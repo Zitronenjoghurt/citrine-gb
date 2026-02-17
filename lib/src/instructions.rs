@@ -1,6 +1,7 @@
 use std::fmt::Display;
 
 #[allow(non_camel_case_types)]
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Copy, Clone)]
 pub enum Instruction {
     Nop,
@@ -14,6 +15,22 @@ pub enum Instruction {
     INC_r(R8),
     DEC_r(R8),
     LD_r_n(R8),
+    /// Rotate left circular accumulator
+    RLCA,
+    /// Rotate right circular accumulator
+    RRCA,
+    /// Rotate left accumulator
+    RLA,
+    /// Rotate right accumulator
+    RRA,
+    /// Decimal adjust accumulator
+    DAA,
+    /// Complement accumulator
+    CPL,
+    /// Set carry flag
+    SCF,
+    /// Clear carry flag
+    CCF,
 }
 
 impl Instruction {
@@ -27,6 +44,7 @@ impl Instruction {
             0b00_00_01_00 => Self::INC_r(R8::B),           // 0x04
             0b00_00_01_01 => Self::DEC_r(R8::B),           // 0x05
             0b00_00_01_10 => Self::LD_r_n(R8::B),          // 0x06
+            0b00_00_01_11 => Self::RLCA,                   // 0x07
             0b00_00_10_00 => Self::LD_nn_SP,               // 0x08
             0b00_00_10_01 => Self::ADD_HL_rr(R16::BC),     // 0x09
             0b00_00_10_10 => Self::LD_A_rr(R16Mem::BC),    // 0x0A
@@ -34,42 +52,49 @@ impl Instruction {
             0b00_00_11_00 => Self::INC_r(R8::C),           // 0x0C
             0b00_00_11_01 => Self::DEC_r(R8::C),           // 0x0D
             0b00_00_11_10 => Self::LD_r_n(R8::C),          // 0x0E
+            0b00_00_11_11 => Self::RRCA,                   // 0x0F
             0b00_01_00_01 => Self::LD_rr_nn(R16::DE),      // 0x11
             0b00_01_00_10 => Self::LD_rr_A(R16Mem::DE),    // 0x12
             0b00_01_00_11 => Self::INC_rr(R16::DE),        // 0x13
             0b00_01_01_00 => Self::INC_r(R8::D),           // 0x14
             0b00_01_01_01 => Self::DEC_r(R8::D),           // 0x15
             0b00_01_01_10 => Self::LD_r_n(R8::D),          // 0x16
+            0b00_01_01_11 => Self::RLA,                    // 0x17
             0b00_01_10_01 => Self::ADD_HL_rr(R16::DE),     // 0x19
             0b00_01_10_10 => Self::LD_A_rr(R16Mem::DE),    // 0x1A
             0b00_01_10_11 => Self::DEC_rr(R16::DE),        // 0x1B
             0b00_01_11_00 => Self::INC_r(R8::E),           // 0x1C
             0b00_01_11_01 => Self::DEC_r(R8::E),           // 0x1D
             0b00_01_11_10 => Self::LD_r_n(R8::E),          // 0x1E
+            0b00_01_11_11 => Self::RRA,                    // 0x1F
             0b00_10_00_01 => Self::LD_rr_nn(R16::HL),      // 0x21
             0b00_10_00_10 => Self::LD_rr_A(R16Mem::HLinc), // 0x22
             0b00_10_00_11 => Self::INC_rr(R16::HL),        // 0x23
             0b00_10_01_00 => Self::INC_r(R8::H),           // 0x24
             0b00_10_01_01 => Self::DEC_r(R8::H),           // 0x25
             0b00_10_01_10 => Self::LD_r_n(R8::H),          // 0x26
+            0b00_10_01_11 => Self::DAA,                    // 0x27
             0b00_10_10_01 => Self::ADD_HL_rr(R16::HL),     // 0x29
             0b00_10_10_10 => Self::LD_A_rr(R16Mem::HLinc), // 0x2A
             0b00_10_10_11 => Self::DEC_rr(R16::HL),        // 0x2B
             0b00_10_11_00 => Self::INC_r(R8::L),           // 0x2C
             0b00_10_11_01 => Self::DEC_r(R8::L),           // 0x2D
             0b00_10_11_10 => Self::LD_r_n(R8::L),          // 0x2E
+            0b00_10_11_11 => Self::CPL,                    // 0x2F
             0b00_11_00_01 => Self::LD_rr_nn(R16::SP),      // 0x31
             0b00_11_00_10 => Self::LD_rr_A(R16Mem::HLdec), // 0x32
             0b00_11_00_11 => Self::INC_rr(R16::SP),        // 0x33
             0b00_11_01_00 => Self::INC_r(R8::HL),          // 0x34
             0b00_11_01_01 => Self::DEC_r(R8::HL),          // 0x35
             0b00_11_01_10 => Self::LD_r_n(R8::HL),         // 0x36
+            0b00_11_01_11 => Self::SCF,                    // 0x37
             0b00_11_10_01 => Self::ADD_HL_rr(R16::SP),     // 0x39
             0b00_11_10_10 => Self::LD_A_rr(R16Mem::HLdec), // 0x3A
             0b00_11_10_11 => Self::DEC_rr(R16::SP),        // 0x3B
             0b00_11_11_00 => Self::INC_r(R8::A),           // 0x3C
             0b00_11_11_01 => Self::DEC_r(R8::A),           // 0x3D
             0b00_11_11_10 => Self::LD_r_n(R8::A),          // 0x3E
+            0b00_11_11_11 => Self::CCF,                    // 0x3F
             _ => Self::Nop,
         }
     }
@@ -83,7 +108,15 @@ impl Instruction {
             | Self::DEC_rr(_)
             | Self::ADD_HL_rr(_)
             | Self::INC_r(_)
-            | Self::DEC_r(_) => 1,
+            | Self::DEC_r(_)
+            | Self::RLCA
+            | Self::RRCA
+            | Self::RLA
+            | Self::RRA
+            | Self::DAA
+            | Self::CPL
+            | Self::SCF
+            | Self::CCF => 1,
             Self::LD_r_n(_) => 2,
             Self::LD_rr_nn(_) | Self::LD_nn_SP => 3,
         }
@@ -106,6 +139,14 @@ impl Instruction {
             Self::INC_r(r8) => format!("INC {r8}"),
             Self::DEC_r(r8) => format!("DEC {r8}"),
             Self::LD_r_n(r8) => format!("LD {r8}, {n1:02X}"),
+            Self::RLCA => String::from("RLCA"),
+            Self::RRCA => String::from("RRCA"),
+            Self::RLA => String::from("RLA"),
+            Self::RRA => String::from("RRA"),
+            Self::DAA => String::from("DAA"),
+            Self::CPL => String::from("CPL"),
+            Self::SCF => String::from("SCF"),
+            Self::CCF => String::from("CCF"),
         }
     }
 }
@@ -124,6 +165,14 @@ impl Display for Instruction {
             Self::INC_r(r8) => write!(f, "INC {r8}"),
             Self::DEC_r(r8) => write!(f, "DEC {r8}"),
             Self::LD_r_n(r8) => write!(f, "LD {r8}, n"),
+            Self::RLCA => write!(f, "RLCA"),
+            Self::RRCA => write!(f, "RRCA"),
+            Self::RLA => write!(f, "RLA"),
+            Self::RRA => write!(f, "RRA"),
+            Self::DAA => write!(f, "DAA"),
+            Self::CPL => write!(f, "CPL"),
+            Self::SCF => write!(f, "SCF"),
+            Self::CCF => write!(f, "CCF"),
         }
     }
 }

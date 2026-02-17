@@ -1,6 +1,9 @@
 use crate::gb::bus::BusInterface;
 use crate::instructions::{Instruction, R16Mem, R16, R8};
-use crate::utils::{add_bytes, add_words, hi, lo, sub_bytes, word};
+use crate::utils::{
+    add_bytes, add_words, hi, lo, rotate_left_get_carry, rotate_left_through_carry,
+    rotate_right_get_carry, rotate_right_through_carry, sub_bytes, word,
+};
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Cpu {
@@ -89,6 +92,14 @@ impl Cpu {
             Instruction::INC_r(r8) => self.inc_r(bus, r8),
             Instruction::DEC_r(r8) => self.dec_r(bus, r8),
             Instruction::LD_r_n(r8) => self.ld_r_n(bus, r8),
+            Instruction::RLCA => self.rlca(),
+            Instruction::RRCA => self.rrca(),
+            Instruction::RLA => self.rla(),
+            Instruction::RRA => self.rra(),
+            Instruction::DAA => self.daa(),
+            Instruction::CPL => self.cpl(),
+            Instruction::SCF => self.scf(),
+            Instruction::CCF => self.ccf(),
         }
 
         self.fetch(bus);
@@ -180,6 +191,89 @@ impl Cpu {
     pub fn ld_r_n(&mut self, bus: &mut impl BusInterface, r8: R8) {
         let value = self.read_program(bus);
         self.set_r8(bus, r8, value);
+    }
+
+    pub fn rlca(&mut self) {
+        let (result, c) = rotate_left_get_carry(self.a);
+        self.a = result;
+        self.f.carry = c;
+        self.f.zero = false;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+    }
+
+    pub fn rrca(&mut self) {
+        let (result, c) = rotate_right_get_carry(self.a);
+        self.a = result;
+        self.f.carry = c;
+        self.f.zero = false;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+    }
+
+    pub fn rla(&mut self) {
+        let (result, c) = rotate_left_through_carry(self.a, self.f.carry);
+        self.a = result;
+        self.f.carry = c;
+        self.f.zero = false;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+    }
+
+    pub fn rra(&mut self) {
+        let (result, c) = rotate_right_through_carry(self.a, self.f.carry);
+        self.a = result;
+        self.f.carry = c;
+        self.f.zero = false;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+    }
+
+    pub fn daa(&mut self) {
+        let mut carry = self.f.carry;
+        let mut adjust: u8 = 0;
+
+        let result = if self.f.subtract {
+            if self.f.half_carry {
+                adjust += 0x06;
+            }
+            if self.f.carry {
+                adjust += 0x60;
+            }
+            self.a.wrapping_sub(adjust)
+        } else {
+            if self.f.half_carry || self.a & 0x0F > 0x09 {
+                adjust += 0x06;
+            }
+            if self.f.carry || self.a > 0x99 {
+                adjust += 0x60;
+                carry = true;
+            }
+            self.a.wrapping_add(adjust)
+        };
+
+        self.a = result;
+        self.f.carry = carry;
+        self.f.zero = result == 0;
+        self.f.half_carry = false;
+    }
+
+    pub fn cpl(&mut self) {
+        self.a = !self.a;
+        self.f.subtract = true;
+        self.f.half_carry = true;
+    }
+
+    pub fn scf(&mut self) {
+        self.f.carry = true;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+    }
+
+    pub fn ccf(&mut self) {
+        self.f.carry = !self.f.carry;
+        self.f.subtract = false;
+        self.f.half_carry = false;
     }
 }
 
