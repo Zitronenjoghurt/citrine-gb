@@ -1,8 +1,8 @@
 use crate::gb::bus::BusInterface;
-use crate::instructions::{Instruction, R16Mem, R16, R8};
+use crate::instructions::{Cond, Instruction, R16Mem, R16, R8};
 use crate::utils::{
-    add_bytes, add_words, hi, lo, rotate_left_get_carry, rotate_left_through_carry,
-    rotate_right_get_carry, rotate_right_through_carry, sub_bytes, word,
+    add_bytes, add_word_signed_byte, add_words, hi, lo, rotate_left_get_carry,
+    rotate_left_through_carry, rotate_right_get_carry, rotate_right_through_carry, sub_bytes, word,
 };
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -81,7 +81,7 @@ impl Cpu {
 
     pub fn step(&mut self, bus: &mut impl BusInterface) {
         match self.decode() {
-            Instruction::Nop => {}
+            Instruction::NOP => {}
             Instruction::LD_rr_nn(r16) => self.ld_rr_nn(bus, r16),
             Instruction::LD_rr_A(r16mem) => self.ld_rr_a(bus, r16mem),
             Instruction::LD_A_rr(r16mem) => self.ld_a_rr(bus, r16mem),
@@ -100,6 +100,9 @@ impl Cpu {
             Instruction::CPL => self.cpl(),
             Instruction::SCF => self.scf(),
             Instruction::CCF => self.ccf(),
+            Instruction::JR_n => self.jr_n(bus),
+            Instruction::JR_c_n(cond) => self.jr_c_n(bus, cond),
+            Instruction::STOP => {}
         }
 
         self.fetch(bus);
@@ -275,6 +278,25 @@ impl Cpu {
         self.f.subtract = false;
         self.f.half_carry = false;
     }
+
+    pub fn jr_n(&mut self, bus: &mut impl BusInterface) {
+        let offset = self.read_program(bus) as i8;
+
+        bus.cycle();
+        let (new_pc, _, _) = add_word_signed_byte(self.pc, offset);
+
+        self.pc = new_pc;
+    }
+
+    pub fn jr_c_n(&mut self, bus: &mut impl BusInterface, cond: Cond) {
+        let offset = self.read_program(bus) as i8;
+
+        if self.f.cond_true(cond) {
+            bus.cycle();
+            let (new_pc, _, _) = add_word_signed_byte(self.pc, offset);
+            self.pc = new_pc;
+        }
+    }
 }
 
 // Register helpers
@@ -364,6 +386,17 @@ pub struct Flags {
     pub half_carry: bool,
     /// C = Set to true if the operation resulted in an overflow
     pub carry: bool,
+}
+
+impl Flags {
+    pub fn cond_true(&self, cond: Cond) -> bool {
+        match cond {
+            Cond::NZ => !self.zero,
+            Cond::Z => self.zero,
+            Cond::NC => !self.carry,
+            Cond::C => self.carry,
+        }
+    }
 }
 
 impl From<Flags> for u8 {
