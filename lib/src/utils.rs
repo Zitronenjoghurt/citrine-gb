@@ -103,7 +103,7 @@ pub fn sub_bytes_carry(a: u8, b: u8, carry: bool) -> (u8, bool, bool) {
 }
 
 /// Rotates the value left by 1, returning (result, carry)
-/// ```
+/// ```text
 /// ┏━ Carry ━┓   ┏━━━━━━ u8 ━━━━━━━┓
 /// ┃    C   ←╂─┬─╂─ b7 ← ... ← b0 ←╂─┐
 /// ┗━━━━━━━━━┛ │ ┗━━━━━━━━━━━━━━━━━┛ │
@@ -116,7 +116,7 @@ pub fn rotate_left_get_carry(value: u8) -> (u8, bool) {
 }
 
 /// Rotates the value right by 1, returning (result, carry)
-/// ```
+/// ```text
 ///   ┏━━━━━━━ u8 ━━━━━━┓   ┏━ Carry ━┓
 /// ┌─╂→ b7 → ... → b0 ─╂─┬─╂→   C    ┃
 /// │ ┗━━━━━━━━━━━━━━━━━┛ │ ┗━━━━━━━━━┛
@@ -129,7 +129,7 @@ pub fn rotate_right_get_carry(value: u8) -> (u8, bool) {
 }
 
 /// Rotates the value right by 1 THROUGH the given carry, returning (result, new_carry)
-/// ```
+/// ```text
 ///   ┏━━━━━━━ u8 ━━━━━━┓ ┏━ Carry ━┓
 /// ┌─╂→ b7 → ... → b0 ─╂─╂→   C   ─╂─┐
 /// │ ┗━━━━━━━━━━━━━━━━━┛ ┗━━━━━━━━━┛ │
@@ -142,7 +142,7 @@ pub fn rotate_right_through_carry(value: u8, carry: bool) -> (u8, bool) {
 }
 
 /// Rotates the value left by 1 THROUGH the given carry, returning (result, new_carry)
-/// ```
+/// ```text
 ///   ┏━ Carry ━┓ ┏━━━━━━ u8 ━━━━━━━┓
 /// ┌─╂─   C   ←╂─╂─ b7 ← ... ← b0 ←╂─┐
 /// │ ┗━━━━━━━━━┛ ┗━━━━━━━━━━━━━━━━━┛ │

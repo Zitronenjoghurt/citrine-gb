@@ -14,6 +14,7 @@ pub struct Cpu {
     pub l: u8,
     pub sp: u16,
     pub pc: u16,
+    pub ir: u8,
     pub ime: bool,
 }
 
@@ -48,6 +49,7 @@ impl Cpu {
             l: 0x4D,
             sp: 0xFFFE,
             pc: 0x0100,
+            ir: 0x00,
             ime: false,
         }
     }
@@ -69,13 +71,13 @@ impl Cpu {
             l: 0x0D,
             sp: 0xFFFE,
             pc: 0x100,
+            ir: 0x00,
             ime: false,
         }
     }
 
-    pub fn cycle(&mut self, bus: &mut impl BusInterface) {
-        let opcode = self.read_program(bus);
-        match Instruction::decode(opcode) {
+    pub fn step(&mut self, bus: &mut impl BusInterface) {
+        match self.decode() {
             Instruction::Nop => {}
             Instruction::LD_rr_nn(r16) => self.ld_rr_nn(bus, r16),
             Instruction::LD_rr_A(r16mem) => self.ld_rr_a(bus, r16mem),
@@ -85,6 +87,16 @@ impl Cpu {
             Instruction::DEC_R16(r16) => self.dec_r16(bus, r16),
             Instruction::ADD_HL_R16(r16) => self.add_hl_r16(bus, r16),
         }
+
+        self.fetch(bus);
+    }
+
+    pub fn fetch(&mut self, bus: &mut impl BusInterface) {
+        self.ir = self.read_program(bus);
+    }
+
+    pub fn decode(&mut self) -> Instruction {
+        Instruction::decode(self.ir)
     }
 
     pub fn read_program(&mut self, bus: &mut impl BusInterface) -> u8 {

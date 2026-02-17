@@ -93,6 +93,24 @@ impl Display for Instruction {
 }
 
 #[derive(Debug, Copy, Clone)]
+pub enum R8 {
+    B = 0,
+    C = 1,
+    D = 2,
+    E = 3,
+    H = 4,
+    L = 5,
+    HL = 6,
+    A = 7,
+}
+
+impl Display for R8 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
 pub enum R16 {
     BC = 0,
     DE = 1,

@@ -63,20 +63,26 @@ pub fn run() {
 
 fn run_test(test: &TestCase) {
     let is_cb = test.name.starts_with("cb ");
-    let pc_offset = if is_cb { 2u16 } else { 1u16 };
-
     let mut cpu = Cpu::from(&test.initial);
     let mut bus = TestBus::from(&test.initial);
 
-    cpu.pc = cpu.pc.wrapping_sub(pc_offset);
+    cpu.ir = *bus
+        .data
+        .get(&test.initial.pc.wrapping_sub(if is_cb { 2 } else { 1 }))
+        .unwrap();
+    cpu.step(&mut bus);
 
-    cpu.cycle(&mut bus);
-
+    // adtennant's cases dont include the final IR
     let mut expected_cpu = Cpu::from(&test.expected);
-    expected_cpu.pc = expected_cpu.pc.wrapping_sub(pc_offset);
+    expected_cpu.ir = cpu.ir;
 
     assert_eq!(cpu, expected_cpu, "CPU | {}", test.name);
-    assert_eq!(bus, TestBus::from(&test.expected), "RAM | {}", test.name);
+    assert_eq!(
+        bus,
+        TestBus::from((&test.expected, test)),
+        "RAM | {}",
+        test.name
+    );
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -85,7 +91,12 @@ struct TestCase {
     initial: TestState,
     #[serde(alias = "final")]
     expected: TestState,
+    #[serde(default, deserialize_with = "deserialize_cycles")]
+    cycles: Vec<BusCycle>,
 }
+
+#[derive(Debug, serde::Deserialize)]
+struct BusCycle(u16, u8, String);
 
 #[derive(Debug, serde::Deserialize)]
 struct TestState {
@@ -115,6 +126,7 @@ impl From<&TestState> for Cpu {
             l: s.l,
             sp: s.sp,
             pc: s.pc,
+            ir: 0,
             ime: false,
         }
     }
@@ -124,6 +136,25 @@ impl From<&TestState> for TestBus {
     fn from(s: &TestState) -> Self {
         Self {
             data: s.ram.iter().map(|e| (e[0], e[1] as u8)).collect(),
+            history: Vec::new(),
         }
     }
+}
+
+impl From<(&TestState, &TestCase)> for TestBus {
+    fn from(s: (&TestState, &TestCase)) -> Self {
+        Self {
+            data: s.0.ram.iter().map(|e| (e[0], e[1] as u8)).collect(),
+            history: s.1.cycles.iter().map(|e| (e.0, e.1, e.2.clone())).collect(),
+        }
+    }
+}
+
+fn deserialize_cycles<'de, D>(deserializer: D) -> Result<Vec<BusCycle>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Option::<Vec<Option<BusCycle>>>::deserialize(deserializer)
+        .map(|o| o.unwrap_or_default().into_iter().flatten().collect())
 }
