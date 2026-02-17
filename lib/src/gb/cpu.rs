@@ -1,6 +1,6 @@
 use crate::gb::bus::BusInterface;
 use crate::instructions::{Instruction, R16Mem, R16};
-use crate::utils::{hi, lo, word};
+use crate::utils::{add_words, hi, lo, word};
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Cpu {
@@ -76,11 +76,14 @@ impl Cpu {
     pub fn cycle(&mut self, bus: &mut impl BusInterface) {
         let opcode = self.read_program(bus);
         match Instruction::decode(opcode) {
-            Instruction::Nop => bus.cycle(),
-            Instruction::LDrrnn(r16) => self.ld_rr_nn(bus, r16),
-            Instruction::LDrrA(r16mem) => self.ld_rr_a(bus, r16mem),
-            Instruction::LDArr(r16mem) => self.ld_a_rr(bus, r16mem),
-            Instruction::LDnnSP => self.ld_nn_sp(bus),
+            Instruction::Nop => {}
+            Instruction::LD_rr_nn(r16) => self.ld_rr_nn(bus, r16),
+            Instruction::LD_rr_A(r16mem) => self.ld_rr_a(bus, r16mem),
+            Instruction::LD_A_rr(r16mem) => self.ld_a_rr(bus, r16mem),
+            Instruction::LD_nn_SP => self.ld_nn_sp(bus),
+            Instruction::INC_R16(r16) => self.inc_r16(bus, r16),
+            Instruction::DEC_R16(r16) => self.dec_r16(bus, r16),
+            Instruction::ADD_HL_R16(r16) => self.add_hl_r16(bus, r16),
         }
     }
 
@@ -120,6 +123,28 @@ impl Cpu {
         let address = self.read_program_nn(bus);
         bus.write_word(address, self.sp);
     }
+
+    pub fn inc_r16(&mut self, bus: &mut impl BusInterface, r16: R16) {
+        bus.cycle();
+
+        self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_add(1));
+    }
+
+    pub fn dec_r16(&mut self, bus: &mut impl BusInterface, r16: R16) {
+        bus.cycle();
+
+        self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_sub(1));
+    }
+
+    pub fn add_hl_r16(&mut self, bus: &mut impl BusInterface, r16: R16) {
+        bus.cycle();
+
+        let (result, hc, c) = add_words(self.get_r16_nn(R16::HL), self.get_r16_nn(r16));
+        self.set_r16_nn(R16::HL, result);
+        self.f.subtract = false;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
 }
 
 // Register helpers
@@ -144,6 +169,15 @@ impl Cpu {
 
     pub fn set_r16_nn(&mut self, r16: R16, value: u16) {
         self.set_r16_lh(r16, lo(value), hi(value))
+    }
+
+    pub fn get_r16_nn(&self, r16: R16) -> u16 {
+        match r16 {
+            R16::BC => word(self.c, self.b),
+            R16::DE => word(self.e, self.d),
+            R16::HL => word(self.l, self.h),
+            R16::SP => self.sp,
+        }
     }
 
     pub fn get_r16mem(&mut self, r16mem: R16Mem) -> u16 {
