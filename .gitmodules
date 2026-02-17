@@ -1,0 +1,3 @@
+[submodule "tests/cpu-adtennant"]
+	path = tests/cpu-adtennant
+	url = https://github.com/adtennant/GameboyCPUTests.git

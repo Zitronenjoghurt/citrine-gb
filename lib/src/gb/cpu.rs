@@ -1,18 +1,20 @@
-use crate::gb::bus::Bus;
+use crate::gb::bus::BusInterface;
+use crate::instructions::{Instruction, R16};
+use crate::utils::{hi, lo, word};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct Cpu {
-    a: u8,
-    b: u8,
-    c: u8,
-    d: u8,
-    e: u8,
-    f: Flags,
-    h: u8,
-    l: u8,
-    sp: u16,
-    pc: u16,
-    ime: bool,
+    pub a: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub f: Flags,
+    pub h: u8,
+    pub l: u8,
+    pub sp: u16,
+    pub pc: u16,
+    pub ime: bool,
 }
 
 impl Cpu {
@@ -71,10 +73,59 @@ impl Cpu {
         }
     }
 
-    pub fn cycle(&mut self, bus: &mut Bus) {}
+    pub fn cycle(&mut self, bus: &mut impl BusInterface) {
+        let opcode = self.read_program(bus);
+        match Instruction::decode(opcode) {
+            Instruction::Nop => bus.cycle(),
+            Instruction::LdRrNn(r16) => self.ld_rr_nn(bus, r16),
+        }
+    }
+
+    pub fn read_program(&mut self, bus: &mut impl BusInterface) -> u8 {
+        let byte = bus.read(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+        byte
+    }
+
+    pub fn read_program_lh(&mut self, bus: &mut impl BusInterface) -> (u8, u8) {
+        (self.read_program(bus), self.read_program(bus))
+    }
 }
 
-#[derive(Debug, Default)]
+// Instruction execution
+impl Cpu {
+    pub fn ld_rr_nn(&mut self, bus: &mut impl BusInterface, r16: R16) {
+        let (low, high) = self.read_program_lh(bus);
+        self.set_r16_lh(r16, low, high);
+    }
+}
+
+// Register helpers
+impl Cpu {
+    pub fn set_r16_lh(&mut self, r16: R16, low: u8, high: u8) {
+        match r16 {
+            R16::BC => {
+                self.c = low;
+                self.b = high;
+            }
+            R16::DE => {
+                self.e = low;
+                self.d = high;
+            }
+            R16::HL => {
+                self.l = low;
+                self.h = high;
+            }
+            R16::SP => self.sp = word(low, high),
+        }
+    }
+
+    pub fn set_r16_nn(&mut self, r16: R16, value: u16) {
+        self.set_r16_lh(r16, lo(value), hi(value))
+    }
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct Flags {
     /// Z = Set to true if the result of the operation is equal to 0
     pub zero: bool,

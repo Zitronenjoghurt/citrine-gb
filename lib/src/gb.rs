@@ -1,5 +1,5 @@
-mod bus;
-mod cpu;
+pub mod bus;
+pub mod cpu;
 mod memory;
 mod ppu;
 mod timer;
