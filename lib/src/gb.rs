@@ -35,11 +35,10 @@ impl GameBoy {
     }
 
     pub fn step(&mut self) {
-        let mut bus = bus::Bus {
+        self.cpu.step(&mut bus::Bus {
             memory: &mut self.memory,
             ppu: &mut self.ppu,
             timer: &mut self.timer,
-        };
-        self.cpu.step(&mut bus);
+        });
     }
 }

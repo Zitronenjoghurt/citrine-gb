@@ -1,6 +1,6 @@
 use crate::gb::bus::BusInterface;
-use crate::instructions::{Instruction, R16Mem, R16};
-use crate::utils::{add_words, hi, lo, word};
+use crate::instructions::{Instruction, R16Mem, R16, R8};
+use crate::utils::{add_bytes, add_words, hi, lo, sub_bytes, word};
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Cpu {
@@ -83,9 +83,12 @@ impl Cpu {
             Instruction::LD_rr_A(r16mem) => self.ld_rr_a(bus, r16mem),
             Instruction::LD_A_rr(r16mem) => self.ld_a_rr(bus, r16mem),
             Instruction::LD_nn_SP => self.ld_nn_sp(bus),
-            Instruction::INC_R16(r16) => self.inc_r16(bus, r16),
-            Instruction::DEC_R16(r16) => self.dec_r16(bus, r16),
-            Instruction::ADD_HL_R16(r16) => self.add_hl_r16(bus, r16),
+            Instruction::INC_rr(r16) => self.inc_rr(bus, r16),
+            Instruction::DEC_rr(r16) => self.dec_rr(bus, r16),
+            Instruction::ADD_HL_rr(r16) => self.add_hl_rr(bus, r16),
+            Instruction::INC_r(r8) => self.inc_r(bus, r8),
+            Instruction::DEC_r(r8) => self.dec_r(bus, r8),
+            Instruction::LD_r_n(r8) => self.ld_r_n(bus, r8),
         }
 
         self.fetch(bus);
@@ -136,19 +139,19 @@ impl Cpu {
         bus.write_word(address, self.sp);
     }
 
-    pub fn inc_r16(&mut self, bus: &mut impl BusInterface, r16: R16) {
+    pub fn inc_rr(&mut self, bus: &mut impl BusInterface, r16: R16) {
         bus.cycle();
 
         self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_add(1));
     }
 
-    pub fn dec_r16(&mut self, bus: &mut impl BusInterface, r16: R16) {
+    pub fn dec_rr(&mut self, bus: &mut impl BusInterface, r16: R16) {
         bus.cycle();
 
         self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_sub(1));
     }
 
-    pub fn add_hl_r16(&mut self, bus: &mut impl BusInterface, r16: R16) {
+    pub fn add_hl_rr(&mut self, bus: &mut impl BusInterface, r16: R16) {
         bus.cycle();
 
         let (result, hc, c) = add_words(self.get_r16_nn(R16::HL), self.get_r16_nn(r16));
@@ -156,6 +159,27 @@ impl Cpu {
         self.f.subtract = false;
         self.f.half_carry = hc;
         self.f.carry = c;
+    }
+
+    pub fn inc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, hc, _) = add_bytes(self.get_r8(bus, r8), 1);
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = hc;
+    }
+
+    pub fn dec_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, hc, _) = sub_bytes(self.get_r8(bus, r8), 1);
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = true;
+        self.f.half_carry = hc;
+    }
+
+    pub fn ld_r_n(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.read_program(bus);
+        self.set_r8(bus, r8, value);
     }
 }
 
@@ -206,6 +230,32 @@ impl Cpu {
                 self.set_r16_nn(R16::HL, value.wrapping_sub(1));
                 value
             }
+        }
+    }
+
+    pub fn get_r8(&self, bus: &mut impl BusInterface, r8: R8) -> u8 {
+        match r8 {
+            R8::B => self.b,
+            R8::C => self.c,
+            R8::D => self.d,
+            R8::E => self.e,
+            R8::H => self.h,
+            R8::L => self.l,
+            R8::HL => bus.read(self.get_r16_nn(R16::HL)),
+            R8::A => self.a,
+        }
+    }
+
+    pub fn set_r8(&mut self, bus: &mut impl BusInterface, r8: R8, value: u8) {
+        match r8 {
+            R8::B => self.b = value,
+            R8::C => self.c = value,
+            R8::D => self.d = value,
+            R8::E => self.e = value,
+            R8::H => self.h = value,
+            R8::L => self.l = value,
+            R8::HL => bus.write(self.get_r16_nn(R16::HL), value),
+            R8::A => self.a = value,
         }
     }
 }
