@@ -36,6 +36,8 @@ pub enum Instruction {
     /// Jump relative with condition
     JR_c_n(Cond),
     STOP,
+    HALT,
+    LD_r_r(R8, R8),
 }
 
 impl Instruction {
@@ -106,6 +108,70 @@ impl Instruction {
             0b00_11_11_01 => Self::DEC_r(R8::A),           // 0x3D
             0b00_11_11_10 => Self::LD_r_n(R8::A),          // 0x3E
             0b00_11_11_11 => Self::CCF,                    // 0x3F
+            0b01_00_00_00 => Self::LD_r_r(R8::B, R8::B),   // 0x40
+            0b01_00_00_01 => Self::LD_r_r(R8::B, R8::C),   // 0x41
+            0b01_00_00_10 => Self::LD_r_r(R8::B, R8::D),   // 0x42
+            0b01_00_00_11 => Self::LD_r_r(R8::B, R8::E),   // 0x43
+            0b01_00_01_00 => Self::LD_r_r(R8::B, R8::H),   // 0x44
+            0b01_00_01_01 => Self::LD_r_r(R8::B, R8::L),   // 0x45
+            0b01_00_01_10 => Self::LD_r_r(R8::B, R8::HL),  // 0x46
+            0b01_00_01_11 => Self::LD_r_r(R8::B, R8::A),   // 0x47
+            0b01_00_10_00 => Self::LD_r_r(R8::C, R8::B),   // 0x48
+            0b01_00_10_01 => Self::LD_r_r(R8::C, R8::C),   // 0x49
+            0b01_00_10_10 => Self::LD_r_r(R8::C, R8::D),   // 0x4A
+            0b01_00_10_11 => Self::LD_r_r(R8::C, R8::E),   // 0x4B
+            0b01_00_11_00 => Self::LD_r_r(R8::C, R8::H),   // 0x4C
+            0b01_00_11_01 => Self::LD_r_r(R8::C, R8::L),   // 0x4D
+            0b01_00_11_10 => Self::LD_r_r(R8::C, R8::HL),  // 0x4E
+            0b01_00_11_11 => Self::LD_r_r(R8::C, R8::A),   // 0x4F
+            0b01_01_00_00 => Self::LD_r_r(R8::D, R8::B),   // 0x50
+            0b01_01_00_01 => Self::LD_r_r(R8::D, R8::C),   // 0x51
+            0b01_01_00_10 => Self::LD_r_r(R8::D, R8::D),   // 0x52
+            0b01_01_00_11 => Self::LD_r_r(R8::D, R8::E),   // 0x53
+            0b01_01_01_00 => Self::LD_r_r(R8::D, R8::H),   // 0x54
+            0b01_01_01_01 => Self::LD_r_r(R8::D, R8::L),   // 0x55
+            0b01_01_01_10 => Self::LD_r_r(R8::D, R8::HL),  // 0x56
+            0b01_01_01_11 => Self::LD_r_r(R8::D, R8::A),   // 0x57
+            0b01_01_10_00 => Self::LD_r_r(R8::E, R8::B),   // 0x58
+            0b01_01_10_01 => Self::LD_r_r(R8::E, R8::C),   // 0x59
+            0b01_01_10_10 => Self::LD_r_r(R8::E, R8::D),   // 0x5A
+            0b01_01_10_11 => Self::LD_r_r(R8::E, R8::E),   // 0x5B
+            0b01_01_11_00 => Self::LD_r_r(R8::E, R8::H),   // 0x5C
+            0b01_01_11_01 => Self::LD_r_r(R8::E, R8::L),   // 0x5D
+            0b01_01_11_10 => Self::LD_r_r(R8::E, R8::HL),  // 0x5E
+            0b01_01_11_11 => Self::LD_r_r(R8::E, R8::A),   // 0x5F
+            0b01_10_00_00 => Self::LD_r_r(R8::H, R8::B),   // 0x60
+            0b01_10_00_01 => Self::LD_r_r(R8::H, R8::C),   // 0x61
+            0b01_10_00_10 => Self::LD_r_r(R8::H, R8::D),   // 0x62
+            0b01_10_00_11 => Self::LD_r_r(R8::H, R8::E),   // 0x63
+            0b01_10_01_00 => Self::LD_r_r(R8::H, R8::H),   // 0x64
+            0b01_10_01_01 => Self::LD_r_r(R8::H, R8::L),   // 0x65
+            0b01_10_01_10 => Self::LD_r_r(R8::H, R8::HL),  // 0x66
+            0b01_10_01_11 => Self::LD_r_r(R8::H, R8::A),   // 0x67
+            0b01_10_10_00 => Self::LD_r_r(R8::L, R8::B),   // 0x68
+            0b01_10_10_01 => Self::LD_r_r(R8::L, R8::C),   // 0x69
+            0b01_10_10_10 => Self::LD_r_r(R8::L, R8::D),   // 0x6A
+            0b01_10_10_11 => Self::LD_r_r(R8::L, R8::E),   // 0x6B
+            0b01_10_11_00 => Self::LD_r_r(R8::L, R8::H),   // 0x6C
+            0b01_10_11_01 => Self::LD_r_r(R8::L, R8::L),   // 0x6D
+            0b01_10_11_10 => Self::LD_r_r(R8::L, R8::HL),  // 0x6E
+            0b01_10_11_11 => Self::LD_r_r(R8::L, R8::A),   // 0x6F
+            0b01_11_00_00 => Self::LD_r_r(R8::HL, R8::B),  // 0x70
+            0b01_11_00_01 => Self::LD_r_r(R8::HL, R8::C),  // 0x71
+            0b01_11_00_10 => Self::LD_r_r(R8::HL, R8::D),  // 0x72
+            0b01_11_00_11 => Self::LD_r_r(R8::HL, R8::E),  // 0x73
+            0b01_11_01_00 => Self::LD_r_r(R8::HL, R8::H),  // 0x74
+            0b01_11_01_01 => Self::LD_r_r(R8::HL, R8::L),  // 0x75
+            0b01_11_01_10 => Self::HALT,                   // 0x76
+            0b01_11_01_11 => Self::LD_r_r(R8::HL, R8::A),  // 0x77
+            0b01_11_10_00 => Self::LD_r_r(R8::A, R8::B),   // 0x78
+            0b01_11_10_01 => Self::LD_r_r(R8::A, R8::C),   // 0x79
+            0b01_11_10_10 => Self::LD_r_r(R8::A, R8::D),   // 0x7A
+            0b01_11_10_11 => Self::LD_r_r(R8::A, R8::E),   // 0x7B
+            0b01_11_11_00 => Self::LD_r_r(R8::A, R8::H),   // 0x7C
+            0b01_11_11_01 => Self::LD_r_r(R8::A, R8::L),   // 0x7D
+            0b01_11_11_10 => Self::LD_r_r(R8::A, R8::HL),  // 0x7E
+            0b01_11_11_11 => Self::LD_r_r(R8::A, R8::A),   // 0x7F
             _ => Self::NOP,
         }
     }
@@ -128,7 +194,9 @@ impl Instruction {
             | Self::CPL
             | Self::SCF
             | Self::CCF
-            | Self::STOP => 1,
+            | Self::STOP
+            | Self::HALT
+            | Self::LD_r_r(_, _) => 1,
             Self::LD_r_n(_) | Self::JR_n | Self::JR_c_n(_) => 2,
             Self::LD_rr_nn(_) | Self::LD_nn_SP => 3,
         }
@@ -162,6 +230,8 @@ impl Instruction {
             Self::JR_n => format!("JR {n1:02X}"),
             Self::JR_c_n(cond) => format!("JR {cond}, {n1:02X}"),
             Self::STOP => String::from("STOP"),
+            Self::HALT => String::from("HALT"),
+            Self::LD_r_r(r81, r82) => format!("LD {r81}, {r82}"),
         }
     }
 }
@@ -191,6 +261,8 @@ impl Display for Instruction {
             Self::JR_n => write!(f, "JR n"),
             Self::JR_c_n(cond) => write!(f, "JR {cond}, n"),
             Self::STOP => write!(f, "STOP"),
+            Self::HALT => write!(f, "HALT"),
+            Self::LD_r_r(r81, r82) => write!(f, "LD {r81}, {r82}"),
         }
     }
 }

@@ -103,6 +103,9 @@ impl Cpu {
             Instruction::JR_n => self.jr_n(bus),
             Instruction::JR_c_n(cond) => self.jr_c_n(bus, cond),
             Instruction::STOP => {}
+            // ToDo: Revisit HALT once interrupts are implemented => https://gbdev.io/pandocs/halt.html#halt
+            Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => {}
+            Instruction::LD_r_r(dest, src) => self.ld_r_r(bus, dest, src),
         }
 
         self.fetch(bus);
@@ -296,6 +299,11 @@ impl Cpu {
             let (new_pc, _, _) = add_word_signed_byte(self.pc, offset);
             self.pc = new_pc;
         }
+    }
+
+    pub fn ld_r_r(&mut self, bus: &mut impl BusInterface, dest: R8, src: R8) {
+        let value = self.get_r8(bus, src);
+        self.set_r8(bus, dest, value);
     }
 }
 
