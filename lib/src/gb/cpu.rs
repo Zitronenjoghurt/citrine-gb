@@ -1,5 +1,5 @@
 use crate::gb::bus::BusInterface;
-use crate::instructions::{Instruction, R16};
+use crate::instructions::{Instruction, R16Mem, R16};
 use crate::utils::{hi, lo, word};
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -77,7 +77,10 @@ impl Cpu {
         let opcode = self.read_program(bus);
         match Instruction::decode(opcode) {
             Instruction::Nop => bus.cycle(),
-            Instruction::LdRrNn(r16) => self.ld_rr_nn(bus, r16),
+            Instruction::LDrrnn(r16) => self.ld_rr_nn(bus, r16),
+            Instruction::LDrrA(r16mem) => self.ld_rr_a(bus, r16mem),
+            Instruction::LDArr(r16mem) => self.ld_a_rr(bus, r16mem),
+            Instruction::LDnnSP => self.ld_nn_sp(bus),
         }
     }
 
@@ -90,6 +93,10 @@ impl Cpu {
     pub fn read_program_lh(&mut self, bus: &mut impl BusInterface) -> (u8, u8) {
         (self.read_program(bus), self.read_program(bus))
     }
+
+    pub fn read_program_nn(&mut self, bus: &mut impl BusInterface) -> u16 {
+        word(self.read_program(bus), self.read_program(bus))
+    }
 }
 
 // Instruction execution
@@ -97,6 +104,21 @@ impl Cpu {
     pub fn ld_rr_nn(&mut self, bus: &mut impl BusInterface, r16: R16) {
         let (low, high) = self.read_program_lh(bus);
         self.set_r16_lh(r16, low, high);
+    }
+
+    pub fn ld_rr_a(&mut self, bus: &mut impl BusInterface, r16_mem: R16Mem) {
+        let address = self.get_r16mem(r16_mem);
+        bus.write(address, self.a);
+    }
+
+    pub fn ld_a_rr(&mut self, bus: &mut impl BusInterface, r16_mem: R16Mem) {
+        let address = self.get_r16mem(r16_mem);
+        self.a = bus.read(address);
+    }
+
+    pub fn ld_nn_sp(&mut self, bus: &mut impl BusInterface) {
+        let address = self.read_program_nn(bus);
+        bus.write_word(address, self.sp);
     }
 }
 
@@ -122,6 +144,23 @@ impl Cpu {
 
     pub fn set_r16_nn(&mut self, r16: R16, value: u16) {
         self.set_r16_lh(r16, lo(value), hi(value))
+    }
+
+    pub fn get_r16mem(&mut self, r16mem: R16Mem) -> u16 {
+        match r16mem {
+            R16Mem::BC => word(self.c, self.b),
+            R16Mem::DE => word(self.e, self.d),
+            R16Mem::HLinc => {
+                let value = word(self.l, self.h);
+                self.set_r16_nn(R16::HL, value.wrapping_add(1));
+                value
+            }
+            R16Mem::HLdec => {
+                let value = word(self.l, self.h);
+                self.set_r16_nn(R16::HL, value.wrapping_sub(1));
+                value
+            }
+        }
     }
 }
 

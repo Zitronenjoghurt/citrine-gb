@@ -1,6 +1,7 @@
 use crate::gb::memory::Memory;
 use crate::gb::ppu::Ppu;
 use crate::gb::timer::Timer;
+use crate::utils::{hi, lo};
 
 /// Connecting the CPU to the other components of the Game Boy
 pub struct Bus<'a> {
@@ -33,7 +34,7 @@ pub trait BusInterface {
     }
 
     fn write_word(&mut self, addr: u16, value: u16) {
-        self.write(addr, value as u8);
-        self.write(addr + 1, (value >> 8) as u8);
+        self.write(addr, lo(value));
+        self.write(addr + 1, hi(value));
     }
 }
