@@ -1,5 +1,5 @@
 use crate::gb::bus::BusInterface;
-use crate::instructions::{Cond, Instruction, R16Mem, R16, R8};
+use crate::instructions::{Cond, Instruction, R16Mem, R16Stk, R16, R8};
 use crate::utils::{
     add_bytes, add_bytes_carry, add_word_signed_byte, add_words, hi, lo, rotate_left_get_carry,
     rotate_left_through_carry, rotate_right_get_carry, rotate_right_through_carry, sub_bytes,
@@ -123,6 +123,8 @@ impl Cpu {
             Instruction::XOR_n => self.xor_n(bus),
             Instruction::OR_n => self.or_n(bus),
             Instruction::CP_n => self.cp_n(bus),
+            Instruction::POP(stk) => self.pop_rr(bus, stk),
+            Instruction::PUSH(stk) => self.push_rr(bus, stk),
         }
 
         self.fetch(bus);
@@ -135,7 +137,10 @@ impl Cpu {
     pub fn decode(&mut self) -> Instruction {
         Instruction::decode(self.ir)
     }
+}
 
+// Program helpers
+impl Cpu {
     pub fn read_program(&mut self, bus: &mut impl BusInterface) -> u8 {
         let byte = bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
@@ -148,6 +153,29 @@ impl Cpu {
 
     pub fn read_program_nn(&mut self, bus: &mut impl BusInterface) -> u16 {
         word(self.read_program(bus), self.read_program(bus))
+    }
+}
+
+// Stack helpers
+impl Cpu {
+    pub fn pop(&mut self, bus: &mut impl BusInterface) -> u8 {
+        let value = bus.read(self.sp);
+        self.sp = self.sp.wrapping_add(1);
+        value
+    }
+
+    pub fn pop_word(&mut self, bus: &mut impl BusInterface) -> u16 {
+        word(self.pop(bus), self.pop(bus))
+    }
+
+    pub fn push(&mut self, bus: &mut impl BusInterface, value: u8) {
+        self.sp = self.sp.wrapping_sub(1);
+        bus.write(self.sp, value);
+    }
+
+    pub fn push_word(&mut self, bus: &mut impl BusInterface, value: u16) {
+        self.push(bus, hi(value));
+        self.push(bus, lo(value));
     }
 }
 
@@ -402,6 +430,19 @@ impl Cpu {
         let value = self.read_program(bus);
         self.cp_a(value);
     }
+
+    pub fn pop_rr(&mut self, bus: &mut impl BusInterface, r16stk: R16Stk) {
+        let value = self.pop_word(bus);
+        self.set_r16stk(r16stk, value);
+    }
+
+    pub fn push_rr(&mut self, bus: &mut impl BusInterface, r16stk: R16Stk) {
+        // Internal cycle: CPU computes decremented SP before first write
+        bus.cycle();
+
+        let value = self.get_r16stk(r16stk);
+        self.push_word(bus, value);
+    }
 }
 
 // 8-Bit Arithmetics
@@ -477,6 +518,32 @@ impl Cpu {
 
 // Register helpers
 impl Cpu {
+    pub fn get_r8(&self, bus: &mut impl BusInterface, r8: R8) -> u8 {
+        match r8 {
+            R8::B => self.b,
+            R8::C => self.c,
+            R8::D => self.d,
+            R8::E => self.e,
+            R8::H => self.h,
+            R8::L => self.l,
+            R8::HL => bus.read(self.get_r16_nn(R16::HL)),
+            R8::A => self.a,
+        }
+    }
+
+    pub fn set_r8(&mut self, bus: &mut impl BusInterface, r8: R8, value: u8) {
+        match r8 {
+            R8::B => self.b = value,
+            R8::C => self.c = value,
+            R8::D => self.d = value,
+            R8::E => self.e = value,
+            R8::H => self.h = value,
+            R8::L => self.l = value,
+            R8::HL => bus.write(self.get_r16_nn(R16::HL), value),
+            R8::A => self.a = value,
+        }
+    }
+
     pub fn set_r16_lh(&mut self, r16: R16, low: u8, high: u8) {
         match r16 {
             R16::BC => {
@@ -525,34 +592,29 @@ impl Cpu {
         }
     }
 
-    pub fn get_r8(&self, bus: &mut impl BusInterface, r8: R8) -> u8 {
-        match r8 {
-            R8::B => self.b,
-            R8::C => self.c,
-            R8::D => self.d,
-            R8::E => self.e,
-            R8::H => self.h,
-            R8::L => self.l,
-            R8::HL => bus.read(self.get_r16_nn(R16::HL)),
-            R8::A => self.a,
+    pub fn get_r16stk(&mut self, r16stk: R16Stk) -> u16 {
+        match r16stk {
+            R16Stk::BC => word(self.c, self.b),
+            R16Stk::DE => word(self.e, self.d),
+            R16Stk::HL => word(self.l, self.h),
+            R16Stk::AF => word(self.f.into(), self.a),
         }
     }
 
-    pub fn set_r8(&mut self, bus: &mut impl BusInterface, r8: R8, value: u8) {
-        match r8 {
-            R8::B => self.b = value,
-            R8::C => self.c = value,
-            R8::D => self.d = value,
-            R8::E => self.e = value,
-            R8::H => self.h = value,
-            R8::L => self.l = value,
-            R8::HL => bus.write(self.get_r16_nn(R16::HL), value),
-            R8::A => self.a = value,
+    pub fn set_r16stk(&mut self, r16stk: R16Stk, value: u16) {
+        match r16stk {
+            R16Stk::BC => self.set_r16_nn(R16::BC, value),
+            R16Stk::DE => self.set_r16_nn(R16::DE, value),
+            R16Stk::HL => self.set_r16_nn(R16::HL, value),
+            R16Stk::AF => {
+                self.f = Flags::from(lo(value));
+                self.a = hi(value);
+            }
         }
     }
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct Flags {
     /// Z = Set to true if the result of the operation is equal to 0
     pub zero: bool,

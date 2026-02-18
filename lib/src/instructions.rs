@@ -54,6 +54,8 @@ pub enum Instruction {
     XOR_n,
     OR_n,
     CP_n,
+    POP(R16Stk),
+    PUSH(R16Stk),
 }
 
 impl Instruction {
@@ -252,12 +254,20 @@ impl Instruction {
             0b10_11_11_01 => Self::CP_r(R8::L),            // 0xBD
             0b10_11_11_10 => Self::CP_r(R8::HL),           // 0xBE
             0b10_11_11_11 => Self::CP_r(R8::A),            // 0xBF
+            0b11_00_00_01 => Self::POP(R16Stk::BC),        // 0xC1
+            0b11_00_01_01 => Self::PUSH(R16Stk::BC),       // 0xC5
             0b11_00_01_10 => Self::ADD_n,                  // 0xC6
             0b11_00_11_10 => Self::ADC_n,                  // 0xCE
+            0b11_01_00_01 => Self::POP(R16Stk::DE),        // 0xD1
+            0b11_01_01_01 => Self::PUSH(R16Stk::DE),       // 0xD5
             0b11_01_01_10 => Self::SUB_n,                  // 0xD6
             0b11_01_11_10 => Self::SBC_n,                  // 0xDE
+            0b11_10_00_01 => Self::POP(R16Stk::HL),        // 0xE1
+            0b11_10_01_01 => Self::PUSH(R16Stk::HL),       // 0xE5
             0b11_10_01_10 => Self::AND_n,                  // 0xE6
             0b11_10_11_10 => Self::XOR_n,                  // 0xEE
+            0b11_11_00_01 => Self::POP(R16Stk::AF),        // 0xF1
+            0b11_11_01_01 => Self::PUSH(R16Stk::AF),       // 0xF5
             0b11_11_01_10 => Self::OR_n,                   // 0xF6
             0b11_11_11_10 => Self::CP_n,                   // 0xFE
             _ => Self::NOP,
@@ -292,7 +302,9 @@ impl Instruction {
             | Self::AND_r(_)
             | Self::XOR_r(_)
             | Self::OR_r(_)
-            | Self::CP_r(_) => 1,
+            | Self::CP_r(_)
+            | Self::POP(_)
+            | Self::PUSH(_) => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -354,6 +366,8 @@ impl Instruction {
             Self::XOR_n => format!("XOR {n1:02X}"),
             Self::OR_n => format!("OR {n1:02X}"),
             Self::CP_n => format!("CP {n1:02X}"),
+            Self::POP(stk) => format!("POP {stk}"),
+            Self::PUSH(stk) => format!("PUSH {stk}"),
         }
     }
 }
@@ -401,6 +415,8 @@ impl Display for Instruction {
             Self::XOR_n => write!(f, "XOR n"),
             Self::OR_n => write!(f, "OR n"),
             Self::CP_n => write!(f, "CP n"),
+            Self::POP(stk) => write!(f, "POP {stk}"),
+            Self::PUSH(stk) => write!(f, "PUSH {stk}"),
         }
     }
 }
@@ -446,6 +462,20 @@ pub enum R16Mem {
 }
 
 impl Display for R16Mem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum R16Stk {
+    BC = 0,
+    DE = 1,
+    HL = 2,
+    AF = 3,
+}
+
+impl Display for R16Stk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
