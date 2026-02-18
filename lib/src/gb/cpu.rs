@@ -1,8 +1,9 @@
 use crate::gb::bus::BusInterface;
 use crate::instructions::{Cond, Instruction, R16Mem, R16, R8};
 use crate::utils::{
-    add_bytes, add_word_signed_byte, add_words, hi, lo, rotate_left_get_carry,
-    rotate_left_through_carry, rotate_right_get_carry, rotate_right_through_carry, sub_bytes, word,
+    add_bytes, add_bytes_carry, add_word_signed_byte, add_words, hi, lo, rotate_left_get_carry,
+    rotate_left_through_carry, rotate_right_get_carry, rotate_right_through_carry, sub_bytes,
+    sub_bytes_carry, word,
 };
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -106,6 +107,14 @@ impl Cpu {
             // ToDo: Revisit HALT once interrupts are implemented => https://gbdev.io/pandocs/halt.html#halt
             Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => {}
             Instruction::LD_r_r(dest, src) => self.ld_r_r(bus, dest, src),
+            Instruction::ADD_r(r8) => self.add_r(bus, r8),
+            Instruction::ADC_r(r8) => self.adc_r(bus, r8),
+            Instruction::SUB_r(r8) => self.sub_r(bus, r8),
+            Instruction::SBC_r(r8) => self.sbc_r(bus, r8),
+            Instruction::AND_r(r8) => self.and_r(bus, r8),
+            Instruction::XOR_r(r8) => self.xor_r(bus, r8),
+            Instruction::OR_r(r8) => self.or_r(bus, r8),
+            Instruction::CP_r(r8) => self.cp_r(bus, r8),
         }
 
         self.fetch(bus);
@@ -304,6 +313,74 @@ impl Cpu {
     pub fn ld_r_r(&mut self, bus: &mut impl BusInterface, dest: R8, src: R8) {
         let value = self.get_r8(bus, src);
         self.set_r8(bus, dest, value);
+    }
+
+    pub fn add_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, hc, c) = add_bytes(self.a, self.get_r8(bus, r8));
+        self.a = result;
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
+
+    pub fn adc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, hc, c) = add_bytes_carry(self.a, self.get_r8(bus, r8), self.f.carry);
+        self.a = result;
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
+
+    pub fn sub_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, hc, c) = sub_bytes(self.a, self.get_r8(bus, r8));
+        self.a = result;
+        self.f.zero = result == 0;
+        self.f.subtract = true;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
+
+    pub fn sbc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, hc, c) = sub_bytes_carry(self.a, self.get_r8(bus, r8), self.f.carry);
+        self.a = result;
+        self.f.zero = result == 0;
+        self.f.subtract = true;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
+
+    pub fn and_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        self.a &= self.get_r8(bus, r8);
+        self.f.zero = self.a == 0;
+        self.f.subtract = false;
+        self.f.half_carry = true;
+        self.f.carry = false;
+    }
+
+    pub fn xor_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        self.a ^= self.get_r8(bus, r8);
+        self.f.zero = self.a == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = false;
+    }
+
+    pub fn or_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        self.a |= self.get_r8(bus, r8);
+        self.f.zero = self.a == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = false;
+    }
+
+    pub fn cp_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, hc, c) = sub_bytes(self.a, self.get_r8(bus, r8));
+        self.f.zero = result == 0;
+        self.f.subtract = true;
+        self.f.half_carry = hc;
+        self.f.carry = c;
     }
 }
 

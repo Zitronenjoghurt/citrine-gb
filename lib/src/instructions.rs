@@ -38,6 +38,14 @@ pub enum Instruction {
     STOP,
     HALT,
     LD_r_r(R8, R8),
+    ADD_r(R8),
+    ADC_r(R8),
+    SUB_r(R8),
+    SBC_r(R8),
+    AND_r(R8),
+    XOR_r(R8),
+    OR_r(R8),
+    CP_r(R8),
 }
 
 impl Instruction {
@@ -172,6 +180,70 @@ impl Instruction {
             0b01_11_11_01 => Self::LD_r_r(R8::A, R8::L),   // 0x7D
             0b01_11_11_10 => Self::LD_r_r(R8::A, R8::HL),  // 0x7E
             0b01_11_11_11 => Self::LD_r_r(R8::A, R8::A),   // 0x7F
+            0b10_00_00_00 => Self::ADD_r(R8::B),           // 0x80
+            0b10_00_00_01 => Self::ADD_r(R8::C),           // 0x81
+            0b10_00_00_10 => Self::ADD_r(R8::D),           // 0x82
+            0b10_00_00_11 => Self::ADD_r(R8::E),           // 0x83
+            0b10_00_01_00 => Self::ADD_r(R8::H),           // 0x84
+            0b10_00_01_01 => Self::ADD_r(R8::L),           // 0x85
+            0b10_00_01_10 => Self::ADD_r(R8::HL),          // 0x86
+            0b10_00_01_11 => Self::ADD_r(R8::A),           // 0x87
+            0b10_00_10_00 => Self::ADC_r(R8::B),           // 0x88
+            0b10_00_10_01 => Self::ADC_r(R8::C),           // 0x89
+            0b10_00_10_10 => Self::ADC_r(R8::D),           // 0x8A
+            0b10_00_10_11 => Self::ADC_r(R8::E),           // 0x8B
+            0b10_00_11_00 => Self::ADC_r(R8::H),           // 0x8C
+            0b10_00_11_01 => Self::ADC_r(R8::L),           // 0x8D
+            0b10_00_11_10 => Self::ADC_r(R8::HL),          // 0x8E
+            0b10_00_11_11 => Self::ADC_r(R8::A),           // 0x8F
+            0b10_01_00_00 => Self::SUB_r(R8::B),           // 0x90
+            0b10_01_00_01 => Self::SUB_r(R8::C),           // 0x91
+            0b10_01_00_10 => Self::SUB_r(R8::D),           // 0x92
+            0b10_01_00_11 => Self::SUB_r(R8::E),           // 0x93
+            0b10_01_01_00 => Self::SUB_r(R8::H),           // 0x94
+            0b10_01_01_01 => Self::SUB_r(R8::L),           // 0x95
+            0b10_01_01_10 => Self::SUB_r(R8::HL),          // 0x96
+            0b10_01_01_11 => Self::SUB_r(R8::A),           // 0x97
+            0b10_01_10_00 => Self::SBC_r(R8::B),           // 0x98
+            0b10_01_10_01 => Self::SBC_r(R8::C),           // 0x99
+            0b10_01_10_10 => Self::SBC_r(R8::D),           // 0x9A
+            0b10_01_10_11 => Self::SBC_r(R8::E),           // 0x9B
+            0b10_01_11_00 => Self::SBC_r(R8::H),           // 0x9C
+            0b10_01_11_01 => Self::SBC_r(R8::L),           // 0x9D
+            0b10_01_11_10 => Self::SBC_r(R8::HL),          // 0x9E
+            0b10_01_11_11 => Self::SBC_r(R8::A),           // 0x9F
+            0b10_10_00_00 => Self::AND_r(R8::B),           // 0xA0
+            0b10_10_00_01 => Self::AND_r(R8::C),           // 0xA1
+            0b10_10_00_10 => Self::AND_r(R8::D),           // 0xA2
+            0b10_10_00_11 => Self::AND_r(R8::E),           // 0xA3
+            0b10_10_01_00 => Self::AND_r(R8::H),           // 0xA4
+            0b10_10_01_01 => Self::AND_r(R8::L),           // 0xA5
+            0b10_10_01_10 => Self::AND_r(R8::HL),          // 0xA6
+            0b10_10_01_11 => Self::AND_r(R8::A),           // 0xA7
+            0b10_10_10_00 => Self::XOR_r(R8::B),           // 0xA8
+            0b10_10_10_01 => Self::XOR_r(R8::C),           // 0xA9
+            0b10_10_10_10 => Self::XOR_r(R8::D),           // 0xAA
+            0b10_10_10_11 => Self::XOR_r(R8::E),           // 0xAB
+            0b10_10_11_00 => Self::XOR_r(R8::H),           // 0xAC
+            0b10_10_11_01 => Self::XOR_r(R8::L),           // 0xAD
+            0b10_10_11_10 => Self::XOR_r(R8::HL),          // 0xAE
+            0b10_10_11_11 => Self::XOR_r(R8::A),           // 0xAF
+            0b10_11_00_00 => Self::OR_r(R8::B),            // 0xB0
+            0b10_11_00_01 => Self::OR_r(R8::C),            // 0xB1
+            0b10_11_00_10 => Self::OR_r(R8::D),            // 0xB2
+            0b10_11_00_11 => Self::OR_r(R8::E),            // 0xB3
+            0b10_11_01_00 => Self::OR_r(R8::H),            // 0xB4
+            0b10_11_01_01 => Self::OR_r(R8::L),            // 0xB5
+            0b10_11_01_10 => Self::OR_r(R8::HL),           // 0xB6
+            0b10_11_01_11 => Self::OR_r(R8::A),            // 0xB7
+            0b10_11_10_00 => Self::CP_r(R8::B),            // 0xB8
+            0b10_11_10_01 => Self::CP_r(R8::C),            // 0xB9
+            0b10_11_10_10 => Self::CP_r(R8::D),            // 0xBA
+            0b10_11_10_11 => Self::CP_r(R8::E),            // 0xBB
+            0b10_11_11_00 => Self::CP_r(R8::H),            // 0xBC
+            0b10_11_11_01 => Self::CP_r(R8::L),            // 0xBD
+            0b10_11_11_10 => Self::CP_r(R8::HL),           // 0xBE
+            0b10_11_11_11 => Self::CP_r(R8::A),            // 0xBF
             _ => Self::NOP,
         }
     }
@@ -196,7 +268,15 @@ impl Instruction {
             | Self::CCF
             | Self::STOP
             | Self::HALT
-            | Self::LD_r_r(_, _) => 1,
+            | Self::LD_r_r(_, _)
+            | Self::ADD_r(_)
+            | Self::ADC_r(_)
+            | Self::SUB_r(_)
+            | Self::SBC_r(_)
+            | Self::AND_r(_)
+            | Self::XOR_r(_)
+            | Self::OR_r(_)
+            | Self::CP_r(_) => 1,
             Self::LD_r_n(_) | Self::JR_n | Self::JR_c_n(_) => 2,
             Self::LD_rr_nn(_) | Self::LD_nn_SP => 3,
         }
@@ -232,6 +312,14 @@ impl Instruction {
             Self::STOP => String::from("STOP"),
             Self::HALT => String::from("HALT"),
             Self::LD_r_r(r81, r82) => format!("LD {r81}, {r82}"),
+            Self::ADD_r(r8) => format!("ADD {r8}"),
+            Self::ADC_r(r8) => format!("ADC {r8}"),
+            Self::SUB_r(r8) => format!("SUB {r8}"),
+            Self::SBC_r(r8) => format!("SBC {r8}"),
+            Self::AND_r(r8) => format!("AND {r8}"),
+            Self::XOR_r(r8) => format!("XOR {r8}"),
+            Self::OR_r(r8) => format!("OR {r8}"),
+            Self::CP_r(r8) => format!("CP {r8}"),
         }
     }
 }
@@ -263,6 +351,14 @@ impl Display for Instruction {
             Self::STOP => write!(f, "STOP"),
             Self::HALT => write!(f, "HALT"),
             Self::LD_r_r(r81, r82) => write!(f, "LD {r81}, {r82}"),
+            Self::ADD_r(r8) => write!(f, "ADD {r8}"),
+            Self::ADC_r(r8) => write!(f, "ADC {r8}"),
+            Self::SUB_r(r8) => write!(f, "SUB {r8}"),
+            Self::SBC_r(r8) => write!(f, "SBC {r8}"),
+            Self::AND_r(r8) => write!(f, "AND {r8}"),
+            Self::XOR_r(r8) => write!(f, "XOR {r8}"),
+            Self::OR_r(r8) => write!(f, "OR {r8}"),
+            Self::CP_r(r8) => write!(f, "CP {r8}"),
         }
     }
 }
