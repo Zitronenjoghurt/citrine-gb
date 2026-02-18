@@ -76,6 +76,15 @@ pub enum Instruction {
     LD_SP_HL,
     DI,
     EI,
+    Prefix,
+    RLC_r(R8),
+    RRC_r(R8),
+    RL_r(R8),
+    RR_r(R8),
+    SLA_r(R8),
+    SRA_r(R8),
+    SWAP_r(R8),
+    SRL_r(R8),
 }
 
 impl Instruction {
@@ -285,6 +294,7 @@ impl Instruction {
             0b11_00_10_00 => Self::RET_c(Cond::Z),         // 0xC8
             0b11_00_10_01 => Self::RET,                    // 0xC9
             0b11_00_10_10 => Self::JP_c_nn(Cond::Z),       // 0xCA
+            0b11_00_10_11 => Self::Prefix,                 // 0xCB
             0b11_00_11_00 => Self::CALL_c_nn(Cond::Z),     // 0xCC
             0b11_00_11_01 => Self::CALL_nn,                // 0xCD
             0b11_00_11_10 => Self::ADC_n,                  // 0xCE
@@ -330,6 +340,76 @@ impl Instruction {
         }
     }
 
+    pub fn decode_prefixed(opcode: u8) -> Self {
+        match opcode {
+            0b00_00_00_00 => Self::RLC_r(R8::B),   // 0x00
+            0b00_00_00_01 => Self::RLC_r(R8::C),   // 0x01
+            0b00_00_00_10 => Self::RLC_r(R8::D),   // 0x02
+            0b00_00_00_11 => Self::RLC_r(R8::E),   // 0x03
+            0b00_00_01_00 => Self::RLC_r(R8::H),   // 0x04
+            0b00_00_01_01 => Self::RLC_r(R8::L),   // 0x05
+            0b00_00_01_10 => Self::RLC_r(R8::HL),  // 0x06
+            0b00_00_01_11 => Self::RLC_r(R8::A),   // 0x07
+            0b00_00_10_00 => Self::RRC_r(R8::B),   // 0x08
+            0b00_00_10_01 => Self::RRC_r(R8::C),   // 0x09
+            0b00_00_10_10 => Self::RRC_r(R8::D),   // 0x0A
+            0b00_00_10_11 => Self::RRC_r(R8::E),   // 0x0B
+            0b00_00_11_00 => Self::RRC_r(R8::H),   // 0x0C
+            0b00_00_11_01 => Self::RRC_r(R8::L),   // 0x0D
+            0b00_00_11_10 => Self::RRC_r(R8::HL),  // 0x0E
+            0b00_00_11_11 => Self::RRC_r(R8::A),   // 0x0F
+            0b00_01_00_00 => Self::RL_r(R8::B),    // 0x10
+            0b00_01_00_01 => Self::RL_r(R8::C),    // 0x11
+            0b00_01_00_10 => Self::RL_r(R8::D),    // 0x12
+            0b00_01_00_11 => Self::RL_r(R8::E),    // 0x13
+            0b00_01_01_00 => Self::RL_r(R8::H),    // 0x14
+            0b00_01_01_01 => Self::RL_r(R8::L),    // 0x15
+            0b00_01_01_10 => Self::RL_r(R8::HL),   // 0x16
+            0b00_01_01_11 => Self::RL_r(R8::A),    // 0x17
+            0b00_01_10_00 => Self::RR_r(R8::B),    // 0x18
+            0b00_01_10_01 => Self::RR_r(R8::C),    // 0x19
+            0b00_01_10_10 => Self::RR_r(R8::D),    // 0x1A
+            0b00_01_10_11 => Self::RR_r(R8::E),    // 0x1B
+            0b00_01_11_00 => Self::RR_r(R8::H),    // 0x1C
+            0b00_01_11_01 => Self::RR_r(R8::L),    // 0x1D
+            0b00_01_11_10 => Self::RR_r(R8::HL),   // 0x1E
+            0b00_01_11_11 => Self::RR_r(R8::A),    // 0x1F
+            0b00_10_00_00 => Self::SLA_r(R8::B),   // 0x20
+            0b00_10_00_01 => Self::SLA_r(R8::C),   // 0x21
+            0b00_10_00_10 => Self::SLA_r(R8::D),   // 0x22
+            0b00_10_00_11 => Self::SLA_r(R8::E),   // 0x23
+            0b00_10_01_00 => Self::SLA_r(R8::H),   // 0x24
+            0b00_10_01_01 => Self::SLA_r(R8::L),   // 0x25
+            0b00_10_01_10 => Self::SLA_r(R8::HL),  // 0x26
+            0b00_10_01_11 => Self::SLA_r(R8::A),   // 0x27
+            0b00_10_10_00 => Self::SRA_r(R8::B),   // 0x28
+            0b00_10_10_01 => Self::SRA_r(R8::C),   // 0x29
+            0b00_10_10_10 => Self::SRA_r(R8::D),   // 0x2A
+            0b00_10_10_11 => Self::SRA_r(R8::E),   // 0x2B
+            0b00_10_11_00 => Self::SRA_r(R8::H),   // 0x2C
+            0b00_10_11_01 => Self::SRA_r(R8::L),   // 0x2D
+            0b00_10_11_10 => Self::SRA_r(R8::HL),  // 0x2E
+            0b00_10_11_11 => Self::SRA_r(R8::A),   // 0x2F
+            0b00_11_00_00 => Self::SWAP_r(R8::B),  // 0x30
+            0b00_11_00_01 => Self::SWAP_r(R8::C),  // 0x31
+            0b00_11_00_10 => Self::SWAP_r(R8::D),  // 0x32
+            0b00_11_00_11 => Self::SWAP_r(R8::E),  // 0x33
+            0b00_11_01_00 => Self::SWAP_r(R8::H),  // 0x34
+            0b00_11_01_01 => Self::SWAP_r(R8::L),  // 0x35
+            0b00_11_01_10 => Self::SWAP_r(R8::HL), // 0x36
+            0b00_11_01_11 => Self::SWAP_r(R8::A),  // 0x37
+            0b00_11_10_00 => Self::SRL_r(R8::B),   // 0x38
+            0b00_11_10_01 => Self::SRL_r(R8::C),   // 0x39
+            0b00_11_10_10 => Self::SRL_r(R8::D),   // 0x3A
+            0b00_11_10_11 => Self::SRL_r(R8::E),   // 0x3B
+            0b00_11_11_00 => Self::SRL_r(R8::H),   // 0x3C
+            0b00_11_11_01 => Self::SRL_r(R8::L),   // 0x3D
+            0b00_11_11_10 => Self::SRL_r(R8::HL),  // 0x3E
+            0b00_11_11_11 => Self::SRL_r(R8::A),   // 0x3F
+            _ => panic!("Invalid prefixed opcode: {:02X}", opcode),
+        }
+    }
+
     pub fn length(&self) -> usize {
         match self {
             Self::NOP
@@ -370,7 +450,8 @@ impl Instruction {
             | Self::LDH_A_C
             | Self::LD_SP_HL
             | Self::DI
-            | Self::EI => 1,
+            | Self::EI
+            | Self::Prefix => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -385,7 +466,15 @@ impl Instruction {
             | Self::LDH_n_A
             | Self::LDH_A_n
             | Self::ADD_SP_n
-            | Self::LD_HL_SP_n => 2,
+            | Self::LD_HL_SP_n
+            | Self::RLC_r(_)
+            | Self::RRC_r(_)
+            | Self::RL_r(_)
+            | Self::RR_r(_)
+            | Self::SLA_r(_)
+            | Self::SRA_r(_)
+            | Self::SWAP_r(_)
+            | Self::SRL_r(_) => 2,
             Self::LD_rr_nn(_)
             | Self::LD_nn_SP
             | Self::JP_c_nn(_)
@@ -465,6 +554,15 @@ impl Instruction {
             Self::LD_SP_HL => String::from("LD SP, HL"),
             Self::DI => String::from("DI"),
             Self::EI => String::from("EI"),
+            Self::Prefix => String::from("Prefix"),
+            Self::RLC_r(r8) => format!("RLC {r8}"),
+            Self::RRC_r(r8) => format!("RRC {r8}"),
+            Self::RL_r(r8) => format!("RL {r8}"),
+            Self::RR_r(r8) => format!("RR {r8}"),
+            Self::SLA_r(r8) => format!("SLA {r8}"),
+            Self::SRA_r(r8) => format!("SRA {r8}"),
+            Self::SWAP_r(r8) => format!("SWAP {r8}"),
+            Self::SRL_r(r8) => format!("SRL {r8}"),
         }
     }
 }
@@ -534,6 +632,15 @@ impl Display for Instruction {
             Self::LD_SP_HL => write!(f, "LD SP, HL"),
             Self::DI => write!(f, "DI"),
             Self::EI => write!(f, "EI"),
+            Self::Prefix => write!(f, "Prefix"),
+            Self::RLC_r(r8) => write!(f, "RLC {r8}"),
+            Self::RRC_r(r8) => write!(f, "RRC {r8}"),
+            Self::RL_r(r8) => write!(f, "RL {r8}"),
+            Self::RR_r(r8) => write!(f, "RR {r8}"),
+            Self::SLA_r(r8) => write!(f, "SLA {r8}"),
+            Self::SRA_r(r8) => write!(f, "SRA {r8}"),
+            Self::SWAP_r(r8) => write!(f, "SWAP {r8}"),
+            Self::SRL_r(r8) => write!(f, "SRL {r8}"),
         }
     }
 }

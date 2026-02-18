@@ -62,14 +62,10 @@ pub fn run() {
 }
 
 fn run_test(test: &TestCase) {
-    let is_cb = test.name.starts_with("cb ");
     let mut cpu = Cpu::from(&test.initial);
     let mut bus = TestBus::from(&test.initial);
 
-    cpu.ir = *bus
-        .data
-        .get(&test.initial.pc.wrapping_sub(if is_cb { 2 } else { 1 }))
-        .unwrap();
+    cpu.ir = *bus.data.get(&test.initial.pc.wrapping_sub(1)).unwrap();
     cpu.step(&mut bus);
 
     // adtennant's cases dont include the final IR

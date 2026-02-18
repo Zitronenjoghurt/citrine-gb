@@ -1,10 +1,6 @@
 use crate::gb::bus::BusInterface;
 use crate::instructions::{Cond, Instruction, R16Mem, R16Stk, R16, R8};
-use crate::utils::{
-    add_bytes, add_bytes_carry, add_word_signed_byte, add_words, hi, lo, rotate_left_get_carry,
-    rotate_left_through_carry, rotate_right_get_carry, rotate_right_through_carry, sub_bytes,
-    sub_bytes_carry, word,
-};
+use crate::utils::*;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Cpu {
@@ -81,7 +77,7 @@ impl Cpu {
     }
 
     pub fn step(&mut self, bus: &mut impl BusInterface) {
-        match self.decode() {
+        match self.decode(bus) {
             Instruction::NOP => {}
             Instruction::LD_rr_nn(r16) => self.ld_rr_nn(bus, r16),
             Instruction::LD_rr_A(r16mem) => self.ld_rr_a(bus, r16mem),
@@ -146,6 +142,15 @@ impl Cpu {
             // ToDo: DI/EI schedule their change to be applied after the next machine cycle, check if this implementation is correct
             Instruction::DI => self.ime = false,
             Instruction::EI => self.ime = true,
+            Instruction::Prefix => {}
+            Instruction::RLC_r(r8) => self.rlc_r(bus, r8),
+            Instruction::RRC_r(r8) => self.rrc_r(bus, r8),
+            Instruction::RL_r(r8) => self.rl_r(bus, r8),
+            Instruction::RR_r(r8) => self.rr_r(bus, r8),
+            Instruction::SLA_r(r8) => self.sla_r(bus, r8),
+            Instruction::SRA_r(r8) => self.sra_r(bus, r8),
+            Instruction::SWAP_r(r8) => self.swap_r(bus, r8),
+            Instruction::SRL_r(r8) => self.srl_r(bus, r8),
         }
 
         self.fetch(bus);
@@ -155,8 +160,13 @@ impl Cpu {
         self.ir = self.read_program(bus);
     }
 
-    pub fn decode(&mut self) -> Instruction {
-        Instruction::decode(self.ir)
+    pub fn decode(&mut self, bus: &mut impl BusInterface) -> Instruction {
+        if self.ir != 0xCB {
+            Instruction::decode(self.ir)
+        } else {
+            self.fetch(bus);
+            Instruction::decode_prefixed(self.ir)
+        }
     }
 }
 
@@ -590,6 +600,90 @@ impl Cpu {
     pub fn ld_sp_hl(&mut self, bus: &mut impl BusInterface) {
         bus.cycle();
         self.sp = self.get_r16_nn(R16::HL);
+    }
+
+    pub fn rlc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, c) = rotate_left_get_carry(self.get_r8(bus, r8));
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = c;
+    }
+
+    pub fn rrc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, c) = rotate_right_get_carry(self.get_r8(bus, r8));
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = c;
+    }
+
+    pub fn rl_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, c) = rotate_left_through_carry(self.get_r8(bus, r8), self.f.carry);
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = c;
+    }
+
+    pub fn rr_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let (result, c) = rotate_right_through_carry(self.get_r8(bus, r8), self.f.carry);
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = c;
+    }
+
+    pub fn sla_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        let carry = get_bit(value, 7);
+        let result = value << 1;
+
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = carry;
+    }
+
+    pub fn sra_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        let carry = get_bit(value, 0);
+        // Shift right while persisting the sign bit
+        let result = set_bit(value >> 1, 7, get_bit(value, 7));
+
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = carry;
+    }
+
+    pub fn swap_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        let result = value.rotate_right(4);
+
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = false;
+    }
+
+    pub fn srl_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        let carry = get_bit(value, 0);
+        let result = value >> 1;
+
+        self.set_r8(bus, r8, result);
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = false;
+        self.f.carry = carry;
     }
 }
 
