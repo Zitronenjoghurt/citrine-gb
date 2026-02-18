@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "citrine-gb-app"
+version = "0.1.0"
+dependencies = [
+ "citrine-gb",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
