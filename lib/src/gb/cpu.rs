@@ -143,6 +143,9 @@ impl Cpu {
             Instruction::ADD_SP_n => self.add_sp_n(bus),
             Instruction::LD_HL_SP_n => self.ld_hl_sp_n(bus),
             Instruction::LD_SP_HL => self.ld_sp_hl(bus),
+            // ToDo: DI/EI schedule their change to be applied after the next machine cycle, check if this implementation is correct
+            Instruction::DI => self.ime = false,
+            Instruction::EI => self.ime = true,
         }
 
         self.fetch(bus);

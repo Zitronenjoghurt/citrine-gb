@@ -74,6 +74,8 @@ pub enum Instruction {
     ADD_SP_n,
     LD_HL_SP_n,
     LD_SP_HL,
+    DI,
+    EI,
 }
 
 impl Instruction {
@@ -314,12 +316,14 @@ impl Instruction {
             0b11_11_00_00 => Self::LDH_A_n,                // 0xF0
             0b11_11_00_01 => Self::POP(R16Stk::AF),        // 0xF1
             0b11_11_00_10 => Self::LDH_A_C,                // 0xF2
+            0b11_11_00_11 => Self::DI,                     // 0xF3
             0b11_11_01_01 => Self::PUSH(R16Stk::AF),       // 0xF5
             0b11_11_01_10 => Self::OR_n,                   // 0xF6
             0b11_11_01_11 => Self::RST_n(0x30),            // 0xF7
             0b11_11_10_00 => Self::LD_HL_SP_n,             // 0xF8
             0b11_11_10_01 => Self::LD_SP_HL,               // 0xF9
             0b11_11_10_10 => Self::LD_A_nn,                // 0xFA
+            0b11_11_10_11 => Self::EI,                     // 0xFB
             0b11_11_11_10 => Self::CP_n,                   // 0xFE
             0b11_11_11_11 => Self::RST_n(0x38),            // 0xFF
             _ => panic!("Invalid unprefixed opcode: {:02X}", opcode),
@@ -364,7 +368,9 @@ impl Instruction {
             | Self::RST_n(_)
             | Self::LDH_C_A
             | Self::LDH_A_C
-            | Self::LD_SP_HL => 1,
+            | Self::LD_SP_HL
+            | Self::DI
+            | Self::EI => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -457,6 +463,8 @@ impl Instruction {
             Self::ADD_SP_n => format!("ADD SP, {:02X}", n1 as i8),
             Self::LD_HL_SP_n => format!("LD HL, SP+{:02X}", n1 as i8),
             Self::LD_SP_HL => String::from("LD SP, HL"),
+            Self::DI => String::from("DI"),
+            Self::EI => String::from("EI"),
         }
     }
 }
@@ -524,6 +532,8 @@ impl Display for Instruction {
             Self::ADD_SP_n => write!(f, "ADD SP, n"),
             Self::LD_HL_SP_n => write!(f, "LD HL, SP+n"),
             Self::LD_SP_HL => write!(f, "LD SP, HL"),
+            Self::DI => write!(f, "DI"),
+            Self::EI => write!(f, "EI"),
         }
     }
 }
