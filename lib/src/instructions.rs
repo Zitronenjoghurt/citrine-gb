@@ -56,6 +56,15 @@ pub enum Instruction {
     CP_n,
     POP(R16Stk),
     PUSH(R16Stk),
+    RET_c(Cond),
+    RET,
+    RETI,
+    JP_c_nn(Cond),
+    JP_nn,
+    JP_HL,
+    CALL_c_nn(Cond),
+    CALL_nn,
+    RST_n(u8),
 }
 
 impl Instruction {
@@ -254,22 +263,47 @@ impl Instruction {
             0b10_11_11_01 => Self::CP_r(R8::L),            // 0xBD
             0b10_11_11_10 => Self::CP_r(R8::HL),           // 0xBE
             0b10_11_11_11 => Self::CP_r(R8::A),            // 0xBF
+            0b11_00_00_00 => Self::RET_c(Cond::NZ),        // 0xC0
             0b11_00_00_01 => Self::POP(R16Stk::BC),        // 0xC1
+            0b11_00_00_10 => Self::JP_c_nn(Cond::NZ),      // 0xC2
+            0b11_00_00_11 => Self::JP_nn,                  // 0xC3
+            0b11_00_01_00 => Self::CALL_c_nn(Cond::NZ),    // 0xC4
             0b11_00_01_01 => Self::PUSH(R16Stk::BC),       // 0xC5
             0b11_00_01_10 => Self::ADD_n,                  // 0xC6
+            0b11_00_10_00 => Self::RET_c(Cond::Z),         // 0xC8
+            0b11_00_10_01 => Self::RET,                    // 0xC9
+            0b11_00_10_10 => Self::JP_c_nn(Cond::Z),       // 0xCA
+            0b11_00_11_00 => Self::CALL_c_nn(Cond::Z),     // 0xCC
+            0b11_00_11_01 => Self::CALL_nn,                // 0xCD
             0b11_00_11_10 => Self::ADC_n,                  // 0xCE
+            0b11_01_00_00 => Self::RET_c(Cond::NC),        // 0xD0
             0b11_01_00_01 => Self::POP(R16Stk::DE),        // 0xD1
+            0b11_01_00_10 => Self::JP_c_nn(Cond::NC),      // 0xD2
+            0b11_01_01_00 => Self::CALL_c_nn(Cond::NC),    // 0xD4
             0b11_01_01_01 => Self::PUSH(R16Stk::DE),       // 0xD5
             0b11_01_01_10 => Self::SUB_n,                  // 0xD6
+            0b11_01_10_00 => Self::RET_c(Cond::C),         // 0xD8
+            0b11_01_10_01 => Self::RETI,                   // 0xD9
+            0b11_01_10_10 => Self::JP_c_nn(Cond::C),       // 0xDA
+            0b11_01_11_00 => Self::CALL_c_nn(Cond::C),     // 0xDC
             0b11_01_11_10 => Self::SBC_n,                  // 0xDE
             0b11_10_00_01 => Self::POP(R16Stk::HL),        // 0xE1
             0b11_10_01_01 => Self::PUSH(R16Stk::HL),       // 0xE5
             0b11_10_01_10 => Self::AND_n,                  // 0xE6
+            0b11_10_10_01 => Self::JP_HL,                  // 0xE9
             0b11_10_11_10 => Self::XOR_n,                  // 0xEE
             0b11_11_00_01 => Self::POP(R16Stk::AF),        // 0xF1
             0b11_11_01_01 => Self::PUSH(R16Stk::AF),       // 0xF5
             0b11_11_01_10 => Self::OR_n,                   // 0xF6
             0b11_11_11_10 => Self::CP_n,                   // 0xFE
+            0b11_00_01_11 => Self::RST_n(0x00),            // 0xC7
+            0b11_00_11_11 => Self::RST_n(0x08),            // 0xCF
+            0b11_01_01_11 => Self::RST_n(0x10),            // 0xD7
+            0b11_01_11_11 => Self::RST_n(0x18),            // 0xDF
+            0b11_10_01_11 => Self::RST_n(0x20),            // 0xE7
+            0b11_10_11_11 => Self::RST_n(0x28),            // 0xEF
+            0b11_11_01_11 => Self::RST_n(0x30),            // 0xF7
+            0b11_11_11_11 => Self::RST_n(0x38),            // 0xFF
             _ => Self::NOP,
         }
     }
@@ -304,7 +338,12 @@ impl Instruction {
             | Self::OR_r(_)
             | Self::CP_r(_)
             | Self::POP(_)
-            | Self::PUSH(_) => 1,
+            | Self::PUSH(_)
+            | Self::RET_c(_)
+            | Self::RET
+            | Self::RETI
+            | Self::JP_HL
+            | Self::RST_n(_) => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -316,7 +355,12 @@ impl Instruction {
             | Self::XOR_n
             | Self::OR_n
             | Self::CP_n => 2,
-            Self::LD_rr_nn(_) | Self::LD_nn_SP => 3,
+            Self::LD_rr_nn(_)
+            | Self::LD_nn_SP
+            | Self::JP_c_nn(_)
+            | Self::JP_nn
+            | Self::CALL_c_nn(_)
+            | Self::CALL_nn => 3,
         }
     }
 
@@ -368,6 +412,15 @@ impl Instruction {
             Self::CP_n => format!("CP {n1:02X}"),
             Self::POP(stk) => format!("POP {stk}"),
             Self::PUSH(stk) => format!("PUSH {stk}"),
+            Self::RET_c(cond) => format!("RET {cond}"),
+            Self::RET => String::from("RET"),
+            Self::RETI => String::from("RETI"),
+            Self::JP_c_nn(cond) => format!("JP {cond}, {nn:04X}"),
+            Self::JP_nn => format!("JP {nn:04X}"),
+            Self::JP_HL => String::from("JP HL"),
+            Self::CALL_c_nn(cond) => format!("CALL {cond}, {nn:04X}"),
+            Self::CALL_nn => format!("CALL {nn:04X}"),
+            Self::RST_n(tgt) => format!("RST {tgt:02X}"),
         }
     }
 }
@@ -417,6 +470,15 @@ impl Display for Instruction {
             Self::CP_n => write!(f, "CP n"),
             Self::POP(stk) => write!(f, "POP {stk}"),
             Self::PUSH(stk) => write!(f, "PUSH {stk}"),
+            Self::RET_c(cond) => write!(f, "RET {cond}"),
+            Self::RET => write!(f, "RET"),
+            Self::RETI => write!(f, "RETI"),
+            Self::JP_c_nn(cond) => write!(f, "JP {cond}, nn"),
+            Self::JP_nn => write!(f, "JP nn"),
+            Self::JP_HL => write!(f, "JP HL"),
+            Self::CALL_c_nn(cond) => write!(f, "CALL {cond}, nn"),
+            Self::CALL_nn => write!(f, "CALL nn"),
+            Self::RST_n(tgt) => write!(f, "RST {tgt:02X}"),
         }
     }
 }

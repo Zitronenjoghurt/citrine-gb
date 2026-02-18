@@ -125,6 +125,15 @@ impl Cpu {
             Instruction::CP_n => self.cp_n(bus),
             Instruction::POP(stk) => self.pop_rr(bus, stk),
             Instruction::PUSH(stk) => self.push_rr(bus, stk),
+            Instruction::RET => self.ret(bus),
+            Instruction::RETI => self.reti(bus),
+            Instruction::RET_c(cond) => self.ret_c(bus, cond),
+            Instruction::JP_nn => self.jump_nn(bus),
+            Instruction::JP_c_nn(cond) => self.jump_c_nn(bus, cond),
+            Instruction::JP_HL => self.jump_hl(),
+            Instruction::CALL_nn => self.call_nn(bus),
+            Instruction::CALL_c_nn(cond) => self.call_c_nn(bus, cond),
+            Instruction::RST_n(tgt) => self.rst(bus, tgt),
         }
 
         self.fetch(bus);
@@ -442,6 +451,71 @@ impl Cpu {
 
         let value = self.get_r16stk(r16stk);
         self.push_word(bus, value);
+    }
+
+    pub fn ret(&mut self, bus: &mut impl BusInterface) {
+        let address = self.pop_word(bus);
+
+        bus.cycle();
+        self.pc = address;
+    }
+
+    pub fn reti(&mut self, bus: &mut impl BusInterface) {
+        self.ret(bus);
+        self.ime = true;
+    }
+
+    pub fn ret_c(&mut self, bus: &mut impl BusInterface, cond: Cond) {
+        bus.cycle();
+
+        if self.f.cond_true(cond) {
+            self.ret(bus);
+        }
+    }
+
+    pub fn jump_nn(&mut self, bus: &mut impl BusInterface) {
+        let address = self.read_program_nn(bus);
+
+        bus.cycle();
+        self.pc = address;
+    }
+
+    pub fn jump_c_nn(&mut self, bus: &mut impl BusInterface, cond: Cond) {
+        let address = self.read_program_nn(bus);
+
+        if self.f.cond_true(cond) {
+            bus.cycle();
+            self.pc = address;
+        }
+    }
+
+    pub fn jump_hl(&mut self) {
+        self.pc = self.get_r16_nn(R16::HL);
+    }
+
+    pub fn call_nn(&mut self, bus: &mut impl BusInterface) {
+        let address = self.read_program_nn(bus);
+
+        bus.cycle();
+        self.push_word(bus, self.pc);
+
+        self.pc = address;
+    }
+
+    pub fn call_c_nn(&mut self, bus: &mut impl BusInterface, cond: Cond) {
+        let address = self.read_program_nn(bus);
+
+        if self.f.cond_true(cond) {
+            bus.cycle();
+            self.push_word(bus, self.pc);
+            self.pc = address;
+        }
+    }
+
+    pub fn rst(&mut self, bus: &mut impl BusInterface, address_lsb: u8) {
+        bus.cycle();
+        self.push_word(bus, self.pc);
+        self.pc = word(address_lsb, 0x00);
     }
 }
 

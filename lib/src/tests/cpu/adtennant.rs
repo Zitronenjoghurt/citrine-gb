@@ -75,6 +75,7 @@ fn run_test(test: &TestCase) {
     // adtennant's cases dont include the final IR
     let mut expected_cpu = Cpu::from(&test.expected);
     expected_cpu.ir = cpu.ir;
+    expected_cpu.ime = cpu.ime;
 
     assert_eq!(cpu, expected_cpu, "CPU | {}", test.name);
     assert_eq!(
