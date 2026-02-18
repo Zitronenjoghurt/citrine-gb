@@ -115,6 +115,14 @@ impl Cpu {
             Instruction::XOR_r(r8) => self.xor_r(bus, r8),
             Instruction::OR_r(r8) => self.or_r(bus, r8),
             Instruction::CP_r(r8) => self.cp_r(bus, r8),
+            Instruction::ADD_n => self.add_n(bus),
+            Instruction::ADC_n => self.adc_n(bus),
+            Instruction::SUB_n => self.sub_n(bus),
+            Instruction::SBC_n => self.sbc_n(bus),
+            Instruction::AND_n => self.and_n(bus),
+            Instruction::XOR_n => self.xor_n(bus),
+            Instruction::OR_n => self.or_n(bus),
+            Instruction::CP_n => self.cp_n(bus),
         }
 
         self.fetch(bus);
@@ -316,16 +324,90 @@ impl Cpu {
     }
 
     pub fn add_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        let (result, hc, c) = add_bytes(self.a, self.get_r8(bus, r8));
-        self.a = result;
-        self.f.zero = result == 0;
-        self.f.subtract = false;
-        self.f.half_carry = hc;
-        self.f.carry = c;
+        let value = self.get_r8(bus, r8);
+        self.add_a(value);
     }
 
     pub fn adc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        let (result, hc, c) = add_bytes_carry(self.a, self.get_r8(bus, r8), self.f.carry);
+        let value = self.get_r8(bus, r8);
+        self.adc_a(value);
+    }
+
+    pub fn sub_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        self.sub_a(value);
+    }
+
+    pub fn sbc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        self.sbc_a(value);
+    }
+
+    pub fn and_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        self.and_a(value);
+    }
+
+    pub fn xor_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        self.xor_a(value);
+    }
+
+    pub fn or_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        self.or_a(value);
+    }
+
+    pub fn cp_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
+        let value = self.get_r8(bus, r8);
+        self.cp_a(value);
+    }
+
+    pub fn add_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.add_a(value);
+    }
+
+    pub fn adc_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.adc_a(value);
+    }
+
+    pub fn sub_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.sub_a(value);
+    }
+
+    pub fn sbc_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.sbc_a(value);
+    }
+
+    pub fn and_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.and_a(value);
+    }
+
+    pub fn xor_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.xor_a(value);
+    }
+
+    pub fn or_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.or_a(value);
+    }
+
+    pub fn cp_n(&mut self, bus: &mut impl BusInterface) {
+        let value = self.read_program(bus);
+        self.cp_a(value);
+    }
+}
+
+// 8-Bit Arithmetics
+impl Cpu {
+    pub fn add_a(&mut self, value: u8) {
+        let (result, hc, c) = add_bytes(self.a, value);
         self.a = result;
         self.f.zero = result == 0;
         self.f.subtract = false;
@@ -333,8 +415,17 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn sub_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        let (result, hc, c) = sub_bytes(self.a, self.get_r8(bus, r8));
+    pub fn adc_a(&mut self, value: u8) {
+        let (result, hc, c) = add_bytes_carry(self.a, value, self.f.carry);
+        self.a = result;
+        self.f.zero = result == 0;
+        self.f.subtract = false;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
+
+    pub fn sub_a(&mut self, value: u8) {
+        let (result, hc, c) = sub_bytes(self.a, value);
         self.a = result;
         self.f.zero = result == 0;
         self.f.subtract = true;
@@ -342,8 +433,8 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn sbc_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        let (result, hc, c) = sub_bytes_carry(self.a, self.get_r8(bus, r8), self.f.carry);
+    pub fn sbc_a(&mut self, value: u8) {
+        let (result, hc, c) = sub_bytes_carry(self.a, value, self.f.carry);
         self.a = result;
         self.f.zero = result == 0;
         self.f.subtract = true;
@@ -351,32 +442,32 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn and_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        self.a &= self.get_r8(bus, r8);
+    pub fn and_a(&mut self, value: u8) {
+        self.a &= value;
         self.f.zero = self.a == 0;
         self.f.subtract = false;
         self.f.half_carry = true;
         self.f.carry = false;
     }
 
-    pub fn xor_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        self.a ^= self.get_r8(bus, r8);
+    pub fn xor_a(&mut self, value: u8) {
+        self.a ^= value;
         self.f.zero = self.a == 0;
         self.f.subtract = false;
         self.f.half_carry = false;
         self.f.carry = false;
     }
 
-    pub fn or_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        self.a |= self.get_r8(bus, r8);
+    pub fn or_a(&mut self, value: u8) {
+        self.a |= value;
         self.f.zero = self.a == 0;
         self.f.subtract = false;
         self.f.half_carry = false;
         self.f.carry = false;
     }
 
-    pub fn cp_r(&mut self, bus: &mut impl BusInterface, r8: R8) {
-        let (result, hc, c) = sub_bytes(self.a, self.get_r8(bus, r8));
+    pub fn cp_a(&mut self, value: u8) {
+        let (result, hc, c) = sub_bytes(self.a, value);
         self.f.zero = result == 0;
         self.f.subtract = true;
         self.f.half_carry = hc;

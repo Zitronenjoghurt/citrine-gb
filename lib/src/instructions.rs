@@ -46,6 +46,14 @@ pub enum Instruction {
     XOR_r(R8),
     OR_r(R8),
     CP_r(R8),
+    ADD_n,
+    ADC_n,
+    SUB_n,
+    SBC_n,
+    AND_n,
+    XOR_n,
+    OR_n,
+    CP_n,
 }
 
 impl Instruction {
@@ -244,6 +252,14 @@ impl Instruction {
             0b10_11_11_01 => Self::CP_r(R8::L),            // 0xBD
             0b10_11_11_10 => Self::CP_r(R8::HL),           // 0xBE
             0b10_11_11_11 => Self::CP_r(R8::A),            // 0xBF
+            0b11_00_01_10 => Self::ADD_n,                  // 0xC6
+            0b11_00_11_10 => Self::ADC_n,                  // 0xCE
+            0b11_01_01_10 => Self::SUB_n,                  // 0xD6
+            0b11_01_11_10 => Self::SBC_n,                  // 0xDE
+            0b11_10_01_10 => Self::AND_n,                  // 0xE6
+            0b11_10_11_10 => Self::XOR_n,                  // 0xEE
+            0b11_11_01_10 => Self::OR_n,                   // 0xF6
+            0b11_11_11_10 => Self::CP_n,                   // 0xFE
             _ => Self::NOP,
         }
     }
@@ -277,7 +293,17 @@ impl Instruction {
             | Self::XOR_r(_)
             | Self::OR_r(_)
             | Self::CP_r(_) => 1,
-            Self::LD_r_n(_) | Self::JR_n | Self::JR_c_n(_) => 2,
+            Self::LD_r_n(_)
+            | Self::JR_n
+            | Self::JR_c_n(_)
+            | Self::ADD_n
+            | Self::ADC_n
+            | Self::SUB_n
+            | Self::SBC_n
+            | Self::AND_n
+            | Self::XOR_n
+            | Self::OR_n
+            | Self::CP_n => 2,
             Self::LD_rr_nn(_) | Self::LD_nn_SP => 3,
         }
     }
@@ -320,6 +346,14 @@ impl Instruction {
             Self::XOR_r(r8) => format!("XOR {r8}"),
             Self::OR_r(r8) => format!("OR {r8}"),
             Self::CP_r(r8) => format!("CP {r8}"),
+            Self::ADD_n => format!("ADD {n1:02X}"),
+            Self::ADC_n => format!("ADC {n1:02X}"),
+            Self::SUB_n => format!("SUB {n1:02X}"),
+            Self::SBC_n => format!("SBC {n1:02X}"),
+            Self::AND_n => format!("AND {n1:02X}"),
+            Self::XOR_n => format!("XOR {n1:02X}"),
+            Self::OR_n => format!("OR {n1:02X}"),
+            Self::CP_n => format!("CP {n1:02X}"),
         }
     }
 }
@@ -359,6 +393,14 @@ impl Display for Instruction {
             Self::XOR_r(r8) => write!(f, "XOR {r8}"),
             Self::OR_r(r8) => write!(f, "OR {r8}"),
             Self::CP_r(r8) => write!(f, "CP {r8}"),
+            Self::ADD_n => write!(f, "ADD n"),
+            Self::ADC_n => write!(f, "ADC n"),
+            Self::SUB_n => write!(f, "SUB n"),
+            Self::SBC_n => write!(f, "SBC n"),
+            Self::AND_n => write!(f, "AND n"),
+            Self::XOR_n => write!(f, "XOR n"),
+            Self::OR_n => write!(f, "OR n"),
+            Self::CP_n => write!(f, "CP n"),
         }
     }
 }
