@@ -142,7 +142,6 @@ impl Cpu {
             // ToDo: DI/EI schedule their change to be applied after the next machine cycle, check if this implementation is correct
             Instruction::DI => self.ime = false,
             Instruction::EI => self.ime = true,
-            Instruction::Prefix => {}
             Instruction::RLC_r(r8) => self.rlc_r(bus, r8),
             Instruction::RRC_r(r8) => self.rrc_r(bus, r8),
             Instruction::RL_r(r8) => self.rl_r(bus, r8),
@@ -151,6 +150,9 @@ impl Cpu {
             Instruction::SRA_r(r8) => self.sra_r(bus, r8),
             Instruction::SWAP_r(r8) => self.swap_r(bus, r8),
             Instruction::SRL_r(r8) => self.srl_r(bus, r8),
+            Instruction::BIT_r(index, r8) => self.bit_r(bus, r8, index),
+            Instruction::RES_r(index, r8) => self.res_r(bus, r8, index),
+            Instruction::SET_r(index, r8) => self.set_r(bus, r8, index),
         }
 
         self.fetch(bus);
@@ -684,6 +686,23 @@ impl Cpu {
         self.f.subtract = false;
         self.f.half_carry = false;
         self.f.carry = carry;
+    }
+
+    pub fn bit_r(&mut self, bus: &mut impl BusInterface, r8: R8, index: u8) {
+        let value = self.get_r8(bus, r8);
+        self.f.zero = !get_bit(value, (index & 0b111) as usize);
+        self.f.subtract = false;
+        self.f.half_carry = true;
+    }
+
+    pub fn set_r(&mut self, bus: &mut impl BusInterface, r8: R8, index: u8) {
+        let value = self.get_r8(bus, r8);
+        self.set_r8(bus, r8, set_bit(value, (index & 0b111) as usize, true));
+    }
+
+    pub fn res_r(&mut self, bus: &mut impl BusInterface, r8: R8, index: u8) {
+        let value = self.get_r8(bus, r8);
+        self.set_r8(bus, r8, set_bit(value, (index & 0b111) as usize, false));
     }
 }
 

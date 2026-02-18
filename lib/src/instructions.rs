@@ -76,7 +76,6 @@ pub enum Instruction {
     LD_SP_HL,
     DI,
     EI,
-    Prefix,
     RLC_r(R8),
     RRC_r(R8),
     RL_r(R8),
@@ -85,6 +84,9 @@ pub enum Instruction {
     SRA_r(R8),
     SWAP_r(R8),
     SRL_r(R8),
+    BIT_r(u8, R8),
+    RES_r(u8, R8),
+    SET_r(u8, R8),
 }
 
 impl Instruction {
@@ -294,7 +296,6 @@ impl Instruction {
             0b11_00_10_00 => Self::RET_c(Cond::Z),         // 0xC8
             0b11_00_10_01 => Self::RET,                    // 0xC9
             0b11_00_10_10 => Self::JP_c_nn(Cond::Z),       // 0xCA
-            0b11_00_10_11 => Self::Prefix,                 // 0xCB
             0b11_00_11_00 => Self::CALL_c_nn(Cond::Z),     // 0xCC
             0b11_00_11_01 => Self::CALL_nn,                // 0xCD
             0b11_00_11_10 => Self::ADC_n,                  // 0xCE
@@ -342,71 +343,262 @@ impl Instruction {
 
     pub fn decode_prefixed(opcode: u8) -> Self {
         match opcode {
-            0b00_00_00_00 => Self::RLC_r(R8::B),   // 0x00
-            0b00_00_00_01 => Self::RLC_r(R8::C),   // 0x01
-            0b00_00_00_10 => Self::RLC_r(R8::D),   // 0x02
-            0b00_00_00_11 => Self::RLC_r(R8::E),   // 0x03
-            0b00_00_01_00 => Self::RLC_r(R8::H),   // 0x04
-            0b00_00_01_01 => Self::RLC_r(R8::L),   // 0x05
-            0b00_00_01_10 => Self::RLC_r(R8::HL),  // 0x06
-            0b00_00_01_11 => Self::RLC_r(R8::A),   // 0x07
-            0b00_00_10_00 => Self::RRC_r(R8::B),   // 0x08
-            0b00_00_10_01 => Self::RRC_r(R8::C),   // 0x09
-            0b00_00_10_10 => Self::RRC_r(R8::D),   // 0x0A
-            0b00_00_10_11 => Self::RRC_r(R8::E),   // 0x0B
-            0b00_00_11_00 => Self::RRC_r(R8::H),   // 0x0C
-            0b00_00_11_01 => Self::RRC_r(R8::L),   // 0x0D
-            0b00_00_11_10 => Self::RRC_r(R8::HL),  // 0x0E
-            0b00_00_11_11 => Self::RRC_r(R8::A),   // 0x0F
-            0b00_01_00_00 => Self::RL_r(R8::B),    // 0x10
-            0b00_01_00_01 => Self::RL_r(R8::C),    // 0x11
-            0b00_01_00_10 => Self::RL_r(R8::D),    // 0x12
-            0b00_01_00_11 => Self::RL_r(R8::E),    // 0x13
-            0b00_01_01_00 => Self::RL_r(R8::H),    // 0x14
-            0b00_01_01_01 => Self::RL_r(R8::L),    // 0x15
-            0b00_01_01_10 => Self::RL_r(R8::HL),   // 0x16
-            0b00_01_01_11 => Self::RL_r(R8::A),    // 0x17
-            0b00_01_10_00 => Self::RR_r(R8::B),    // 0x18
-            0b00_01_10_01 => Self::RR_r(R8::C),    // 0x19
-            0b00_01_10_10 => Self::RR_r(R8::D),    // 0x1A
-            0b00_01_10_11 => Self::RR_r(R8::E),    // 0x1B
-            0b00_01_11_00 => Self::RR_r(R8::H),    // 0x1C
-            0b00_01_11_01 => Self::RR_r(R8::L),    // 0x1D
-            0b00_01_11_10 => Self::RR_r(R8::HL),   // 0x1E
-            0b00_01_11_11 => Self::RR_r(R8::A),    // 0x1F
-            0b00_10_00_00 => Self::SLA_r(R8::B),   // 0x20
-            0b00_10_00_01 => Self::SLA_r(R8::C),   // 0x21
-            0b00_10_00_10 => Self::SLA_r(R8::D),   // 0x22
-            0b00_10_00_11 => Self::SLA_r(R8::E),   // 0x23
-            0b00_10_01_00 => Self::SLA_r(R8::H),   // 0x24
-            0b00_10_01_01 => Self::SLA_r(R8::L),   // 0x25
-            0b00_10_01_10 => Self::SLA_r(R8::HL),  // 0x26
-            0b00_10_01_11 => Self::SLA_r(R8::A),   // 0x27
-            0b00_10_10_00 => Self::SRA_r(R8::B),   // 0x28
-            0b00_10_10_01 => Self::SRA_r(R8::C),   // 0x29
-            0b00_10_10_10 => Self::SRA_r(R8::D),   // 0x2A
-            0b00_10_10_11 => Self::SRA_r(R8::E),   // 0x2B
-            0b00_10_11_00 => Self::SRA_r(R8::H),   // 0x2C
-            0b00_10_11_01 => Self::SRA_r(R8::L),   // 0x2D
-            0b00_10_11_10 => Self::SRA_r(R8::HL),  // 0x2E
-            0b00_10_11_11 => Self::SRA_r(R8::A),   // 0x2F
-            0b00_11_00_00 => Self::SWAP_r(R8::B),  // 0x30
-            0b00_11_00_01 => Self::SWAP_r(R8::C),  // 0x31
-            0b00_11_00_10 => Self::SWAP_r(R8::D),  // 0x32
-            0b00_11_00_11 => Self::SWAP_r(R8::E),  // 0x33
-            0b00_11_01_00 => Self::SWAP_r(R8::H),  // 0x34
-            0b00_11_01_01 => Self::SWAP_r(R8::L),  // 0x35
-            0b00_11_01_10 => Self::SWAP_r(R8::HL), // 0x36
-            0b00_11_01_11 => Self::SWAP_r(R8::A),  // 0x37
-            0b00_11_10_00 => Self::SRL_r(R8::B),   // 0x38
-            0b00_11_10_01 => Self::SRL_r(R8::C),   // 0x39
-            0b00_11_10_10 => Self::SRL_r(R8::D),   // 0x3A
-            0b00_11_10_11 => Self::SRL_r(R8::E),   // 0x3B
-            0b00_11_11_00 => Self::SRL_r(R8::H),   // 0x3C
-            0b00_11_11_01 => Self::SRL_r(R8::L),   // 0x3D
-            0b00_11_11_10 => Self::SRL_r(R8::HL),  // 0x3E
-            0b00_11_11_11 => Self::SRL_r(R8::A),   // 0x3F
-            _ => panic!("Invalid prefixed opcode: {:02X}", opcode),
+            0b00_00_00_00 => Self::RLC_r(R8::B),     // 0x00
+            0b00_00_00_01 => Self::RLC_r(R8::C),     // 0x01
+            0b00_00_00_10 => Self::RLC_r(R8::D),     // 0x02
+            0b00_00_00_11 => Self::RLC_r(R8::E),     // 0x03
+            0b00_00_01_00 => Self::RLC_r(R8::H),     // 0x04
+            0b00_00_01_01 => Self::RLC_r(R8::L),     // 0x05
+            0b00_00_01_10 => Self::RLC_r(R8::HL),    // 0x06
+            0b00_00_01_11 => Self::RLC_r(R8::A),     // 0x07
+            0b00_00_10_00 => Self::RRC_r(R8::B),     // 0x08
+            0b00_00_10_01 => Self::RRC_r(R8::C),     // 0x09
+            0b00_00_10_10 => Self::RRC_r(R8::D),     // 0x0A
+            0b00_00_10_11 => Self::RRC_r(R8::E),     // 0x0B
+            0b00_00_11_00 => Self::RRC_r(R8::H),     // 0x0C
+            0b00_00_11_01 => Self::RRC_r(R8::L),     // 0x0D
+            0b00_00_11_10 => Self::RRC_r(R8::HL),    // 0x0E
+            0b00_00_11_11 => Self::RRC_r(R8::A),     // 0x0F
+            0b00_01_00_00 => Self::RL_r(R8::B),      // 0x10
+            0b00_01_00_01 => Self::RL_r(R8::C),      // 0x11
+            0b00_01_00_10 => Self::RL_r(R8::D),      // 0x12
+            0b00_01_00_11 => Self::RL_r(R8::E),      // 0x13
+            0b00_01_01_00 => Self::RL_r(R8::H),      // 0x14
+            0b00_01_01_01 => Self::RL_r(R8::L),      // 0x15
+            0b00_01_01_10 => Self::RL_r(R8::HL),     // 0x16
+            0b00_01_01_11 => Self::RL_r(R8::A),      // 0x17
+            0b00_01_10_00 => Self::RR_r(R8::B),      // 0x18
+            0b00_01_10_01 => Self::RR_r(R8::C),      // 0x19
+            0b00_01_10_10 => Self::RR_r(R8::D),      // 0x1A
+            0b00_01_10_11 => Self::RR_r(R8::E),      // 0x1B
+            0b00_01_11_00 => Self::RR_r(R8::H),      // 0x1C
+            0b00_01_11_01 => Self::RR_r(R8::L),      // 0x1D
+            0b00_01_11_10 => Self::RR_r(R8::HL),     // 0x1E
+            0b00_01_11_11 => Self::RR_r(R8::A),      // 0x1F
+            0b00_10_00_00 => Self::SLA_r(R8::B),     // 0x20
+            0b00_10_00_01 => Self::SLA_r(R8::C),     // 0x21
+            0b00_10_00_10 => Self::SLA_r(R8::D),     // 0x22
+            0b00_10_00_11 => Self::SLA_r(R8::E),     // 0x23
+            0b00_10_01_00 => Self::SLA_r(R8::H),     // 0x24
+            0b00_10_01_01 => Self::SLA_r(R8::L),     // 0x25
+            0b00_10_01_10 => Self::SLA_r(R8::HL),    // 0x26
+            0b00_10_01_11 => Self::SLA_r(R8::A),     // 0x27
+            0b00_10_10_00 => Self::SRA_r(R8::B),     // 0x28
+            0b00_10_10_01 => Self::SRA_r(R8::C),     // 0x29
+            0b00_10_10_10 => Self::SRA_r(R8::D),     // 0x2A
+            0b00_10_10_11 => Self::SRA_r(R8::E),     // 0x2B
+            0b00_10_11_00 => Self::SRA_r(R8::H),     // 0x2C
+            0b00_10_11_01 => Self::SRA_r(R8::L),     // 0x2D
+            0b00_10_11_10 => Self::SRA_r(R8::HL),    // 0x2E
+            0b00_10_11_11 => Self::SRA_r(R8::A),     // 0x2F
+            0b00_11_00_00 => Self::SWAP_r(R8::B),    // 0x30
+            0b00_11_00_01 => Self::SWAP_r(R8::C),    // 0x31
+            0b00_11_00_10 => Self::SWAP_r(R8::D),    // 0x32
+            0b00_11_00_11 => Self::SWAP_r(R8::E),    // 0x33
+            0b00_11_01_00 => Self::SWAP_r(R8::H),    // 0x34
+            0b00_11_01_01 => Self::SWAP_r(R8::L),    // 0x35
+            0b00_11_01_10 => Self::SWAP_r(R8::HL),   // 0x36
+            0b00_11_01_11 => Self::SWAP_r(R8::A),    // 0x37
+            0b00_11_10_00 => Self::SRL_r(R8::B),     // 0x38
+            0b00_11_10_01 => Self::SRL_r(R8::C),     // 0x39
+            0b00_11_10_10 => Self::SRL_r(R8::D),     // 0x3A
+            0b00_11_10_11 => Self::SRL_r(R8::E),     // 0x3B
+            0b00_11_11_00 => Self::SRL_r(R8::H),     // 0x3C
+            0b00_11_11_01 => Self::SRL_r(R8::L),     // 0x3D
+            0b00_11_11_10 => Self::SRL_r(R8::HL),    // 0x3E
+            0b00_11_11_11 => Self::SRL_r(R8::A),     // 0x3F
+            0b01_00_00_00 => Self::BIT_r(0, R8::B),  // 0x40
+            0b01_00_00_01 => Self::BIT_r(0, R8::C),  // 0x41
+            0b01_00_00_10 => Self::BIT_r(0, R8::D),  // 0x42
+            0b01_00_00_11 => Self::BIT_r(0, R8::E),  // 0x43
+            0b01_00_01_00 => Self::BIT_r(0, R8::H),  // 0x44
+            0b01_00_01_01 => Self::BIT_r(0, R8::L),  // 0x45
+            0b01_00_01_10 => Self::BIT_r(0, R8::HL), // 0x46
+            0b01_00_01_11 => Self::BIT_r(0, R8::A),  // 0x47
+            0b01_00_10_00 => Self::BIT_r(1, R8::B),  // 0x48
+            0b01_00_10_01 => Self::BIT_r(1, R8::C),  // 0x49
+            0b01_00_10_10 => Self::BIT_r(1, R8::D),  // 0x4A
+            0b01_00_10_11 => Self::BIT_r(1, R8::E),  // 0x4B
+            0b01_00_11_00 => Self::BIT_r(1, R8::H),  // 0x4C
+            0b01_00_11_01 => Self::BIT_r(1, R8::L),  // 0x4D
+            0b01_00_11_10 => Self::BIT_r(1, R8::HL), // 0x4E
+            0b01_00_11_11 => Self::BIT_r(1, R8::A),  // 0x4F
+            0b01_01_00_00 => Self::BIT_r(2, R8::B),  // 0x50
+            0b01_01_00_01 => Self::BIT_r(2, R8::C),  // 0x51
+            0b01_01_00_10 => Self::BIT_r(2, R8::D),  // 0x52
+            0b01_01_00_11 => Self::BIT_r(2, R8::E),  // 0x53
+            0b01_01_01_00 => Self::BIT_r(2, R8::H),  // 0x54
+            0b01_01_01_01 => Self::BIT_r(2, R8::L),  // 0x55
+            0b01_01_01_10 => Self::BIT_r(2, R8::HL), // 0x56
+            0b01_01_01_11 => Self::BIT_r(2, R8::A),  // 0x57
+            0b01_01_10_00 => Self::BIT_r(3, R8::B),  // 0x58
+            0b01_01_10_01 => Self::BIT_r(3, R8::C),  // 0x59
+            0b01_01_10_10 => Self::BIT_r(3, R8::D),  // 0x5A
+            0b01_01_10_11 => Self::BIT_r(3, R8::E),  // 0x5B
+            0b01_01_11_00 => Self::BIT_r(3, R8::H),  // 0x5C
+            0b01_01_11_01 => Self::BIT_r(3, R8::L),  // 0x5D
+            0b01_01_11_10 => Self::BIT_r(3, R8::HL), // 0x5E
+            0b01_01_11_11 => Self::BIT_r(3, R8::A),  // 0x5F
+            0b01_10_00_00 => Self::BIT_r(4, R8::B),  // 0x60
+            0b01_10_00_01 => Self::BIT_r(4, R8::C),  // 0x61
+            0b01_10_00_10 => Self::BIT_r(4, R8::D),  // 0x62
+            0b01_10_00_11 => Self::BIT_r(4, R8::E),  // 0x63
+            0b01_10_01_00 => Self::BIT_r(4, R8::H),  // 0x64
+            0b01_10_01_01 => Self::BIT_r(4, R8::L),  // 0x65
+            0b01_10_01_10 => Self::BIT_r(4, R8::HL), // 0x66
+            0b01_10_01_11 => Self::BIT_r(4, R8::A),  // 0x67
+            0b01_10_10_00 => Self::BIT_r(5, R8::B),  // 0x68
+            0b01_10_10_01 => Self::BIT_r(5, R8::C),  // 0x69
+            0b01_10_10_10 => Self::BIT_r(5, R8::D),  // 0x6A
+            0b01_10_10_11 => Self::BIT_r(5, R8::E),  // 0x6B
+            0b01_10_11_00 => Self::BIT_r(5, R8::H),  // 0x6C
+            0b01_10_11_01 => Self::BIT_r(5, R8::L),  // 0x6D
+            0b01_10_11_10 => Self::BIT_r(5, R8::HL), // 0x6E
+            0b01_10_11_11 => Self::BIT_r(5, R8::A),  // 0x6F
+            0b01_11_00_00 => Self::BIT_r(6, R8::B),  // 0x70
+            0b01_11_00_01 => Self::BIT_r(6, R8::C),  // 0x71
+            0b01_11_00_10 => Self::BIT_r(6, R8::D),  // 0x72
+            0b01_11_00_11 => Self::BIT_r(6, R8::E),  // 0x73
+            0b01_11_01_00 => Self::BIT_r(6, R8::H),  // 0x74
+            0b01_11_01_01 => Self::BIT_r(6, R8::L),  // 0x75
+            0b01_11_01_10 => Self::BIT_r(6, R8::HL), // 0x76
+            0b01_11_01_11 => Self::BIT_r(6, R8::A),  // 0x77
+            0b01_11_10_00 => Self::BIT_r(7, R8::B),  // 0x78
+            0b01_11_10_01 => Self::BIT_r(7, R8::C),  // 0x79
+            0b01_11_10_10 => Self::BIT_r(7, R8::D),  // 0x7A
+            0b01_11_10_11 => Self::BIT_r(7, R8::E),  // 0x7B
+            0b01_11_11_00 => Self::BIT_r(7, R8::H),  // 0x7C
+            0b01_11_11_01 => Self::BIT_r(7, R8::L),  // 0x7D
+            0b01_11_11_10 => Self::BIT_r(7, R8::HL), // 0x7E
+            0b01_11_11_11 => Self::BIT_r(7, R8::A),  // 0x7F
+            0b10_00_00_00 => Self::RES_r(0, R8::B),  // 0x80
+            0b10_00_00_01 => Self::RES_r(0, R8::C),  // 0x81
+            0b10_00_00_10 => Self::RES_r(0, R8::D),  // 0x82
+            0b10_00_00_11 => Self::RES_r(0, R8::E),  // 0x83
+            0b10_00_01_00 => Self::RES_r(0, R8::H),  // 0x84
+            0b10_00_01_01 => Self::RES_r(0, R8::L),  // 0x85
+            0b10_00_01_10 => Self::RES_r(0, R8::HL), // 0x86
+            0b10_00_01_11 => Self::RES_r(0, R8::A),  // 0x87
+            0b10_00_10_00 => Self::RES_r(1, R8::B),  // 0x88
+            0b10_00_10_01 => Self::RES_r(1, R8::C),  // 0x89
+            0b10_00_10_10 => Self::RES_r(1, R8::D),  // 0x8A
+            0b10_00_10_11 => Self::RES_r(1, R8::E),  // 0x8B
+            0b10_00_11_00 => Self::RES_r(1, R8::H),  // 0x8C
+            0b10_00_11_01 => Self::RES_r(1, R8::L),  // 0x8D
+            0b10_00_11_10 => Self::RES_r(1, R8::HL), // 0x8E
+            0b10_00_11_11 => Self::RES_r(1, R8::A),  // 0x8F
+            0b10_01_00_00 => Self::RES_r(2, R8::B),  // 0x90
+            0b10_01_00_01 => Self::RES_r(2, R8::C),  // 0x91
+            0b10_01_00_10 => Self::RES_r(2, R8::D),  // 0x92
+            0b10_01_00_11 => Self::RES_r(2, R8::E),  // 0x93
+            0b10_01_01_00 => Self::RES_r(2, R8::H),  // 0x94
+            0b10_01_01_01 => Self::RES_r(2, R8::L),  // 0x95
+            0b10_01_01_10 => Self::RES_r(2, R8::HL), // 0x96
+            0b10_01_01_11 => Self::RES_r(2, R8::A),  // 0x97
+            0b10_01_10_00 => Self::RES_r(3, R8::B),  // 0x98
+            0b10_01_10_01 => Self::RES_r(3, R8::C),  // 0x99
+            0b10_01_10_10 => Self::RES_r(3, R8::D),  // 0x9A
+            0b10_01_10_11 => Self::RES_r(3, R8::E),  // 0x9B
+            0b10_01_11_00 => Self::RES_r(3, R8::H),  // 0x9C
+            0b10_01_11_01 => Self::RES_r(3, R8::L),  // 0x9D
+            0b10_01_11_10 => Self::RES_r(3, R8::HL), // 0x9E
+            0b10_01_11_11 => Self::RES_r(3, R8::A),  // 0x9F
+            0b10_10_00_00 => Self::RES_r(4, R8::B),  // 0xA0
+            0b10_10_00_01 => Self::RES_r(4, R8::C),  // 0xA1
+            0b10_10_00_10 => Self::RES_r(4, R8::D),  // 0xA2
+            0b10_10_00_11 => Self::RES_r(4, R8::E),  // 0xA3
+            0b10_10_01_00 => Self::RES_r(4, R8::H),  // 0xA4
+            0b10_10_01_01 => Self::RES_r(4, R8::L),  // 0xA5
+            0b10_10_01_10 => Self::RES_r(4, R8::HL), // 0xA6
+            0b10_10_01_11 => Self::RES_r(4, R8::A),  // 0xA7
+            0b10_10_10_00 => Self::RES_r(5, R8::B),  // 0xA8
+            0b10_10_10_01 => Self::RES_r(5, R8::C),  // 0xA9
+            0b10_10_10_10 => Self::RES_r(5, R8::D),  // 0xAA
+            0b10_10_10_11 => Self::RES_r(5, R8::E),  // 0xAB
+            0b10_10_11_00 => Self::RES_r(5, R8::H),  // 0xAC
+            0b10_10_11_01 => Self::RES_r(5, R8::L),  // 0xAD
+            0b10_10_11_10 => Self::RES_r(5, R8::HL), // 0xAE
+            0b10_10_11_11 => Self::RES_r(5, R8::A),  // 0xAF
+            0b10_11_00_00 => Self::RES_r(6, R8::B),  // 0xB0
+            0b10_11_00_01 => Self::RES_r(6, R8::C),  // 0xB1
+            0b10_11_00_10 => Self::RES_r(6, R8::D),  // 0xB2
+            0b10_11_00_11 => Self::RES_r(6, R8::E),  // 0xB3
+            0b10_11_01_00 => Self::RES_r(6, R8::H),  // 0xB4
+            0b10_11_01_01 => Self::RES_r(6, R8::L),  // 0xB5
+            0b10_11_01_10 => Self::RES_r(6, R8::HL), // 0xB6
+            0b10_11_01_11 => Self::RES_r(6, R8::A),  // 0xB7
+            0b10_11_10_00 => Self::RES_r(7, R8::B),  // 0xB8
+            0b10_11_10_01 => Self::RES_r(7, R8::C),  // 0xB9
+            0b10_11_10_10 => Self::RES_r(7, R8::D),  // 0xBA
+            0b10_11_10_11 => Self::RES_r(7, R8::E),  // 0xBB
+            0b10_11_11_00 => Self::RES_r(7, R8::H),  // 0xBC
+            0b10_11_11_01 => Self::RES_r(7, R8::L),  // 0xBD
+            0b10_11_11_10 => Self::RES_r(7, R8::HL), // 0xBE
+            0b10_11_11_11 => Self::RES_r(7, R8::A),  // 0xBF
+            0b11_00_00_00 => Self::SET_r(0, R8::B),  // 0xC0
+            0b11_00_00_01 => Self::SET_r(0, R8::C),  // 0xC1
+            0b11_00_00_10 => Self::SET_r(0, R8::D),  // 0xC2
+            0b11_00_00_11 => Self::SET_r(0, R8::E),  // 0xC3
+            0b11_00_01_00 => Self::SET_r(0, R8::H),  // 0xC4
+            0b11_00_01_01 => Self::SET_r(0, R8::L),  // 0xC5
+            0b11_00_01_10 => Self::SET_r(0, R8::HL), // 0xC6
+            0b11_00_01_11 => Self::SET_r(0, R8::A),  // 0xC7
+            0b11_00_10_00 => Self::SET_r(1, R8::B),  // 0xC8
+            0b11_00_10_01 => Self::SET_r(1, R8::C),  // 0xC9
+            0b11_00_10_10 => Self::SET_r(1, R8::D),  // 0xCA
+            0b11_00_10_11 => Self::SET_r(1, R8::E),  // 0xCB
+            0b11_00_11_00 => Self::SET_r(1, R8::H),  // 0xCC
+            0b11_00_11_01 => Self::SET_r(1, R8::L),  // 0xCD
+            0b11_00_11_10 => Self::SET_r(1, R8::HL), // 0xCE
+            0b11_00_11_11 => Self::SET_r(1, R8::A),  // 0xCF
+            0b11_01_00_00 => Self::SET_r(2, R8::B),  // 0xD0
+            0b11_01_00_01 => Self::SET_r(2, R8::C),  // 0xD1
+            0b11_01_00_10 => Self::SET_r(2, R8::D),  // 0xD2
+            0b11_01_00_11 => Self::SET_r(2, R8::E),  // 0xD3
+            0b11_01_01_00 => Self::SET_r(2, R8::H),  // 0xD4
+            0b11_01_01_01 => Self::SET_r(2, R8::L),  // 0xD5
+            0b11_01_01_10 => Self::SET_r(2, R8::HL), // 0xD6
+            0b11_01_01_11 => Self::SET_r(2, R8::A),  // 0xD7
+            0b11_01_10_00 => Self::SET_r(3, R8::B),  // 0xD8
+            0b11_01_10_01 => Self::SET_r(3, R8::C),  // 0xD9
+            0b11_01_10_10 => Self::SET_r(3, R8::D),  // 0xDA
+            0b11_01_10_11 => Self::SET_r(3, R8::E),  // 0xDB
+            0b11_01_11_00 => Self::SET_r(3, R8::H),  // 0xDC
+            0b11_01_11_01 => Self::SET_r(3, R8::L),  // 0xDD
+            0b11_01_11_10 => Self::SET_r(3, R8::HL), // 0xDE
+            0b11_01_11_11 => Self::SET_r(3, R8::A),  // 0xDF
+            0b11_10_00_00 => Self::SET_r(4, R8::B),  // 0xE0
+            0b11_10_00_01 => Self::SET_r(4, R8::C),  // 0xE1
+            0b11_10_00_10 => Self::SET_r(4, R8::D),  // 0xE2
+            0b11_10_00_11 => Self::SET_r(4, R8::E),  // 0xE3
+            0b11_10_01_00 => Self::SET_r(4, R8::H),  // 0xE4
+            0b11_10_01_01 => Self::SET_r(4, R8::L),  // 0xE5
+            0b11_10_01_10 => Self::SET_r(4, R8::HL), // 0xE6
+            0b11_10_01_11 => Self::SET_r(4, R8::A),  // 0xE7
+            0b11_10_10_00 => Self::SET_r(5, R8::B),  // 0xE8
+            0b11_10_10_01 => Self::SET_r(5, R8::C),  // 0xE9
+            0b11_10_10_10 => Self::SET_r(5, R8::D),  // 0xEA
+            0b11_10_10_11 => Self::SET_r(5, R8::E),  // 0xEB
+            0b11_10_11_00 => Self::SET_r(5, R8::H),  // 0xEC
+            0b11_10_11_01 => Self::SET_r(5, R8::L),  // 0xED
+            0b11_10_11_10 => Self::SET_r(5, R8::HL), // 0xEE
+            0b11_10_11_11 => Self::SET_r(5, R8::A),  // 0xEF
+            0b11_11_00_00 => Self::SET_r(6, R8::B),  // 0xF0
+            0b11_11_00_01 => Self::SET_r(6, R8::C),  // 0xF1
+            0b11_11_00_10 => Self::SET_r(6, R8::D),  // 0xF2
+            0b11_11_00_11 => Self::SET_r(6, R8::E),  // 0xF3
+            0b11_11_01_00 => Self::SET_r(6, R8::H),  // 0xF4
+            0b11_11_01_01 => Self::SET_r(6, R8::L),  // 0xF5
+            0b11_11_01_10 => Self::SET_r(6, R8::HL), // 0xF6
+            0b11_11_01_11 => Self::SET_r(6, R8::A),  // 0xF7
+            0b11_11_10_00 => Self::SET_r(7, R8::B),  // 0xF8
+            0b11_11_10_01 => Self::SET_r(7, R8::C),  // 0xF9
+            0b11_11_10_10 => Self::SET_r(7, R8::D),  // 0xFA
+            0b11_11_10_11 => Self::SET_r(7, R8::E),  // 0xFB
+            0b11_11_11_00 => Self::SET_r(7, R8::H),  // 0xFC
+            0b11_11_11_01 => Self::SET_r(7, R8::L),  // 0xFD
+            0b11_11_11_10 => Self::SET_r(7, R8::HL), // 0xFE
+            0b11_11_11_11 => Self::SET_r(7, R8::A),  // 0xFF
         }
     }
 
@@ -450,8 +642,7 @@ impl Instruction {
             | Self::LDH_A_C
             | Self::LD_SP_HL
             | Self::DI
-            | Self::EI
-            | Self::Prefix => 1,
+            | Self::EI => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -474,7 +665,10 @@ impl Instruction {
             | Self::SLA_r(_)
             | Self::SRA_r(_)
             | Self::SWAP_r(_)
-            | Self::SRL_r(_) => 2,
+            | Self::SRL_r(_)
+            | Self::BIT_r(_, _)
+            | Self::RES_r(_, _)
+            | Self::SET_r(_, _) => 2,
             Self::LD_rr_nn(_)
             | Self::LD_nn_SP
             | Self::JP_c_nn(_)
@@ -554,7 +748,6 @@ impl Instruction {
             Self::LD_SP_HL => String::from("LD SP, HL"),
             Self::DI => String::from("DI"),
             Self::EI => String::from("EI"),
-            Self::Prefix => String::from("Prefix"),
             Self::RLC_r(r8) => format!("RLC {r8}"),
             Self::RRC_r(r8) => format!("RRC {r8}"),
             Self::RL_r(r8) => format!("RL {r8}"),
@@ -563,6 +756,9 @@ impl Instruction {
             Self::SRA_r(r8) => format!("SRA {r8}"),
             Self::SWAP_r(r8) => format!("SWAP {r8}"),
             Self::SRL_r(r8) => format!("SRL {r8}"),
+            Self::BIT_r(n, r8) => format!("BIT {n:02X}, {r8}"),
+            Self::RES_r(n, r8) => format!("RES {n:02X}, {r8}"),
+            Self::SET_r(n, r8) => format!("SET {n:02X}, {r8}"),
         }
     }
 }
@@ -632,7 +828,6 @@ impl Display for Instruction {
             Self::LD_SP_HL => write!(f, "LD SP, HL"),
             Self::DI => write!(f, "DI"),
             Self::EI => write!(f, "EI"),
-            Self::Prefix => write!(f, "Prefix"),
             Self::RLC_r(r8) => write!(f, "RLC {r8}"),
             Self::RRC_r(r8) => write!(f, "RRC {r8}"),
             Self::RL_r(r8) => write!(f, "RL {r8}"),
@@ -641,6 +836,9 @@ impl Display for Instruction {
             Self::SRA_r(r8) => write!(f, "SRA {r8}"),
             Self::SWAP_r(r8) => write!(f, "SWAP {r8}"),
             Self::SRL_r(r8) => write!(f, "SRL {r8}"),
+            Self::BIT_r(n, r8) => write!(f, "BIT {n:02X}, {r8}"),
+            Self::RES_r(n, r8) => write!(f, "RES {n:02X}, {r8}"),
+            Self::SET_r(n, r8) => write!(f, "SET {n:02X}, {r8}"),
         }
     }
 }
