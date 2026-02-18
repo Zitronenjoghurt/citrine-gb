@@ -65,6 +65,12 @@ pub enum Instruction {
     CALL_c_nn(Cond),
     CALL_nn,
     RST_n(u8),
+    LDH_C_A,
+    LDH_A_C,
+    LDH_n_A,
+    LDH_A_n,
+    LD_nn_A,
+    LD_A_nn,
 }
 
 impl Instruction {
@@ -287,14 +293,20 @@ impl Instruction {
             0b11_01_10_10 => Self::JP_c_nn(Cond::C),       // 0xDA
             0b11_01_11_00 => Self::CALL_c_nn(Cond::C),     // 0xDC
             0b11_01_11_10 => Self::SBC_n,                  // 0xDE
+            0b11_10_00_00 => Self::LDH_n_A,                // 0xE0
             0b11_10_00_01 => Self::POP(R16Stk::HL),        // 0xE1
+            0b11_10_00_10 => Self::LDH_C_A,                // 0xE2
             0b11_10_01_01 => Self::PUSH(R16Stk::HL),       // 0xE5
             0b11_10_01_10 => Self::AND_n,                  // 0xE6
             0b11_10_10_01 => Self::JP_HL,                  // 0xE9
+            0b11_10_10_10 => Self::LD_nn_A,                // 0xEA
             0b11_10_11_10 => Self::XOR_n,                  // 0xEE
+            0b11_11_00_00 => Self::LDH_A_n,                // 0xF0
             0b11_11_00_01 => Self::POP(R16Stk::AF),        // 0xF1
+            0b11_11_00_10 => Self::LDH_A_C,                // 0xF2
             0b11_11_01_01 => Self::PUSH(R16Stk::AF),       // 0xF5
             0b11_11_01_10 => Self::OR_n,                   // 0xF6
+            0b11_11_10_10 => Self::LD_A_nn,                // 0xFA
             0b11_11_11_10 => Self::CP_n,                   // 0xFE
             0b11_00_01_11 => Self::RST_n(0x00),            // 0xC7
             0b11_00_11_11 => Self::RST_n(0x08),            // 0xCF
@@ -304,7 +316,7 @@ impl Instruction {
             0b11_10_11_11 => Self::RST_n(0x28),            // 0xEF
             0b11_11_01_11 => Self::RST_n(0x30),            // 0xF7
             0b11_11_11_11 => Self::RST_n(0x38),            // 0xFF
-            _ => Self::NOP,
+            _ => panic!("Invalid unprefixed opcode: {:02X}", opcode),
         }
     }
 
@@ -343,7 +355,9 @@ impl Instruction {
             | Self::RET
             | Self::RETI
             | Self::JP_HL
-            | Self::RST_n(_) => 1,
+            | Self::RST_n(_)
+            | Self::LDH_C_A
+            | Self::LDH_A_C => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -354,13 +368,17 @@ impl Instruction {
             | Self::AND_n
             | Self::XOR_n
             | Self::OR_n
-            | Self::CP_n => 2,
+            | Self::CP_n
+            | Self::LDH_n_A
+            | Self::LDH_A_n => 2,
             Self::LD_rr_nn(_)
             | Self::LD_nn_SP
             | Self::JP_c_nn(_)
             | Self::JP_nn
             | Self::CALL_c_nn(_)
-            | Self::CALL_nn => 3,
+            | Self::CALL_nn
+            | Self::LD_nn_A
+            | Self::LD_A_nn => 3,
         }
     }
 
@@ -421,6 +439,12 @@ impl Instruction {
             Self::CALL_c_nn(cond) => format!("CALL {cond}, {nn:04X}"),
             Self::CALL_nn => format!("CALL {nn:04X}"),
             Self::RST_n(tgt) => format!("RST {tgt:02X}"),
+            Self::LDH_C_A => String::from("LDH C, A"),
+            Self::LDH_A_C => String::from("LDH A, C"),
+            Self::LDH_n_A => format!("LDH {n1:02X}, A"),
+            Self::LDH_A_n => format!("LDH A, {n1:02X}"),
+            Self::LD_nn_A => format!("LD {nn:04X}, A"),
+            Self::LD_A_nn => format!("LD A, {nn:04X}"),
         }
     }
 }
@@ -479,6 +503,12 @@ impl Display for Instruction {
             Self::CALL_c_nn(cond) => write!(f, "CALL {cond}, nn"),
             Self::CALL_nn => write!(f, "CALL nn"),
             Self::RST_n(tgt) => write!(f, "RST {tgt:02X}"),
+            Self::LDH_C_A => write!(f, "LDH C, A"),
+            Self::LDH_A_C => write!(f, "LDH A, C"),
+            Self::LDH_n_A => write!(f, "LDH n, A"),
+            Self::LDH_A_n => write!(f, "LDH A, n"),
+            Self::LD_nn_A => write!(f, "LD nn, A"),
+            Self::LD_A_nn => write!(f, "LD A, nn"),
         }
     }
 }

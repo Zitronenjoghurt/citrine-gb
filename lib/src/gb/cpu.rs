@@ -134,6 +134,12 @@ impl Cpu {
             Instruction::CALL_nn => self.call_nn(bus),
             Instruction::CALL_c_nn(cond) => self.call_c_nn(bus, cond),
             Instruction::RST_n(tgt) => self.rst(bus, tgt),
+            Instruction::LDH_C_A => self.ldh_c_a(bus),
+            Instruction::LDH_A_C => self.ldh_a_c(bus),
+            Instruction::LDH_n_A => self.ldh_n_a(bus),
+            Instruction::LDH_A_n => self.ldh_a_n(bus),
+            Instruction::LD_nn_A => self.ld_nn_a(bus),
+            Instruction::LD_A_nn => self.ld_a_nn(bus),
         }
 
         self.fetch(bus);
@@ -516,6 +522,36 @@ impl Cpu {
         bus.cycle();
         self.push_word(bus, self.pc);
         self.pc = word(address_lsb, 0x00);
+    }
+
+    pub fn ldh_c_a(&mut self, bus: &mut impl BusInterface) {
+        bus.write(word(self.c, 0xFF), self.a);
+    }
+
+    pub fn ldh_a_c(&mut self, bus: &mut impl BusInterface) {
+        self.a = bus.read(word(self.c, 0xFF));
+    }
+
+    pub fn ldh_n_a(&mut self, bus: &mut impl BusInterface) {
+        let address_low = self.read_program(bus);
+        bus.write(word(address_low, 0xFF), self.a);
+    }
+
+    pub fn ldh_a_n(&mut self, bus: &mut impl BusInterface) {
+        let address_low = self.read_program(bus);
+        self.a = bus.read(word(address_low, 0xFF));
+    }
+
+    pub fn ld_nn_a(&mut self, bus: &mut impl BusInterface) {
+        let address_low = self.read_program(bus);
+        let address_high = self.read_program(bus);
+        bus.write(word(address_low, address_high), self.a);
+    }
+
+    pub fn ld_a_nn(&mut self, bus: &mut impl BusInterface) {
+        let address_low = self.read_program(bus);
+        let address_high = self.read_program(bus);
+        self.a = bus.read(word(address_low, address_high));
     }
 }
 
