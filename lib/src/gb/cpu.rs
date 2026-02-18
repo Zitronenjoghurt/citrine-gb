@@ -140,6 +140,9 @@ impl Cpu {
             Instruction::LDH_A_n => self.ldh_a_n(bus),
             Instruction::LD_nn_A => self.ld_nn_a(bus),
             Instruction::LD_A_nn => self.ld_a_nn(bus),
+            Instruction::ADD_SP_n => self.add_sp_n(bus),
+            Instruction::LD_HL_SP_n => self.ld_hl_sp_n(bus),
+            Instruction::LD_SP_HL => self.ld_sp_hl(bus),
         }
 
         self.fetch(bus);
@@ -552,6 +555,38 @@ impl Cpu {
         let address_low = self.read_program(bus);
         let address_high = self.read_program(bus);
         self.a = bus.read(word(address_low, address_high));
+    }
+
+    pub fn add_sp_n(&mut self, bus: &mut impl BusInterface) {
+        let offset = self.read_program(bus) as i8;
+
+        bus.cycle();
+        let (result, hc, c) = add_word_signed_byte(self.sp, offset);
+
+        bus.cycle();
+        self.sp = result;
+        self.f.zero = false;
+        self.f.subtract = false;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
+
+    pub fn ld_hl_sp_n(&mut self, bus: &mut impl BusInterface) {
+        let offset = self.read_program(bus) as i8;
+
+        bus.cycle();
+        let (result, hc, c) = add_word_signed_byte(self.sp, offset);
+
+        self.set_r16_nn(R16::HL, result);
+        self.f.zero = false;
+        self.f.subtract = false;
+        self.f.half_carry = hc;
+        self.f.carry = c;
+    }
+
+    pub fn ld_sp_hl(&mut self, bus: &mut impl BusInterface) {
+        bus.cycle();
+        self.sp = self.get_r16_nn(R16::HL);
     }
 }
 

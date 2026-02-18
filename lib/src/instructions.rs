@@ -71,6 +71,9 @@ pub enum Instruction {
     LDH_A_n,
     LD_nn_A,
     LD_A_nn,
+    ADD_SP_n,
+    LD_HL_SP_n,
+    LD_SP_HL,
 }
 
 impl Instruction {
@@ -276,45 +279,48 @@ impl Instruction {
             0b11_00_01_00 => Self::CALL_c_nn(Cond::NZ),    // 0xC4
             0b11_00_01_01 => Self::PUSH(R16Stk::BC),       // 0xC5
             0b11_00_01_10 => Self::ADD_n,                  // 0xC6
+            0b11_00_01_11 => Self::RST_n(0x00),            // 0xC7
             0b11_00_10_00 => Self::RET_c(Cond::Z),         // 0xC8
             0b11_00_10_01 => Self::RET,                    // 0xC9
             0b11_00_10_10 => Self::JP_c_nn(Cond::Z),       // 0xCA
             0b11_00_11_00 => Self::CALL_c_nn(Cond::Z),     // 0xCC
             0b11_00_11_01 => Self::CALL_nn,                // 0xCD
             0b11_00_11_10 => Self::ADC_n,                  // 0xCE
+            0b11_00_11_11 => Self::RST_n(0x08),            // 0xCF
             0b11_01_00_00 => Self::RET_c(Cond::NC),        // 0xD0
             0b11_01_00_01 => Self::POP(R16Stk::DE),        // 0xD1
             0b11_01_00_10 => Self::JP_c_nn(Cond::NC),      // 0xD2
             0b11_01_01_00 => Self::CALL_c_nn(Cond::NC),    // 0xD4
             0b11_01_01_01 => Self::PUSH(R16Stk::DE),       // 0xD5
             0b11_01_01_10 => Self::SUB_n,                  // 0xD6
+            0b11_01_01_11 => Self::RST_n(0x10),            // 0xD7
             0b11_01_10_00 => Self::RET_c(Cond::C),         // 0xD8
             0b11_01_10_01 => Self::RETI,                   // 0xD9
             0b11_01_10_10 => Self::JP_c_nn(Cond::C),       // 0xDA
             0b11_01_11_00 => Self::CALL_c_nn(Cond::C),     // 0xDC
             0b11_01_11_10 => Self::SBC_n,                  // 0xDE
+            0b11_01_11_11 => Self::RST_n(0x18),            // 0xDF
             0b11_10_00_00 => Self::LDH_n_A,                // 0xE0
             0b11_10_00_01 => Self::POP(R16Stk::HL),        // 0xE1
             0b11_10_00_10 => Self::LDH_C_A,                // 0xE2
             0b11_10_01_01 => Self::PUSH(R16Stk::HL),       // 0xE5
             0b11_10_01_10 => Self::AND_n,                  // 0xE6
+            0b11_10_01_11 => Self::RST_n(0x20),            // 0xE7
+            0b11_10_10_00 => Self::ADD_SP_n,               // 0xE8
             0b11_10_10_01 => Self::JP_HL,                  // 0xE9
             0b11_10_10_10 => Self::LD_nn_A,                // 0xEA
             0b11_10_11_10 => Self::XOR_n,                  // 0xEE
+            0b11_10_11_11 => Self::RST_n(0x28),            // 0xEF
             0b11_11_00_00 => Self::LDH_A_n,                // 0xF0
             0b11_11_00_01 => Self::POP(R16Stk::AF),        // 0xF1
             0b11_11_00_10 => Self::LDH_A_C,                // 0xF2
             0b11_11_01_01 => Self::PUSH(R16Stk::AF),       // 0xF5
             0b11_11_01_10 => Self::OR_n,                   // 0xF6
+            0b11_11_01_11 => Self::RST_n(0x30),            // 0xF7
+            0b11_11_10_00 => Self::LD_HL_SP_n,             // 0xF8
+            0b11_11_10_01 => Self::LD_SP_HL,               // 0xF9
             0b11_11_10_10 => Self::LD_A_nn,                // 0xFA
             0b11_11_11_10 => Self::CP_n,                   // 0xFE
-            0b11_00_01_11 => Self::RST_n(0x00),            // 0xC7
-            0b11_00_11_11 => Self::RST_n(0x08),            // 0xCF
-            0b11_01_01_11 => Self::RST_n(0x10),            // 0xD7
-            0b11_01_11_11 => Self::RST_n(0x18),            // 0xDF
-            0b11_10_01_11 => Self::RST_n(0x20),            // 0xE7
-            0b11_10_11_11 => Self::RST_n(0x28),            // 0xEF
-            0b11_11_01_11 => Self::RST_n(0x30),            // 0xF7
             0b11_11_11_11 => Self::RST_n(0x38),            // 0xFF
             _ => panic!("Invalid unprefixed opcode: {:02X}", opcode),
         }
@@ -357,7 +363,8 @@ impl Instruction {
             | Self::JP_HL
             | Self::RST_n(_)
             | Self::LDH_C_A
-            | Self::LDH_A_C => 1,
+            | Self::LDH_A_C
+            | Self::LD_SP_HL => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -370,7 +377,9 @@ impl Instruction {
             | Self::OR_n
             | Self::CP_n
             | Self::LDH_n_A
-            | Self::LDH_A_n => 2,
+            | Self::LDH_A_n
+            | Self::ADD_SP_n
+            | Self::LD_HL_SP_n => 2,
             Self::LD_rr_nn(_)
             | Self::LD_nn_SP
             | Self::JP_c_nn(_)
@@ -445,6 +454,9 @@ impl Instruction {
             Self::LDH_A_n => format!("LDH A, {n1:02X}"),
             Self::LD_nn_A => format!("LD {nn:04X}, A"),
             Self::LD_A_nn => format!("LD A, {nn:04X}"),
+            Self::ADD_SP_n => format!("ADD SP, {:02X}", n1 as i8),
+            Self::LD_HL_SP_n => format!("LD HL, SP+{:02X}", n1 as i8),
+            Self::LD_SP_HL => String::from("LD SP, HL"),
         }
     }
 }
@@ -509,6 +521,9 @@ impl Display for Instruction {
             Self::LDH_A_n => write!(f, "LDH A, n"),
             Self::LD_nn_A => write!(f, "LD nn, A"),
             Self::LD_A_nn => write!(f, "LD A, nn"),
+            Self::ADD_SP_n => write!(f, "ADD SP, n"),
+            Self::LD_HL_SP_n => write!(f, "LD HL, SP+n"),
+            Self::LD_SP_HL => write!(f, "LD SP, HL"),
         }
     }
 }
