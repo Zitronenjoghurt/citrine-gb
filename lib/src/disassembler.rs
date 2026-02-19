@@ -56,9 +56,16 @@ impl Disassembly {
 
     pub fn decode_range(&mut self, mem: &impl ReadMemory, start: u16, end: u16) {
         let mut addr = start;
-        while addr <= end {
+        while addr >= start && addr <= end {
             let entry = self.decode_at(mem, addr);
-            addr += entry.instruction.length() as u16;
+            if let Some(jump_addr) = entry
+                .instruction
+                .unconditional_jump_target(addr, &entry.ctx)
+            {
+                addr = jump_addr;
+            } else {
+                addr += entry.instruction.length() as u16;
+            }
         }
     }
 

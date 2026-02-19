@@ -1,22 +1,17 @@
 use crate::disassembler::Disassembly;
+use crate::rom::header::RomHeader;
 use std::path::Path;
 
-const NINTENDO_LOGO: [u8; 48] = [
-    0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
-    0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
-    0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
-];
+mod header;
 
 #[derive(Debug)]
 pub struct Rom {
-    pub header: RomHeader,
     pub data: Vec<u8>,
 }
 
 impl Rom {
     pub fn new(data: &[u8]) -> Self {
         Self {
-            header: RomHeader::new(data),
             data: data.to_vec(),
         }
     }
@@ -27,22 +22,69 @@ impl Rom {
     }
 }
 
-#[derive(Debug)]
-pub struct RomHeader {
-    pub entrypoint: Disassembly,
-    pub valid_nintendo_logo: bool,
-}
+// Header
+impl Rom {
+    pub fn header(&self) -> RomHeader {
+        RomHeader::new(&self.data)
+    }
 
-impl RomHeader {
-    pub fn new(data: &[u8]) -> Self {
-        let mut entrypoint = Disassembly::new();
-        entrypoint.decode_range(&data, 0x100, 0x104);
+    pub fn title(&self) -> String {
+        RomHeader::parse_title(&self.data)
+    }
 
-        let valid_nintendo_logo = data[0x104..=0x133] == NINTENDO_LOGO;
+    pub fn has_valid_nintendo_logo(&self) -> bool {
+        RomHeader::parse_valid_nintendo_logo(&self.data)
+    }
 
-        Self {
-            entrypoint,
-            valid_nintendo_logo,
-        }
+    pub fn cgb_mode(&self) -> header::RomCgbMode {
+        RomHeader::parse_cgb_mode(&self.data)
+    }
+
+    pub fn sgb_support(&self) -> bool {
+        RomHeader::parse_sgb_support(&self.data)
+    }
+
+    pub fn licensee(&self) -> header::RomLicensee {
+        RomHeader::parse_licensee(&self.data)
+    }
+
+    pub fn cartridge_type(&self) -> Option<header::RomCartridgeType> {
+        RomHeader::parse_cartridge_type(&self.data)
+    }
+
+    pub fn rom_banks(&self) -> usize {
+        RomHeader::parse_rom_banks(&self.data)
+    }
+
+    pub fn ram_banks(&self) -> usize {
+        RomHeader::parse_ram_banks(&self.data)
+    }
+
+    pub fn overseas_only(&self) -> bool {
+        RomHeader::parse_overseas_only(&self.data)
+    }
+
+    pub fn version_number(&self) -> u8 {
+        RomHeader::parse_version_number(&self.data)
+    }
+
+    pub fn provided_header_checksum(&self) -> u8 {
+        RomHeader::parse_header_checksum(&self.data)
+    }
+
+    pub fn actual_header_checksum(&self) -> u8 {
+        RomHeader::calculate_header_checksum(&self.data)
+    }
+
+    pub fn provided_global_checksum(&self) -> u16 {
+        RomHeader::parse_global_checksum(&self.data)
+    }
+
+    pub fn actual_global_checksum(&self) -> u16 {
+        RomHeader::calculate_global_checksum(&self.data)
+    }
+
+    pub fn entrypoint(&self) -> Disassembly {
+        RomHeader::parse_entrypoint(&self.data)
     }
 }

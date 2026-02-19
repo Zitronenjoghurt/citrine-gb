@@ -6,12 +6,12 @@ fn main() {
         "{:#?}",
         Rom::from_file(&PathBuf::from("./roms/crystal.gbc"))
             .unwrap()
-            .header
+            .header()
     );
     println!(
         "{:#?}",
         Rom::from_file(&PathBuf::from("./roms/blue.gb"))
             .unwrap()
-            .header
+            .header()
     );
 }

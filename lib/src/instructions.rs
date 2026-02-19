@@ -761,6 +761,27 @@ impl Instruction {
             Self::SET_r(n, r8) => format!("SET {n:02X}, {r8}"),
         }
     }
+
+    pub fn unconditional_jump_target(&self, address: u16, context: &[u8]) -> Option<u16> {
+        let n1 = context.get(1).copied().unwrap_or(0);
+        let n2 = context.get(2).copied().unwrap_or(0);
+        let nn = u16::from_le_bytes([n1, n2]);
+
+        match self {
+            Self::JP_nn => Some(nn),
+            Self::JR_n => {
+                let offset = n1 as i8;
+                Some(
+                    address
+                        .wrapping_add(self.length() as u16)
+                        .wrapping_add(offset as u16),
+                )
+            }
+            Self::CALL_nn => Some(nn),
+            Self::RST_n(tgt) => Some(*tgt as u16),
+            _ => None,
+        }
+    }
 }
 
 impl Display for Instruction {
