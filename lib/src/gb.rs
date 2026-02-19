@@ -25,7 +25,7 @@ impl GameBoy {
             cartridge: cartridge::Cartridge::new(),
             memory: memory::Memory::new(),
             timer: timer::Timer,
-            ppu: ppu::Ppu,
+            ppu: ppu::Ppu::new(false),
             cgb: false,
         }
     }
@@ -36,7 +36,7 @@ impl GameBoy {
             cartridge: cartridge::Cartridge::new(),
             memory: memory::Memory::new(),
             timer: timer::Timer,
-            ppu: ppu::Ppu,
+            ppu: ppu::Ppu::new(true),
             cgb: true,
         }
     }
