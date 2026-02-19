@@ -1,8 +1,14 @@
 use crate::gb::ppu::framebuffer::Framebuffer;
+use crate::gb::ppu::lcdc::LCDC;
+use crate::gb::ppu::stat::STAT;
 use crate::{ReadMemory, WriteMemory};
 
 mod color;
 mod framebuffer;
+mod lcdc;
+mod mode;
+mod rendering;
+mod stat;
 
 const VRAM_BANK_SIZE: usize = 0x2000; // 8KiB
 const OAM_SIZE: usize = 160; // Bytes
@@ -10,15 +16,16 @@ const OAM_SIZE: usize = 160; // Bytes
 pub struct Ppu {
     frame: Framebuffer,
     cgb: bool,
+    dot_counter: usize,
     // Memory
     /// Video RAM (2 banks on CGB)
     vram: [[u8; VRAM_BANK_SIZE]; 2],
     /// Sprite attribute table
     oam: [u8; OAM_SIZE],
     /// LCD control
-    lcdc: u8,
+    lcdc: LCDC,
     /// LCD status
-    stat: u8,
+    stat: STAT,
     /// BG scroll Y
     scy: u8,
     /// BG scroll X
@@ -63,15 +70,42 @@ pub struct Ppu {
     hdma5: u8,
 }
 
+impl Ppu {
+    pub fn new(cgb: bool) -> Self {
+        if cgb {
+            Self::default()
+        } else {
+            Self {
+                cgb: false,
+                dma: 0xFF,
+                ..Default::default()
+            }
+        }
+    }
+
+    pub fn cycle(&mut self) {
+        if self.cgb {
+            self.dot();
+            self.dot();
+        } else {
+            self.dot();
+            self.dot();
+            self.dot();
+            self.dot();
+        }
+    }
+}
+
 impl Default for Ppu {
     fn default() -> Self {
         Self {
             frame: Framebuffer::new(),
             cgb: true,
+            dot_counter: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
             oam: [0x00; OAM_SIZE],
-            lcdc: 0x91,
-            stat: 0x85,
+            lcdc: 0x91.into(),
+            stat: 0x85.into(),
             scy: 0x00,
             scx: 0x00,
             ly: 0x00,
@@ -97,20 +131,6 @@ impl Default for Ppu {
     }
 }
 
-impl Ppu {
-    pub fn new(cgb: bool) -> Self {
-        if cgb {
-            Self::default()
-        } else {
-            Self {
-                cgb: false,
-                dma: 0xFF,
-                ..Default::default()
-            }
-        }
-    }
-}
-
 impl ReadMemory for Ppu {
     fn read_naive(&self, addr: u16) -> u8 {
         match addr {
@@ -122,8 +142,8 @@ impl ReadMemory for Ppu {
                 }
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
-            0xFF40 => self.lcdc,
-            0xFF41 => self.stat,
+            0xFF40 => self.lcdc.into(),
+            0xFF41 => self.stat.into(),
             0xFF42 => self.scy,
             0xFF43 => self.scx,
             0xFF44 => self.ly,
@@ -227,8 +247,8 @@ impl WriteMemory for Ppu {
                 }
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
-            0xFF40 => self.lcdc = value,
-            0xFF41 => self.stat = (self.stat & 0x87) | (value & 0x78), // bits 0-2 read-only, bit 7 unused
+            0xFF40 => self.lcdc = value.into(),
+            0xFF41 => self.stat = ((u8::from(self.stat) & 0x87) | (value & 0x78)).into(), // bits 0-2 read-only, bit 7 unused
             0xFF42 => self.scy = value,
             0xFF43 => self.scx = value,
             0xFF44 => {} // LY is read-only

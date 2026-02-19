@@ -44,7 +44,9 @@ impl WriteMemory for Bus<'_> {
 }
 
 impl BusInterface for Bus<'_> {
-    fn cycle(&mut self) {}
+    fn cycle(&mut self) {
+        self.ppu.cycle();
+    }
 
     fn read(&mut self, addr: u16) -> u8 {
         self.cycle();
