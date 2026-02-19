@@ -1,4 +1,5 @@
 use crate::disassembler::Disassembly;
+use crate::error::{GbError, GbResult};
 
 pub const NINTENDO_LOGO: [u8; 48] = [
     0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
@@ -26,54 +27,69 @@ pub struct RomHeader {
 }
 
 impl RomHeader {
-    pub fn new(data: &[u8]) -> Self {
-        Self {
-            title: Self::parse_title(data),
-            valid_nintendo_logo: Self::parse_valid_nintendo_logo(data),
-            cgb_mode: Self::parse_cgb_mode(data),
-            sgb_support: Self::parse_sgb_support(data),
-            licensee: Self::parse_licensee(data),
-            cartridge_type: Self::parse_cartridge_type(data),
-            rom_banks: Self::parse_rom_banks(data),
-            ram_banks: Self::parse_ram_banks(data),
-            overseas_only: Self::parse_overseas_only(data),
-            version_number: Self::parse_version_number(data),
-            provided_header_checksum: Self::parse_header_checksum(data),
-            actual_header_checksum: Self::calculate_header_checksum(data),
-            provided_global_checksum: Self::parse_global_checksum(data),
-            actual_global_checksum: Self::calculate_global_checksum(data),
-            entrypoint: Self::parse_entrypoint(data),
-        }
+    pub fn new(data: &[u8]) -> GbResult<Self> {
+        Ok(Self {
+            title: Self::parse_title(data)?,
+            valid_nintendo_logo: Self::parse_valid_nintendo_logo(data)?,
+            cgb_mode: Self::parse_cgb_mode(data)?,
+            sgb_support: Self::parse_sgb_support(data)?,
+            licensee: Self::parse_licensee(data)?,
+            cartridge_type: Self::parse_cartridge_type(data)?,
+            rom_banks: Self::parse_rom_banks(data)?,
+            ram_banks: Self::parse_ram_banks(data)?,
+            overseas_only: Self::parse_overseas_only(data)?,
+            version_number: Self::parse_version_number(data)?,
+            provided_header_checksum: Self::parse_header_checksum(data)?,
+            actual_header_checksum: Self::calculate_header_checksum(data)?,
+            provided_global_checksum: Self::parse_global_checksum(data)?,
+            actual_global_checksum: Self::calculate_global_checksum(data)?,
+            entrypoint: Self::parse_entrypoint(data)?,
+        })
     }
 
-    pub fn parse_title(data: &[u8]) -> String {
+    pub fn parse_title(data: &[u8]) -> GbResult<String> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
         let bytes = &data[0x134..=0x143];
         let end = bytes.iter().position(|&b| b == 0x00).unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..end]).to_string()
+        Ok(String::from_utf8_lossy(&bytes[..end]).to_string())
     }
 
-    pub fn parse_valid_nintendo_logo(data: &[u8]) -> bool {
-        data[0x104..=0x133] == NINTENDO_LOGO
+    pub fn parse_valid_nintendo_logo(data: &[u8]) -> GbResult<bool> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(data[0x104..=0x133] == NINTENDO_LOGO)
     }
 
-    pub fn parse_cgb_mode(data: &[u8]) -> RomCgbMode {
-        match data[0x143] {
+    pub fn parse_cgb_mode(data: &[u8]) -> GbResult<RomCgbMode> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(match data[0x143] {
             0x80 => RomCgbMode::CgbAndGb,
             0xC0 => RomCgbMode::CgbOnly,
             _ => RomCgbMode::None,
+        })
+    }
+
+    pub fn parse_sgb_support(data: &[u8]) -> GbResult<bool> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
         }
+        Ok(data[0x146] == 0x03)
     }
 
-    pub fn parse_sgb_support(data: &[u8]) -> bool {
-        data[0x146] == 0x03
-    }
-
-    pub fn parse_licensee(data: &[u8]) -> RomLicensee {
+    pub fn parse_licensee(data: &[u8]) -> GbResult<RomLicensee> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
         let old_code = data[0x14B];
         if old_code == 0x33 {
-            Self::parse_new_licensee(data)
+            Ok(Self::parse_new_licensee(data))
         } else {
-            Self::parse_old_licensee(old_code)
+            Ok(Self::parse_old_licensee(old_code))
         }
     }
 
@@ -300,8 +316,11 @@ impl RomHeader {
         }
     }
 
-    pub fn parse_cartridge_type(data: &[u8]) -> Option<RomCartridgeType> {
-        match data[0x147] {
+    pub fn parse_cartridge_type(data: &[u8]) -> GbResult<Option<RomCartridgeType>> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(match data[0x147] {
             0x00 => Some(RomCartridgeType::RomOnly),
             0x01 => Some(RomCartridgeType::Mbc1),
             0x02 => Some(RomCartridgeType::Mbc1Ram),
@@ -331,11 +350,14 @@ impl RomHeader {
             0xFE => Some(RomCartridgeType::HuC3),
             0xFF => Some(RomCartridgeType::HuC1RamBattery),
             _ => None,
-        }
+        })
     }
 
-    pub fn parse_rom_banks(data: &[u8]) -> usize {
-        match data[0x148] {
+    pub fn parse_rom_banks(data: &[u8]) -> GbResult<usize> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(match data[0x148] {
             0x00 => 2,
             0x01 => 4,
             0x02 => 8,
@@ -349,52 +371,77 @@ impl RomHeader {
             0x53 => 80,
             0x54 => 96,
             _ => 0,
-        }
+        })
     }
 
-    pub fn parse_ram_banks(data: &[u8]) -> usize {
-        match data[0x149] {
+    pub fn parse_ram_banks(data: &[u8]) -> GbResult<usize> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(match data[0x149] {
             0x02 => 1,
             0x03 => 4,
             0x04 => 16,
             0x05 => 8,
             _ => 0,
+        })
+    }
+
+    pub fn parse_overseas_only(data: &[u8]) -> GbResult<bool> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
         }
+        Ok(data[0x14A] == 0x01)
     }
 
-    pub fn parse_overseas_only(data: &[u8]) -> bool {
-        data[0x14A] == 0x01
+    pub fn parse_version_number(data: &[u8]) -> GbResult<u8> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(data[0x14C])
     }
 
-    pub fn parse_version_number(data: &[u8]) -> u8 {
-        data[0x14C]
-    }
-
-    pub fn calculate_header_checksum(data: &[u8]) -> u8 {
-        data[0x134..=0x14C]
+    pub fn calculate_header_checksum(data: &[u8]) -> GbResult<u8> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(data[0x134..=0x14C]
             .iter()
-            .fold(0, |acc, &b| acc.wrapping_sub(b).wrapping_sub(1))
+            .fold(0, |acc, &b| acc.wrapping_sub(b).wrapping_sub(1)))
     }
 
-    pub fn parse_header_checksum(data: &[u8]) -> u8 {
-        data[0x14D]
+    pub fn parse_header_checksum(data: &[u8]) -> GbResult<u8> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(data[0x14D])
     }
 
-    pub fn calculate_global_checksum(data: &[u8]) -> u16 {
-        data.iter()
+    pub fn calculate_global_checksum(data: &[u8]) -> GbResult<u16> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(data
+            .iter()
             .enumerate()
             .filter(|(addr, _)| *addr < 0x14E || *addr > 0x14F)
-            .fold(0, |acc, (_, byte)| acc.wrapping_add(*byte as u16))
+            .fold(0, |acc, (_, byte)| acc.wrapping_add(*byte as u16)))
     }
 
-    pub fn parse_global_checksum(data: &[u8]) -> u16 {
-        u16::from_be_bytes([data[0x14E], data[0x14F]])
+    pub fn parse_global_checksum(data: &[u8]) -> GbResult<u16> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
+        Ok(u16::from_be_bytes([data[0x14E], data[0x14F]]))
     }
 
-    pub fn parse_entrypoint(data: &[u8]) -> Disassembly {
+    pub fn parse_entrypoint(data: &[u8]) -> GbResult<Disassembly> {
+        if data.len() < 0x150 {
+            return Err(GbError::RomTooSmall);
+        }
         let mut entrypoint = Disassembly::new();
         entrypoint.decode_range(&data, 0x100, 0x104);
-        entrypoint
+        Ok(entrypoint)
     }
 }
 

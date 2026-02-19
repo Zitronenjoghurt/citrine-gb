@@ -1,3 +1,4 @@
+use crate::gb::cartridge::Cartridge;
 use crate::gb::memory::Memory;
 use crate::gb::ppu::Ppu;
 use crate::gb::timer::Timer;
@@ -6,6 +7,7 @@ use crate::{ReadMemory, WriteMemory};
 
 /// Connecting the CPU to the other components of the Game Boy
 pub struct Bus<'a> {
+    pub cartridge: &'a mut Cartridge,
     pub memory: &'a mut Memory,
     pub ppu: &'a mut Ppu,
     pub timer: &'a mut Timer,
@@ -13,13 +15,21 @@ pub struct Bus<'a> {
 
 impl ReadMemory for Bus<'_> {
     fn read_naive(&self, addr: u16) -> u8 {
-        self.memory.read(addr)
+        match addr {
+            0x0000..0x7FFF => self.cartridge.read_naive(addr),
+            0xA000..=0xBFFF => self.cartridge.read_naive(addr),
+            _ => self.memory.read_naive(addr),
+        }
     }
 }
 
 impl WriteMemory for Bus<'_> {
     fn write_naive(&mut self, addr: u16, value: u8) {
-        self.memory.write(addr, value);
+        match addr {
+            0x0000..0x7FFF => self.cartridge.write_naive(addr, value),
+            0xA000..=0xBFFF => self.cartridge.write_naive(addr, value),
+            _ => self.memory.write_naive(addr, value),
+        }
     }
 }
 

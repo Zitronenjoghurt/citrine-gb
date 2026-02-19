@@ -1,5 +1,5 @@
-const ROM_BANK_SIZE: usize = 0x4000; // 16KiB
-const RAM_BANK_SIZE: usize = 0x2000; // 8KiB
+use crate::{ReadMemory, WriteMemory};
+
 const VRAM_BANK_SIZE: usize = 0x2000; // 8KiB
 const WRAM_BANK_SIZE: usize = 0x1000; // 4KiB
 const OAM_SIZE: usize = 160; // Bytes
@@ -7,9 +7,6 @@ const HRAM_SIZE: usize = 127; // Bytes
 const IO_SIZE: usize = 128; // Bytes
 
 pub struct Memory {
-    // ToDo: Put in Cartridge
-    rom: Vec<[u8; ROM_BANK_SIZE]>,
-    ram: Vec<[u8; RAM_BANK_SIZE]>,
     // ToDo: Put in PPU
     vram: Vec<[u8; VRAM_BANK_SIZE]>,
     wram: Vec<[u8; WRAM_BANK_SIZE]>,
@@ -22,8 +19,6 @@ pub struct Memory {
 impl Memory {
     pub fn new() -> Self {
         Self {
-            rom: vec![[0; ROM_BANK_SIZE]; 2],
-            ram: vec![[0; RAM_BANK_SIZE]; 1],
             vram: vec![[0; VRAM_BANK_SIZE]; 1],
             wram: vec![[0; WRAM_BANK_SIZE]; 2],
             oam: [0; OAM_SIZE],
@@ -31,16 +26,15 @@ impl Memory {
             io: [0; IO_SIZE],
         }
     }
+}
 
-    pub fn read(&self, addr: u16) -> u8 {
+impl ReadMemory for Memory {
+    fn read_naive(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x3FFF => self.rom[0][addr as usize],
-            0x4000..=0x7FFF => self.rom[1][(addr - 0x4000) as usize],
             0x8000..=0x9FFF => self.vram[0][(addr - 0x8000) as usize],
-            0xA000..=0xBFFF => self.ram[0][(addr - 0xA000) as usize],
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize],
             0xD000..=0xDFFF => self.wram[1][(addr - 0xD000) as usize],
-            0xE000..=0xFDFF => self.read(addr - 0x2000), // echo RAM
+            0xE000..=0xFDFF => self.read_naive(addr - 0x2000), // echo RAM
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
@@ -48,14 +42,15 @@ impl Memory {
             _ => 0xFF,
         }
     }
+}
 
-    pub fn write(&mut self, addr: u16, value: u8) {
+impl WriteMemory for Memory {
+    fn write_naive(&mut self, addr: u16, value: u8) {
         match addr {
             0x8000..=0x9FFF => self.vram[0][(addr - 0x8000) as usize] = value,
-            0xA000..=0xBFFF => self.ram[0][(addr - 0xA000) as usize] = value,
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize] = value,
             0xD000..=0xDFFF => self.wram[1][(addr - 0xD000) as usize] = value,
-            0xE000..=0xFDFF => self.write(addr - 0x2000, value), // echo RAM
+            0xE000..=0xFDFF => self.write_naive(addr - 0x2000, value), // echo RAM
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,

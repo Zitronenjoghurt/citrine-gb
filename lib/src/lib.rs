@@ -1,4 +1,5 @@
 mod disassembler;
+mod error;
 pub mod gb;
 mod instructions;
 pub mod rom;

@@ -1,8 +1,9 @@
 use crate::disassembler::Disassembly;
+use crate::error::GbResult;
 use crate::rom::header::RomHeader;
 use std::path::Path;
 
-mod header;
+pub mod header;
 
 #[derive(Debug)]
 pub struct Rom {
@@ -16,7 +17,7 @@ impl Rom {
         }
     }
 
-    pub fn from_file(path: &Path) -> Result<Self, std::io::Error> {
+    pub fn from_file(path: &Path) -> GbResult<Self> {
         let data = std::fs::read(path)?;
         Ok(Self::new(&data))
     }
@@ -24,67 +25,67 @@ impl Rom {
 
 // Header
 impl Rom {
-    pub fn header(&self) -> RomHeader {
+    pub fn header(&self) -> GbResult<RomHeader> {
         RomHeader::new(&self.data)
     }
 
-    pub fn title(&self) -> String {
+    pub fn title(&self) -> GbResult<String> {
         RomHeader::parse_title(&self.data)
     }
 
-    pub fn has_valid_nintendo_logo(&self) -> bool {
+    pub fn has_valid_nintendo_logo(&self) -> GbResult<bool> {
         RomHeader::parse_valid_nintendo_logo(&self.data)
     }
 
-    pub fn cgb_mode(&self) -> header::RomCgbMode {
+    pub fn cgb_mode(&self) -> GbResult<header::RomCgbMode> {
         RomHeader::parse_cgb_mode(&self.data)
     }
 
-    pub fn sgb_support(&self) -> bool {
+    pub fn sgb_support(&self) -> GbResult<bool> {
         RomHeader::parse_sgb_support(&self.data)
     }
 
-    pub fn licensee(&self) -> header::RomLicensee {
+    pub fn licensee(&self) -> GbResult<header::RomLicensee> {
         RomHeader::parse_licensee(&self.data)
     }
 
-    pub fn cartridge_type(&self) -> Option<header::RomCartridgeType> {
+    pub fn cartridge_type(&self) -> GbResult<Option<header::RomCartridgeType>> {
         RomHeader::parse_cartridge_type(&self.data)
     }
 
-    pub fn rom_banks(&self) -> usize {
+    pub fn rom_banks(&self) -> GbResult<usize> {
         RomHeader::parse_rom_banks(&self.data)
     }
 
-    pub fn ram_banks(&self) -> usize {
+    pub fn ram_banks(&self) -> GbResult<usize> {
         RomHeader::parse_ram_banks(&self.data)
     }
 
-    pub fn overseas_only(&self) -> bool {
+    pub fn overseas_only(&self) -> GbResult<bool> {
         RomHeader::parse_overseas_only(&self.data)
     }
 
-    pub fn version_number(&self) -> u8 {
+    pub fn version_number(&self) -> GbResult<u8> {
         RomHeader::parse_version_number(&self.data)
     }
 
-    pub fn provided_header_checksum(&self) -> u8 {
+    pub fn provided_header_checksum(&self) -> GbResult<u8> {
         RomHeader::parse_header_checksum(&self.data)
     }
 
-    pub fn actual_header_checksum(&self) -> u8 {
+    pub fn actual_header_checksum(&self) -> GbResult<u8> {
         RomHeader::calculate_header_checksum(&self.data)
     }
 
-    pub fn provided_global_checksum(&self) -> u16 {
+    pub fn provided_global_checksum(&self) -> GbResult<u16> {
         RomHeader::parse_global_checksum(&self.data)
     }
 
-    pub fn actual_global_checksum(&self) -> u16 {
+    pub fn actual_global_checksum(&self) -> GbResult<u16> {
         RomHeader::calculate_global_checksum(&self.data)
     }
 
-    pub fn entrypoint(&self) -> Disassembly {
+    pub fn entrypoint(&self) -> GbResult<Disassembly> {
         RomHeader::parse_entrypoint(&self.data)
     }
 }
