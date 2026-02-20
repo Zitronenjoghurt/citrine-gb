@@ -82,15 +82,15 @@ impl Ppu {
         }
     }
 
-    pub fn cycle(&mut self, ic: &mut impl ICInterface) {
+    pub fn cycle(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
         if self.cgb {
-            self.dot(ic);
-            self.dot(ic);
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
         } else {
-            self.dot(ic);
-            self.dot(ic);
-            self.dot(ic);
-            self.dot(ic);
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
         }
     }
 

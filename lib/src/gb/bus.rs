@@ -24,6 +24,7 @@ impl ReadMemory for CpuBus<'_> {
             0x8000..=0x9FFF => self.ppu.read_naive(addr),
             0xA000..=0xBFFF => self.cartridge.read_naive(addr),
             0xFE00..=0xFE9F => self.ppu.read_naive(addr),
+            0xFF04..=0xFF07 => self.timer.read_naive(addr),
             0xFF0F => self.ic.flag.into(),
             0xFF46 => self.dma.source,
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
@@ -42,6 +43,7 @@ impl WriteMemory for CpuBus<'_> {
             0x8000..=0x9FFF => self.ppu.write_naive(addr, value),
             0xA000..=0xBFFF => self.cartridge.write_naive(addr, value),
             0xFE00..=0xFE9F => self.ppu.write_naive(addr, value),
+            0xFF04..=0xFF07 => self.timer.write_naive(addr, value),
             0xFF0F => self.ic.flag = value.into(),
             0xFF46 => self.dma.start(value),
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
@@ -55,7 +57,8 @@ impl WriteMemory for CpuBus<'_> {
 
 impl CpuBusInterface for CpuBus<'_> {
     fn cycle(&mut self) {
-        self.ppu.cycle(self.ic);
+        self.timer.cycle(self.ic);
+        self.ppu.cycle(self.ic, self.dma.active);
 
         if let Some((src, dst)) = self.dma.cycle() {
             self.write_naive(dst, self.read_naive(src));

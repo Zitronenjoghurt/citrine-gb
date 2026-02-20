@@ -11,6 +11,7 @@ mod memory;
 mod ppu;
 mod timer;
 
+// ToDo: CGB specific registers like speed mode
 pub struct GameBoy {
     pub cpu: cpu::Cpu,
     pub cartridge: cartridge::Cartridge,
@@ -30,7 +31,7 @@ impl GameBoy {
             dma: dma::DmaController::new(false),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
-            timer: timer::Timer,
+            timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(false),
             cgb: false,
         }
@@ -43,7 +44,7 @@ impl GameBoy {
             dma: dma::DmaController::new(true),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
-            timer: timer::Timer,
+            timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(true),
             cgb: true,
         }

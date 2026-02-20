@@ -3,7 +3,7 @@ use crate::gb::ppu::mode::PpuMode;
 use crate::gb::ppu::Ppu;
 
 impl Ppu {
-    pub fn dot(&mut self, ic: &mut impl ICInterface) {
+    pub fn dot(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
         if !self.lcdc.lcd_enabled {
             return;
         }
