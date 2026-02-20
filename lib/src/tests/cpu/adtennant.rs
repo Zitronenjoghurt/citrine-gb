@@ -125,6 +125,7 @@ impl From<&TestState> for Cpu {
             pc: s.pc,
             ir: 0,
             ime: false,
+            ime_next: false,
         }
     }
 }

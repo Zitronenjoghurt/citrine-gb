@@ -1,4 +1,5 @@
 use crate::gb::bus::BusInterface;
+use crate::gb::ic::{ICInterface, Interrupt};
 use std::collections::HashMap;
 
 mod cpu;
@@ -26,4 +27,8 @@ impl BusInterface for TestBus {
         self.data.insert(addr, value);
         self.history.push((addr, value, "write".to_string()));
     }
+}
+
+impl ICInterface for TestBus {
+    fn request_interrupt(&mut self, _interrupt: Interrupt) {}
 }

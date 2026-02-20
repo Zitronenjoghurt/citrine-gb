@@ -1,5 +1,7 @@
 use crate::gb::ppu::mode::PpuMode;
 
+/// Source: https://gbdev.io/pandocs/STAT.html#ff41--stat-lcd-status
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct STAT {
     pub lyc_interrupt: bool,

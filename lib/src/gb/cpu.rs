@@ -1,4 +1,5 @@
 use crate::gb::bus::BusInterface;
+use crate::gb::ic::ICInterface;
 use crate::instructions::{Cond, Instruction, R16Mem, R16Stk, R16, R8};
 use crate::utils::*;
 
@@ -16,6 +17,7 @@ pub struct Cpu {
     pub pc: u16,
     pub ir: u8,
     pub ime: bool,
+    pub ime_next: bool,
 }
 
 impl Cpu {
@@ -51,6 +53,7 @@ impl Cpu {
             pc: 0x0100,
             ir: 0x00,
             ime: false,
+            ime_next: false,
         }
     }
 
@@ -73,10 +76,13 @@ impl Cpu {
             pc: 0x100,
             ir: 0x00,
             ime: false,
+            ime_next: false,
         }
     }
 
-    pub fn step(&mut self, bus: &mut impl BusInterface) {
+    pub fn step(&mut self, bus: &mut (impl BusInterface + ICInterface)) {
+        self.interrupt_handler(bus);
+
         match self.decode(bus) {
             Instruction::NOP => {}
             Instruction::LD_rr_nn(r16) => self.ld_rr_nn(bus, r16),
@@ -139,9 +145,11 @@ impl Cpu {
             Instruction::ADD_SP_n => self.add_sp_n(bus),
             Instruction::LD_HL_SP_n => self.ld_hl_sp_n(bus),
             Instruction::LD_SP_HL => self.ld_sp_hl(bus),
-            // ToDo: DI/EI schedule their change to be applied after the next machine cycle, check if this implementation is correct
-            Instruction::DI => self.ime = false,
-            Instruction::EI => self.ime = true,
+            Instruction::DI => {
+                self.ime_next = false;
+                self.ime = false;
+            }
+            Instruction::EI => self.ime_next = true,
             Instruction::RLC_r(r8) => self.rlc_r(bus, r8),
             Instruction::RRC_r(r8) => self.rrc_r(bus, r8),
             Instruction::RL_r(r8) => self.rl_r(bus, r8),
@@ -169,6 +177,25 @@ impl Cpu {
             self.fetch(bus);
             Instruction::decode_prefixed(self.ir)
         }
+    }
+
+    fn interrupt_handler(&mut self, bus: &mut (impl BusInterface + ICInterface)) {
+        if self.ime
+            && let Some(interrupt) = bus.take_interrupt()
+        {
+            self.ime = false;
+            self.ime_next = false;
+
+            bus.cycle();
+            bus.cycle();
+            self.push_word(bus, self.pc.wrapping_sub(1));
+            self.pc = interrupt.vector();
+
+            self.fetch(bus);
+        }
+
+        // EI is delayed by one instruction
+        self.ime = self.ime_next;
     }
 }
 

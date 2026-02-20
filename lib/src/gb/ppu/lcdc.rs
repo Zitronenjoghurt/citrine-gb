@@ -1,4 +1,5 @@
-/// https://gbdev.io/pandocs/LCDC.html#lcd-control
+/// Source: https://gbdev.io/pandocs/LCDC.html#lcd-control
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LCDC {
     /// Controls whether the LCD is on and the PPU is active.

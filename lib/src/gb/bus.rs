@@ -1,4 +1,5 @@
 use crate::gb::cartridge::Cartridge;
+use crate::gb::ic::{ICInterface, InterruptController};
 use crate::gb::memory::Memory;
 use crate::gb::ppu::Ppu;
 use crate::gb::timer::Timer;
@@ -8,9 +9,11 @@ use crate::{ReadMemory, WriteMemory};
 /// Connecting the CPU to the other components of the Game Boy
 pub struct Bus<'a> {
     pub cartridge: &'a mut Cartridge,
+    pub ic: &'a mut InterruptController,
     pub memory: &'a mut Memory,
     pub ppu: &'a mut Ppu,
     pub timer: &'a mut Timer,
+    // ToDo: Add DMA controller
 }
 
 impl ReadMemory for Bus<'_> {
@@ -20,9 +23,11 @@ impl ReadMemory for Bus<'_> {
             0x8000..=0x9FFF => self.ppu.read_naive(addr),
             0xA000..=0xBFFF => self.cartridge.read_naive(addr),
             0xFE00..=0xFE9F => self.ppu.read_naive(addr),
+            0xFF0F => self.ic.flag.into(),
             0xFF40..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.read_naive(addr)
             }
+            0xFFFF => self.ic.enable.into(),
             _ => self.memory.read_naive(addr),
         }
     }
@@ -35,9 +40,11 @@ impl WriteMemory for Bus<'_> {
             0x8000..=0x9FFF => self.ppu.write_naive(addr, value),
             0xA000..=0xBFFF => self.cartridge.write_naive(addr, value),
             0xFE00..=0xFE9F => self.ppu.write_naive(addr, value),
+            0xFF0F => self.ic.flag = value.into(),
             0xFF40..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.write_naive(addr, value)
             }
+            0xFFFF => self.ic.enable = value.into(),
             _ => self.memory.write_naive(addr, value),
         }
     }
@@ -45,16 +52,14 @@ impl WriteMemory for Bus<'_> {
 
 impl BusInterface for Bus<'_> {
     fn cycle(&mut self) {
-        self.ppu.cycle();
+        self.ppu.cycle(self.ic);
     }
 
     fn read(&mut self, addr: u16) -> u8 {
-        self.cycle();
         self.read_naive(addr)
     }
 
     fn write(&mut self, addr: u16, value: u8) {
-        self.cycle();
         self.write_naive(addr, value);
     }
 }
@@ -71,5 +76,15 @@ pub trait BusInterface {
     fn write_word(&mut self, addr: u16, value: u16) {
         self.write(addr, lo(value));
         self.write(addr + 1, hi(value));
+    }
+}
+
+impl ICInterface for Bus<'_> {
+    fn request_interrupt(&mut self, interrupt: crate::gb::ic::Interrupt) {
+        self.ic.request_interrupt(interrupt);
+    }
+
+    fn take_interrupt(&mut self) -> Option<crate::gb::ic::Interrupt> {
+        self.ic.take_interrupt()
     }
 }

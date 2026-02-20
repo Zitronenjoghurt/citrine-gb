@@ -1,3 +1,4 @@
+use crate::gb::ic::ICInterface;
 use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::gb::ppu::lcdc::LCDC;
 use crate::gb::ppu::stat::STAT;
@@ -83,15 +84,15 @@ impl Ppu {
         }
     }
 
-    pub fn cycle(&mut self) {
+    pub fn cycle(&mut self, ic: &mut impl ICInterface) {
         if self.cgb {
-            self.dot();
-            self.dot();
+            self.dot(ic);
+            self.dot(ic);
         } else {
-            self.dot();
-            self.dot();
-            self.dot();
-            self.dot();
+            self.dot(ic);
+            self.dot(ic);
+            self.dot(ic);
+            self.dot(ic);
         }
     }
 }
