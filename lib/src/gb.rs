@@ -5,6 +5,7 @@ use crate::rom::Rom;
 pub mod bus;
 mod cartridge;
 pub mod cpu;
+mod dma;
 pub mod ic;
 mod memory;
 mod ppu;
@@ -13,6 +14,7 @@ mod timer;
 pub struct GameBoy {
     pub cpu: cpu::Cpu,
     pub cartridge: cartridge::Cartridge,
+    pub dma: dma::DmaController,
     pub ic: ic::InterruptController,
     pub memory: memory::Memory,
     pub timer: timer::Timer,
@@ -25,6 +27,7 @@ impl GameBoy {
         Self {
             cpu: cpu::Cpu::new_dmg(header_checksum),
             cartridge: cartridge::Cartridge::new(),
+            dma: dma::DmaController::new(false),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
             timer: timer::Timer,
@@ -37,6 +40,7 @@ impl GameBoy {
         Self {
             cpu: cpu::Cpu::new_cgb(),
             cartridge: cartridge::Cartridge::new(),
+            dma: dma::DmaController::new(true),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
             timer: timer::Timer,
@@ -57,8 +61,9 @@ impl GameBoy {
     }
 
     pub fn step(&mut self) {
-        self.cpu.step(&mut bus::Bus {
+        self.cpu.step(&mut bus::CpuBus {
             cartridge: &mut self.cartridge,
+            dma: &mut self.dma,
             ic: &mut self.ic,
             memory: &mut self.memory,
             ppu: &mut self.ppu,

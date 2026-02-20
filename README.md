@@ -10,3 +10,4 @@ A soon-to-be cycle-accurate Game Boy emulator.
 - [Game Boy: Complete Technical Reference by gekkio](https://gekkio.fi/files/gb-docs/gbctr.pdf)
 - [Game Boy CPU Instructions by meganesu](https://meganesu.github.io/generate-gb-opcodes/)
 - [Game Boy CPU Tests by adtennant](https://github.com/adtennant/GameboyCPUTests)
+- [Some CPU internals by SonoSoos](https://gist.github.com/SonoSooS/c0055300670d678b5ae8433e20bea595)

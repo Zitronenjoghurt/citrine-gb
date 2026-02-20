@@ -1,6 +1,7 @@
 use crate::gb::ic::ICInterface;
 use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::gb::ppu::lcdc::LCDC;
+use crate::gb::ppu::mode::PpuMode;
 use crate::gb::ppu::stat::STAT;
 use crate::{ReadMemory, WriteMemory};
 
@@ -35,8 +36,6 @@ pub struct Ppu {
     ly: u8,
     /// Scanline compare
     lyc: u8,
-    /// OAM DMA source address
-    dma: u8,
     /// BG palette (DMG)
     bgp: u8,
     /// OBJ palette 0 (DMG)
@@ -78,7 +77,6 @@ impl Ppu {
         } else {
             Self {
                 cgb: false,
-                dma: 0xFF,
                 ..Default::default()
             }
         }
@@ -93,6 +91,22 @@ impl Ppu {
             self.dot(ic);
             self.dot(ic);
             self.dot(ic);
+        }
+    }
+
+    pub fn cpu_conflicts(&self, addr: u16) -> bool {
+        if self.stat.ppu_mode == PpuMode::HBlank || self.stat.ppu_mode == PpuMode::VBlank {
+            return false;
+        }
+
+        match addr {
+            // VRAM blocked during mode 3
+            0x8000..=0x9FFF => self.stat.ppu_mode == PpuMode::Drawing,
+            // OAM blocked during mode 2 and 3
+            0xFE00..=0xFE9F => matches!(self.stat.ppu_mode, PpuMode::OamScan | PpuMode::Drawing),
+            // CGB palettes blocked during mode 3
+            0xFF69 | 0xFF6B => self.cgb && self.stat.ppu_mode == PpuMode::Drawing,
+            _ => false,
         }
     }
 }
@@ -111,7 +125,6 @@ impl Default for Ppu {
             scx: 0x00,
             ly: 0x00,
             lyc: 0x00,
-            dma: 0x00,
             bgp: 0xFC,
             obp0: 0x00,
             obp1: 0x00,
@@ -149,7 +162,6 @@ impl ReadMemory for Ppu {
             0xFF43 => self.scx,
             0xFF44 => self.ly,
             0xFF45 => self.lyc,
-            0xFF46 => self.dma,
             0xFF47 => self.bgp,
             0xFF48 => self.obp0,
             0xFF49 => self.obp1,
@@ -254,7 +266,6 @@ impl WriteMemory for Ppu {
             0xFF43 => self.scx = value,
             0xFF44 => {} // LY is read-only
             0xFF45 => self.lyc = value,
-            0xFF46 => self.dma = value, // TODO: trigger OAM DMA
             0xFF47 => self.bgp = value,
             0xFF48 => self.obp0 = value,
             0xFF49 => self.obp1 = value,

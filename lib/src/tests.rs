@@ -1,4 +1,4 @@
-use crate::gb::bus::BusInterface;
+use crate::gb::bus::CpuBusInterface;
 use crate::gb::ic::{ICInterface, Interrupt};
 use std::collections::HashMap;
 
@@ -10,7 +10,7 @@ pub struct TestBus {
     history: Vec<(u16, u8, String)>,
 }
 
-impl BusInterface for TestBus {
+impl CpuBusInterface for TestBus {
     fn cycle(&mut self) {}
 
     fn read(&mut self, addr: u16) -> u8 {
