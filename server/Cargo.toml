@@ -1,0 +1,11 @@
+[package]
+name = "citrine-gb-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.8"
+env_logger = "0.11.9"
+log = "0.4.29"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6.8", features = ["fs"] }

@@ -1,0 +1,9 @@
+services:
+  citrine-server:
+    container_name: citrine-server
+    build:
+      context: ../..
+      dockerfile: server/docker/Dockerfile
+    ports:
+      - "13707:13707"
+    restart: unless-stopped

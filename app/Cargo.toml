@@ -3,5 +3,32 @@ name = "citrine-gb-app"
 version = "0.1.0"
 edition = "2024"
 
+[package.metadata.docs.rs]
+all-features = true
+targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
+
 [dependencies]
-citrine-gb = { workspace = true }
+citrine-gb = { workspace = true, features = ["debug"] }
+anyhow = "1.0.102"
+eframe = { version = "0.33.0", default-features = false, features = ["persistence"] }
+egui = "0.33.0"
+egui-notify = "0.21.0"
+egui-phosphor = { version = "0.11.0", features = ["regular"] }
+log = "0.4.29"
+rfd = "0.17.2"
+serde = { version = "1.0.228", features = ["derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.33.0", default-features = false, features = ["persistence", "wayland", "wgpu", "x11"] }
+wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.33.0", default-features = false, features = ["glow", "persistence"] }
+wasm-bindgen-futures = "0.4.50"
+web-sys = "0.3.70"
+
+[profile.release]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2

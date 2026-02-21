@@ -32,3 +32,6 @@ impl CpuBusInterface for TestBus {
 impl ICInterface for TestBus {
     fn request_interrupt(&mut self, _interrupt: Interrupt) {}
 }
+
+#[cfg(feature = "debug")]
+impl crate::debug::DebuggerInterface for TestBus {}

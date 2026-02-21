@@ -3,6 +3,15 @@ use crate::gb::ic::ICInterface;
 use crate::instructions::{Cond, Instruction, R16Mem, R16Stk, R16, R8};
 use crate::utils::*;
 
+#[cfg(not(feature = "debug"))]
+pub trait Bus: CpuBusInterface + ICInterface {}
+#[cfg(not(feature = "debug"))]
+impl<T: CpuBusInterface + ICInterface> Bus for T {}
+#[cfg(feature = "debug")]
+pub trait Bus: CpuBusInterface + ICInterface + crate::debug::DebuggerInterface {}
+#[cfg(feature = "debug")]
+impl<T: CpuBusInterface + ICInterface + crate::debug::DebuggerInterface> Bus for T {}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Cpu {
     pub a: u8,
@@ -80,7 +89,7 @@ impl Cpu {
         }
     }
 
-    pub fn step(&mut self, bus: &mut (impl CpuBusInterface + ICInterface)) {
+    pub fn step(&mut self, bus: &mut impl Bus) {
         self.interrupt_handler(bus);
 
         match self.decode(bus) {
@@ -166,11 +175,11 @@ impl Cpu {
         self.fetch(bus);
     }
 
-    pub fn fetch(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn fetch(&mut self, bus: &mut impl Bus) {
         self.ir = self.read_program(bus);
     }
 
-    pub fn decode(&mut self, bus: &mut impl CpuBusInterface) -> Instruction {
+    pub fn decode(&mut self, bus: &mut impl Bus) -> Instruction {
         if self.ir != 0xCB {
             Instruction::decode(self.ir)
         } else {
@@ -179,7 +188,7 @@ impl Cpu {
         }
     }
 
-    fn interrupt_handler(&mut self, bus: &mut (impl CpuBusInterface + ICInterface)) {
+    fn interrupt_handler(&mut self, bus: &mut impl Bus) {
         if self.ime
             && let Some(interrupt) = bus.take_interrupt()
         {
@@ -201,39 +210,39 @@ impl Cpu {
 
 // Program helpers
 impl Cpu {
-    pub fn read_program(&mut self, bus: &mut impl CpuBusInterface) -> u8 {
+    pub fn read_program(&mut self, bus: &mut impl Bus) -> u8 {
         let byte = bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         byte
     }
 
-    pub fn read_program_lh(&mut self, bus: &mut impl CpuBusInterface) -> (u8, u8) {
+    pub fn read_program_lh(&mut self, bus: &mut impl Bus) -> (u8, u8) {
         (self.read_program(bus), self.read_program(bus))
     }
 
-    pub fn read_program_nn(&mut self, bus: &mut impl CpuBusInterface) -> u16 {
+    pub fn read_program_nn(&mut self, bus: &mut impl Bus) -> u16 {
         word(self.read_program(bus), self.read_program(bus))
     }
 }
 
 // Stack helpers
 impl Cpu {
-    pub fn pop(&mut self, bus: &mut impl CpuBusInterface) -> u8 {
+    pub fn pop(&mut self, bus: &mut impl Bus) -> u8 {
         let value = bus.read(self.sp);
         self.sp = self.sp.wrapping_add(1);
         value
     }
 
-    pub fn pop_word(&mut self, bus: &mut impl CpuBusInterface) -> u16 {
+    pub fn pop_word(&mut self, bus: &mut impl Bus) -> u16 {
         word(self.pop(bus), self.pop(bus))
     }
 
-    pub fn push(&mut self, bus: &mut impl CpuBusInterface, value: u8) {
+    pub fn push(&mut self, bus: &mut impl Bus, value: u8) {
         self.sp = self.sp.wrapping_sub(1);
         bus.write(self.sp, value);
     }
 
-    pub fn push_word(&mut self, bus: &mut impl CpuBusInterface, value: u16) {
+    pub fn push_word(&mut self, bus: &mut impl Bus, value: u16) {
         self.push(bus, hi(value));
         self.push(bus, lo(value));
     }
@@ -241,39 +250,39 @@ impl Cpu {
 
 // Instruction execution
 impl Cpu {
-    pub fn ld_rr_nn(&mut self, bus: &mut impl CpuBusInterface, r16: R16) {
+    pub fn ld_rr_nn(&mut self, bus: &mut impl Bus, r16: R16) {
         let (low, high) = self.read_program_lh(bus);
         self.set_r16_lh(r16, low, high);
     }
 
-    pub fn ld_rr_a(&mut self, bus: &mut impl CpuBusInterface, r16_mem: R16Mem) {
+    pub fn ld_rr_a(&mut self, bus: &mut impl Bus, r16_mem: R16Mem) {
         let address = self.get_r16mem(r16_mem);
         bus.write(address, self.a);
     }
 
-    pub fn ld_a_rr(&mut self, bus: &mut impl CpuBusInterface, r16_mem: R16Mem) {
+    pub fn ld_a_rr(&mut self, bus: &mut impl Bus, r16_mem: R16Mem) {
         let address = self.get_r16mem(r16_mem);
         self.a = bus.read(address);
     }
 
-    pub fn ld_nn_sp(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ld_nn_sp(&mut self, bus: &mut impl Bus) {
         let address = self.read_program_nn(bus);
         bus.write_word(address, self.sp);
     }
 
-    pub fn inc_rr(&mut self, bus: &mut impl CpuBusInterface, r16: R16) {
+    pub fn inc_rr(&mut self, bus: &mut impl Bus, r16: R16) {
         bus.cycle();
 
         self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_add(1));
     }
 
-    pub fn dec_rr(&mut self, bus: &mut impl CpuBusInterface, r16: R16) {
+    pub fn dec_rr(&mut self, bus: &mut impl Bus, r16: R16) {
         bus.cycle();
 
         self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_sub(1));
     }
 
-    pub fn add_hl_rr(&mut self, bus: &mut impl CpuBusInterface, r16: R16) {
+    pub fn add_hl_rr(&mut self, bus: &mut impl Bus, r16: R16) {
         bus.cycle();
 
         let (result, hc, c) = add_words(self.get_r16_nn(R16::HL), self.get_r16_nn(r16));
@@ -283,7 +292,7 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn inc_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn inc_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let (result, hc, _) = add_bytes(self.get_r8(bus, r8), 1);
         self.set_r8(bus, r8, result);
         self.f.zero = result == 0;
@@ -291,7 +300,7 @@ impl Cpu {
         self.f.half_carry = hc;
     }
 
-    pub fn dec_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn dec_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let (result, hc, _) = sub_bytes(self.get_r8(bus, r8), 1);
         self.set_r8(bus, r8, result);
         self.f.zero = result == 0;
@@ -299,7 +308,7 @@ impl Cpu {
         self.f.half_carry = hc;
     }
 
-    pub fn ld_r_n(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn ld_r_n(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.read_program(bus);
         self.set_r8(bus, r8, value);
     }
@@ -387,7 +396,7 @@ impl Cpu {
         self.f.half_carry = false;
     }
 
-    pub fn jr_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn jr_n(&mut self, bus: &mut impl Bus) {
         let offset = self.read_program(bus) as i8;
 
         bus.cycle();
@@ -396,7 +405,7 @@ impl Cpu {
         self.pc = new_pc;
     }
 
-    pub fn jr_c_n(&mut self, bus: &mut impl CpuBusInterface, cond: Cond) {
+    pub fn jr_c_n(&mut self, bus: &mut impl Bus, cond: Cond) {
         let offset = self.read_program(bus) as i8;
 
         if self.f.cond_true(cond) {
@@ -406,97 +415,97 @@ impl Cpu {
         }
     }
 
-    pub fn ld_r_r(&mut self, bus: &mut impl CpuBusInterface, dest: R8, src: R8) {
+    pub fn ld_r_r(&mut self, bus: &mut impl Bus, dest: R8, src: R8) {
         let value = self.get_r8(bus, src);
         self.set_r8(bus, dest, value);
     }
 
-    pub fn add_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn add_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.add_a(value);
     }
 
-    pub fn adc_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn adc_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.adc_a(value);
     }
 
-    pub fn sub_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn sub_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.sub_a(value);
     }
 
-    pub fn sbc_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn sbc_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.sbc_a(value);
     }
 
-    pub fn and_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn and_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.and_a(value);
     }
 
-    pub fn xor_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn xor_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.xor_a(value);
     }
 
-    pub fn or_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn or_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.or_a(value);
     }
 
-    pub fn cp_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn cp_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.cp_a(value);
     }
 
-    pub fn add_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn add_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.add_a(value);
     }
 
-    pub fn adc_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn adc_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.adc_a(value);
     }
 
-    pub fn sub_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn sub_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.sub_a(value);
     }
 
-    pub fn sbc_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn sbc_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.sbc_a(value);
     }
 
-    pub fn and_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn and_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.and_a(value);
     }
 
-    pub fn xor_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn xor_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.xor_a(value);
     }
 
-    pub fn or_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn or_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.or_a(value);
     }
 
-    pub fn cp_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn cp_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.cp_a(value);
     }
 
-    pub fn pop_rr(&mut self, bus: &mut impl CpuBusInterface, r16stk: R16Stk) {
+    pub fn pop_rr(&mut self, bus: &mut impl Bus, r16stk: R16Stk) {
         let value = self.pop_word(bus);
         self.set_r16stk(r16stk, value);
     }
 
-    pub fn push_rr(&mut self, bus: &mut impl CpuBusInterface, r16stk: R16Stk) {
+    pub fn push_rr(&mut self, bus: &mut impl Bus, r16stk: R16Stk) {
         // Internal cycle: CPU computes decremented SP before first write
         bus.cycle();
 
@@ -504,19 +513,19 @@ impl Cpu {
         self.push_word(bus, value);
     }
 
-    pub fn ret(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ret(&mut self, bus: &mut impl Bus) {
         let address = self.pop_word(bus);
 
         bus.cycle();
         self.pc = address;
     }
 
-    pub fn reti(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn reti(&mut self, bus: &mut impl Bus) {
         self.ret(bus);
         self.ime = true;
     }
 
-    pub fn ret_c(&mut self, bus: &mut impl CpuBusInterface, cond: Cond) {
+    pub fn ret_c(&mut self, bus: &mut impl Bus, cond: Cond) {
         bus.cycle();
 
         if self.f.cond_true(cond) {
@@ -524,14 +533,14 @@ impl Cpu {
         }
     }
 
-    pub fn jump_nn(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn jump_nn(&mut self, bus: &mut impl Bus) {
         let address = self.read_program_nn(bus);
 
         bus.cycle();
         self.pc = address;
     }
 
-    pub fn jump_c_nn(&mut self, bus: &mut impl CpuBusInterface, cond: Cond) {
+    pub fn jump_c_nn(&mut self, bus: &mut impl Bus, cond: Cond) {
         let address = self.read_program_nn(bus);
 
         if self.f.cond_true(cond) {
@@ -544,7 +553,7 @@ impl Cpu {
         self.pc = self.get_r16_nn(R16::HL);
     }
 
-    pub fn call_nn(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn call_nn(&mut self, bus: &mut impl Bus) {
         let address = self.read_program_nn(bus);
 
         bus.cycle();
@@ -553,7 +562,7 @@ impl Cpu {
         self.pc = address;
     }
 
-    pub fn call_c_nn(&mut self, bus: &mut impl CpuBusInterface, cond: Cond) {
+    pub fn call_c_nn(&mut self, bus: &mut impl Bus, cond: Cond) {
         let address = self.read_program_nn(bus);
 
         if self.f.cond_true(cond) {
@@ -563,43 +572,43 @@ impl Cpu {
         }
     }
 
-    pub fn rst(&mut self, bus: &mut impl CpuBusInterface, address_lsb: u8) {
+    pub fn rst(&mut self, bus: &mut impl Bus, address_lsb: u8) {
         bus.cycle();
         self.push_word(bus, self.pc);
         self.pc = word(address_lsb, 0x00);
     }
 
-    pub fn ldh_c_a(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ldh_c_a(&mut self, bus: &mut impl Bus) {
         bus.write(word(self.c, 0xFF), self.a);
     }
 
-    pub fn ldh_a_c(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ldh_a_c(&mut self, bus: &mut impl Bus) {
         self.a = bus.read(word(self.c, 0xFF));
     }
 
-    pub fn ldh_n_a(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ldh_n_a(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         bus.write(word(address_low, 0xFF), self.a);
     }
 
-    pub fn ldh_a_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ldh_a_n(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         self.a = bus.read(word(address_low, 0xFF));
     }
 
-    pub fn ld_nn_a(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ld_nn_a(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         let address_high = self.read_program(bus);
         bus.write(word(address_low, address_high), self.a);
     }
 
-    pub fn ld_a_nn(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ld_a_nn(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         let address_high = self.read_program(bus);
         self.a = bus.read(word(address_low, address_high));
     }
 
-    pub fn add_sp_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn add_sp_n(&mut self, bus: &mut impl Bus) {
         let offset = self.read_program(bus) as i8;
 
         bus.cycle();
@@ -613,7 +622,7 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn ld_hl_sp_n(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ld_hl_sp_n(&mut self, bus: &mut impl Bus) {
         let offset = self.read_program(bus) as i8;
 
         bus.cycle();
@@ -626,12 +635,12 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn ld_sp_hl(&mut self, bus: &mut impl CpuBusInterface) {
+    pub fn ld_sp_hl(&mut self, bus: &mut impl Bus) {
         bus.cycle();
         self.sp = self.get_r16_nn(R16::HL);
     }
 
-    pub fn rlc_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn rlc_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let (result, c) = rotate_left_get_carry(self.get_r8(bus, r8));
         self.set_r8(bus, r8, result);
         self.f.zero = result == 0;
@@ -640,7 +649,7 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn rrc_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn rrc_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let (result, c) = rotate_right_get_carry(self.get_r8(bus, r8));
         self.set_r8(bus, r8, result);
         self.f.zero = result == 0;
@@ -649,7 +658,7 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn rl_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn rl_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let (result, c) = rotate_left_through_carry(self.get_r8(bus, r8), self.f.carry);
         self.set_r8(bus, r8, result);
         self.f.zero = result == 0;
@@ -658,7 +667,7 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn rr_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn rr_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let (result, c) = rotate_right_through_carry(self.get_r8(bus, r8), self.f.carry);
         self.set_r8(bus, r8, result);
         self.f.zero = result == 0;
@@ -667,7 +676,7 @@ impl Cpu {
         self.f.carry = c;
     }
 
-    pub fn sla_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn sla_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         let carry = get_bit(value, 7);
         let result = value << 1;
@@ -679,7 +688,7 @@ impl Cpu {
         self.f.carry = carry;
     }
 
-    pub fn sra_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn sra_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         let carry = get_bit(value, 0);
         // Shift right while persisting the sign bit
@@ -692,7 +701,7 @@ impl Cpu {
         self.f.carry = carry;
     }
 
-    pub fn swap_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn swap_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         let result = value.rotate_right(4);
 
@@ -703,7 +712,7 @@ impl Cpu {
         self.f.carry = false;
     }
 
-    pub fn srl_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8) {
+    pub fn srl_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         let carry = get_bit(value, 0);
         let result = value >> 1;
@@ -715,19 +724,19 @@ impl Cpu {
         self.f.carry = carry;
     }
 
-    pub fn bit_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8, index: u8) {
+    pub fn bit_r(&mut self, bus: &mut impl Bus, r8: R8, index: u8) {
         let value = self.get_r8(bus, r8);
         self.f.zero = !get_bit(value, (index & 0b111) as usize);
         self.f.subtract = false;
         self.f.half_carry = true;
     }
 
-    pub fn set_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8, index: u8) {
+    pub fn set_r(&mut self, bus: &mut impl Bus, r8: R8, index: u8) {
         let value = self.get_r8(bus, r8);
         self.set_r8(bus, r8, set_bit(value, (index & 0b111) as usize, true));
     }
 
-    pub fn res_r(&mut self, bus: &mut impl CpuBusInterface, r8: R8, index: u8) {
+    pub fn res_r(&mut self, bus: &mut impl Bus, r8: R8, index: u8) {
         let value = self.get_r8(bus, r8);
         self.set_r8(bus, r8, set_bit(value, (index & 0b111) as usize, false));
     }
@@ -806,7 +815,7 @@ impl Cpu {
 
 // Register helpers
 impl Cpu {
-    pub fn get_r8(&self, bus: &mut impl CpuBusInterface, r8: R8) -> u8 {
+    pub fn get_r8(&self, bus: &mut impl Bus, r8: R8) -> u8 {
         match r8 {
             R8::B => self.b,
             R8::C => self.c,
@@ -819,7 +828,7 @@ impl Cpu {
         }
     }
 
-    pub fn set_r8(&mut self, bus: &mut impl CpuBusInterface, r8: R8, value: u8) {
+    pub fn set_r8(&mut self, bus: &mut impl Bus, r8: R8, value: u8) {
         match r8 {
             R8::B => self.b = value,
             R8::C => self.c = value,

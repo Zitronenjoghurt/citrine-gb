@@ -1,3 +1,5 @@
+#[cfg(feature = "debug")]
+mod debug;
 mod disassembler;
 mod error;
 pub mod gb;

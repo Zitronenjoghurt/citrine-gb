@@ -15,6 +15,8 @@ mod timer;
 pub struct GameBoy {
     pub cpu: cpu::Cpu,
     pub cartridge: cartridge::Cartridge,
+    #[cfg(feature = "debug")]
+    pub debugger: crate::debug::Debugger,
     pub dma: dma::DmaController,
     pub ic: ic::InterruptController,
     pub memory: memory::Memory,
@@ -28,6 +30,8 @@ impl GameBoy {
         Self {
             cpu: cpu::Cpu::new_dmg(header_checksum),
             cartridge: cartridge::Cartridge::new(),
+            #[cfg(feature = "debug")]
+            debugger: crate::debug::Debugger::new(),
             dma: dma::DmaController::new(false),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
@@ -41,6 +45,8 @@ impl GameBoy {
         Self {
             cpu: cpu::Cpu::new_cgb(),
             cartridge: cartridge::Cartridge::new(),
+            #[cfg(feature = "debug")]
+            debugger: crate::debug::Debugger::new(),
             dma: dma::DmaController::new(true),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
@@ -64,6 +70,8 @@ impl GameBoy {
     pub fn step(&mut self) {
         self.cpu.step(&mut bus::CpuBus {
             cartridge: &mut self.cartridge,
+            #[cfg(feature = "debug")]
+            debugger: &mut self.debugger,
             dma: &mut self.dma,
             ic: &mut self.ic,
             memory: &mut self.memory,

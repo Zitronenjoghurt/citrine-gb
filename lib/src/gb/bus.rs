@@ -10,6 +10,8 @@ use crate::{ReadMemory, WriteMemory};
 /// Connecting the CPU to the other components of the Game Boy
 pub struct CpuBus<'a> {
     pub cartridge: &'a mut Cartridge,
+    #[cfg(feature = "debug")]
+    pub debugger: &'a mut crate::debug::Debugger,
     pub dma: &'a mut DmaController,
     pub ic: &'a mut InterruptController,
     pub memory: &'a mut Memory,
@@ -108,5 +110,12 @@ impl ICInterface for CpuBus<'_> {
 
     fn take_interrupt(&mut self) -> Option<crate::gb::ic::Interrupt> {
         self.ic.take_interrupt()
+    }
+}
+
+#[cfg(feature = "debug")]
+impl crate::debug::DebuggerAccess for CpuBus<'_> {
+    fn debugger(&mut self) -> &mut dyn crate::debug::DebuggerInterface {
+        self.debugger
     }
 }
