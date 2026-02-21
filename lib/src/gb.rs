@@ -12,6 +12,8 @@ mod memory;
 mod ppu;
 mod timer;
 
+const FRAME_CYCLES: u32 = 17556;
+
 // ToDo: CGB specific registers like speed mode
 pub struct GameBoy {
     pub cpu: cpu::Cpu,
@@ -24,6 +26,7 @@ pub struct GameBoy {
     pub timer: timer::Timer,
     pub ppu: ppu::Ppu,
     pub cgb: bool,
+    pub frame_cycles: u32,
 }
 
 impl GameBoy {
@@ -39,6 +42,7 @@ impl GameBoy {
             timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(false),
             cgb: false,
+            frame_cycles: 0,
         }
     }
 
@@ -54,6 +58,7 @@ impl GameBoy {
             timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(true),
             cgb: true,
+            frame_cycles: 0,
         }
     }
 
@@ -78,7 +83,16 @@ impl GameBoy {
             memory: &mut self.memory,
             ppu: &mut self.ppu,
             timer: &mut self.timer,
+            cycles: &mut self.frame_cycles,
         });
+    }
+
+    // ToDo: Rely on PPU frame ready rather than frame cycles
+    pub fn run_frame(&mut self) {
+        while self.frame_cycles < FRAME_CYCLES {
+            self.step();
+        }
+        self.frame_cycles -= FRAME_CYCLES;
     }
 
     pub fn frame(&self) -> &Framebuffer {

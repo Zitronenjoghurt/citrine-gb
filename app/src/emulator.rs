@@ -5,6 +5,7 @@ pub struct Emulator {
     texture: Option<egui::TextureHandle>,
     running: bool,
     last_frame: Option<web_time::Instant>,
+    pub last_frame_secs: f64,
 }
 
 impl Default for Emulator {
@@ -14,6 +15,7 @@ impl Default for Emulator {
             texture: None,
             running: false,
             last_frame: None,
+            last_frame_secs: 0.0,
         }
     }
 }
@@ -35,10 +37,11 @@ impl Emulator {
         };
 
         if should_run {
-            // ToDo: Run full frame
-            self.gb.step();
+            let start = web_time::Instant::now();
+            self.gb.run_frame();
             self.update_texture(ctx);
             self.last_frame = Some(now);
+            self.last_frame_secs = start.elapsed().as_secs_f64();
         }
     }
 

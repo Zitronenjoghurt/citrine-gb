@@ -4,6 +4,7 @@ fn main() {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_maximized(true)
+            .with_drag_and_drop(true)
             .with_title("Citrine")
             .with_app_id("io.github.zitronenjoghurt.citrine"),
         persist_window: true,

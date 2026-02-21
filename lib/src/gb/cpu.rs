@@ -90,6 +90,13 @@ impl Cpu {
     }
 
     pub fn step(&mut self, bus: &mut impl Bus) {
+        #[cfg(feature = "debug")]
+        {
+            if bus.break_at(self.pc) {
+                return;
+            }
+        }
+
         self.interrupt_handler(bus);
 
         match self.decode(bus) {

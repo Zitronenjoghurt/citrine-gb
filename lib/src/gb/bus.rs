@@ -17,6 +17,7 @@ pub struct CpuBus<'a> {
     pub memory: &'a mut Memory,
     pub ppu: &'a mut Ppu,
     pub timer: &'a mut Timer,
+    pub cycles: &'a mut u32,
 }
 
 impl ReadMemory for CpuBus<'_> {
@@ -65,6 +66,8 @@ impl CpuBusInterface for CpuBus<'_> {
         if let Some((src, dst)) = self.dma.cycle() {
             self.write_naive(dst, self.read_naive(src));
         }
+
+        *self.cycles = self.cycles.wrapping_add(1);
     }
 
     fn read(&mut self, addr: u16) -> u8 {
@@ -115,7 +118,11 @@ impl ICInterface for CpuBus<'_> {
 
 #[cfg(feature = "debug")]
 impl crate::debug::DebuggerAccess for CpuBus<'_> {
-    fn debugger(&mut self) -> &mut dyn crate::debug::DebuggerInterface {
+    fn debugger(&self) -> &dyn crate::debug::DebuggerInterface {
+        self.debugger
+    }
+
+    fn debugger_mut(&mut self) -> &mut dyn crate::debug::DebuggerInterface {
         self.debugger
     }
 }
