@@ -1,4 +1,5 @@
 use crate::error::GbResult;
+use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::rom::header::RomCgbMode;
 use crate::rom::Rom;
 
@@ -78,5 +79,9 @@ impl GameBoy {
             ppu: &mut self.ppu,
             timer: &mut self.timer,
         });
+    }
+
+    pub fn frame(&self) -> &Framebuffer {
+        self.ppu.frame()
     }
 }

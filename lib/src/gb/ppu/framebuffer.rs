@@ -1,17 +1,41 @@
 use crate::gb::ppu::color::RGBA;
+use crate::gb::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
+
+const FB_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
+const FB_SIZE: usize = FB_PIXELS * 4;
 
 #[derive(Debug)]
-pub struct Framebuffer([u8; 160 * 144 * 4]);
+pub struct Framebuffer(Box<[u8; FB_SIZE]>);
 
 impl Default for Framebuffer {
     fn default() -> Self {
-        Self([0; 160 * 144 * 4])
+        Self(vec![0u8; FB_SIZE].into_boxed_slice().try_into().unwrap())
     }
 }
 
 impl Framebuffer {
     pub fn new() -> Self {
-        Self::default()
+        Self::test_pattern()
+    }
+
+    pub fn test_pattern() -> Self {
+        let mut fb = Self::default();
+        for y in 0..144 {
+            for x in 0..160 {
+                let tile_x = x / 8;
+                let tile_y = y / 8;
+                let is_green = (tile_x + tile_y) % 2 == 0;
+
+                let idx = (y * 160 + x) * 4;
+                if is_green {
+                    fb.0[idx] = 0x0F;
+                    fb.0[idx + 1] = 0x88;
+                    fb.0[idx + 2] = 0x0F;
+                }
+                fb.0[idx + 3] = 0xFF;
+            }
+        }
+        fb
     }
 
     pub fn set(&mut self, index: usize, color: RGBA) {
@@ -29,6 +53,6 @@ impl Framebuffer {
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        &self.0
+        self.0.as_slice()
     }
 }

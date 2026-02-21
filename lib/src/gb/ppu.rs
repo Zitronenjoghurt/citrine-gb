@@ -6,12 +6,14 @@ use crate::gb::ppu::stat::STAT;
 use crate::{ReadMemory, WriteMemory};
 
 mod color;
-mod framebuffer;
+pub mod framebuffer;
 mod lcdc;
 mod mode;
 mod rendering;
 mod stat;
 
+pub const SCREEN_WIDTH: usize = 160;
+pub const SCREEN_HEIGHT: usize = 144;
 const VRAM_BANK_SIZE: usize = 0x2000; // 8KiB
 const OAM_SIZE: usize = 160; // Bytes
 
@@ -108,6 +110,10 @@ impl Ppu {
             0xFF69 | 0xFF6B => self.cgb && self.stat.ppu_mode == PpuMode::Drawing,
             _ => false,
         }
+    }
+
+    pub fn frame(&self) -> &Framebuffer {
+        &self.frame
     }
 }
 

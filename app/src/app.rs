@@ -1,9 +1,12 @@
+use crate::emulator::Emulator;
 use eframe::{Frame, Storage};
-use egui::{CentralPanel, Context, FontDefinitions, Window};
+use egui::{CentralPanel, Context, FontDefinitions, TopBottomPanel};
 use egui_notify::Toasts;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
+    #[serde(skip, default)]
+    emulator: Emulator,
     #[serde(skip, default)]
     toasts: Toasts,
 }
@@ -25,12 +28,27 @@ impl Citrine {
 }
 
 impl eframe::App for Citrine {
-    fn update(&mut self, ctx: &Context, frame: &mut Frame) {
-        Window::new("Hello World!").show(ctx, |ui| ui.label("Hello World!"));
-        CentralPanel::default().show(ctx, |ui| ui.label("Hello World!"));
+    fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
+        self.emulator.update(ctx);
+        TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
+        CentralPanel::default().show(ctx, |ui| self.central_panel(ui));
     }
 
     fn save(&mut self, storage: &mut dyn Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
+    }
+}
+
+// Rendering
+impl Citrine {
+    fn top_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Citrine");
+            ui.separator();
+        });
+    }
+
+    fn central_panel(&mut self, ui: &mut egui::Ui) {
+        self.emulator.ui(ui);
     }
 }
