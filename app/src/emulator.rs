@@ -1,7 +1,7 @@
 use citrine_gb::gb::GameBoy;
 
 pub struct Emulator {
-    gb: GameBoy,
+    pub gb: GameBoy,
     texture: Option<egui::TextureHandle>,
     running: bool,
     last_frame: Option<web_time::Instant>,
@@ -13,7 +13,7 @@ impl Default for Emulator {
         Self {
             gb: GameBoy::new_dmg(0),
             texture: None,
-            running: false,
+            running: true,
             last_frame: None,
             last_frame_secs: 0.0,
         }

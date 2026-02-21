@@ -1,13 +1,16 @@
-use crate::app::file_picker::{FileIntent, FilePicker};
-use crate::app::panels::Panels;
+use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
+use crate::app::panels::{PanelKind, Panels};
+use crate::app::widgets::panel_menu::PanelMenu;
 use crate::emulator::Emulator;
 use crate::icons;
+use citrine_gb::rom::Rom;
 use eframe::{Frame, Storage};
-use egui::{CentralPanel, Context, FontDefinitions, TopBottomPanel};
+use egui::{CentralPanel, Context, FontDefinitions, SidePanel, TopBottomPanel, Widget};
 use egui_notify::Toasts;
 
 mod file_picker;
 mod panels;
+mod widgets;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
@@ -29,6 +32,7 @@ impl Citrine {
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
             .unwrap_or_default();
         app.file_picker.set_drop_intent(FileIntent::LoadRom);
+        app.panels.right = Some(PanelKind::Debug);
         app
     }
 
@@ -42,11 +46,22 @@ impl Citrine {
 impl eframe::App for Citrine {
     fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
         if let Some(result) = self.file_picker.poll(ctx) {
-            // ToDo: Handle result
+            match result.intent {
+                FileIntent::LoadRom => self.handle_load_rom(result),
+            }
         }
 
         self.emulator.update(ctx);
         TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
+
+        if let Some(panel) = self.panels.left {
+            SidePanel::left("left_panel").show(ctx, |ui| panel.ui(ui, self));
+        }
+
+        if let Some(panel) = self.panels.right {
+            SidePanel::right("right_panel").show(ctx, |ui| panel.ui(ui, self));
+        }
+
         CentralPanel::default().show(ctx, |ui| self.central_panel(ui));
 
         self.file_picker.show_drop_overlay(ctx);
@@ -72,6 +87,9 @@ impl Citrine {
                 }
             });
 
+            PanelMenu::new(icons::ALIGN_LEFT_SIMPLE, &mut self.panels.left).ui(ui);
+            PanelMenu::new(icons::ALIGN_RIGHT_SIMPLE, &mut self.panels.right).ui(ui);
+
             ui.separator();
 
             ui.label(format!("{:.02}ms", self.emulator.last_frame_secs * 1000.0))
@@ -82,5 +100,15 @@ impl Citrine {
         ui.vertical_centered(|ui| {
             self.emulator.ui(ui);
         });
+    }
+}
+
+// File handling
+impl Citrine {
+    fn handle_load_rom(&mut self, fr: FileResult) {
+        let rom = Rom::new(&fr.data);
+        if let Err(err) = self.emulator.gb.load_rom(&rom) {
+            self.toasts.error(format!("Failed to load ROM: {}", err));
+        }
     }
 }
