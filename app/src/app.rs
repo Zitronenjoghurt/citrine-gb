@@ -13,6 +13,7 @@ mod file_picker;
 mod panels;
 mod ui_state;
 mod widgets;
+mod windows;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
@@ -71,6 +72,9 @@ impl eframe::App for Citrine {
 
         CentralPanel::default().show(ctx, |ui| self.central_panel(ui));
 
+        let active_windows = self.ui.windows.active;
+        active_windows.show_all(ctx, self);
+
         self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
     }
@@ -93,6 +97,8 @@ impl Citrine {
                     ui.close_kind(egui::UiKind::Menu);
                 }
             });
+
+            self.ui.windows.active.toggle_menu(ui);
 
             PanelMenu::new(icons::ALIGN_LEFT_SIMPLE, &mut self.ui.panels.left).ui(ui);
             PanelMenu::new(icons::ALIGN_RIGHT_SIMPLE, &mut self.ui.panels.right).ui(ui);

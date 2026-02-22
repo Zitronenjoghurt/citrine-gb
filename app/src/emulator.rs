@@ -3,7 +3,7 @@ use citrine_gb::gb::GameBoy;
 pub struct Emulator {
     pub gb: GameBoy,
     texture: Option<egui::TextureHandle>,
-    running: bool,
+    pub running: bool,
     last_frame: Option<web_time::Instant>,
     pub last_frame_secs: f64,
 }
@@ -59,6 +59,11 @@ impl Emulator {
             ui.image(egui::load::SizedTexture::new(tex.id(), size));
             ui.ctx().request_repaint();
         }
+    }
+
+    pub fn force_step(&mut self, ctx: &egui::Context) {
+        self.gb.step();
+        self.update_texture(ctx);
     }
 
     fn update_texture(&mut self, ctx: &egui::Context) {

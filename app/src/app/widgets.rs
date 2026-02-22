@@ -1,3 +1,4 @@
 pub mod panel_menu;
 pub mod registers;
-mod toggle_button;
+pub mod time_control;
+pub mod toggle_button;
