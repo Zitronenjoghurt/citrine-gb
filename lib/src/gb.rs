@@ -9,8 +9,8 @@ pub mod cpu;
 mod dma;
 pub mod ic;
 mod memory;
-mod ppu;
-mod timer;
+pub mod ppu;
+pub mod timer;
 
 // ToDo: CGB specific registers like speed mode
 pub struct GameBoy {

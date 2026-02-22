@@ -1,5 +1,6 @@
 use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
-use crate::app::panels::{PanelKind, Panels};
+use crate::app::panels::PanelKind;
+use crate::app::ui_state::UiState;
 use crate::app::widgets::panel_menu::PanelMenu;
 use crate::emulator::Emulator;
 use crate::icons;
@@ -10,11 +11,12 @@ use egui_notify::Toasts;
 
 mod file_picker;
 mod panels;
+mod ui_state;
 mod widgets;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
-    pub panels: Panels,
+    pub ui: UiState,
     #[serde(skip, default)]
     pub emulator: Emulator,
     #[serde(skip, default)]
@@ -37,7 +39,7 @@ impl Citrine {
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
             .unwrap_or_default();
         app.file_picker.set_drop_intent(FileIntent::LoadRom);
-        app.panels.right = Some(PanelKind::Registers);
+        app.ui.panels.right = Some(PanelKind::Registers);
         app
     }
 
@@ -59,11 +61,11 @@ impl eframe::App for Citrine {
         self.emulator.update(ctx);
         TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
 
-        if let Some(panel) = self.panels.left {
+        if let Some(panel) = self.ui.panels.left {
             SidePanel::left("left_panel").show(ctx, |ui| panel.ui(ui, self));
         }
 
-        if let Some(panel) = self.panels.right {
+        if let Some(panel) = self.ui.panels.right {
             SidePanel::right("right_panel").show(ctx, |ui| panel.ui(ui, self));
         }
 
@@ -92,8 +94,8 @@ impl Citrine {
                 }
             });
 
-            PanelMenu::new(icons::ALIGN_LEFT_SIMPLE, &mut self.panels.left).ui(ui);
-            PanelMenu::new(icons::ALIGN_RIGHT_SIMPLE, &mut self.panels.right).ui(ui);
+            PanelMenu::new(icons::ALIGN_LEFT_SIMPLE, &mut self.ui.panels.left).ui(ui);
+            PanelMenu::new(icons::ALIGN_RIGHT_SIMPLE, &mut self.ui.panels.right).ui(ui);
 
             ui.separator();
 

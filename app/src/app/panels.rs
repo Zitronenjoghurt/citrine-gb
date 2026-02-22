@@ -1,7 +1,6 @@
-use egui::Ui;
+use crate::app::widgets::registers::Registers;
+use egui::{Ui, Widget};
 use strum_macros::EnumIter;
-
-mod registers;
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Panels {
@@ -23,7 +22,7 @@ impl PanelKind {
 
     pub fn ui(&self, ui: &mut Ui, app: &mut crate::Citrine) {
         match self {
-            Self::Registers => registers::debug(ui, app),
-        }
+            Self::Registers => Registers::new(&app.emulator.gb, &mut app.ui.registers).ui(ui),
+        };
     }
 }
