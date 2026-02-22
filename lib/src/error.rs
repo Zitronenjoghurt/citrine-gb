@@ -4,6 +4,8 @@ pub type GbResult<T> = Result<T, GbError>;
 pub enum GbError {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
+    #[error("Missing ROM cartridge type")]
+    MissingRomCartridgeType,
     #[error("ROM too small")]
     RomTooSmall,
     #[error("ROM size exceeded expected rom bank count")]
