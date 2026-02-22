@@ -1,7 +1,7 @@
 use egui::Ui;
 use strum_macros::EnumIter;
 
-mod debug;
+mod registers;
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Panels {
@@ -11,19 +11,19 @@ pub struct Panels {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize, EnumIter)]
 pub enum PanelKind {
-    Debug,
+    Registers,
 }
 
 impl PanelKind {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Debug => "Debug",
+            Self::Registers => "Registers",
         }
     }
 
     pub fn ui(&self, ui: &mut Ui, app: &mut crate::Citrine) {
         match self {
-            Self::Debug => debug::debug(ui, app),
+            Self::Registers => registers::debug(ui, app),
         }
     }
 }

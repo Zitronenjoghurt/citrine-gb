@@ -23,24 +23,24 @@ const OAM_SIZE: usize = 160; // Bytes
 pub struct Ppu {
     frame: Framebuffer,
     model: GbModel,
-    dot_counter: usize,
+    pub dot_counter: usize,
     // Memory
     /// Video RAM (2 banks on CGB)
     vram: [[u8; VRAM_BANK_SIZE]; 2],
     /// Sprite attribute table
     oam: [u8; OAM_SIZE],
     /// LCD control
-    lcdc: LCDC,
+    pub lcdc: LCDC,
     /// LCD status
-    stat: STAT,
+    pub stat: STAT,
     /// BG scroll Y
-    scy: u8,
+    pub scy: u8,
     /// BG scroll X
-    scx: u8,
+    pub scx: u8,
     /// Current scanline
-    ly: u8,
+    pub ly: u8,
     /// Scanline compare
-    lyc: u8,
+    pub lyc: u8,
     /// BG palette (DMG)
     bgp: u8,
     /// OBJ palette 0 (DMG)
@@ -121,7 +121,10 @@ impl Ppu {
     }
 
     pub fn cpu_conflicts(&self, addr: u16) -> bool {
-        if self.stat.ppu_mode == PpuMode::HBlank || self.stat.ppu_mode == PpuMode::VBlank {
+        if !self.lcdc.lcd_enabled
+            || self.stat.ppu_mode == PpuMode::HBlank
+            || self.stat.ppu_mode == PpuMode::VBlank
+        {
             return false;
         }
 

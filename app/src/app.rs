@@ -37,7 +37,7 @@ impl Citrine {
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
             .unwrap_or_default();
         app.file_picker.set_drop_intent(FileIntent::LoadRom);
-        app.panels.right = Some(PanelKind::Debug);
+        app.panels.right = Some(PanelKind::Registers);
         app
     }
 
