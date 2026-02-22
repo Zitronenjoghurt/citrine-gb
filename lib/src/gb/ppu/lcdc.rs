@@ -22,27 +22,45 @@ pub struct LCDC {
 }
 
 impl LCDC {
-    pub fn get_bg_tilemap_address(&self) -> u16 {
-        if self.bg_tilemap { 0x9C00 } else { 0x9800 }
-    }
-
-    pub fn get_tile_address(&self, tile_x: u16, tile_y: u16) -> u16 {
-        self.get_bg_tilemap_address() + tile_x + tile_y * 32
-    }
-
-    pub fn get_tile_line_data_address(&self, tile_id: u8, y_pos: u16) -> u16 {
-        let tile_line = (y_pos % 8) * 2;
-
-        let tile_data_offset = if self.bg_window_tiles {
-            tile_id as u16 * 16
-        } else {
-            (((tile_id as i8) as i16) + 128) as u16 * 16
-        };
-
+    // ToDo: x-flip, y-flip
+    pub fn bg_win_tile_line_address(&self, tile_id: u8, y: u8) -> u16 {
         if self.bg_window_tiles {
-            0x8000 + tile_data_offset + tile_line
+            self.obj_tile_line_address(tile_id, y)
         } else {
-            0x8800 + tile_data_offset + tile_line
+            // Line within the tile (0-7), same as before
+            let tile_line = (y % 8) as u16;
+
+            // tile_id is reinterpreted as a signed byte (-128 to 127)
+            // so tile 0x00 = 0, 0x7F = 127, 0x80 = -128, 0xFF = -1
+            // multiplied by 16 (tile size) to get the byte offset from 0x9000
+            let offset = (tile_id as i8) as i32 * 16;
+
+            // 0x9000 is the base address for this addressing mode
+            // tile ID 0  => 0x9000 + 0 = 0x9000
+            // tile ID 127 => 0x9000 + 2032 = 0x97F0 (top of range)
+            // tile ID -1 => 0x9000 - 16 = 0x8FF0
+            // tile ID -128 => 0x9000 - 2048 = 0x8800 (bottom of range)
+            (0x9000_i32 + offset) as u16 + tile_line * 2
+        }
+    }
+
+    // ToDo: x-flip, y-flip
+    pub fn obj_tile_line_address(&self, tile_id: u8, y: u8) -> u16 {
+        // Line within the tile => tiles are 8x8
+        let tile_line = (y % 8) as u16;
+
+        // At 2 bytes per row (2 bit per pixel) one tile is 16 bytes long
+        // To get the address of the line within a tile we have to skip tile_line * 2 bytes
+        0x8000 + (tile_id as u16) * 16 + tile_line * 2
+    }
+
+    pub fn bg_tile_id_address(&self, tile_x: u8, tile_y: u8) -> u16 {
+        // Each tilemap is 32x32 tiles (5 bit), there are 2 addressing modes
+        let index = (tile_x & 0b11111) as u16 + ((tile_y & 0b11111) as u16) * 32;
+        if !self.bg_tilemap {
+            0x9800 + index
+        } else {
+            0x9C00 + index
         }
     }
 }

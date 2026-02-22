@@ -26,3 +26,9 @@ impl RGBA {
         self.0[3]
     }
 }
+
+impl From<[u8; 4]> for RGBA {
+    fn from(arr: [u8; 4]) -> Self {
+        Self(arr)
+    }
+}

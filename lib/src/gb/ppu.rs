@@ -3,15 +3,17 @@ use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::gb::ppu::lcdc::LCDC;
 use crate::gb::ppu::mode::PpuMode;
 use crate::gb::ppu::stat::STAT;
+use crate::gb::ppu::tile::TileLine;
 use crate::gb::GbModel;
 use crate::{ReadMemory, WriteMemory};
 
 mod color;
+mod dot;
 pub mod framebuffer;
 mod lcdc;
 mod mode;
-mod rendering;
 mod stat;
+mod tile;
 
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
@@ -136,6 +138,53 @@ impl Ppu {
 
     pub fn frame(&self) -> &Framebuffer {
         &self.frame
+    }
+}
+
+// Memory access helpers
+impl Ppu {
+    fn get_bg_tile_coords(&self, x: u8, y: u8) -> (u8, u8) {
+        let tile_x = x.wrapping_add(self.scx) / 8;
+        let tile_y = y.wrapping_add(self.scy) / 8;
+        (tile_x, tile_y)
+    }
+
+    fn get_bg_tile_id(&self, tile_x: u8, tile_y: u8) -> u8 {
+        let address = self.lcdc.bg_tile_id_address(tile_x, tile_y);
+        self.read_naive(address)
+    }
+
+    fn get_bg_win_tile_line(&self, tile_id: u8, y: u8) -> TileLine {
+        let address = self.lcdc.bg_win_tile_line_address(tile_id, y);
+        TileLine {
+            low: self.read_naive(address),
+            high: self.read_naive(address + 1),
+        }
+    }
+
+    fn get_obj_tile_line(&self, tile_id: u8, y: u8) -> TileLine {
+        let address = self.lcdc.obj_tile_line_address(tile_id, y);
+        TileLine {
+            low: self.read_naive(address),
+            high: self.read_naive(address + 1),
+        }
+    }
+
+    fn get_current_bg_color_index(&self, x: u8) -> u8 {
+        let (tile_x, tile_y) = self.get_bg_tile_coords(x, self.ly);
+        let tile_id = self.get_bg_tile_id(tile_x, tile_y);
+        let tile_line = self.get_bg_win_tile_line(tile_id, self.ly.wrapping_add(self.scy));
+        tile_line.color_index(x.wrapping_add(self.scx))
+    }
+
+    fn apply_bg_palette(&self, color_index: u8) -> u8 {
+        (self.bgp >> (color_index * 2)) & 0x03
+    }
+
+    // ToDo: CGB color palette
+    fn get_current_bg_color(&self, x: u8) -> u8 {
+        let color_index = self.get_current_bg_color_index(x);
+        self.apply_bg_palette(color_index)
     }
 }
 

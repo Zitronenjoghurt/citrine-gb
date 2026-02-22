@@ -1,6 +1,16 @@
 use crate::gb::ic::{ICInterface, Interrupt};
+use crate::gb::ppu::color::RGBA;
 use crate::gb::ppu::mode::PpuMode;
 use crate::gb::ppu::Ppu;
+
+/// Using the Game Boy Pocket color scheme
+/// https://en.wikipedia.org/wiki/List_of_video_game_console_palettes
+const COLOR_SCHEME: [[u8; 4]; 4] = [
+    [0xC5, 0xCA, 0xA4, 0xFF],
+    [0x8C, 0x92, 0x6B, 0xFF],
+    [0x4A, 0x51, 0x38, 0xFF],
+    [0x18, 0x18, 0x18, 0xFF],
+];
 
 impl Ppu {
     pub fn dot(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
@@ -17,6 +27,15 @@ impl Ppu {
             PpuMode::Drawing => {
                 // ToDo: Account for Mode 3 penalties => https://gbdev.io/pandocs/Rendering.html#mode-3-length
                 if self.dot_counter == 80 + 172 {
+                    if self.lcdc.bg_window_enable {
+                        for x in 0..160_u8 {
+                            let color_index = self.get_current_bg_color_index(x);
+                            let shade = self.apply_bg_palette(color_index);
+                            let fb_index = self.ly as usize * 160 + x as usize;
+                            self.frame
+                                .set(fb_index, RGBA::from(COLOR_SCHEME[shade as usize]));
+                        }
+                    }
                     self.stat.ppu_mode = PpuMode::HBlank;
                     if self.stat.mode0_interrupt {
                         ic.request_interrupt(Interrupt::Lcd);
