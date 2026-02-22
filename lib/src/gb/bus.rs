@@ -114,6 +114,10 @@ impl ICInterface for CpuBus<'_> {
     fn take_interrupt(&mut self) -> Option<crate::gb::ic::Interrupt> {
         self.ic.take_interrupt()
     }
+
+    fn has_pending_interrupt(&self) -> bool {
+        self.ic.has_pending_interrupt()
+    }
 }
 
 #[cfg(feature = "debug")]

@@ -24,6 +24,9 @@ pub trait ICInterface {
     fn take_interrupt(&mut self) -> Option<Interrupt> {
         None
     }
+    fn has_pending_interrupt(&self) -> bool {
+        false
+    }
 }
 
 impl ICInterface for InterruptController {
@@ -39,6 +42,12 @@ impl ICInterface for InterruptController {
             }
         }
         None
+    }
+
+    fn has_pending_interrupt(&self) -> bool {
+        let enable: u8 = self.enable.into();
+        let flags: u8 = self.flag.into();
+        (enable & flags & 0x1F) != 0
     }
 }
 
