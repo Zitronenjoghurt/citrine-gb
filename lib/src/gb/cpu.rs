@@ -27,6 +27,7 @@ pub struct Cpu {
     pub ir: u8,
     pub ime: bool,
     pub ime_next: bool,
+    pub halted: bool,
 }
 
 impl Cpu {
@@ -63,6 +64,7 @@ impl Cpu {
             ir: 0x00,
             ime: false,
             ime_next: false,
+            halted: false,
         }
     }
 
@@ -86,6 +88,7 @@ impl Cpu {
             ir: 0x00,
             ime: false,
             ime_next: false,
+            halted: false,
         }
     }
 
@@ -95,6 +98,15 @@ impl Cpu {
             if bus.break_at(self.pc) {
                 return;
             }
+        }
+
+        if self.halted {
+            bus.cycle();
+            if bus.has_pending_interrupt() {
+                // ToDo: Halt bug => https://gbdev.io/pandocs/halt.html#halt-bug
+                self.halted = false;
+            }
+            return;
         }
 
         self.interrupt_handler(bus);
@@ -122,8 +134,7 @@ impl Cpu {
             Instruction::JR_n => self.jr_n(bus),
             Instruction::JR_c_n(cond) => self.jr_c_n(bus, cond),
             Instruction::STOP => {}
-            // ToDo: Revisit HALT once interrupts are implemented => https://gbdev.io/pandocs/halt.html#halt
-            Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => {}
+            Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => self.halted = true,
             Instruction::LD_r_r(dest, src) => self.ld_r_r(bus, dest, src),
             Instruction::ADD_r(r8) => self.add_r(bus, r8),
             Instruction::ADC_r(r8) => self.adc_r(bus, r8),
