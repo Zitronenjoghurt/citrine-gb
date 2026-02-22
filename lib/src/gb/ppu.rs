@@ -3,6 +3,7 @@ use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::gb::ppu::lcdc::LCDC;
 use crate::gb::ppu::mode::PpuMode;
 use crate::gb::ppu::stat::STAT;
+use crate::gb::GbModel;
 use crate::{ReadMemory, WriteMemory};
 
 mod color;
@@ -19,7 +20,7 @@ const OAM_SIZE: usize = 160; // Bytes
 
 pub struct Ppu {
     frame: Framebuffer,
-    cgb: bool,
+    model: GbModel,
     dot_counter: usize,
     // Memory
     /// Video RAM (2 banks on CGB)
@@ -73,55 +74,10 @@ pub struct Ppu {
 }
 
 impl Ppu {
-    pub fn new(cgb: bool) -> Self {
-        if cgb {
-            Self::default()
-        } else {
-            Self {
-                cgb: false,
-                ..Default::default()
-            }
-        }
-    }
-
-    pub fn cycle(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
-        if self.cgb {
-            self.dot(ic, oam_dma);
-            self.dot(ic, oam_dma);
-        } else {
-            self.dot(ic, oam_dma);
-            self.dot(ic, oam_dma);
-            self.dot(ic, oam_dma);
-            self.dot(ic, oam_dma);
-        }
-    }
-
-    pub fn cpu_conflicts(&self, addr: u16) -> bool {
-        if self.stat.ppu_mode == PpuMode::HBlank || self.stat.ppu_mode == PpuMode::VBlank {
-            return false;
-        }
-
-        match addr {
-            // VRAM blocked during mode 3
-            0x8000..=0x9FFF => self.stat.ppu_mode == PpuMode::Drawing,
-            // OAM blocked during mode 2 and 3
-            0xFE00..=0xFE9F => matches!(self.stat.ppu_mode, PpuMode::OamScan | PpuMode::Drawing),
-            // CGB palettes blocked during mode 3
-            0xFF69 | 0xFF6B => self.cgb && self.stat.ppu_mode == PpuMode::Drawing,
-            _ => false,
-        }
-    }
-
-    pub fn frame(&self) -> &Framebuffer {
-        &self.frame
-    }
-}
-
-impl Default for Ppu {
-    fn default() -> Self {
+    pub fn new(model: GbModel) -> Self {
         Self {
             frame: Framebuffer::new(),
-            cgb: true,
+            model,
             dot_counter: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
             oam: [0x00; OAM_SIZE],
@@ -149,13 +105,45 @@ impl Default for Ppu {
             hdma5: 0xFF,
         }
     }
+
+    pub fn cycle(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
+        if self.model.is_cgb() {
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
+        } else {
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
+            self.dot(ic, oam_dma);
+        }
+    }
+
+    pub fn cpu_conflicts(&self, addr: u16) -> bool {
+        if self.stat.ppu_mode == PpuMode::HBlank || self.stat.ppu_mode == PpuMode::VBlank {
+            return false;
+        }
+
+        match addr {
+            // VRAM blocked during mode 3
+            0x8000..=0x9FFF => self.stat.ppu_mode == PpuMode::Drawing,
+            // OAM blocked during mode 2 and 3
+            0xFE00..=0xFE9F => matches!(self.stat.ppu_mode, PpuMode::OamScan | PpuMode::Drawing),
+            // CGB palettes blocked during mode 3
+            0xFF69 | 0xFF6B => self.model.is_cgb() && self.stat.ppu_mode == PpuMode::Drawing,
+            _ => false,
+        }
+    }
+
+    pub fn frame(&self) -> &Framebuffer {
+        &self.frame
+    }
 }
 
 impl ReadMemory for Ppu {
     fn read_naive(&self, addr: u16) -> u8 {
         match addr {
             0x8000..=0x9FFF => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.vram[(self.vbk & 1) as usize][(addr - 0x8000) as usize]
                 } else {
                     self.vram[0][(addr - 0x8000) as usize]
@@ -174,77 +162,77 @@ impl ReadMemory for Ppu {
             0xFF4A => self.wy,
             0xFF4B => self.wx,
             0xFF4F => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.vbk | 0xFE // only bit 0 readable
                 } else {
                     0xFF
                 }
             }
             0xFF51 => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.hdma1
                 } else {
                     0xFF
                 }
             }
             0xFF52 => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.hdma2
                 } else {
                     0xFF
                 }
             }
             0xFF53 => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.hdma3
                 } else {
                     0xFF
                 }
             }
             0xFF54 => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.hdma4
                 } else {
                     0xFF
                 }
             }
             0xFF55 => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.hdma5
                 } else {
                     0xFF
                 }
             }
             0xFF68 => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.bcps
                 } else {
                     0xFF
                 }
             }
             0xFF69 => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.bg_palette_ram[(self.bcps & 0x3F) as usize]
                 } else {
                     0xFF
                 }
             }
             0xFF6A => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.ocps
                 } else {
                     0xFF
                 }
             }
             0xFF6B => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.obj_palette_ram[(self.ocps & 0x3F) as usize]
                 } else {
                     0xFF
                 }
             }
             0xFF6C => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.opri
                 } else {
                     0xFF
@@ -259,7 +247,7 @@ impl WriteMemory for Ppu {
     fn write_naive(&mut self, addr: u16, value: u8) {
         match addr {
             0x8000..=0x9FFF => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.vram[(self.vbk & 1) as usize][(addr - 0x8000) as usize] = value
                 } else {
                     self.vram[0][(addr - 0x8000) as usize] = value;
@@ -278,7 +266,7 @@ impl WriteMemory for Ppu {
             0xFF4A => self.wy = value,
             0xFF4B => self.wx = value,
             0xFF4F => {
-                if self.cgb {
+                if self.model.is_cgb() {
                     self.vbk = value & 0x01
                 } else {
                     self.vbk = value

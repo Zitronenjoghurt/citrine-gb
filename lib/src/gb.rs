@@ -12,8 +12,6 @@ mod memory;
 mod ppu;
 mod timer;
 
-const FRAME_CYCLES: u32 = 17556;
-
 // ToDo: CGB specific registers like speed mode
 pub struct GameBoy {
     pub cpu: cpu::Cpu,
@@ -25,7 +23,7 @@ pub struct GameBoy {
     pub memory: memory::Memory,
     pub timer: timer::Timer,
     pub ppu: ppu::Ppu,
-    pub cgb: bool,
+    pub model: GbModel,
     pub frame_cycles: u32,
 }
 
@@ -36,12 +34,12 @@ impl GameBoy {
             cartridge: cartridge::Cartridge::new(),
             #[cfg(feature = "debug")]
             debugger: crate::debug::Debugger::new(),
-            dma: dma::DmaController::new(false),
+            dma: dma::DmaController::new(GbModel::Dmg),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
             timer: timer::Timer::new(),
-            ppu: ppu::Ppu::new(false),
-            cgb: false,
+            ppu: ppu::Ppu::new(GbModel::Dmg),
+            model: GbModel::Dmg,
             frame_cycles: 0,
         }
     }
@@ -52,12 +50,12 @@ impl GameBoy {
             cartridge: cartridge::Cartridge::new(),
             #[cfg(feature = "debug")]
             debugger: crate::debug::Debugger::new(),
-            dma: dma::DmaController::new(true),
+            dma: dma::DmaController::new(GbModel::Cgb),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
             timer: timer::Timer::new(),
-            ppu: ppu::Ppu::new(true),
-            cgb: true,
+            ppu: ppu::Ppu::new(GbModel::Cgb),
+            model: GbModel::Cgb,
             frame_cycles: 0,
         }
     }
@@ -89,13 +87,36 @@ impl GameBoy {
 
     // ToDo: Rely on PPU frame ready rather than frame cycles
     pub fn run_frame(&mut self) {
-        while self.frame_cycles < FRAME_CYCLES {
+        while self.frame_cycles < self.model.frame_cycles() {
             self.step();
         }
-        self.frame_cycles -= FRAME_CYCLES;
+        self.frame_cycles -= self.model.frame_cycles();
     }
 
     pub fn frame(&self) -> &Framebuffer {
         self.ppu.frame()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GbModel {
+    Dmg,
+    Cgb,
+}
+
+impl GbModel {
+    pub fn frame_cycles(&self) -> u32 {
+        match self {
+            GbModel::Dmg => 17556,
+            GbModel::Cgb => 35112,
+        }
+    }
+
+    pub fn is_dmg(&self) -> bool {
+        matches!(self, GbModel::Dmg)
+    }
+
+    pub fn is_cgb(&self) -> bool {
+        matches!(self, GbModel::Cgb)
     }
 }

@@ -25,7 +25,12 @@ pub struct Citrine {
 
 impl Citrine {
     pub fn new(cc: &eframe::CreationContext) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        cc.egui_ctx.set_pixels_per_point(3.0);
+
+        #[cfg(not(target_arch = "wasm32"))]
         cc.egui_ctx.set_pixels_per_point(1.5);
+
         Self::setup_fonts(&cc.egui_ctx);
         let mut app = cc
             .storage

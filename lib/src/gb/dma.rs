@@ -1,27 +1,20 @@
+use crate::gb::GbModel;
+
 #[derive(Debug)]
 pub struct DmaController {
     pub active: bool,
     pub source: u8,
     pub progress: u8,
-    pub cgb: bool,
+    pub model: GbModel,
 }
 
 impl DmaController {
-    pub fn new(cgb: bool) -> Self {
-        if cgb {
-            Self {
-                active: false,
-                source: 0x00,
-                progress: 0,
-                cgb: true,
-            }
-        } else {
-            Self {
-                active: false,
-                source: 0xFF,
-                progress: 0,
-                cgb: false,
-            }
+    pub fn new(model: GbModel) -> Self {
+        Self {
+            active: false,
+            source: if model == GbModel::Cgb { 0x00 } else { 0xFF },
+            progress: 0,
+            model,
         }
     }
 
@@ -64,7 +57,7 @@ impl DmaController {
             return true;
         };
 
-        if !self.cgb {
+        if self.model.is_dmg() {
             return true;
         };
 
