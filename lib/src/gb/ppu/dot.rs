@@ -27,15 +27,7 @@ impl Ppu {
             PpuMode::Drawing => {
                 // ToDo: Account for Mode 3 penalties => https://gbdev.io/pandocs/Rendering.html#mode-3-length
                 if self.dot_counter == 80 + 172 {
-                    if self.lcdc.bg_window_enable {
-                        for x in 0..160_u8 {
-                            let color_index = self.get_current_bg_color_index(x);
-                            let shade = self.apply_bg_palette(color_index);
-                            let fb_index = self.ly as usize * 160 + x as usize;
-                            self.frame
-                                .set(fb_index, RGBA::from(COLOR_SCHEME[shade as usize]));
-                        }
-                    }
+                    self.render_scanline();
                     self.stat.ppu_mode = PpuMode::HBlank;
                     if self.stat.mode0_interrupt {
                         ic.request_interrupt(Interrupt::Lcd);
@@ -72,6 +64,7 @@ impl Ppu {
 
                     if self.ly == 154 {
                         self.ly = 0;
+                        self.wl = 0;
                         self.check_lyc(ic);
                         self.stat.ppu_mode = PpuMode::OamScan;
                     }
@@ -90,6 +83,30 @@ impl Ppu {
 
         if !prev && self.stat.lyc_equals_ly && self.stat.lyc_interrupt {
             ic.request_interrupt(Interrupt::Lcd)
+        }
+    }
+
+    fn render_scanline(&mut self) {
+        if self.lcdc.do_render_bg() {
+            for x in 0..160_u8 {
+                let color_index = self.get_current_bg_color_index(x);
+                let shade = self.apply_bg_palette(color_index);
+                let fb_index = self.ly as usize * 160 + x as usize;
+                self.frame
+                    .set(fb_index, RGBA::from(COLOR_SCHEME[shade as usize]));
+            }
+        }
+
+        let wx_start = self.wx.saturating_sub(7);
+        if self.lcdc.do_render_window() && self.ly >= self.wy && wx_start < 160 {
+            for x in wx_start..160_u8 {
+                let color_index = self.get_current_window_color_index(x);
+                let shade = self.apply_bg_palette(color_index);
+                let fb_index = self.ly as usize * 160 + x as usize;
+                self.frame
+                    .set(fb_index, RGBA::from(COLOR_SCHEME[shade as usize]));
+            }
+            self.wl = self.wl.wrapping_add(1);
         }
     }
 }

@@ -1,7 +1,6 @@
 use crate::gb::ic::ICInterface;
 use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::gb::ppu::lcdc::LCDC;
-use crate::gb::ppu::mode::PpuMode;
 use crate::gb::ppu::stat::STAT;
 use crate::gb::ppu::tile::TileLine;
 use crate::gb::GbModel;
@@ -24,6 +23,8 @@ pub struct Ppu {
     frame: Framebuffer,
     model: GbModel,
     pub dot_counter: usize,
+    /// Window line => internal register
+    pub wl: u8,
     // Memory
     /// Video RAM (2 banks on CGB)
     vram: [[u8; VRAM_BANK_SIZE]; 2],
@@ -48,9 +49,9 @@ pub struct Ppu {
     /// OBJ palette 1 (DMG)
     obp1: u8,
     /// Window Y position
-    wy: u8,
+    pub wy: u8,
     /// Window X position (+7)
-    wx: u8,
+    pub wx: u8,
     /// VRAM bank select (CGB)
     vbk: u8,
     /// BG palette index (CGB)
@@ -81,13 +82,14 @@ impl Ppu {
             frame: Framebuffer::new(),
             model,
             dot_counter: 0,
+            wl: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
             oam: [0x00; OAM_SIZE],
             lcdc: 0x91.into(),
             stat: 0x85.into(),
             scy: 0x00,
             scx: 0x00,
-            ly: 0x00,
+            ly: 0x91,
             lyc: 0x00,
             bgp: 0xFC,
             obp0: 0x00,
@@ -121,22 +123,26 @@ impl Ppu {
     }
 
     pub fn cpu_conflicts(&self, addr: u16) -> bool {
-        if !self.lcdc.lcd_enabled
-            || self.stat.ppu_mode == PpuMode::HBlank
-            || self.stat.ppu_mode == PpuMode::VBlank
-        {
-            return false;
-        }
+        false
 
-        match addr {
-            // VRAM blocked during mode 3
-            0x8000..=0x9FFF => self.stat.ppu_mode == PpuMode::Drawing,
-            // OAM blocked during mode 2 and 3
-            0xFE00..=0xFE9F => matches!(self.stat.ppu_mode, PpuMode::OamScan | PpuMode::Drawing),
-            // CGB palettes blocked during mode 3
-            0xFF69 | 0xFF6B => self.model.is_cgb() && self.stat.ppu_mode == PpuMode::Drawing,
-            _ => false,
-        }
+        // ToDo: Improve accuracy, test viability?? => currently causing conflicts where it shouldn't
+        // => run cpu_instrs test => part of the text is missing
+        //if !self.lcdc.lcd_enabled
+        //    || self.stat.ppu_mode == PpuMode::HBlank
+        //    || self.stat.ppu_mode == PpuMode::VBlank
+        //{
+        //    return false;
+        //}
+
+        //match addr {
+        //    // VRAM blocked during mode 3
+        //    0x8000..=0x9FFF => self.stat.ppu_mode == PpuMode::Drawing,
+        //    // OAM blocked during mode 2 and 3
+        //    0xFE00..=0xFE9F => matches!(self.stat.ppu_mode, PpuMode::OamScan | PpuMode::Drawing),
+        //    // CGB palettes blocked during mode 3
+        //    0xFF69 | 0xFF6B => self.model.is_cgb() && self.stat.ppu_mode == PpuMode::Drawing,
+        //    _ => false,
+        //}
     }
 
     pub fn frame(&self) -> &Framebuffer {
@@ -158,6 +164,17 @@ impl Ppu {
 
     fn get_bg_tile_id(&self, tile_x: u8, tile_y: u8) -> u8 {
         let address = self.lcdc.bg_tile_id_address(tile_x, tile_y);
+        self.read_naive(address)
+    }
+
+    fn get_window_tile_coords(&self, x: u8, y: u8) -> (u8, u8) {
+        let tile_x = x.wrapping_sub(self.wx.wrapping_sub(7)) / 8;
+        let tile_y = y.wrapping_sub(self.wy) / 8;
+        (tile_x, tile_y)
+    }
+
+    fn get_window_tile_id(&self, tile_x: u8, tile_y: u8) -> u8 {
+        let address = self.lcdc.window_tile_id_address(tile_x, tile_y);
         self.read_naive(address)
     }
 
@@ -184,14 +201,18 @@ impl Ppu {
         tile_line.color_index(x.wrapping_add(self.scx))
     }
 
-    fn apply_bg_palette(&self, color_index: u8) -> u8 {
-        (self.bgp >> (color_index * 2)) & 0x03
+    fn get_current_window_color_index(&self, x: u8) -> u8 {
+        let win_x = x.wrapping_sub(self.wx.wrapping_sub(7));
+        let win_y = self.wl;
+        let (tile_x, tile_y) = (win_x / 8, win_y / 8);
+        let tile_id = self.get_window_tile_id(tile_x, tile_y);
+        let tile_line = self.get_bg_win_tile_line(tile_id, win_y);
+        tile_line.color_index(win_x)
     }
 
     // ToDo: CGB color palette
-    fn get_current_bg_color(&self, x: u8) -> u8 {
-        let color_index = self.get_current_bg_color_index(x);
-        self.apply_bg_palette(color_index)
+    fn apply_bg_palette(&self, color_index: u8) -> u8 {
+        (self.bgp >> (color_index * 2)) & 0x03
     }
 }
 
@@ -311,13 +332,16 @@ impl WriteMemory for Ppu {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
             0xFF40 => {
-                let lcd_on = self.lcdc.lcd_enabled;
+                // ToDo: Check accuracy of ppu reset when lcd is turned off => currently causing lines to never be drawn
+                // => run dmg-acid2 test => first line is missing
+                //let lcd_on = self.lcdc.lcd_enabled;
                 self.lcdc = value.into();
-                if lcd_on && !self.lcdc.lcd_enabled {
-                    self.ly = 0;
-                    self.dot_counter = 0;
-                    self.stat.ppu_mode = PpuMode::HBlank;
-                }
+                //if lcd_on && !self.lcdc.lcd_enabled {
+                //    self.ly = 0;
+                //    self.wl = 0;
+                //    self.dot_counter = 0;
+                //    self.stat.ppu_mode = PpuMode::HBlank;
+                //}
             }
             0xFF41 => self.stat = ((u8::from(self.stat) & 0x87) | (value & 0x78)).into(), // bits 0-2 read-only, bit 7 unused
             0xFF42 => self.scy = value,

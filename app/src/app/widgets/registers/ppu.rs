@@ -74,6 +74,18 @@ impl Widget for PpuRegisters<'_> {
                     ui.label(flag_text(self.ppu.lcdc.bg_window_enable));
                     ui.label("BWE");
                     ui.end_row();
+
+                    ui.label("WX");
+                    ui.label(self.ppu.wx.to_string());
+                    ui.label(self.ppu.wy.to_string());
+                    ui.label("WY");
+                    ui.end_row();
+
+                    ui.label("WL");
+                    ui.label(self.ppu.wl.to_string());
+                    ui.label("");
+                    ui.label("");
+                    ui.end_row();
                 });
         })
         .response

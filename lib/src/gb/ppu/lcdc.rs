@@ -63,6 +63,23 @@ impl LCDC {
             0x9C00 + index
         }
     }
+
+    pub fn window_tile_id_address(&self, tile_x: u8, tile_y: u8) -> u16 {
+        let index = (tile_x & 0b11111) as u16 + ((tile_y & 0b11111) as u16) * 32;
+        if !self.window_tilemap {
+            0x9800 + index
+        } else {
+            0x9C00 + index
+        }
+    }
+
+    pub fn do_render_bg(&self) -> bool {
+        self.bg_window_enable
+    }
+
+    pub fn do_render_window(&self) -> bool {
+        self.bg_window_enable && self.window_enable
+    }
 }
 
 impl From<u8> for LCDC {
