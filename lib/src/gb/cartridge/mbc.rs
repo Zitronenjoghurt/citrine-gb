@@ -1,6 +1,5 @@
 use crate::error::{GbError, GbResult};
-use crate::rom::header::RomCartridgeType;
-use crate::rom::Rom;
+use crate::rom::header::{RomCartridgeType, RomHeader};
 
 mod mbc1;
 
@@ -10,6 +9,7 @@ pub trait MbcInterface {
     fn rom_bank_low(&self) -> usize;
     fn rom_bank_high(&self) -> usize;
     fn ram_bank(&self) -> usize;
+    fn soft_reset(&mut self);
 }
 
 #[derive(Debug)]
@@ -53,20 +53,27 @@ impl MbcInterface for Mbc {
             Self::Mbc1(mbc) => mbc.ram_bank(),
         }
     }
+
+    fn soft_reset(&mut self) {
+        match self {
+            Self::None => {}
+            Self::Mbc1(mbc) => mbc.soft_reset(),
+        }
+    }
 }
 
-impl TryFrom<&Rom> for Mbc {
+impl TryFrom<&RomHeader> for Mbc {
     type Error = GbError;
 
-    fn try_from(rom: &Rom) -> GbResult<Self> {
-        let cartridge_type = rom
-            .cartridge_type()?
+    fn try_from(header: &RomHeader) -> GbResult<Self> {
+        let cartridge_type = header
+            .cartridge_type
             .ok_or(GbError::MissingRomCartridgeType)?;
-        let rom_banks = rom.rom_banks()?;
-        let ram_banks = rom.ram_banks()?;
 
         let mbc = match cartridge_type {
-            RomCartridgeType::Mbc1 => Self::Mbc1(mbc1::Mbc1::new(rom_banks, ram_banks)),
+            RomCartridgeType::Mbc1 => {
+                Self::Mbc1(mbc1::Mbc1::new(header.rom_banks, header.ram_banks))
+            }
             _ => Self::None,
         };
 

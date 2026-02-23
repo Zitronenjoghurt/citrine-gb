@@ -1,5 +1,6 @@
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
+use crate::rom::header::RomHeader;
 use crate::rom::Rom;
 use crate::{ReadMemory, WriteMemory};
 
@@ -9,6 +10,7 @@ const ROM_BANK_SIZE: usize = 0x4000; // 16KiB
 const RAM_BANK_SIZE: usize = 0x2000; // 8KiB
 
 pub struct Cartridge {
+    pub header: RomHeader,
     mbc: mbc::Mbc,
     rom: Vec<[u8; ROM_BANK_SIZE]>,
     ram: Vec<[u8; RAM_BANK_SIZE]>,
@@ -17,6 +19,7 @@ pub struct Cartridge {
 impl Cartridge {
     pub fn new() -> Self {
         Self {
+            header: RomHeader::default(),
             mbc: mbc::Mbc::None,
             rom: vec![[0; ROM_BANK_SIZE]; 2],
             ram: vec![[0; RAM_BANK_SIZE]; 1],
@@ -24,9 +27,10 @@ impl Cartridge {
     }
 
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
-        let rom_banks = rom.rom_banks()?.max(2);
-        let ram_banks = rom.ram_banks()?.max(1);
-        self.mbc = mbc::Mbc::try_from(rom)?;
+        let header = rom.header()?;
+        let rom_banks = header.rom_banks.max(2);
+        let ram_banks = header.ram_banks.max(1);
+        self.mbc = mbc::Mbc::try_from(&header)?;
 
         self.rom = rom
             .data
@@ -46,6 +50,11 @@ impl Cartridge {
         self.ram = vec![[0; RAM_BANK_SIZE]; ram_banks];
 
         Ok(())
+    }
+
+    pub fn soft_reset(&mut self) {
+        self.mbc.soft_reset();
+        self.ram.iter_mut().for_each(|bank| bank.fill(0));
     }
 }
 

@@ -68,6 +68,11 @@ impl CpuBusInterface for CpuBus<'_> {
         }
 
         *self.cycles = self.cycles.wrapping_add(1);
+
+        #[cfg(feature = "debug")]
+        {
+            self.debugger.total_cycles = self.debugger.total_cycles.wrapping_add(1);
+        }
     }
 
     fn read(&mut self, addr: u16) -> u8 {

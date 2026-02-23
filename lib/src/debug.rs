@@ -3,11 +3,16 @@ use std::collections::HashSet;
 #[derive(Debug, Default)]
 pub struct Debugger {
     pub breakpoints: HashSet<u16>,
+    pub total_cycles: u128,
 }
 
 impl Debugger {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn soft_reset(&mut self) {
+        self.total_cycles = 0;
     }
 }
 

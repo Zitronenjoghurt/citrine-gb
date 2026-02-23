@@ -20,6 +20,6 @@ impl AppWindow for TimeControlWindow {
     }
 
     fn ui(&mut self, ui: &mut Ui, app: &mut Citrine) {
-        TimeControl::new(&mut app.emulator).ui(ui);
+        TimeControl::new(&mut app.emulator, &mut app.ui.time_ctrl).ui(ui);
     }
 }

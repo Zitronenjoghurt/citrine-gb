@@ -61,8 +61,19 @@ impl Emulator {
         }
     }
 
-    pub fn force_step(&mut self, ctx: &egui::Context) {
-        self.gb.step();
+    pub fn force_step(&mut self, ctx: &egui::Context, cycle_count: u32) {
+        self.gb.run_cycles(cycle_count);
+        self.update_texture(ctx);
+    }
+
+    pub fn soft_reset(&mut self, ctx: &egui::Context) {
+        self.gb.soft_reset();
+        self.update_texture(ctx);
+    }
+
+    pub fn reset_to(&mut self, ctx: &egui::Context, start_cycles: u32) {
+        self.gb.soft_reset();
+        self.gb.run_cycles(start_cycles);
         self.update_texture(ctx);
     }
 

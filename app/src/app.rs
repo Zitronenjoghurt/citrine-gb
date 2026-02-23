@@ -105,7 +105,9 @@ impl Citrine {
 
             ui.separator();
 
-            ui.label(format!("{:.02}ms", self.emulator.last_frame_secs * 1000.0))
+            ui.label(format!("{:.02}ms", self.emulator.last_frame_secs * 1000.0));
+
+            ui.label(format!("{} Cycles", self.emulator.gb.debugger.total_cycles));
         });
     }
 

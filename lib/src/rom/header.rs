@@ -7,7 +7,7 @@ pub const NINTENDO_LOGO: [u8; 48] = [
     0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RomHeader {
     pub title: String,
     pub valid_nintendo_logo: bool,
@@ -445,15 +445,17 @@ impl RomHeader {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum RomCgbMode {
+    #[default]
     None = 0x00,
     CgbOnly = 0x80,
     CgbAndGb = 0xC0,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum RomLicensee {
+    #[default]
     Unknown,
     None,
     Nintendo,

@@ -72,4 +72,8 @@ impl DmaController {
 
         (source_on_cartridge && addr_on_cartridge) || (source_on_wram && addr_on_wram)
     }
+
+    pub fn soft_reset(&mut self) {
+        *self = Self::new(self.model);
+    }
 }

@@ -19,6 +19,12 @@ impl Memory {
             io: [0; IO_SIZE],
         }
     }
+
+    pub fn soft_reset(&mut self) {
+        self.wram = vec![[0; WRAM_BANK_SIZE]; 2];
+        self.hram = [0; HRAM_SIZE];
+        self.io = [0; IO_SIZE];
+    }
 }
 
 impl ReadMemory for Memory {

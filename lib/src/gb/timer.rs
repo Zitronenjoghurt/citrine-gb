@@ -72,6 +72,10 @@ impl Timer {
             self.overflow_pending = true;
         }
     }
+
+    pub fn soft_reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl ReadMemory for Timer {

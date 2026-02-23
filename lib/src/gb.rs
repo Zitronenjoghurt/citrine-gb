@@ -24,7 +24,7 @@ pub struct GameBoy {
     pub timer: timer::Timer,
     pub ppu: ppu::Ppu,
     pub model: GbModel,
-    pub frame_cycles: u32,
+    pub cycle_counter: u32,
 }
 
 impl GameBoy {
@@ -40,7 +40,7 @@ impl GameBoy {
             timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(GbModel::Dmg),
             model: GbModel::Dmg,
-            frame_cycles: 0,
+            cycle_counter: 0,
         }
     }
 
@@ -56,7 +56,7 @@ impl GameBoy {
             timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(GbModel::Cgb),
             model: GbModel::Cgb,
-            frame_cycles: 0,
+            cycle_counter: 0,
         }
     }
 
@@ -81,25 +81,49 @@ impl GameBoy {
             memory: &mut self.memory,
             ppu: &mut self.ppu,
             timer: &mut self.timer,
-            cycles: &mut self.frame_cycles,
+            cycles: &mut self.cycle_counter,
         });
     }
 
     // ToDo: Rely on PPU frame ready rather than frame cycles
     pub fn run_frame(&mut self) {
-        while self.frame_cycles < self.model.frame_cycles() {
+        while self.cycle_counter < self.model.frame_cycles() {
             self.step();
         }
-        self.frame_cycles -= self.model.frame_cycles();
+        self.cycle_counter -= self.model.frame_cycles();
+    }
+
+    pub fn run_cycles(&mut self, cycles: u32) {
+        self.cycle_counter = 0;
+        while self.cycle_counter < cycles {
+            self.step();
+        }
     }
 
     pub fn frame(&self) -> &Framebuffer {
         self.ppu.frame()
     }
+
+    pub fn soft_reset(&mut self) {
+        self.cpu
+            .soft_reset(self.cartridge.header.provided_header_checksum);
+        self.cartridge.soft_reset();
+        self.dma.soft_reset();
+        self.ic.soft_reset();
+        self.memory.soft_reset();
+        self.timer.soft_reset();
+        self.ppu.soft_reset();
+        self.cycle_counter = 0;
+        #[cfg(feature = "debug")]
+        {
+            self.debugger.soft_reset();
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum GbModel {
+    #[default]
     Dmg,
     Cgb,
 }

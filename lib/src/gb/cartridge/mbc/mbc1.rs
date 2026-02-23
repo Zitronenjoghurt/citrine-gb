@@ -86,4 +86,8 @@ impl MbcInterface for Mbc1 {
             (self.secondary_register as usize) & (self.ram_bank_count - 1)
         }
     }
+
+    fn soft_reset(&mut self) {
+        *self = Self::new(self.rom_bank_count, self.ram_bank_count);
+    }
 }

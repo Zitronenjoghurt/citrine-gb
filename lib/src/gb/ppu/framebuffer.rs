@@ -22,15 +22,26 @@ impl Framebuffer {
         let mut fb = Self::default();
         for y in 0..144 {
             for x in 0..160 {
-                let tile_x = x / 8;
-                let tile_y = y / 8;
-                let is_green = (tile_x + tile_y) % 2 == 0;
+                let tile_x = x / 4;
+                let tile_y = y / 4;
+                let is_yellow = (tile_x + tile_y) % 2 == 0;
+
+                let px_check = (x + y) % 2;
+                let pair_check = (x / 2 + y / 2) % 2;
 
                 let idx = (y * 160 + x) * 4;
-                if is_green {
-                    fb.0[idx] = 0x0F;
-                    fb.0[idx + 1] = 0x88;
-                    fb.0[idx + 2] = 0x0F;
+                if is_yellow {
+                    let base: u8 = 0x60 + (pair_check as u8) * 0x20;
+                    let v = base + (px_check as u8) * 0x10;
+                    fb.0[idx] = v;
+                    fb.0[idx + 1] = v;
+                    fb.0[idx + 2] = 0x04;
+                } else {
+                    let base: u8 = 0x15 + (pair_check as u8) * 0x12;
+                    let v = base + (px_check as u8) * 0x08;
+                    fb.0[idx] = v;
+                    fb.0[idx + 1] = v;
+                    fb.0[idx + 2] = v + 0x08;
                 }
                 fb.0[idx + 3] = 0xFF;
             }

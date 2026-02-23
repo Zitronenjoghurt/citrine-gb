@@ -142,6 +142,10 @@ impl Ppu {
     pub fn frame(&self) -> &Framebuffer {
         &self.frame
     }
+
+    pub fn soft_reset(&mut self) {
+        *self = Self::new(self.model);
+    }
 }
 
 // Memory access helpers

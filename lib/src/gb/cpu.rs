@@ -1,5 +1,6 @@
 use crate::gb::bus::CpuBusInterface;
 use crate::gb::ic::ICInterface;
+use crate::gb::GbModel;
 use crate::instructions::{Cond, Instruction, R16Mem, R16Stk, R16, R8};
 use crate::utils::*;
 
@@ -28,6 +29,7 @@ pub struct Cpu {
     pub ime: bool,
     pub ime_next: bool,
     pub halted: bool,
+    pub model: GbModel,
 }
 
 impl Cpu {
@@ -65,6 +67,7 @@ impl Cpu {
             ime: false,
             ime_next: false,
             halted: false,
+            model: GbModel::Dmg,
         }
     }
 
@@ -89,6 +92,7 @@ impl Cpu {
             ime: false,
             ime_next: false,
             halted: false,
+            model: GbModel::Cgb,
         }
     }
 
@@ -215,7 +219,7 @@ impl Cpu {
 
             bus.cycle();
             bus.cycle();
-            self.push_word(bus, self.pc.wrapping_sub(1));
+            self.push_word(bus, self.pc.wrapping_sub(1)); // ToDo: Potential pain point, check if this is correct
             self.pc = interrupt.vector();
 
             self.fetch(bus);
@@ -223,6 +227,13 @@ impl Cpu {
 
         // EI is delayed by one instruction
         self.ime = self.ime_next;
+    }
+
+    pub fn soft_reset(&mut self, header_checksum: u8) {
+        match self.model {
+            GbModel::Dmg => *self = Self::new_dmg(header_checksum),
+            GbModel::Cgb => *self = Self::new_cgb(),
+        }
     }
 }
 

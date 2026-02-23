@@ -1,4 +1,5 @@
 use crate::gb::cpu::Cpu;
+use crate::gb::GbModel;
 use crate::tests::TestBus;
 use std::path::PathBuf;
 
@@ -127,6 +128,7 @@ impl From<&TestState> for Cpu {
             ime: false,
             ime_next: false,
             halted: false,
+            model: GbModel::Dmg,
         }
     }
 }

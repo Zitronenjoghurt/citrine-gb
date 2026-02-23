@@ -17,6 +17,10 @@ impl InterruptController {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn soft_reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 pub trait ICInterface {
