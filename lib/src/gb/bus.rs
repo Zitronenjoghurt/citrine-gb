@@ -55,6 +55,11 @@ impl WriteMemory for CpuBus<'_> {
             0xFFFF => self.ic.enable = value.into(),
             _ => self.memory.write_naive(addr, value),
         }
+
+        // LYC/Stat write => immediately trigger interrupt
+        if addr == 0xFF41 || addr == 0xFF45 {
+            self.ppu.check_lyc(self.ic);
+        }
     }
 }
 

@@ -219,7 +219,7 @@ impl Cpu {
 
             bus.cycle();
             bus.cycle();
-            self.push_word(bus, self.pc.wrapping_sub(1)); // ToDo: Potential pain point, check if this is correct
+            self.push_word(bus, self.pc.wrapping_sub(1));
             self.pc = interrupt.vector();
 
             self.fetch(bus);

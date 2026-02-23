@@ -84,7 +84,7 @@ impl Ppu {
         self.dot_counter += 1;
     }
 
-    fn check_lyc(&mut self, ic: &mut impl ICInterface) {
+    pub fn check_lyc(&mut self, ic: &mut impl ICInterface) {
         let prev = self.stat.lyc_equals_ly;
         self.stat.lyc_equals_ly = self.ly == self.lyc;
 
