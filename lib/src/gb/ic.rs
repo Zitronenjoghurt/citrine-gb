@@ -61,12 +61,12 @@ pub enum Interrupt {
     Timer,
     Serial,
     Lcd,
-    Vblank,
+    VBlank,
 }
 
 impl Interrupt {
     pub const PRIORITY: &'static [Self; 5] = &[
-        Self::Vblank,
+        Self::VBlank,
         Self::Lcd,
         Self::Timer,
         Self::Serial,
@@ -75,7 +75,7 @@ impl Interrupt {
 
     pub fn vector(&self) -> u16 {
         match self {
-            Self::Vblank => 0x40,
+            Self::VBlank => 0x40,
             Self::Lcd => 0x48,
             Self::Timer => 0x50,
             Self::Serial => 0x58,
@@ -100,7 +100,7 @@ impl InterruptFlags {
             Interrupt::Timer => self.timer = enabled,
             Interrupt::Serial => self.serial = enabled,
             Interrupt::Lcd => self.lcd = enabled,
-            Interrupt::Vblank => self.vblank = enabled,
+            Interrupt::VBlank => self.vblank = enabled,
         }
     }
 
@@ -110,7 +110,7 @@ impl InterruptFlags {
             Interrupt::Timer => self.timer,
             Interrupt::Serial => self.serial,
             Interrupt::Lcd => self.lcd,
-            Interrupt::Vblank => self.vblank,
+            Interrupt::VBlank => self.vblank,
         }
     }
 }
