@@ -69,11 +69,13 @@ impl GameBoy {
     }
 
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
-        *self = Self::new(
-            self.model,
-            Some(self.boot_rom.rom.clone()),
-            rom.provided_header_checksum()?,
-        );
+        let boot_rom = if !self.boot_rom.rom.is_empty() {
+            Some(self.boot_rom.rom.clone())
+        } else {
+            None
+        };
+
+        *self = Self::new(self.model, boot_rom, rom.provided_header_checksum()?);
         self.cartridge.load_rom(rom)?;
         Ok(())
     }
