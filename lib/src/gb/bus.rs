@@ -1,3 +1,4 @@
+use crate::gb::boot_rom::BootRom;
 use crate::gb::cartridge::Cartridge;
 use crate::gb::dma::DmaController;
 use crate::gb::ic::{ICInterface, InterruptController};
@@ -9,6 +10,7 @@ use crate::{ReadMemory, WriteMemory};
 
 /// Connecting the CPU to the other components of the Game Boy
 pub struct CpuBus<'a> {
+    pub boot_rom: &'a mut BootRom,
     pub cartridge: &'a mut Cartridge,
     #[cfg(feature = "debug")]
     pub debugger: &'a mut crate::debug::Debugger,
@@ -22,6 +24,10 @@ pub struct CpuBus<'a> {
 
 impl ReadMemory for CpuBus<'_> {
     fn read_naive(&self, addr: u16) -> u8 {
+        if self.boot_rom.mounted && addr < self.boot_rom.boundary_address() {
+            return self.boot_rom.rom[addr as usize];
+        }
+
         match addr {
             0x0000..=0x7FFF => self.cartridge.read_naive(addr),
             0x8000..=0x9FFF => self.ppu.read_naive(addr),
@@ -41,6 +47,11 @@ impl ReadMemory for CpuBus<'_> {
 
 impl WriteMemory for CpuBus<'_> {
     fn write_naive(&mut self, addr: u16, value: u8) {
+        if self.boot_rom.mounted && addr == 0xFF50 {
+            self.boot_rom.mounted = false;
+            return;
+        }
+
         match addr {
             0x0000..=0x7FFF => self.cartridge.write_naive(addr, value),
             0x8000..=0x9FFF => self.ppu.write_naive(addr, value),

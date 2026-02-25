@@ -4,6 +4,7 @@ use egui::DroppedFile;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileIntent {
     LoadRom,
+    LoadBootRom,
 }
 
 #[derive(Debug, Clone)]
@@ -31,12 +32,17 @@ impl FileIntent {
                 label: "Game Boy ROMs",
                 extensions: &["gb", "gbc"],
             }],
+            Self::LoadBootRom => &[FileFilter {
+                label: "Game Boy Boot ROM",
+                extensions: &["bin"],
+            }],
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::LoadRom => "Drop ROM file here",
+            Self::LoadBootRom => "Drop Boot ROM file here",
         }
     }
 

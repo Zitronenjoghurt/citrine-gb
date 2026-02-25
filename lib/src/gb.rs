@@ -1,8 +1,8 @@
 use crate::error::GbResult;
 use crate::gb::ppu::framebuffer::Framebuffer;
-use crate::rom::header::RomCgbMode;
 use crate::rom::Rom;
 
+mod boot_rom;
 pub mod bus;
 mod cartridge;
 pub mod cpu;
@@ -14,6 +14,7 @@ pub mod timer;
 
 // ToDo: CGB specific registers like speed mode
 pub struct GameBoy {
+    pub boot_rom: boot_rom::BootRom,
     pub cpu: cpu::Cpu,
     pub cartridge: cartridge::Cartridge,
     #[cfg(feature = "debug")]
@@ -28,51 +29,62 @@ pub struct GameBoy {
 }
 
 impl GameBoy {
-    pub fn new_dmg(header_checksum: u8) -> Self {
+    pub fn new(model: GbModel, boot_rom: Option<Vec<u8>>, rom_header_checksum: u8) -> Self {
+        let cpu = if boot_rom.is_some() {
+            cpu::Cpu::new_with_boot_rom(model)
+        } else {
+            match model {
+                GbModel::Dmg => cpu::Cpu::new_dmg(rom_header_checksum),
+                GbModel::Cgb => cpu::Cpu::new_cgb(),
+            }
+        };
+
+        let boot_rom = if let Some(boot_rom) = boot_rom {
+            boot_rom::BootRom {
+                rom: boot_rom,
+                mounted: true,
+            }
+        } else {
+            boot_rom::BootRom::default()
+        };
+
         Self {
-            cpu: cpu::Cpu::new_dmg(header_checksum),
+            boot_rom,
+            cpu,
             cartridge: cartridge::Cartridge::new(),
             #[cfg(feature = "debug")]
             debugger: crate::debug::Debugger::new(),
-            dma: dma::DmaController::new(GbModel::Dmg),
+            dma: dma::DmaController::new(model),
             ic: ic::InterruptController::new(),
             memory: memory::Memory::new(),
             timer: timer::Timer::new(),
-            ppu: ppu::Ppu::new(GbModel::Dmg),
-            model: GbModel::Dmg,
+            ppu: ppu::Ppu::new(model),
+            model,
             cycle_counter: 0,
         }
     }
 
-    pub fn new_cgb() -> Self {
-        Self {
-            cpu: cpu::Cpu::new_cgb(),
-            cartridge: cartridge::Cartridge::new(),
-            #[cfg(feature = "debug")]
-            debugger: crate::debug::Debugger::new(),
-            dma: dma::DmaController::new(GbModel::Cgb),
-            ic: ic::InterruptController::new(),
-            memory: memory::Memory::new(),
-            timer: timer::Timer::new(),
-            ppu: ppu::Ppu::new(GbModel::Cgb),
-            model: GbModel::Cgb,
-            cycle_counter: 0,
-        }
+    pub fn new_empty(model: GbModel) -> Self {
+        Self::new(model, None, 0x00)
     }
 
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
-        let use_cgb = rom.cgb_mode()? != RomCgbMode::None;
-        *self = if use_cgb {
-            Self::new_cgb()
-        } else {
-            Self::new_dmg(rom.provided_header_checksum()?)
-        };
+        *self = Self::new(
+            self.model,
+            Some(self.boot_rom.rom.clone()),
+            rom.provided_header_checksum()?,
+        );
         self.cartridge.load_rom(rom)?;
         Ok(())
     }
 
+    pub fn load_boot_rom(&mut self, rom: &[u8]) {
+        *self = Self::new(self.model, Some(rom.to_vec()), 0x00);
+    }
+
     pub fn step(&mut self) {
         self.cpu.step(&mut bus::CpuBus {
+            boot_rom: &mut self.boot_rom,
             cartridge: &mut self.cartridge,
             #[cfg(feature = "debug")]
             debugger: &mut self.debugger,
@@ -105,6 +117,7 @@ impl GameBoy {
     }
 
     pub fn soft_reset(&mut self) {
+        self.boot_rom.soft_reset();
         self.cpu
             .soft_reset(self.cartridge.header.provided_header_checksum);
         self.cartridge.soft_reset();

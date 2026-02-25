@@ -1,4 +1,4 @@
-use citrine_gb::gb::GameBoy;
+use citrine_gb::gb::{GameBoy, GbModel};
 
 pub struct Emulator {
     pub gb: GameBoy,
@@ -11,7 +11,7 @@ pub struct Emulator {
 impl Default for Emulator {
     fn default() -> Self {
         Self {
-            gb: GameBoy::new_dmg(0),
+            gb: GameBoy::new_empty(GbModel::Dmg),
             texture: None,
             running: true,
             last_frame: None,

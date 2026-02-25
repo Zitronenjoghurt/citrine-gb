@@ -96,6 +96,13 @@ impl Cpu {
         }
     }
 
+    pub fn new_with_boot_rom(model: GbModel) -> Self {
+        Self {
+            model,
+            ..Default::default()
+        }
+    }
+
     pub fn step(&mut self, bus: &mut impl Bus) {
         #[cfg(feature = "debug")]
         {

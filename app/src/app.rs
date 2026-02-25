@@ -56,6 +56,7 @@ impl eframe::App for Citrine {
         if let Some(result) = self.file_picker.poll(ctx) {
             match result.intent {
                 FileIntent::LoadRom => self.handle_load_rom(result),
+                FileIntent::LoadBootRom => self.handle_load_boot_rom(result),
             }
         }
 
@@ -96,6 +97,10 @@ impl Citrine {
                     self.file_picker.open(FileIntent::LoadRom);
                     ui.close_kind(egui::UiKind::Menu);
                 }
+                if ui.button("Load Boot ROM").clicked() {
+                    self.file_picker.open(FileIntent::LoadBootRom);
+                    ui.close_kind(egui::UiKind::Menu);
+                }
             });
 
             self.ui.windows.active.toggle_menu(ui);
@@ -124,6 +129,13 @@ impl Citrine {
         let rom = Rom::new(&fr.data);
         if let Err(err) = self.emulator.gb.load_rom(&rom) {
             self.toasts.error(format!("Failed to load ROM: {}", err));
+        } else {
+            self.toasts.success(format!("Loaded ROM '{}'", fr.name));
         }
+    }
+
+    fn handle_load_boot_rom(&mut self, fr: FileResult) {
+        self.emulator.gb.load_boot_rom(&fr.data);
+        self.toasts.success("Boot ROM loaded");
     }
 }
