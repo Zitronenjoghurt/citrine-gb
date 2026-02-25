@@ -73,7 +73,7 @@ impl Ppu {
                     let wy = self.fetcher.wl;
                     (wx & 0x1F, (wy / 8) & 0x1F)
                 } else {
-                    let tx = ((self.scx / 8).wrapping_add(self.fetcher.x)) & 0x1F;
+                    let tx = ((self.scx / 8).wrapping_add(self.fetcher.x / 8)) & 0x1F;
                     let ty = self.ly.wrapping_add(self.scy);
                     (tx, (ty / 8) & 0x1F)
                 };
