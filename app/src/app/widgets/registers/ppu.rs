@@ -82,7 +82,7 @@ impl Widget for PpuRegisters<'_> {
                     ui.end_row();
 
                     ui.label("WL");
-                    ui.label(self.ppu.wl.to_string());
+                    ui.label(self.ppu.fetcher.wl.to_string());
                     ui.label("");
                     ui.label("");
                     ui.end_row();

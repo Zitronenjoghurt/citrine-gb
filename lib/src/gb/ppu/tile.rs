@@ -1,3 +1,4 @@
+#[derive(Debug, Default, Copy, Clone)]
 pub struct TileLine {
     pub low: u8,
     pub high: u8,

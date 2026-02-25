@@ -59,6 +59,10 @@ impl Framebuffer {
         self.0[index * 4 + 3] = color.a();
     }
 
+    pub fn set_xy(&mut self, x: usize, y: usize, color: RGBA) {
+        self.set(y * 160 + x, color);
+    }
+
     pub fn clear(&mut self) {
         self.0.fill(0);
     }
