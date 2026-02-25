@@ -4,6 +4,7 @@ use crate::gb::ppu::fifo::PixelFifo;
 use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::gb::ppu::lcdc::LCDC;
 use crate::gb::ppu::mode::PpuMode;
+use crate::gb::ppu::scanner::OamScanner;
 use crate::gb::ppu::stat::STAT;
 use crate::gb::GbModel;
 use crate::{ReadMemory, WriteMemory};
@@ -14,6 +15,8 @@ mod fifo;
 pub mod framebuffer;
 mod lcdc;
 mod mode;
+mod scanner;
+mod sprite;
 mod stat;
 mod tile;
 
@@ -36,7 +39,9 @@ pub struct Ppu {
     model: GbModel,
     pub fetcher: PixelFetcher,
     pub fifo: PixelFifo,
-    pub dot_counter: u16,
+    pub scanner: OamScanner,
+    /// How many dots are left in the current H or V blank period
+    pub blank_timeout: u16,
     /// Window line => internal register
     pub wl: u8,
     // Memory
@@ -97,7 +102,8 @@ impl Ppu {
             model,
             fetcher: PixelFetcher::default(),
             fifo: PixelFifo::default(),
-            dot_counter: 0,
+            scanner: OamScanner::default(),
+            blank_timeout: 0,
             wl: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
             oam: [0x00; OAM_SIZE],
@@ -139,62 +145,99 @@ impl Ppu {
     }
 
     pub fn dot(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
-        self.dot_counter += 1;
-
         match self.stat.ppu_mode {
             PpuMode::OamScan => {
-                if self.dot_counter == 80 {
+                let done = self.dot_oam_scan();
+                if done {
                     self.stat.ppu_mode = PpuMode::Drawing;
                 }
             }
             PpuMode::Drawing => {
                 self.dot_fetcher();
-                if self.dot_counter == 80 + 172 {
-                    self.stat.ppu_mode = PpuMode::HBlank;
-                    if self.stat.mode0_interrupt {
-                        ic.request_interrupt(Interrupt::Lcd);
-                    }
-                }
             }
             PpuMode::HBlank => {
-                if self.dot_counter == 456 {
-                    self.dot_counter = 0;
+                self.blank_timeout -= 1;
+                if self.blank_timeout == 0 {
                     self.ly += 1;
                     self.check_lyc(ic);
-
                     if self.ly == 144 {
+                        self.blank_timeout = 456;
                         self.stat.ppu_mode = PpuMode::VBlank;
-                        ic.request_interrupt(Interrupt::VBlank);
-                        if self.stat.mode1_interrupt {
-                            ic.request_interrupt(Interrupt::Lcd);
-                        }
                     } else {
                         self.stat.ppu_mode = PpuMode::OamScan;
-                        if self.stat.mode2_interrupt {
-                            ic.request_interrupt(Interrupt::Lcd);
-                        }
                     }
-
-                    return;
                 }
             }
             PpuMode::VBlank => {
-                if self.dot_counter == 456 {
-                    self.dot_counter = 0;
+                self.blank_timeout -= 1;
+                if self.blank_timeout == 0 {
                     self.ly += 1;
                     self.check_lyc(ic);
-
                     if self.ly == 154 {
                         self.ly = 0;
-                        self.wl = 0;
                         self.check_lyc(ic);
                         self.stat.ppu_mode = PpuMode::OamScan;
+                    } else {
+                        self.blank_timeout = 456;
                     }
-
-                    return;
                 }
             }
         }
+
+        //match self.stat.ppu_mode {
+        //    PpuMode::OamScan => {
+        //        if self.dot_counter == 80 {
+        //            self.stat.ppu_mode = PpuMode::Drawing;
+        //        }
+        //    }
+        //    PpuMode::Drawing => {
+        //        self.dot_fetcher();
+        //        if self.dot_counter == 80 + 172 {
+        //            self.stat.ppu_mode = PpuMode::HBlank;
+        //            if self.stat.mode0_interrupt {
+        //                ic.request_interrupt(Interrupt::Lcd);
+        //            }
+        //        }
+        //    }
+        //    PpuMode::HBlank => {
+        //        if self.dot_counter == 456 {
+        //            self.dot_counter = 0;
+        //            self.ly += 1;
+        //            self.check_lyc(ic);
+        //
+        //            if self.ly == 144 {
+        //                self.stat.ppu_mode = PpuMode::VBlank;
+        //                ic.request_interrupt(Interrupt::VBlank);
+        //                if self.stat.mode1_interrupt {
+        //                    ic.request_interrupt(Interrupt::Lcd);
+        //                }
+        //            } else {
+        //                self.stat.ppu_mode = PpuMode::OamScan;
+        //                if self.stat.mode2_interrupt {
+        //                    ic.request_interrupt(Interrupt::Lcd);
+        //                }
+        //            }
+        //
+        //            return;
+        //        }
+        //    }
+        //    PpuMode::VBlank => {
+        //        if self.dot_counter == 456 {
+        //            self.dot_counter = 0;
+        //            self.ly += 1;
+        //            self.check_lyc(ic);
+        //
+        //            if self.ly == 154 {
+        //                self.ly = 0;
+        //                self.wl = 0;
+        //                self.check_lyc(ic);
+        //                self.stat.ppu_mode = PpuMode::OamScan;
+        //            }
+        //
+        //            return;
+        //        }
+        //    }
+        //}
     }
 
     pub fn check_lyc(&mut self, ic: &mut impl ICInterface) {

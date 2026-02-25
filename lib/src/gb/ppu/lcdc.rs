@@ -80,6 +80,10 @@ impl LCDC {
     pub fn do_render_window(&self) -> bool {
         self.bg_window_enable && self.window_enable
     }
+
+    pub fn sprite_height(&self) -> u8 {
+        if self.obj_size { 16 } else { 8 }
+    }
 }
 
 impl From<u8> for LCDC {

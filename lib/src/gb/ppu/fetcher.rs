@@ -33,8 +33,9 @@ pub enum PixelFetcherState {
     GetTileDataLow2,
     GetTileDataHigh1,
     GetTileDataHigh2,
-    Sleep1,
-    Sleep2,
+    // Unsure if the sleep states actually exist, they're in the pan docs but nowhere else??
+    //Sleep1,
+    //Sleep2,
     Push,
 }
 
@@ -89,14 +90,15 @@ impl Ppu {
                 self.fetcher.tile_data_high = self.blocked_read(addr + 1);
 
                 self.try_push_to_fifo();
-                self.fetcher.state = PixelFetcherState::Sleep1;
-            }
-            PixelFetcherState::Sleep1 => {
-                self.fetcher.state = PixelFetcherState::Sleep2;
-            }
-            PixelFetcherState::Sleep2 => {
                 self.fetcher.state = PixelFetcherState::Push;
+                //self.fetcher.state = PixelFetcherState::Sleep1;
             }
+            //PixelFetcherState::Sleep1 => {
+            //    self.fetcher.state = PixelFetcherState::Sleep2;
+            //}
+            //PixelFetcherState::Sleep2 => {
+            //    self.fetcher.state = PixelFetcherState::Push;
+            //}
             PixelFetcherState::Push => {
                 if self.try_push_to_fifo() {
                     self.fetcher.x += 1;
