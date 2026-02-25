@@ -148,6 +148,7 @@ impl Ppu {
                 let fifo_done = self.dot_fifo();
                 if fetcher_done && fifo_done {
                     self.fetcher.reset();
+                    self.blank_timeout = 456;
                     self.stat.ppu_mode = PpuMode::HBlank;
                     if self.stat.mode0_interrupt {
                         ic.request_interrupt(Interrupt::Lcd);
