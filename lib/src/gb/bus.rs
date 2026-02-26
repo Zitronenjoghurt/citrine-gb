@@ -5,7 +5,7 @@ use crate::gb::ic::{ICInterface, InterruptController};
 use crate::gb::memory::Memory;
 use crate::gb::ppu::Ppu;
 use crate::gb::timer::Timer;
-use crate::utils::{hi, lo};
+use crate::utils::bit::{hi, lo};
 use crate::{ReadMemory, WriteMemory};
 
 /// Connecting the CPU to the other components of the Game Boy

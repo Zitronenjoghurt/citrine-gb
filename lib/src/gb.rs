@@ -4,7 +4,7 @@ use crate::rom::Rom;
 
 mod boot_rom;
 pub mod bus;
-mod cartridge;
+pub mod cartridge;
 pub mod cpu;
 mod dma;
 pub mod ic;

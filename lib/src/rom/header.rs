@@ -1,5 +1,8 @@
 use crate::disassembler::Disassembly;
 use crate::error::{GbError, GbResult};
+use crate::gb::cartridge::{RAM_BANK_SIZE, ROM_BANK_SIZE};
+use crate::utils::formatting::format_byte_size;
+use std::fmt::Display;
 
 pub const NINTENDO_LOGO: [u8; 48] = [
     0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
@@ -443,6 +446,22 @@ impl RomHeader {
         entrypoint.decode_range(&data, 0x100, 0x104);
         Ok(entrypoint)
     }
+
+    pub fn rom_size_bytes(&self) -> usize {
+        self.rom_banks * ROM_BANK_SIZE
+    }
+
+    pub fn ram_size_bytes(&self) -> usize {
+        self.ram_banks * RAM_BANK_SIZE
+    }
+
+    pub fn rom_size_pretty(&self) -> String {
+        format_byte_size(self.rom_size_bytes())
+    }
+
+    pub fn ram_size_pretty(&self) -> String {
+        format_byte_size(self.ram_size_bytes())
+    }
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -451,6 +470,15 @@ pub enum RomCgbMode {
     None = 0x00,
     CgbOnly = 0x80,
     CgbAndGb = 0xC0,
+}
+
+impl Display for RomCgbMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CgbOnly => write!(f, "Game Boy Color only"),
+            Self::None | Self::CgbAndGb => write!(f, "Game Boy and Game Boy Color"),
+        }
+    }
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]

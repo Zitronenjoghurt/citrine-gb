@@ -2,7 +2,11 @@ use crate::gb::bus::CpuBusInterface;
 use crate::gb::ic::ICInterface;
 use crate::gb::GbModel;
 use crate::instructions::{Cond, Instruction, R16Mem, R16Stk, R16, R8};
-use crate::utils::*;
+use crate::utils::bit::{
+    add_bytes, add_bytes_carry, add_word_signed_byte, add_words, get_bit, hi, lo,
+    rotate_left_get_carry, rotate_left_through_carry, rotate_right_get_carry,
+    rotate_right_through_carry, set_bit, sub_bytes, sub_bytes_carry, word,
+};
 
 #[cfg(not(feature = "debug"))]
 pub trait Bus: CpuBusInterface + ICInterface {}

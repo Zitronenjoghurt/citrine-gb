@@ -6,24 +6,32 @@ use crate::{ReadMemory, WriteMemory};
 
 mod mbc;
 
-const ROM_BANK_SIZE: usize = 0x4000; // 16KiB
-const RAM_BANK_SIZE: usize = 0x2000; // 8KiB
+pub const ROM_BANK_SIZE: usize = 0x4000; // 16KiB
+pub const RAM_BANK_SIZE: usize = 0x2000; // 8KiB
 
 pub struct Cartridge {
     pub header: RomHeader,
+    pub has_rom_loaded: bool,
     mbc: mbc::Mbc,
     rom: Vec<[u8; ROM_BANK_SIZE]>,
     ram: Vec<[u8; RAM_BANK_SIZE]>,
 }
 
-impl Cartridge {
-    pub fn new() -> Self {
+impl Default for Cartridge {
+    fn default() -> Self {
         Self {
             header: RomHeader::default(),
+            has_rom_loaded: false,
             mbc: mbc::Mbc::None,
             rom: vec![[0; ROM_BANK_SIZE]; 2],
             ram: vec![[0; RAM_BANK_SIZE]; 1],
         }
+    }
+}
+
+impl Cartridge {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
@@ -46,6 +54,8 @@ impl Cartridge {
             return Err(GbError::RomTooBig);
         }
 
+        self.header = header;
+        self.has_rom_loaded = true;
         self.rom.resize(rom_banks, [0; ROM_BANK_SIZE]);
         self.ram = vec![[0; RAM_BANK_SIZE]; ram_banks];
 
