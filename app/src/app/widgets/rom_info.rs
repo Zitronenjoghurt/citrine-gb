@@ -85,7 +85,8 @@ impl Widget for RomInfo<'_> {
                 ui.end_row();
 
                 ui.label("Entrypoint");
-                ui.label(format!("{}", self.header.entrypoint));
+                ui.style_mut().override_font_id = Some(egui::FontId::monospace(14.0));
+                ui.label(self.header.entrypoint.to_string());
                 ui.end_row();
             })
             .response

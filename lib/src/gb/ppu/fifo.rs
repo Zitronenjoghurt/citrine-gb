@@ -58,6 +58,7 @@ impl PixelFifo {
     }
 }
 
+// ToDo: Discard SCX % 8 pixels or smth?
 impl Ppu {
     // Returns true if the FIFO is empty (done)
     pub fn dot_fifo(&mut self) -> bool {

@@ -2,6 +2,7 @@ use crate::{icons, Citrine};
 use bitflags::{bitflags, bitflags_match, Flags};
 use egui::{Context, Id, Ui, Widget, WidgetText};
 
+mod debug_actions;
 mod rom_info;
 mod time_control;
 
@@ -10,11 +11,16 @@ bitflags! {
     pub struct ActiveWindows: u16 {
         const TIME_CONTROL = 0b0000_0000_0000_0001;
         const ROM_INFO = 0b0000_0000_0000_0010;
+        const DEBUG_ACTIONS = 0b0000_0000_0000_0100;
     }
 }
 
 impl ActiveWindows {
-    const ORDER: &'static [ActiveWindows] = &[ActiveWindows::ROM_INFO, ActiveWindows::TIME_CONTROL];
+    const ORDER: &'static [ActiveWindows] = &[
+        ActiveWindows::ROM_INFO,
+        ActiveWindows::TIME_CONTROL,
+        ActiveWindows::DEBUG_ACTIONS,
+    ];
 
     pub fn show_all(&self, ctx: &Context, app: &mut Citrine) {
         self.iter().for_each(|id| id.show(ctx, app));
@@ -24,6 +30,7 @@ impl ActiveWindows {
         bitflags_match!(*self, {
             Self::TIME_CONTROL => time_control::TimeControlWindow::new().show(ctx, app),
             Self::ROM_INFO => rom_info::RomInfoWindow::new().show(ctx, app),
+            Self::DEBUG_ACTIONS => debug_actions::DebugActionsWindow::new().show(ctx, app),
             _ => {}
         });
     }
@@ -32,6 +39,7 @@ impl ActiveWindows {
         bitflags_match!(*self, {
             Self::TIME_CONTROL => "Time Control",
             Self::ROM_INFO => "Rom Info",
+            Self::DEBUG_ACTIONS => "Debug Actions",
             _ => ""
         })
     }

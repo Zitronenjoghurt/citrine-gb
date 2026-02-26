@@ -33,6 +33,8 @@ pub struct Ppu {
     pub scanner: OamScanner,
     /// How many dots are left in the current H or V blank period
     pub blank_timeout: u16,
+    /// Dots in the current scanline
+    pub line_dot_counter: u16,
     // Memory
     /// Video RAM (2 banks on CGB)
     vram: [[u8; VRAM_BANK_SIZE]; 2],
@@ -93,6 +95,7 @@ impl Ppu {
             fifo: PixelFifo::default(),
             scanner: OamScanner::default(),
             blank_timeout: 0,
+            line_dot_counter: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
             oam: [0x00; OAM_SIZE],
             lcdc: 0x91.into(),
@@ -138,17 +141,19 @@ impl Ppu {
 
         match self.stat.ppu_mode {
             PpuMode::OamScan => {
+                self.line_dot_counter += 1;
                 let done = self.dot_oam_scan();
                 if done {
                     self.stat.ppu_mode = PpuMode::Drawing;
                 }
             }
             PpuMode::Drawing => {
+                self.line_dot_counter += 1;
                 let fetcher_done = self.dot_fetcher();
                 let fifo_done = self.dot_fifo();
                 if fetcher_done && fifo_done {
                     self.fetcher.reset();
-                    self.blank_timeout = 456;
+                    self.blank_timeout = 456 - self.line_dot_counter;
                     self.stat.ppu_mode = PpuMode::HBlank;
                     if self.stat.mode0_interrupt {
                         ic.request_interrupt(Interrupt::Lcd);
@@ -159,6 +164,7 @@ impl Ppu {
                 self.blank_timeout -= 1;
                 if self.blank_timeout == 0 {
                     self.ly += 1;
+                    self.line_dot_counter = 0;
                     self.check_lyc(ic);
                     if self.ly == 144 {
                         self.blank_timeout = 456;
@@ -236,6 +242,10 @@ impl Ppu {
 
     pub fn soft_reset(&mut self) {
         *self = Self::new(self.model);
+    }
+
+    pub fn clear_frame(&mut self) {
+        self.frame.clear_with_test_pattern();
     }
 }
 

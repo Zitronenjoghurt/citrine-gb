@@ -94,7 +94,6 @@ impl Ppu {
                 self.fetcher.state = PixelFetcherState::GetTileDataHigh1;
             }
             PixelFetcherState::GetTileDataHigh1 => {
-                self.try_push_to_fifo();
                 self.fetcher.state = PixelFetcherState::GetTileDataHigh2;
             }
             PixelFetcherState::GetTileDataHigh2 => {

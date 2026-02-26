@@ -18,6 +18,10 @@ impl Framebuffer {
         Self::test_pattern()
     }
 
+    pub fn clear_with_test_pattern(&mut self) {
+        *self = Self::test_pattern();
+    }
+
     pub fn test_pattern() -> Self {
         let mut fb = Self::default();
         for y in 0..144 {

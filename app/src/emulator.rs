@@ -77,6 +77,11 @@ impl Emulator {
         self.update_texture(ctx);
     }
 
+    pub fn clear_frame(&mut self, ctx: &egui::Context) {
+        self.gb.ppu.clear_frame();
+        self.update_texture(ctx);
+    }
+
     fn update_texture(&mut self, ctx: &egui::Context) {
         let image =
             egui::ColorImage::from_rgba_unmultiplied([160, 144], self.gb.frame().as_slice());

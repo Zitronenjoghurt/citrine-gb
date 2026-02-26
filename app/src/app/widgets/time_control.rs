@@ -61,6 +61,10 @@ impl Widget for TimeControl<'_> {
                         if ui.button("CGB").clicked() {
                             self.state.step_cycles = GbModel::Cgb.frame_cycles();
                         }
+
+                        if ui.button("100").clicked() {
+                            self.state.step_cycles = 100;
+                        }
                     });
 
                     ui.horizontal(|ui| {

@@ -23,8 +23,8 @@ impl Widget for PpuRegisters<'_> {
                     ui.style_mut().override_font_id = Some(egui::FontId::monospace(14.0));
                     ui.label("PPU");
                     ui.label(format!("{:?}", self.ppu.stat.ppu_mode));
-                    ui.label("XXXX");
-                    ui.label("DOTS");
+                    ui.label(self.ppu.line_dot_counter.to_string());
+                    ui.label("LDOT");
                     ui.end_row();
 
                     ui.label("SCX");
