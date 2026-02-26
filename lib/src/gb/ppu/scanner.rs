@@ -20,33 +20,31 @@ impl Ppu {
     // ToDo: candidate for off-by-one errors
     /// Returns true when done
     pub fn dot_oam_scan(&mut self) -> bool {
-        if self.scanner.dot_progress >= 79 {
+        if self.scanner.dot_progress >= 80 {
             self.scanner.reset();
         };
 
         self.scanner.dot_progress += 1;
 
-        // Don't fetch sprite on even dot
-        if (self.scanner.dot_progress & 1) == 0 {
+        // Don't fetch sprite on odd dot
+        if (self.scanner.dot_progress & 1) != 0 {
             return false;
         };
 
         // Don't ever fetch more than 10 sprites
         if self.scanner.buffer.len() >= 10 {
-            return false;
+            return self.scanner.dot_progress >= 80;
         }
 
-        let index = self.scanner.dot_progress / 2;
+        let index = (self.scanner.dot_progress - 1) / 2;
         let sprite = self.fetch_sprite(index);
 
-        if sprite.x > 8
-            && self.ly + 16 >= sprite.y
-            && self.ly + 16 < sprite.y + self.lcdc.sprite_height()
-        {
+        // ToDo: Sprite x has to be greater than 0?? GBEDG
+        if self.ly + 16 >= sprite.y && self.ly + 16 < sprite.y + self.lcdc.sprite_height() {
             self.scanner.buffer.push(sprite);
         }
 
-        self.scanner.dot_progress == 79
+        self.scanner.dot_progress == 80
     }
 
     fn fetch_sprite(&self, index: u8) -> Sprite {

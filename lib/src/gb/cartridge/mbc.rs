@@ -71,7 +71,9 @@ impl TryFrom<&RomHeader> for Mbc {
             .ok_or(GbError::MissingRomCartridgeType)?;
 
         let mbc = match cartridge_type {
-            RomCartridgeType::Mbc1 => {
+            RomCartridgeType::Mbc1
+            | RomCartridgeType::Mbc1Ram
+            | RomCartridgeType::Mbc1RamBattery => {
                 Self::Mbc1(mbc1::Mbc1::new(header.rom_banks, header.ram_banks))
             }
             _ => Self::None,

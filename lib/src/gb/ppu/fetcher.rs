@@ -12,6 +12,7 @@ pub struct PixelFetcher {
     pub x: u8,
     pub tile_id: u8,
     pub tile_line: TileLine,
+    pub window_mode: bool,
     /// Whether WY condition has been met this frame
     pub wy_triggered: bool,
     /// Window line
@@ -20,11 +21,15 @@ pub struct PixelFetcher {
 }
 
 impl PixelFetcher {
-    pub fn reset(&mut self) {
+    pub fn reset_scanline(&mut self) {
         self.state = PixelFetcherState::GetTile1;
         self.x = 0;
         self.tile_id = 0;
         self.tile_line = TileLine::default();
+        self.window_mode = false;
+    }
+
+    pub fn reset_frame(&mut self) {
         self.wy_triggered = false;
         self.wl = 0;
     }
@@ -47,28 +52,33 @@ pub enum PixelFetcherState {
 // jsgroth's: PPU fetches the first tile twice, and "renders the first copy offscreen before pushing any pixels to the display
 // => This adds another 8 cycles as the PPU pops these 8 pixels off the queue without clocking the LCD.
 impl Ppu {
-    /// Returns true when done
-    pub fn dot_fetcher(&mut self) -> bool {
-        if self.fetcher.x == 160 {
-            return true;
-        };
+    pub fn dot_fetcher(&mut self) {
+        if !self.fetcher.window_mode
+            && self.lcdc.do_render_window()
+            && self.fetcher.wy_triggered
+            && self.fetcher.x >= self.wx.wrapping_sub(7)
+        {
+            self.fifo.reset_bg();
+            self.fetcher.reset_scanline();
+            self.fetcher.window_mode = true;
+        }
 
         match self.fetcher.state {
             PixelFetcherState::GetTile1 => {
                 self.fetcher.state = PixelFetcherState::GetTile2;
             }
             PixelFetcherState::GetTile2 => {
-                let inside_window = self.fetcher_inside_window();
+                let window_mode = self.fetcher.window_mode;
 
-                let tilemap_addr = if (self.lcdc.bg_tilemap && !inside_window)
-                    || (self.lcdc.window_tilemap && inside_window)
+                let tilemap_addr = if (self.lcdc.bg_tilemap && !window_mode)
+                    || (self.lcdc.window_tilemap && window_mode)
                 {
                     0x9C00
                 } else {
                     0x9800
                 };
 
-                let (tile_x, tile_y) = if inside_window {
+                let (tile_x, tile_y) = if window_mode {
                     let wx = self.fetcher.x.wrapping_sub(self.wx.wrapping_sub(7)) / 8;
                     let wy = self.fetcher.wl;
                     (wx & 0x1F, (wy / 8) & 0x1F)
@@ -102,23 +112,18 @@ impl Ppu {
                     .bg_win_tile_line_address(self.fetcher.tile_id, self.fetcher_y());
                 self.fetcher.tile_line.high = self.blocked_read(addr + 1);
 
-                self.try_push_to_fifo();
+                // ToDo: Check where exactly the push happens
+                //self.try_push_to_fifo();
                 self.fetcher.state = PixelFetcherState::Push;
             }
             PixelFetcherState::Push => {
                 // ToDo: Check if 8 pixels are pushed at once or if they are pushed one by one (and how it's influencing the fetcher.x increment)
                 if self.try_push_to_fifo() {
                     self.fetcher.x += 8;
-                    if self.fetcher.x == 160 {
-                        return true;
-                    } else {
-                        self.fetcher.state = PixelFetcherState::GetTile1;
-                    }
+                    self.fetcher.state = PixelFetcherState::GetTile1;
                 }
             }
         }
-
-        false
     }
 
     // ToDo: Blocked PPU read => https://gbdev.io/pandocs/pixel_fifo.html#vram-access
@@ -126,16 +131,8 @@ impl Ppu {
         self.read_naive(addr)
     }
 
-    // ToDo: If fetcher finds window pixel, it actually resets the X-Position-Counter, etc. => see GBEDG Window Fetching
-    // => Check relevance for this implementation
-    fn fetcher_inside_window(&self) -> bool {
-        self.lcdc.do_render_window()
-            && self.fetcher.wy_triggered
-            && self.fetcher.x >= self.wx.wrapping_sub(7)
-    }
-
     fn fetcher_y(&self) -> u8 {
-        if self.fetcher_inside_window() {
+        if self.fetcher.window_mode {
             self.fetcher.wl
         } else {
             self.ly.wrapping_add(self.scy)
@@ -149,8 +146,6 @@ impl Ppu {
 
         // ToDo: CGB palette from attribute byte in VRAM bank 1
         let pixels = std::array::from_fn(|i| FifoPixel {
-            x: self.fetcher.x + i as u8,
-            y: self.ly,
             color_index: self.fetcher.tile_line.color_index(i as u8),
             palette: 0,
             sprite_priority: 0,

@@ -15,9 +15,6 @@ const COLOR_SCHEME: [[u8; 4]; 4] = [
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct FifoPixel {
-    // ToDo: Correct way to store the pixel position?
-    pub x: u8,
-    pub y: u8,
     /// A value between 0 and 3
     pub color_index: u8,
     /// On CGB a value between 0 and 7 and on DMG this only applies to objects
@@ -36,6 +33,8 @@ pub struct PixelFifo {
     // The queues are only manipulated while drawing (mode 3)
     bg: VecDeque<FifoPixel>,
     sprite: VecDeque<FifoPixel>,
+    lcd_x: u8,
+    scx_discard: u8,
 }
 
 impl PixelFifo {
@@ -56,20 +55,35 @@ impl PixelFifo {
     pub fn pop_bg(&mut self) -> Option<FifoPixel> {
         self.bg.pop_front()
     }
+
+    pub fn reset_bg(&mut self) {
+        self.bg.clear();
+    }
+
+    pub fn start_scanline(&mut self, scx: u8) {
+        self.bg.clear();
+        self.lcd_x = 0;
+        self.scx_discard = scx % 8;
+    }
 }
 
-// ToDo: Discard SCX % 8 pixels or smth?
 impl Ppu {
     // Returns true if the FIFO is empty (done)
     pub fn dot_fifo(&mut self) -> bool {
-        // ToDo: If sprite pixel but no bg pixel => sprite pixel is 'merdged' with current bg pixel? (GBEDG) => revisit when implementing sprite rendering
+        // ToDo: If sprite pixel but no bg pixel => sprite pixel is 'merged' with current bg pixel? (GBEDG) => revisit when implementing sprite rendering
 
         if let Some(bg) = self.fifo.pop_bg() {
-            let color = self.apply_bg_palette(bg.color_index);
-            self.frame.set_xy(bg.x as usize, bg.y as usize, color);
+            if self.fifo.scx_discard > 0 {
+                self.fifo.scx_discard -= 1;
+            } else {
+                let color = self.apply_bg_palette(bg.color_index);
+                self.frame
+                    .set_xy(self.fifo.lcd_x as usize, self.ly as usize, color);
+                self.fifo.lcd_x += 1;
+            }
         };
 
-        self.fifo.bg_empty()
+        self.fifo.lcd_x == 160
     }
 
     // ToDo: CGB color palette

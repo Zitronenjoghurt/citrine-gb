@@ -94,7 +94,7 @@ impl Ppu {
             fetcher: PixelFetcher::default(),
             fifo: PixelFifo::default(),
             scanner: OamScanner::default(),
-            blank_timeout: 4104, // 4560 - 456, we start 1 line into VBlank
+            blank_timeout: 456,
             line_dot_counter: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
             oam: [0x00; OAM_SIZE],
@@ -144,15 +144,19 @@ impl Ppu {
                 self.line_dot_counter += 1;
                 let done = self.dot_oam_scan();
                 if done {
+                    self.fifo.start_scanline(self.scx);
                     self.stat.ppu_mode = PpuMode::Drawing;
                 }
             }
             PpuMode::Drawing => {
                 self.line_dot_counter += 1;
-                let fetcher_done = self.dot_fetcher();
+                self.dot_fetcher();
                 let fifo_done = self.dot_fifo();
-                if fetcher_done && fifo_done {
-                    self.fetcher.reset();
+                if fifo_done {
+                    if self.fetcher.window_mode {
+                        self.fetcher.wl += 1;
+                    }
+                    self.fetcher.reset_scanline();
                     self.blank_timeout = 456 - self.line_dot_counter;
                     self.stat.ppu_mode = PpuMode::HBlank;
                     if self.stat.mode0_interrupt {
@@ -189,7 +193,11 @@ impl Ppu {
                     if self.ly == 154 {
                         self.ly = 0;
                         self.check_lyc(ic);
+                        self.fetcher.reset_frame();
                         self.stat.ppu_mode = PpuMode::OamScan;
+                        if self.stat.mode2_interrupt {
+                            ic.request_interrupt(Interrupt::Lcd);
+                        }
                     } else {
                         self.blank_timeout = 456;
                     }
