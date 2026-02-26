@@ -94,7 +94,7 @@ impl Ppu {
             fetcher: PixelFetcher::default(),
             fifo: PixelFifo::default(),
             scanner: OamScanner::default(),
-            blank_timeout: 0,
+            blank_timeout: 4104, // 4560 - 456, we start 1 line into VBlank
             line_dot_counter: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
             oam: [0x00; OAM_SIZE],
