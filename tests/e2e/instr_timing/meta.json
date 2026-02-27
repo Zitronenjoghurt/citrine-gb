@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "instr_timing",
+  "description": "Blargg's test rom",
+  "rom": {
+    "title": "INSTR_TIMING",
+    "licensee": "None",
+    "cartridge_type": "MBC1",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "E9ADA3C1",
+    "sha1": "F740E20F3B916448395C795C8FDC0CC1848E7436",
+    "sha256": "646067B3D6C79FDA810E9C3F1CB7C0EFD5ABB0A7AC06437C54E65720C15D9925"
+  },
+  "cycles": 750001
+}

@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "mem_timing",
+  "description": "Blargg's test rom",
+  "rom": {
+    "title": "MEM_TIMING",
+    "licensee": "None",
+    "cartridge_type": "MBC1 + RAM + Battery",
+    "rom_banks": 4,
+    "ram_banks": 1,
+    "crc_32": "1ECD4033",
+    "sha1": "1F610B59A6258DFAAB20FE66848B037CC9B0E94F",
+    "sha256": "AB9DAF4C51F417C468AD0A61DAB66872CF8B5A50E6EB08D989B581D15F3CF461"
+  },
+  "cycles": 3300000
+}

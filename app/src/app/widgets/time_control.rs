@@ -86,7 +86,7 @@ impl Widget for TimeControl<'_> {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Start cycles");
-                    Slider::new(&mut self.state.start_cycles, 0..=1_000_000)
+                    Slider::new(&mut self.state.start_cycles, 0..=100_000_000)
                         .logarithmic(true)
                         .ui(ui);
                 });

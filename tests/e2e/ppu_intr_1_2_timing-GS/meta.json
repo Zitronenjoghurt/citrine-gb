@@ -1,8 +1,8 @@
 {
   "model": "Dmg",
   "theme": "GreyScale",
-  "name": "intr_1_2_timing-GS",
-  "description": "Mooneye PPU Test",
+  "name": "ppu_intr_1_2_timing-GS",
+  "description": "Mooneye PPU test rom",
   "rom": {
     "title": "mooneye-gb test",
     "licensee": "Unknown Licensee",

@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "cpu_instrs",
+  "description": "Blargg's test rom",
+  "rom": {
+    "title": "CPU_INSTRS",
+    "licensee": "None",
+    "cartridge_type": "MBC1",
+    "rom_banks": 4,
+    "ram_banks": 0,
+    "crc_32": "B074356D",
+    "sha1": "A979A7321B63B8E744D75D6AA7866B1E00D43DA8",
+    "sha256": "8C5E12F41E0BA5BBCA796944F92FFE6DE28809198682C4332E38D1B3CF56FCF2"
+  },
+  "cycles": 57000000
+}
