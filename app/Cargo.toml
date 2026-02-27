@@ -8,7 +8,7 @@ all-features = true
 targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 
 [dependencies]
-citrine-gb = { workspace = true, features = ["debug"] }
+citrine-gb = { workspace = true, features = ["debug", "serde"] }
 bitflags = { version = "2.11.0", features = ["serde"] }
 eframe = { version = "0.33.0", default-features = false, features = ["persistence"] }
 egui = "0.33.0"

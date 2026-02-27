@@ -1,6 +1,6 @@
 use crate::error::GbResult;
-use crate::gb::ppu::framebuffer::Framebuffer;
 use crate::rom::Rom;
+use ppu::types::framebuffer::Framebuffer;
 
 mod boot_rom;
 pub mod bus;

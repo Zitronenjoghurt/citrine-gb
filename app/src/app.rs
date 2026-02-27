@@ -1,5 +1,4 @@
 use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
-use crate::app::panels::PanelKind;
 use crate::app::ui_state::UiState;
 use crate::app::widgets::panel_menu::PanelMenu;
 use crate::emulator::Emulator;
@@ -11,6 +10,7 @@ use egui_notify::Toasts;
 
 mod file_picker;
 mod panels;
+mod settings;
 mod ui_state;
 mod widgets;
 mod windows;
@@ -28,19 +28,12 @@ pub struct Citrine {
 
 impl Citrine {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        #[cfg(target_arch = "wasm32")]
-        cc.egui_ctx.set_pixels_per_point(3.0);
-
-        #[cfg(not(target_arch = "wasm32"))]
-        cc.egui_ctx.set_pixels_per_point(1.5);
-
         Self::setup_fonts(&cc.egui_ctx);
         let mut app = cc
             .storage
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
             .unwrap_or_default();
         app.file_picker.set_drop_intent(FileIntent::LoadRom);
-        app.ui.panels.right = Some(PanelKind::Registers);
         app
     }
 
@@ -78,6 +71,12 @@ impl eframe::App for Citrine {
 
         self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
+
+        if self.ui.settings.is_dirty() {
+            let settings = std::mem::take(&mut self.ui.settings);
+            settings.apply(ctx, self);
+            self.ui.settings = settings;
+        }
     }
 
     fn save(&mut self, storage: &mut dyn Storage) {

@@ -1,17 +1,8 @@
 //! Source: https://gbdev.io/pandocs/pixel_fifo.html and https://ashiepaws.github.io/GBEDG/ppu/
 
-use crate::gb::ppu::color::RGBA;
+use crate::gb::ppu::types::color::RGBA;
 use crate::gb::ppu::Ppu;
 use std::collections::VecDeque;
-
-/// Using the Game Boy Pocket color scheme
-/// https://en.wikipedia.org/wiki/List_of_video_game_console_palettes
-const COLOR_SCHEME: [[u8; 4]; 4] = [
-    [0xC5, 0xCA, 0xA4, 0xFF],
-    [0x8C, 0x92, 0x6B, 0xFF],
-    [0x4A, 0x51, 0x38, 0xFF],
-    [0x18, 0x18, 0x18, 0xFF],
-];
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct FifoPixel {
@@ -88,7 +79,7 @@ impl Ppu {
 
     // ToDo: CGB color palette
     fn apply_bg_palette(&self, color_index: u8) -> RGBA {
-        let shade = ((self.bgp >> (color_index * 2)) & 0x03) as usize;
-        RGBA::from(COLOR_SCHEME[shade])
+        let shade = ((self.bgp >> (color_index * 2)) & 0x03);
+        self.dmg_theme.color_from_shade(shade)
     }
 }

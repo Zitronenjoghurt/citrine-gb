@@ -1,5 +1,5 @@
 use crate::gb::ppu::fifo::FifoPixel;
-use crate::gb::ppu::tile::TileLine;
+use crate::gb::ppu::types::tile::TileLine;
 use crate::gb::ppu::Ppu;
 use crate::ReadMemory;
 

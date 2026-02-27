@@ -4,6 +4,8 @@ check:
 	rustup target add wasm32-unknown-unknown aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc
 	cargo check -p citrine-gb
 	cargo check -p citrine-gb --features debug
+	cargo check -p citrine-gb --features serde
+	cargo check -p citrine-gb --features debug,serde
 	cargo check -p citrine-gb-app
 	cargo check -p citrine-gb-app --target wasm32-unknown-unknown
 	cargo check -p citrine-gb-app --target aarch64-apple-darwin
@@ -11,6 +13,8 @@ check:
 	cargo check -p citrine-gb-app --target x86_64-pc-windows-msvc
 	cargo test -p citrine-gb
 	cargo test -p citrine-gb --features debug
+	cargo test -p citrine-gb --features serde
+	cargo test -p citrine-gb --features debug,serde
 
 dev:
 	cargo install trunk

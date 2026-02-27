@@ -1,4 +1,4 @@
-use crate::gb::ppu::color::RGBA;
+use crate::gb::ppu::types::color::RGBA;
 use crate::gb::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 const FB_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;

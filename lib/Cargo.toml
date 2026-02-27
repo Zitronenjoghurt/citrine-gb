@@ -9,6 +9,7 @@ debug = []
 
 [dependencies]
 thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 
 [dev-dependencies]
 serde = { version = "1.0.228", features = ["derive"] }

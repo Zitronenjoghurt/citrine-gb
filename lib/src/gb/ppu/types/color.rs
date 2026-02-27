@@ -1,13 +1,18 @@
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RGBA([u8; 4]);
 
 impl RGBA {
-    pub fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
+    pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self([r, g, b, a])
     }
 
-    pub fn rgb(r: u8, g: u8, b: u8) -> Self {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self::new(r, g, b, 0xFF)
+    }
+
+    pub const fn grey(value: u8) -> Self {
+        Self::new(value, value, value, 0xFF)
     }
 
     pub fn r(&self) -> u8 {

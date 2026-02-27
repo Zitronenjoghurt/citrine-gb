@@ -1,4 +1,4 @@
-use crate::gb::ppu::mode::PpuMode;
+use crate::gb::ppu::types::mode::PpuMode;
 
 /// Source: https://gbdev.io/pandocs/STAT.html#ff41--stat-lcd-status
 #[allow(clippy::upper_case_acronyms)]

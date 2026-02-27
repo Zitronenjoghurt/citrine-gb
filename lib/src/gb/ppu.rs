@@ -1,24 +1,19 @@
 use crate::gb::ic::{ICInterface, Interrupt};
 use crate::gb::ppu::fetcher::PixelFetcher;
 use crate::gb::ppu::fifo::PixelFifo;
-use crate::gb::ppu::framebuffer::Framebuffer;
-use crate::gb::ppu::lcdc::LCDC;
-use crate::gb::ppu::mode::PpuMode;
 use crate::gb::ppu::scanner::OamScanner;
-use crate::gb::ppu::stat::STAT;
+use crate::gb::ppu::types::theme::DmgTheme;
 use crate::gb::GbModel;
 use crate::{ReadMemory, WriteMemory};
+use types::framebuffer::Framebuffer;
+use types::lcdc::LCDC;
+use types::mode::PpuMode;
+use types::stat::STAT;
 
-mod color;
 mod fetcher;
 mod fifo;
-pub mod framebuffer;
-mod lcdc;
-mod mode;
 mod scanner;
-mod sprite;
-mod stat;
-mod tile;
+pub mod types;
 
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
@@ -28,6 +23,7 @@ const OAM_SIZE: usize = 160; // Bytes
 pub struct Ppu {
     frame: Framebuffer,
     model: GbModel,
+    pub dmg_theme: DmgTheme,
     pub fetcher: PixelFetcher,
     pub fifo: PixelFifo,
     pub scanner: OamScanner,
@@ -91,6 +87,7 @@ impl Ppu {
         Self {
             frame: Framebuffer::new(),
             model,
+            dmg_theme: DmgTheme::default(),
             fetcher: PixelFetcher::default(),
             fifo: PixelFifo::default(),
             scanner: OamScanner::default(),

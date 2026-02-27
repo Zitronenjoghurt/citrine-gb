@@ -1,4 +1,4 @@
-use crate::gb::ppu::sprite::Sprite;
+use crate::gb::ppu::types::sprite::Sprite;
 use crate::gb::ppu::Ppu;
 
 #[derive(Debug, Default)]
