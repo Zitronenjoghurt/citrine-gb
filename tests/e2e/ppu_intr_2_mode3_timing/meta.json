@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "ppu_intr_2_mode3_timing",
+  "description": "Mooneye PPU test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "F8A3C090",
+    "sha1": "FEF8222788B8E2610A38EA19CA0BD0B03DB0E04F",
+    "sha256": "B5CB7D22162E3ED6FA2DAFEAA487CF1D1C042B5E8A3A9877823C33B578B9C31E"
+  },
+  "cycles": 200000
+}

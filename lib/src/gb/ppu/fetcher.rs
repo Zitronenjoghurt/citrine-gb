@@ -48,19 +48,18 @@ pub enum PixelFetcherState {
     Push,
 }
 
-// ToDo: Check initial delay, how does it influence accuracy? is it really relevant?
-// jsgroth's: PPU fetches the first tile twice, and "renders the first copy offscreen before pushing any pixels to the display
-// => This adds another 8 cycles as the PPU pops these 8 pixels off the queue without clocking the LCD.
 impl Ppu {
     pub fn dot_fetcher(&mut self) {
         if !self.fetcher.window_mode
             && self.lcdc.do_render_window()
             && self.fetcher.wy_triggered
-            && self.fetcher.x >= self.wx.wrapping_sub(7)
+            // ToDo: Check if it should use fetcher x, lcd x or smth else
+            && self.fifo.lcd_x >= self.wx.saturating_sub(7)
         {
             self.fifo.reset_bg();
             self.fetcher.reset_scanline();
             self.fetcher.window_mode = true;
+            return;
         }
 
         match self.fetcher.state {
@@ -79,9 +78,9 @@ impl Ppu {
                 };
 
                 let (tile_x, tile_y) = if window_mode {
-                    let wx = self.fetcher.x.wrapping_sub(self.wx.wrapping_sub(7)) / 8;
-                    let wy = self.fetcher.wl;
-                    (wx & 0x1F, (wy / 8) & 0x1F)
+                    let tx = (self.fetcher.x / 8) & 0x1F;
+                    let ty = (self.fetcher.wl / 8) & 0x1F;
+                    (tx, ty)
                 } else {
                     let tx = ((self.scx / 8).wrapping_add(self.fetcher.x / 8)) & 0x1F;
                     let ty = self.ly.wrapping_add(self.scy);

@@ -372,16 +372,25 @@ impl WriteMemory for Ppu {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
             0xFF40 => {
-                // ToDo: Check accuracy of ppu reset when lcd is turned off => currently causing lines to never be drawn
-                // => run dmg-acid2 test => first line is missing
-                //let lcd_on = self.lcdc.lcd_enabled;
+                let was_enabled = self.lcdc.lcd_enabled;
+
                 self.lcdc = value.into();
-                //if lcd_on && !self.lcdc.lcd_enabled {
-                //    self.ly = 0;
-                //    self.wl = 0;
-                //    self.dot_counter = 0;
-                //    self.stat.ppu_mode = PpuMode::HBlank;
-                //}
+                let is_enabled = self.lcdc.lcd_enabled;
+
+                if was_enabled && !is_enabled {
+                    self.ly = 0;
+                    self.line_dot_counter = 0;
+                    self.stat.ppu_mode = PpuMode::HBlank;
+                } else if !was_enabled && is_enabled {
+                    self.ly = 0;
+                    self.line_dot_counter = 0;
+                    self.blank_timeout = 456;
+                    self.stat.ppu_mode = PpuMode::OamScan;
+
+                    self.fetcher.reset_frame();
+                    self.fetcher.reset_scanline();
+                    self.fifo.start_scanline(self.scx);
+                }
             }
             0xFF41 => self.stat = ((u8::from(self.stat) & 0x87) | (value & 0x78)).into(), // bits 0-2 read-only, bit 7 unused
             0xFF42 => self.scy = value,

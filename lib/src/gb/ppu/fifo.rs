@@ -24,8 +24,8 @@ pub struct PixelFifo {
     // The queues are only manipulated while drawing (mode 3)
     bg: VecDeque<FifoPixel>,
     sprite: VecDeque<FifoPixel>,
-    lcd_x: u8,
-    scx_discard: u8,
+    pub lcd_x: u8,
+    pub scx_discard: u8,
 }
 
 impl PixelFifo {
@@ -67,7 +67,12 @@ impl Ppu {
             if self.fifo.scx_discard > 0 {
                 self.fifo.scx_discard -= 1;
             } else {
-                let color = self.apply_bg_palette(bg.color_index);
+                let color_index = if self.lcdc.bg_window_enable {
+                    bg.color_index
+                } else {
+                    0
+                };
+                let color = self.apply_bg_palette(color_index);
                 self.frame
                     .set_xy(self.fifo.lcd_x as usize, self.ly as usize, color);
                 self.fifo.lcd_x += 1;

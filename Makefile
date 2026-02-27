@@ -10,7 +10,7 @@ check:
 	cargo check -p citrine-gb-app --target aarch64-apple-darwin
 	cargo check -p citrine-gb-app --target x86_64-unknown-linux-gnu
 	cargo check -p citrine-gb-app --target x86_64-pc-windows-msvc
-	cargo test -p citrine-gb
+	cargo test -p citrine-gb --release
 
 dev:
 	cargo install trunk
