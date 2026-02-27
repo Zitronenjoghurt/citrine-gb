@@ -246,7 +246,9 @@ impl Ppu {
     }
 
     pub fn soft_reset(&mut self) {
+        let theme = self.dmg_theme;
         *self = Self::new(self.model);
+        self.dmg_theme = theme;
     }
 
     pub fn clear_frame(&mut self) {

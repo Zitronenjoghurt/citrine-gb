@@ -3,6 +3,7 @@ use crate::gb::ic::{ICInterface, Interrupt};
 use std::collections::HashMap;
 
 mod cpu;
+mod e2e;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct TestBus {

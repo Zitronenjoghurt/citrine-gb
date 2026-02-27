@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+pub mod e2e;
+
 #[derive(Debug, Default)]
 pub struct Debugger {
     pub breakpoints: HashSet<u16>,

@@ -134,9 +134,19 @@ impl GameBoy {
             self.debugger.soft_reset();
         }
     }
+
+    #[cfg(feature = "debug")]
+    pub fn create_e2e_test(
+        &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> crate::debug::e2e::E2ETest {
+        crate::debug::e2e::E2ETest::create(self, name.into(), description.into())
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GbModel {
     #[default]
     Dmg,

@@ -50,6 +50,7 @@ impl eframe::App for Citrine {
             match result.intent {
                 FileIntent::LoadRom => self.handle_load_rom(result),
                 FileIntent::LoadBootRom => self.handle_load_boot_rom(result),
+                FileIntent::ExportE2E => self.handle_export_e2e(result),
             }
         }
 
@@ -125,7 +126,7 @@ impl Citrine {
 // File handling
 impl Citrine {
     fn handle_load_rom(&mut self, fr: FileResult) {
-        let rom = Rom::new(&fr.data);
+        let rom = Rom::new(fr.data().unwrap());
         if let Err(err) = self.emulator.gb.load_rom(&rom) {
             self.toasts.error(format!("Failed to load ROM: {}", err));
         } else {
@@ -134,7 +135,28 @@ impl Citrine {
     }
 
     fn handle_load_boot_rom(&mut self, fr: FileResult) {
-        self.emulator.gb.load_boot_rom(&fr.data);
+        self.emulator.gb.load_boot_rom(fr.data().unwrap());
         self.toasts.success("Boot ROM loaded");
+    }
+
+    fn handle_export_e2e(&mut self, fr: FileResult) {
+        let dir = fr.directory_path().unwrap();
+
+        if self.ui.e2e.title.is_empty() {
+            self.toasts.error("Please enter a title for the E2E test");
+            return;
+        }
+
+        let e2e = self
+            .emulator
+            .gb
+            .create_e2e_test(&self.ui.e2e.title, &self.ui.e2e.description);
+
+        if let Err(err) = e2e.export(dir) {
+            self.toasts.error(format!("Failed to export E2E: {}", err));
+        } else {
+            self.toasts
+                .success(format!("Exported E2E to '{}'", dir.display()));
+        }
     }
 }

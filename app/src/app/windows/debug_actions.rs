@@ -19,8 +19,10 @@ impl AppWindow for DebugActionsWindow {
     }
 
     fn ui(&mut self, ui: &mut Ui, app: &mut Citrine) {
-        if ui.button("Clear Frame Buffer").clicked() {
-            app.emulator.clear_frame(ui.ctx());
-        }
+        ui.vertical(|ui| {
+            if ui.button("Clear Frame Buffer").clicked() {
+                app.emulator.clear_frame(ui.ctx());
+            }
+        });
     }
 }

@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "intr_1_2_timing-GS",
+  "description": "Mooneye PPU Test",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "663A7BB7",
+    "sha1": "75ED20802FE0D0B6F1C33BA5B6F35FAE93285C57",
+    "sha256": "3BAC47FC79CE514FD7F6BBE0D87F1160B91A5292BE27FEE7BC3BCEA6BC171EE9"
+  },
+  "cycles": 300001
+}

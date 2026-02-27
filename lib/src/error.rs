@@ -10,4 +10,7 @@ pub enum GbError {
     RomTooSmall,
     #[error("ROM size exceeded expected rom bank count")]
     RomTooBig,
+    #[cfg(feature = "serde_json")]
+    #[error("JSON error: {0}")]
+    JsonSerde(#[from] serde_json::error::Error),
 }

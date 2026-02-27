@@ -27,6 +27,12 @@ pub struct RomHeader {
     pub provided_global_checksum: u16,
     pub actual_global_checksum: u16,
     pub entrypoint: Disassembly,
+    #[cfg(feature = "crc32fast")]
+    pub crc32: u32,
+    #[cfg(feature = "sha1")]
+    pub sha1: [u8; 20],
+    #[cfg(feature = "sha2")]
+    pub sha256: [u8; 32],
 }
 
 impl RomHeader {
@@ -47,6 +53,12 @@ impl RomHeader {
             provided_global_checksum: Self::parse_global_checksum(data)?,
             actual_global_checksum: Self::calculate_global_checksum(data)?,
             entrypoint: Self::parse_entrypoint(data)?,
+            #[cfg(feature = "crc32fast")]
+            crc32: Self::calculate_crc32(data),
+            #[cfg(feature = "sha1")]
+            sha1: Self::calculate_sha1(data),
+            #[cfg(feature = "sha2")]
+            sha256: Self::calculate_sha256(data),
         })
     }
 
@@ -445,6 +457,23 @@ impl RomHeader {
         let mut entrypoint = Disassembly::new();
         entrypoint.decode_range(&data, 0x100, 0x104);
         Ok(entrypoint)
+    }
+
+    #[cfg(feature = "crc32fast")]
+    pub fn calculate_crc32(data: &[u8]) -> u32 {
+        crc32fast::hash(data)
+    }
+
+    #[cfg(feature = "sha1")]
+    pub fn calculate_sha1(data: &[u8]) -> [u8; 20] {
+        use sha1::Digest;
+        sha1::Sha1::digest(data).into()
+    }
+
+    #[cfg(feature = "sha2")]
+    pub fn calculate_sha256(data: &[u8]) -> [u8; 32] {
+        use sha2::Digest;
+        sha2::Sha256::digest(data).into()
     }
 
     pub fn rom_size_bytes(&self) -> usize {

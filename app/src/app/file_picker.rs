@@ -1,17 +1,41 @@
 use egui::DroppedFile;
+use std::path::{Path, PathBuf};
 
 /// Describes what a file operation is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileIntent {
     LoadRom,
     LoadBootRom,
+    ExportE2E,
+}
+
+#[derive(Debug, Clone)]
+pub enum FileResultKind {
+    File { data: Vec<u8> },
+    Directory { path: PathBuf },
 }
 
 #[derive(Debug, Clone)]
 pub struct FileResult {
     pub intent: FileIntent,
     pub name: String,
-    pub data: Vec<u8>,
+    pub kind: FileResultKind,
+}
+
+impl FileResult {
+    pub fn data(&self) -> Option<&[u8]> {
+        match &self.kind {
+            FileResultKind::File { data } => Some(data),
+            FileResultKind::Directory { .. } => None,
+        }
+    }
+
+    pub fn directory_path(&self) -> Option<&Path> {
+        match &self.kind {
+            FileResultKind::Directory { path } => Some(path),
+            FileResultKind::File { .. } => None,
+        }
+    }
 }
 
 struct PendingRequest {
@@ -36,6 +60,7 @@ impl FileIntent {
                 label: "Game Boy Boot ROM",
                 extensions: &["bin"],
             }],
+            Self::ExportE2E => &[],
         }
     }
 
@@ -43,12 +68,17 @@ impl FileIntent {
         match self {
             Self::LoadRom => "Drop ROM file here",
             Self::LoadBootRom => "Drop Boot ROM file here",
+            Self::ExportE2E => "Select a directory",
         }
     }
 
     pub fn accepts(&self, filename: &str) -> bool {
+        let filters = self.filters();
+        if filters.is_empty() {
+            return true;
+        }
         let lower = filename.to_lowercase();
-        self.filters()
+        filters
             .iter()
             .flat_map(|f| f.extensions.iter())
             .any(|ext| lower.ends_with(&format!(".{ext}")))
@@ -90,36 +120,48 @@ impl FilePicker {
     pub fn open(&mut self, intent: FileIntent) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.pending_result = self.open_blocking(&intent);
+            match &intent {
+                FileIntent::ExportE2E => {
+                    self.pending_result = self.open_directory_blocking(&intent);
+                }
+                _ => {
+                    self.pending_result = self.open_file_blocking(&intent);
+                }
+            }
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            let filters: Vec<_> = intent
-                .filters()
-                .iter()
-                .map(|f| (f.label, f.extensions))
-                .collect();
+            match &intent {
+                FileIntent::ExportE2E => {}
+                _ => {
+                    let filters: Vec<_> = intent
+                        .filters()
+                        .iter()
+                        .map(|f| (f.label, f.extensions))
+                        .collect();
 
-            let mut dialog = rfd::AsyncFileDialog::new();
-            for (label, exts) in &filters {
-                dialog = dialog.add_filter(*label, exts);
+                    let mut dialog = rfd::AsyncFileDialog::new();
+                    for (label, exts) in &filters {
+                        dialog = dialog.add_filter(*label, exts);
+                    }
+                    let task = dialog.pick_file();
+
+                    let intent_clone = intent.clone();
+                    self.pending = Some(PendingRequest {
+                        intent,
+                        promise: poll_promise::Promise::spawn_local(async move {
+                            let file = task.await?;
+                            let data = file.read().await;
+                            Some(FileResult {
+                                intent: intent_clone,
+                                name: file.file_name(),
+                                kind: FileResultKind::File { data },
+                            })
+                        }),
+                    });
+                }
             }
-            let task = dialog.pick_file();
-
-            let intent_clone = intent.clone();
-            self.pending = Some(PendingRequest {
-                intent,
-                promise: poll_promise::Promise::spawn_local(async move {
-                    let file = task.await?;
-                    let data = file.read().await;
-                    Some(FileResult {
-                        intent: intent_clone,
-                        name: file.file_name(),
-                        data,
-                    })
-                }),
-            });
         }
     }
 
@@ -151,7 +193,7 @@ impl FilePicker {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn open_blocking(&self, intent: &FileIntent) -> Option<FileResult> {
+    fn open_file_blocking(&self, intent: &FileIntent) -> Option<FileResult> {
         let mut dialog = rfd::FileDialog::new();
         for filter in intent.filters() {
             dialog = dialog.add_filter(filter.label, filter.extensions);
@@ -165,7 +207,21 @@ impl FilePicker {
         Some(FileResult {
             intent: intent.clone(),
             name,
-            data,
+            kind: FileResultKind::File { data },
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_directory_blocking(&self, intent: &FileIntent) -> Option<FileResult> {
+        let path = rfd::FileDialog::new().pick_folder()?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Some(FileResult {
+            intent: intent.clone(),
+            name,
+            kind: FileResultKind::Directory { path },
         })
     }
 
@@ -201,7 +257,7 @@ impl FilePicker {
             return Some(FileResult {
                 intent: intent.clone(),
                 name,
-                data,
+                kind: FileResultKind::File { data },
             });
         }
 

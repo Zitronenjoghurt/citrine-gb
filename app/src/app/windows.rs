@@ -3,6 +3,7 @@ use bitflags::{bitflags, bitflags_match, Flags};
 use egui::{Context, Id, Ui, Widget, WidgetText};
 
 mod debug_actions;
+mod e2e_test;
 mod rom_info;
 mod settings;
 mod time_control;
@@ -14,6 +15,7 @@ bitflags! {
         const ROM_INFO = 0b0000_0000_0000_0010;
         const DEBUG_ACTIONS = 0b0000_0000_0000_0100;
         const SETTINGS = 0b0000_0000_0000_1000;
+        const E2E_TEST = 0b0000_0000_0001_0000;
     }
 }
 
@@ -23,6 +25,7 @@ impl ActiveWindows {
         ActiveWindows::ROM_INFO,
         ActiveWindows::TIME_CONTROL,
         ActiveWindows::DEBUG_ACTIONS,
+        ActiveWindows::E2E_TEST,
     ];
 
     pub fn show_all(&self, ctx: &Context, app: &mut Citrine) {
@@ -35,6 +38,7 @@ impl ActiveWindows {
             Self::ROM_INFO => rom_info::RomInfoWindow::new().show(ctx, app),
             Self::DEBUG_ACTIONS => debug_actions::DebugActionsWindow::new().show(ctx, app),
             Self::SETTINGS => settings::SettingsWindow::new().show(ctx, app),
+            Self::E2E_TEST => e2e_test::E2ETestWindow::new().show(ctx, app),
             _ => {}
         });
     }
@@ -45,6 +49,7 @@ impl ActiveWindows {
             Self::ROM_INFO => "Rom Info",
             Self::DEBUG_ACTIONS => "Debug Actions",
             Self::SETTINGS => "Settings",
+            Self::E2E_TEST => "E2E Test",
             _ => ""
         })
     }

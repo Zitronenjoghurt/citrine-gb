@@ -79,7 +79,7 @@ impl Ppu {
 
     // ToDo: CGB color palette
     fn apply_bg_palette(&self, color_index: u8) -> RGBA {
-        let shade = ((self.bgp >> (color_index * 2)) & 0x03);
+        let shade = (self.bgp >> (color_index * 2)) & 0x03;
         self.dmg_theme.color_from_shade(shade)
     }
 }

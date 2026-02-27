@@ -74,4 +74,18 @@ impl Framebuffer {
     pub fn as_slice(&self) -> &[u8] {
         self.0.as_slice()
     }
+
+    #[cfg(feature = "png")]
+    pub fn render_png(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut encoder =
+                png::Encoder::new(&mut buf, SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&self.0[..]).unwrap();
+        }
+        buf
+    }
 }
