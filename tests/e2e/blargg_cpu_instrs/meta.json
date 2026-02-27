@@ -1,7 +1,7 @@
 {
   "model": "Dmg",
   "theme": "GreyScale",
-  "name": "cpu_instrs",
+  "name": "blargg_cpu_instrs",
   "description": "Blargg's test rom",
   "rom": {
     "title": "CPU_INSTRS",

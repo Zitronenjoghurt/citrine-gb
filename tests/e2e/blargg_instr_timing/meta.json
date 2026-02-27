@@ -1,7 +1,7 @@
 {
   "model": "Dmg",
   "theme": "GreyScale",
-  "name": "instr_timing",
+  "name": "blargg_instr_timing",
   "description": "Blargg's test rom",
   "rom": {
     "title": "INSTR_TIMING",

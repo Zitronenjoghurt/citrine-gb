@@ -9,6 +9,7 @@ pub struct Timer {
     pub tac: u8,
     prev_and: bool,
     overflow_pending: bool,
+    is_reloading: bool,
 }
 
 impl Default for Timer {
@@ -20,6 +21,7 @@ impl Default for Timer {
             tac: 0xF8,
             prev_and: false,
             overflow_pending: false,
+            is_reloading: false,
         }
     }
 }
@@ -30,8 +32,11 @@ impl Timer {
     }
 
     pub fn cycle(&mut self, ic: &mut impl ICInterface) {
+        self.is_reloading = false;
+
         if self.overflow_pending {
             self.overflow_pending = false;
+            self.is_reloading = true;
             self.tima = self.tma;
             ic.request_interrupt(crate::gb::ic::Interrupt::Timer);
         }
@@ -98,10 +103,17 @@ impl WriteMemory for Timer {
                 self.check_falling_edge();
             }
             0xFF05 => {
-                self.overflow_pending = false;
-                self.tima = value;
+                if !self.is_reloading {
+                    self.tima = value;
+                    self.overflow_pending = false;
+                }
             }
-            0xFF06 => self.tma = value,
+            0xFF06 => {
+                self.tma = value;
+                if self.is_reloading {
+                    self.tima = value;
+                }
+            }
             0xFF07 => {
                 self.tac = value;
                 self.check_falling_edge();

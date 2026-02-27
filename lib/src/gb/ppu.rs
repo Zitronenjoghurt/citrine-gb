@@ -392,7 +392,7 @@ impl WriteMemory for Ppu {
                     self.stat.ppu_mode = PpuMode::OamScan;
 
                     self.fetcher.reset_frame();
-                    self.fetcher.reset_scanline();
+                    self.scanner.reset();
                     self.fifo.start_scanline(self.scx);
                 }
             }

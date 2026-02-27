@@ -30,6 +30,7 @@ impl PixelFetcher {
     }
 
     pub fn reset_frame(&mut self) {
+        self.reset_scanline();
         self.wy_triggered = false;
         self.wl = 0;
     }

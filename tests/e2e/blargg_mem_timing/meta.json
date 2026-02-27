@@ -1,7 +1,7 @@
 {
   "model": "Dmg",
   "theme": "GreyScale",
-  "name": "mem_timing",
+  "name": "blargg_mem_timing",
   "description": "Blargg's test rom",
   "rom": {
     "title": "MEM_TIMING",

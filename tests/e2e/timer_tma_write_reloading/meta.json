@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "timer_tma_write_reloading",
+  "description": "Mooneye timer test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "9C6425D8",
+    "sha1": "96ED885557581932B7B7E3604290F0AD978A719D",
+    "sha256": "E48FF98D4F363B92E92BDABE86253FCF63F648964E3A61E73D52AEDCBA3E5AB2"
+  },
+  "cycles": 170000
+}
