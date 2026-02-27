@@ -121,6 +121,10 @@ impl Ppu {
     }
 
     pub fn cycle(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
+        if !self.lcdc.lcd_enabled {
+            return;
+        }
+
         if self.model.is_cgb() {
             self.dot(ic, oam_dma);
             self.dot(ic, oam_dma);
