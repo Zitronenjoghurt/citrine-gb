@@ -8,6 +8,7 @@ default = []
 debug = ["crc32fast", "png", "serde", "serde_json", "sha1", "sha2"]
 
 [dependencies]
+bitflags = "2.11.0"
 crc32fast = { version = "1.5.0", optional = true }
 png = { version = "0.18.1", optional = true }
 thiserror = "2.0.18"

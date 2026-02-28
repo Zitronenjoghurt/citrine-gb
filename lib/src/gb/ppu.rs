@@ -152,6 +152,7 @@ impl Ppu {
                     self.fetcher.reset_scanline();
                     self.fifo.start_scanline(self.scx);
                     self.stat.ppu_mode = PpuMode::Drawing;
+                    self.evaluate_stat_interrupts(ic);
                 }
             }
             PpuMode::Drawing => {

@@ -8,6 +8,7 @@ pub mod cartridge;
 pub mod cpu;
 mod dma;
 pub mod ic;
+pub mod joypad;
 mod memory;
 pub mod ppu;
 pub mod timer;
@@ -24,6 +25,7 @@ pub struct GameBoy {
     pub memory: memory::Memory,
     pub timer: timer::Timer,
     pub ppu: ppu::Ppu,
+    pub joypad: joypad::Joypad,
     pub model: GbModel,
     pub cycle_counter: u32,
 }
@@ -59,6 +61,7 @@ impl GameBoy {
             memory: memory::Memory::new(),
             timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(model),
+            joypad: joypad::Joypad::new(),
             model,
             cycle_counter: 0,
         }
@@ -92,6 +95,7 @@ impl GameBoy {
             debugger: &mut self.debugger,
             dma: &mut self.dma,
             ic: &mut self.ic,
+            joypad: &mut self.joypad,
             memory: &mut self.memory,
             ppu: &mut self.ppu,
             timer: &mut self.timer,
@@ -141,6 +145,14 @@ impl GameBoy {
         {
             self.debugger.soft_reset();
         }
+    }
+
+    pub fn press_button(&mut self, button: joypad::JoypadState) {
+        self.joypad.press(button);
+    }
+
+    pub fn release_button(&mut self, button: joypad::JoypadState) {
+        self.joypad.release(button);
     }
 
     #[cfg(feature = "debug")]

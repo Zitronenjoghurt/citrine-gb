@@ -449,6 +449,7 @@ dependencies = [
 name = "citrine-gb"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.11.0",
  "citrine-gb",
  "crc32fast",
  "png",

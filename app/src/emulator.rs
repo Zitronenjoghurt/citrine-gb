@@ -1,3 +1,4 @@
+use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
 
 pub struct Emulator {
@@ -30,6 +31,8 @@ impl Emulator {
             return;
         }
 
+        self.handle_input(ctx);
+
         let now = web_time::Instant::now();
         let should_run = match self.last_frame {
             Some(last) => now.duration_since(last).as_secs_f64() >= 1.0 / 59.7275,
@@ -43,6 +46,36 @@ impl Emulator {
             self.last_frame = Some(now);
             self.last_frame_secs = start.elapsed().as_secs_f64();
         }
+    }
+
+    pub fn handle_input(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
+            for event in &i.events {
+                let egui::Event::Key { key, pressed, .. } = event else {
+                    continue;
+                };
+
+                let button = match key {
+                    egui::Key::W | egui::Key::ArrowUp => Some(JoypadState::UP),
+                    egui::Key::S | egui::Key::ArrowDown => Some(JoypadState::DOWN),
+                    egui::Key::A | egui::Key::ArrowLeft => Some(JoypadState::LEFT),
+                    egui::Key::D | egui::Key::ArrowRight => Some(JoypadState::RIGHT),
+                    egui::Key::Q | egui::Key::Z | egui::Key::Y => Some(JoypadState::A),
+                    egui::Key::E | egui::Key::X => Some(JoypadState::B),
+                    egui::Key::Enter | egui::Key::Space => Some(JoypadState::START),
+                    egui::Key::Backspace => Some(JoypadState::SELECT),
+                    _ => None,
+                };
+
+                if let Some(button) = button {
+                    if *pressed {
+                        self.gb.press_button(button);
+                    } else {
+                        self.gb.release_button(button);
+                    }
+                }
+            }
+        });
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
