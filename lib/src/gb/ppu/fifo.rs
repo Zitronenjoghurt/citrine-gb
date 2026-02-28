@@ -51,28 +51,68 @@ impl PixelFifo {
         self.bg.clear();
     }
 
+    pub fn push_sprite(&mut self, pixels: [FifoPixel; 8], offset: u8) {
+        while self.sprite.len() < 8 {
+            self.sprite.push_back(FifoPixel::default());
+        }
+
+        for i in offset..8 {
+            let queue_index = (i - offset) as usize;
+            let new_pixel = pixels[i as usize];
+
+            let existing = &mut self.sprite[queue_index];
+
+            // ToDo: Check if this is correct for CGB too
+            if existing.color_index == 0 && new_pixel.color_index != 0 {
+                *existing = new_pixel;
+            }
+        }
+    }
+
+    pub fn pop_sprite(&mut self) -> Option<FifoPixel> {
+        self.sprite.pop_front()
+    }
+
     pub fn start_scanline(&mut self, scx: u8) {
         self.bg.clear();
+        self.sprite.clear();
         self.lcd_x = 0;
         self.scx_discard = scx % 8;
     }
 }
 
 impl Ppu {
-    // Returns true if the FIFO is empty (done)
+    // Returns true if the FIFO is done
     pub fn dot_fifo(&mut self) -> bool {
-        // ToDo: If sprite pixel but no bg pixel => sprite pixel is 'merged' with current bg pixel? (GBEDG) => revisit when implementing sprite rendering
+        // ToDo: If sprite pixel but no bg pixel => sprite pixel is 'merged' with current bg pixel? (GBEDG)
+        if self.fetcher.sprite_mode.is_some() {
+            return false;
+        }
 
         if let Some(bg) = self.fifo.pop_bg() {
             if self.fifo.scx_discard > 0 {
                 self.fifo.scx_discard -= 1;
             } else {
-                let color_index = if self.lcdc.bg_window_enable {
+                let sprite = self.fifo.pop_sprite();
+
+                let bg_color_index = if self.lcdc.do_render_bg() {
                     bg.color_index
                 } else {
                     0
                 };
-                let color = self.apply_bg_palette(color_index);
+
+                let color = if let Some(sprite) = sprite {
+                    if sprite.color_index == 0
+                        || ((bg.obj_bg_priority || sprite.obj_bg_priority) && bg.color_index != 0)
+                    {
+                        self.apply_bg_palette(bg.palette, bg_color_index)
+                    } else {
+                        self.apply_sprite_palette(sprite.palette, sprite.color_index)
+                    }
+                } else {
+                    self.apply_bg_palette(bg.palette, bg_color_index)
+                };
+
                 self.frame
                     .set_xy(self.fifo.lcd_x as usize, self.ly as usize, color);
                 self.fifo.lcd_x += 1;
@@ -83,8 +123,19 @@ impl Ppu {
     }
 
     // ToDo: CGB color palette
-    fn apply_bg_palette(&self, color_index: u8) -> RGBA {
+    fn apply_bg_palette(&self, _palette: u8, color_index: u8) -> RGBA {
         let shade = (self.bgp >> (color_index * 2)) & 0x03;
+        self.dmg_theme.color_from_shade(shade)
+    }
+
+    // ToDo: CGB color palette
+    fn apply_sprite_palette(&self, palette: u8, color_index: u8) -> RGBA {
+        let p = if palette & 1 == 1 {
+            self.obp1
+        } else {
+            self.obp0
+        };
+        let shade = (p >> (color_index * 2)) & 0x03;
         self.dmg_theme.color_from_shade(shade)
     }
 }

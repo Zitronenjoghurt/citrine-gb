@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "dmg_acid2",
+  "description": "PPU test rom by Matt Currie",
+  "rom": {
+    "title": "DMG-ACID2",
+    "licensee": "None",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "02B9A055",
+    "sha1": "E04B6F1B754FCA299BEA97FC54D00763A6F6B3EF",
+    "sha256": "464E14B7D42E7FEEA0B7EDE42BE7071DC88913F75B9FFA444299424B63D1DFF1"
+  },
+  "cycles": 200000
+}

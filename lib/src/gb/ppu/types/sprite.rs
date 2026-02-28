@@ -5,6 +5,7 @@ pub struct Sprite {
     pub x: u8,
     pub tile_id: u8,
     pub flags: SpriteFlags,
+    pub oam_index: u8,
 }
 
 impl From<[u8; 4]> for Sprite {
@@ -14,6 +15,7 @@ impl From<[u8; 4]> for Sprite {
             x: value[1],
             tile_id: value[2],
             flags: value[3].into(),
+            oam_index: 0,
         }
     }
 }

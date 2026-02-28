@@ -99,12 +99,20 @@ impl GameBoy {
         });
     }
 
-    // ToDo: Rely on PPU frame ready rather than frame cycles
     pub fn run_frame(&mut self) {
-        while self.cycle_counter < self.model.frame_cycles() {
+        self.ppu.frame_ready = false;
+
+        while !self.ppu.frame_ready {
             self.step();
+
+            if !self.ppu.lcdc.lcd_enabled && self.cycle_counter >= self.model.frame_cycles() {
+                break;
+            }
         }
-        self.cycle_counter -= self.model.frame_cycles();
+
+        if self.cycle_counter >= self.model.frame_cycles() {
+            self.cycle_counter -= self.model.frame_cycles();
+        }
     }
 
     pub fn run_cycles(&mut self, cycles: u32) {

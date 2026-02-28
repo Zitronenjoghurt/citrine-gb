@@ -14,9 +14,19 @@ impl OamScanner {
         self.dot_progress = 0;
         self.buffer.clear();
     }
+
+    pub fn pop_sprite_for_x(&mut self, x: u8) -> Option<Sprite> {
+        let index = self
+            .buffer
+            .iter()
+            // ToDo: Check trigger
+            .position(|sprite| x == sprite.x.saturating_sub(8))?;
+        Some(self.buffer.remove(index))
+    }
 }
 
 impl Ppu {
+    // ToDo: Handle sprite y_flip?
     // ToDo: candidate for off-by-one errors
     /// Returns true when done
     pub fn dot_oam_scan(&mut self) -> bool {
@@ -39,8 +49,10 @@ impl Ppu {
         let index = (self.scanner.dot_progress - 1) / 2;
         let sprite = self.fetch_sprite(index);
 
-        // ToDo: Sprite x has to be greater than 0?? GBEDG
-        if self.ly + 16 >= sprite.y && self.ly + 16 < sprite.y + self.lcdc.sprite_height() {
+        if sprite.x > 0
+            && self.ly + 16 >= sprite.y
+            && self.ly + 16 < sprite.y + self.lcdc.sprite_height()
+        {
             self.scanner.buffer.push(sprite);
         }
 
@@ -50,6 +62,8 @@ impl Ppu {
     fn fetch_sprite(&self, index: u8) -> Sprite {
         let i = (index % 40) as usize * 4;
         let bytes: [u8; 4] = self.oam[i..i + 4].try_into().unwrap();
-        bytes.into()
+        let mut sprite: Sprite = bytes.into();
+        sprite.oam_index = index;
+        sprite
     }
 }

@@ -44,7 +44,7 @@ impl LCDC {
         }
     }
 
-    // ToDo: x-flip, y-flip
+    // ToDo: y-flip?
     pub fn obj_tile_line_address(&self, tile_id: u8, y: u8) -> u16 {
         // Line within the tile => tiles are 8x8
         let tile_line = (y % 8) as u16;
@@ -79,6 +79,10 @@ impl LCDC {
 
     pub fn do_render_window(&self) -> bool {
         self.bg_window_enable && self.window_enable
+    }
+
+    pub fn do_render_obj(&self) -> bool {
+        self.obj_enable
     }
 
     pub fn sprite_height(&self) -> u8 {

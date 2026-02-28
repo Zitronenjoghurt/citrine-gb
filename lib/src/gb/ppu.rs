@@ -23,6 +23,7 @@ const OAM_SIZE: usize = 160; // Bytes
 pub struct Ppu {
     frame: Framebuffer,
     model: GbModel,
+    pub frame_ready: bool,
     pub dmg_theme: DmgTheme,
     pub fetcher: PixelFetcher,
     pub fifo: PixelFifo,
@@ -87,6 +88,7 @@ impl Ppu {
         Self {
             frame: Framebuffer::new(),
             model,
+            frame_ready: false,
             dmg_theme: DmgTheme::default(),
             fetcher: PixelFetcher::default(),
             fifo: PixelFifo::default(),
@@ -145,6 +147,7 @@ impl Ppu {
                 self.line_dot_counter += 1;
                 let done = self.dot_oam_scan();
                 if done {
+                    self.fetcher.reset_scanline();
                     self.fifo.start_scanline(self.scx);
                     self.stat.ppu_mode = PpuMode::Drawing;
                 }
@@ -174,6 +177,7 @@ impl Ppu {
                     if self.ly == 144 {
                         self.blank_timeout = 456;
                         self.stat.ppu_mode = PpuMode::VBlank;
+                        self.frame_ready = true;
                         ic.request_interrupt(Interrupt::VBlank);
                         if self.stat.mode1_interrupt {
                             ic.request_interrupt(Interrupt::Lcd);
