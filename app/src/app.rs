@@ -7,6 +7,7 @@ use citrine_gb::rom::Rom;
 use eframe::{Frame, Storage};
 use egui::{CentralPanel, Context, FontDefinitions, SidePanel, TopBottomPanel, Widget};
 use egui_notify::Toasts;
+use gilrs::Gilrs;
 
 mod file_picker;
 mod panels;
@@ -15,15 +16,33 @@ mod ui_state;
 mod widgets;
 mod windows;
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
     pub ui: UiState,
     #[serde(skip, default)]
     pub emulator: Emulator,
     #[serde(skip, default)]
     pub file_picker: FilePicker,
+    #[serde(skip, default = "default_gilrs")]
+    pub gil: Gilrs,
     #[serde(skip, default)]
     pub toasts: Toasts,
+}
+
+impl Default for Citrine {
+    fn default() -> Self {
+        Self {
+            ui: UiState::default(),
+            emulator: Emulator::default(),
+            file_picker: FilePicker::default(),
+            gil: default_gilrs(),
+            toasts: Toasts::default(),
+        }
+    }
+}
+
+fn default_gilrs() -> Gilrs {
+    Gilrs::new().unwrap()
 }
 
 impl Citrine {
@@ -54,7 +73,7 @@ impl eframe::App for Citrine {
             }
         }
 
-        self.emulator.update(ctx);
+        self.emulator.update(ctx, &mut self.gil);
         TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
 
         if let Some(panel) = self.ui.panels.left {
