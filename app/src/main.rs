@@ -6,7 +6,8 @@ fn main() {
             .with_maximized(true)
             .with_drag_and_drop(true)
             .with_title("Citrine")
-            .with_app_id("io.github.zitronenjoghurt.citrine"),
+            .with_app_id("io.github.zitronenjoghurt.citrine")
+            .with_icon(load_icon()),
         persist_window: true,
         ..Default::default()
     };
@@ -17,6 +18,21 @@ fn main() {
         Box::new(|cc| Ok(Box::new(citrine_gb_app::Citrine::new(cc)))),
     )
     .expect("Failed to run egui application.");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_icon() -> egui::IconData {
+    let icon_bytes = include_bytes!("../assets/icon-512x512.png");
+    let image = image::load_from_memory(icon_bytes)
+        .expect("Failed to load icon")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

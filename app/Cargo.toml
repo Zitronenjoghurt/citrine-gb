@@ -23,10 +23,26 @@ web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.33.0", default-features = false, features = ["persistence", "wayland", "wgpu", "x11"] }
+image = "0.25.9"
 wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-gcc-ar"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { version = "0.33.0", default-features = false, features = ["glow", "persistence"] }
 poll-promise = { version = "0.3.0", features = ["web"] }
 wasm-bindgen-futures = "0.4.50"
 web-sys = "0.3.70"
+
+[build-dependencies]
+winresource = "0.1"
+
+[package.metadata.bundle]
+name = "Citrine"
+identifier = "io.github.zitronenjoghurt.citrine"
+short_description = "A cycle-accurate Game Boy and Game Boy Color emulator."
+icon = ["assets/icon-512x512.icns"]
+
+[package.metadata.winresource]
