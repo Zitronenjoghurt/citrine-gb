@@ -1,7 +1,12 @@
 [package]
 name = "citrine-gb"
+description = "A cycle-accurate game boy emulator. (Work in progress)"
+homepage = "https://gb.lemon.industries"
+repository = "https://github.com/Zitronenjoghurt/citrine-gb"
+license = "MIT"
 version = "0.1.0"
 edition = "2024"
+exclude = [".DS_Store"]
 
 [features]
 default = []

@@ -50,3 +50,7 @@ win:
 	cp target/x86_64-pc-windows-gnu/release/citrine-gb-app.exe "build/windows/v$(v)/Citrine v$(v).exe"
 	cd build/windows/v$(v) && zip -r citrine-v$(v)-win-64.zip "Citrine v$(v).exe"
 	@echo "Windows executable built and zipped"
+
+publish:
+	cargo test -p citrine-gb --release
+	cd lib && cargo publish
