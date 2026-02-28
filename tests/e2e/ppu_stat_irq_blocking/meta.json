@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "ppu_stat_irq_blocking",
+  "description": "Mooneye PPU test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "5BE2A9F9",
+    "sha1": "F8F9803D0F7FEC70F96D5F761E5231553B232CA9",
+    "sha256": "604436AEB6A37BADD71BE0FAFA526307345F1DE6AF757193F11FC77E09A01FC7"
+  },
+  "cycles": 200001
+}

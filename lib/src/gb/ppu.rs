@@ -28,6 +28,7 @@ pub struct Ppu {
     pub fetcher: PixelFetcher,
     pub fifo: PixelFifo,
     pub scanner: OamScanner,
+    stat_line_previous: bool,
     /// How many dots are left in the current H or V blank period
     pub blank_timeout: u16,
     /// Dots in the current scanline
@@ -93,6 +94,7 @@ impl Ppu {
             fetcher: PixelFetcher::default(),
             fifo: PixelFifo::default(),
             scanner: OamScanner::default(),
+            stat_line_previous: false,
             blank_timeout: 456,
             line_dot_counter: 0,
             vram: [[0x00; VRAM_BANK_SIZE]; 2],
@@ -163,9 +165,7 @@ impl Ppu {
                     self.fetcher.reset_scanline();
                     self.blank_timeout = 456 - self.line_dot_counter;
                     self.stat.ppu_mode = PpuMode::HBlank;
-                    if self.stat.mode0_interrupt {
-                        ic.request_interrupt(Interrupt::Lcd);
-                    }
+                    self.evaluate_stat_interrupts(ic);
                 }
             }
             PpuMode::HBlank => {
@@ -173,51 +173,58 @@ impl Ppu {
                 if self.blank_timeout == 0 {
                     self.ly += 1;
                     self.line_dot_counter = 0;
-                    self.check_lyc(ic);
+                    self.check_lyc();
                     if self.ly == 144 {
                         self.blank_timeout = 456;
                         self.stat.ppu_mode = PpuMode::VBlank;
                         self.frame_ready = true;
                         ic.request_interrupt(Interrupt::VBlank);
-                        if self.stat.mode1_interrupt {
-                            ic.request_interrupt(Interrupt::Lcd);
-                        }
                     } else {
                         self.stat.ppu_mode = PpuMode::OamScan;
-                        if self.stat.mode2_interrupt {
-                            ic.request_interrupt(Interrupt::Lcd);
-                        }
                     }
+                    self.evaluate_stat_interrupts(ic);
                 }
             }
             PpuMode::VBlank => {
                 self.blank_timeout -= 1;
                 if self.blank_timeout == 0 {
                     self.ly += 1;
-                    self.check_lyc(ic);
+                    self.check_lyc();
                     if self.ly == 154 {
                         self.ly = 0;
-                        self.check_lyc(ic);
+                        self.check_lyc();
                         self.fetcher.reset_frame();
                         self.stat.ppu_mode = PpuMode::OamScan;
-                        if self.stat.mode2_interrupt {
-                            ic.request_interrupt(Interrupt::Lcd);
-                        }
                     } else {
                         self.blank_timeout = 456;
                     }
+                    self.evaluate_stat_interrupts(ic);
                 }
             }
         }
     }
 
-    pub fn check_lyc(&mut self, ic: &mut impl ICInterface) {
-        let prev = self.stat.lyc_equals_ly;
+    pub fn check_lyc(&mut self) {
         self.stat.lyc_equals_ly = self.ly == self.lyc;
+    }
 
-        if !prev && self.stat.lyc_equals_ly && self.stat.lyc_interrupt {
-            ic.request_interrupt(Interrupt::Lcd)
+    fn current_stat_line(&self) -> bool {
+        let lyc_match = self.stat.lyc_interrupt && self.stat.lyc_equals_ly;
+        let mode0 = self.stat.mode0_interrupt && self.stat.ppu_mode == PpuMode::HBlank;
+        let mode1 = self.stat.mode1_interrupt && self.stat.ppu_mode == PpuMode::VBlank;
+        let mode2 = self.stat.mode2_interrupt && self.stat.ppu_mode == PpuMode::OamScan;
+
+        lyc_match || mode0 || mode1 || mode2
+    }
+
+    pub fn evaluate_stat_interrupts(&mut self, ic: &mut impl ICInterface) {
+        let current_line = self.current_stat_line();
+
+        if !self.stat_line_previous && current_line {
+            ic.request_interrupt(Interrupt::Lcd);
         }
+
+        self.stat_line_previous = current_line;
     }
 
     pub fn check_window_condition(&mut self) {
