@@ -2,11 +2,14 @@ use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
 use gilrs::EventType::{ButtonPressed, ButtonReleased};
 
+const FRAME_TIME: f64 = 1.0 / 59.7275;
+
 pub struct Emulator {
     pub gb: GameBoy,
     texture: Option<egui::TextureHandle>,
     pub running: bool,
-    last_frame: Option<web_time::Instant>,
+    last_update: Option<web_time::Instant>,
+    time_accumulator: f64,
     pub last_frame_secs: f64,
 }
 
@@ -16,7 +19,8 @@ impl Default for Emulator {
             gb: GameBoy::new_empty(GbModel::Dmg),
             texture: None,
             running: true,
-            last_frame: None,
+            last_update: None,
+            time_accumulator: 0.0,
             last_frame_secs: 0.0,
         }
     }
@@ -29,23 +33,37 @@ impl Emulator {
         }
 
         if !self.running {
+            self.last_update = Some(web_time::Instant::now());
             return;
         }
 
         self.handle_input(ctx, gil);
 
         let now = web_time::Instant::now();
-        let should_run = match self.last_frame {
-            Some(last) => now.duration_since(last).as_secs_f64() >= 1.0 / 59.7275,
-            None => true,
+        let dt = match self.last_update {
+            Some(last) => now.duration_since(last).as_secs_f64(),
+            None => 0.0,
         };
 
-        if should_run {
+        self.last_update = Some(now);
+        self.time_accumulator += dt;
+        if self.time_accumulator > FRAME_TIME * 5.0 {
+            self.time_accumulator = FRAME_TIME * 5.0;
+        }
+
+        let mut ran_frame = false;
+        while self.time_accumulator >= FRAME_TIME {
             let start = web_time::Instant::now();
+
             self.gb.run_frame();
-            self.update_texture(ctx);
-            self.last_frame = Some(now);
+
             self.last_frame_secs = start.elapsed().as_secs_f64();
+            self.time_accumulator -= FRAME_TIME;
+            ran_frame = true;
+        }
+
+        if ran_frame {
+            self.update_texture(ctx);
         }
     }
 
