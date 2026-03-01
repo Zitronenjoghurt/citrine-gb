@@ -3,25 +3,44 @@ use citrine_gb::gb::{GameBoy, GbModel};
 use gilrs::EventType::{ButtonPressed, ButtonReleased};
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
+const GB_WIDTH: usize = 160;
+const GB_HEIGHT: usize = 144;
+const FRAME_SCALE: usize = 3;
 
 pub struct Emulator {
     pub gb: GameBoy,
-    texture: Option<egui::TextureHandle>,
     pub running: bool,
+    pub enable_matrix: bool,
+    /// 0.0 to 1.0 (e.g., 0.85 = 15% darker)
+    pub matrix_edge_brightness: f32,
+    /// 0.0 to 1.0 (e.g., 0.75 = 25% darker)
+    pub matrix_corner_brightness: f32,
+    pub enable_ghosting: bool,
+    /// 0.0 (pure smear) to 1.0 (instant, no ghosting)
+    pub ghosting_blend: f32,
+
+    texture: Option<egui::TextureHandle>,
     last_update: Option<web_time::Instant>,
     time_accumulator: f64,
     pub last_frame_secs: f64,
+    last_frame: Vec<u8>,
 }
 
 impl Default for Emulator {
     fn default() -> Self {
         Self {
             gb: GameBoy::new_empty(GbModel::Dmg),
-            texture: None,
             running: true,
+            enable_matrix: true,
+            matrix_edge_brightness: 0.85,
+            matrix_corner_brightness: 0.75,
+            enable_ghosting: true,
+            ghosting_blend: 0.7,
+            texture: None,
             last_update: None,
             time_accumulator: 0.0,
             last_frame_secs: 0.0,
+            last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
         }
     }
 }
@@ -47,6 +66,7 @@ impl Emulator {
 
         self.last_update = Some(now);
         self.time_accumulator += dt;
+
         if self.time_accumulator > FRAME_TIME * 5.0 {
             self.time_accumulator = FRAME_TIME * 5.0;
         }
@@ -116,16 +136,33 @@ impl Emulator {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         if let Some(tex) = &self.texture {
-            let aspect = 160.0 / 144.0;
             let available = ui.available_size();
 
-            let size = if available.x / available.y > aspect {
-                egui::vec2(available.y * aspect, available.y)
-            } else {
-                egui::vec2(available.x, available.x / aspect)
-            };
+            let tex_width = (GB_WIDTH * FRAME_SCALE) as f32;
+            let tex_height = (GB_HEIGHT * FRAME_SCALE) as f32;
 
-            ui.image(egui::load::SizedTexture::new(tex.id(), size));
+            let scale_x = available.x / tex_width;
+            let scale_y = available.y / tex_height;
+
+            let mut scale_factor = scale_x.min(scale_y);
+
+            if self.enable_matrix {
+                scale_factor = scale_factor.floor().max(1.0);
+            }
+
+            let final_size = egui::vec2(tex_width * scale_factor, tex_height * scale_factor);
+
+            let leftover_x = (available.x - final_size.x).max(0.0);
+            let leftover_y = (available.y - final_size.y).max(0.0);
+
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+
+            ui.add_space((leftover_y / 2.0).floor());
+            ui.horizontal(|ui| {
+                ui.add_space((leftover_x / 2.0).floor());
+                ui.image(egui::load::SizedTexture::new(tex.id(), final_size));
+            });
+
             ui.ctx().request_repaint();
         }
     }
@@ -152,8 +189,73 @@ impl Emulator {
     }
 
     fn update_texture(&mut self, ctx: &egui::Context) {
-        let image =
-            egui::ColorImage::from_rgba_unmultiplied([160, 144], self.gb.frame().as_slice());
+        let upscaled_width = GB_WIDTH * FRAME_SCALE;
+        let upscaled_height = GB_HEIGHT * FRAME_SCALE;
+
+        let current_raw = self.gb.frame().as_slice();
+        let mut upscaled_data = vec![0u8; upscaled_width * upscaled_height * 4];
+
+        let blend = if self.enable_ghosting {
+            self.ghosting_blend
+        } else {
+            1.0
+        };
+
+        for y in 0..GB_HEIGHT {
+            for x in 0..GB_WIDTH {
+                let orig_idx = (y * GB_WIDTH + x) * 4;
+
+                let r = (current_raw[orig_idx] as f32 * blend
+                    + self.last_frame[orig_idx] as f32 * (1.0 - blend))
+                    as u8;
+                let g = (current_raw[orig_idx + 1] as f32 * blend
+                    + self.last_frame[orig_idx + 1] as f32 * (1.0 - blend))
+                    as u8;
+                let b = (current_raw[orig_idx + 2] as f32 * blend
+                    + self.last_frame[orig_idx + 2] as f32 * (1.0 - blend))
+                    as u8;
+                let a = 255;
+
+                self.last_frame[orig_idx] = r;
+                self.last_frame[orig_idx + 1] = g;
+                self.last_frame[orig_idx + 2] = b;
+                self.last_frame[orig_idx + 3] = a;
+
+                for dy in 0..FRAME_SCALE {
+                    for dx in 0..FRAME_SCALE {
+                        let up_x = x * FRAME_SCALE + dx;
+                        let up_y = y * FRAME_SCALE + dy;
+                        let up_idx = (up_y * upscaled_width + up_x) * 4;
+
+                        let mut pixel_r = r;
+                        let mut pixel_g = g;
+                        let mut pixel_b = b;
+
+                        if self.enable_matrix {
+                            if dx == FRAME_SCALE - 1 && dy == FRAME_SCALE - 1 {
+                                pixel_r = (pixel_r as f32 * self.matrix_corner_brightness) as u8;
+                                pixel_g = (pixel_g as f32 * self.matrix_corner_brightness) as u8;
+                                pixel_b = (pixel_b as f32 * self.matrix_corner_brightness) as u8;
+                            } else if dx == FRAME_SCALE - 1 || dy == FRAME_SCALE - 1 {
+                                pixel_r = (pixel_r as f32 * self.matrix_edge_brightness) as u8;
+                                pixel_g = (pixel_g as f32 * self.matrix_edge_brightness) as u8;
+                                pixel_b = (pixel_b as f32 * self.matrix_edge_brightness) as u8;
+                            }
+                        }
+
+                        upscaled_data[up_idx] = pixel_r;
+                        upscaled_data[up_idx + 1] = pixel_g;
+                        upscaled_data[up_idx + 2] = pixel_b;
+                        upscaled_data[up_idx + 3] = a;
+                    }
+                }
+            }
+        }
+
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [upscaled_width, upscaled_height],
+            &upscaled_data,
+        );
 
         match &mut self.texture {
             Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),

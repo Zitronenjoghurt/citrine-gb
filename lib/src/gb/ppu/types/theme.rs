@@ -6,13 +6,15 @@ use std::fmt::Display;
 pub enum DmgTheme {
     #[default]
     Citrine,
+    Original,
+    Pocket,
     GreyScale,
-    GbPocket,
     Custom([RGBA; 4]),
 }
 
 impl DmgTheme {
-    pub const SELECTABLE: &'static [Self] = &[Self::Citrine, Self::GreyScale, Self::GbPocket];
+    pub const SELECTABLE: &'static [Self] =
+        &[Self::Citrine, Self::Original, Self::Pocket, Self::GreyScale];
 
     pub fn palette(&self) -> &[RGBA; 4] {
         match self {
@@ -26,6 +28,29 @@ impl DmgTheme {
                     ]
                 }
             }
+            Self::Original => {
+                const {
+                    // Might be too dark?
+                    &[
+                        RGBA::hex(0x8B956DFF),
+                        RGBA::hex(0x4B5A3CFF),
+                        RGBA::hex(0x253421FF),
+                        RGBA::hex(0x0F140AFF),
+                    ]
+                    //&[
+                    //    RGBA::hex(0xE0F8D0FF),
+                    //    RGBA::hex(0x88C070FF),
+                    //    RGBA::hex(0x346856FF),
+                    //    RGBA::hex(0x081820FF),
+                    //]
+                    //&[
+                    //    RGBA::rgb(0x9B, 0xBC, 0x0F),
+                    //    RGBA::rgb(0x8B, 0xAC, 0x0F),
+                    //    RGBA::rgb(0x30, 0x62, 0x30),
+                    //    RGBA::rgb(0x0F, 0x38, 0x0F),
+                    //]
+                }
+            }
             Self::GreyScale => {
                 const {
                     &[
@@ -36,7 +61,7 @@ impl DmgTheme {
                     ]
                 }
             }
-            Self::GbPocket => {
+            Self::Pocket => {
                 const {
                     &[
                         RGBA::rgb(0xC5, 0xCA, 0xA4),
@@ -59,8 +84,9 @@ impl Display for DmgTheme {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Citrine => write!(f, "Citrine"),
+            Self::Original => write!(f, "Original"),
+            Self::Pocket => write!(f, "Game Boy Pocket"),
             Self::GreyScale => write!(f, "Grey Scale"),
-            Self::GbPocket => write!(f, "Game Boy Pocket"),
             Self::Custom(_) => write!(f, "Custom"),
         }
     }

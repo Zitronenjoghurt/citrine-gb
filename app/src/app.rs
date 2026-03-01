@@ -92,11 +92,7 @@ impl eframe::App for Citrine {
         self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
 
-        if self.ui.settings.is_dirty() {
-            let settings = std::mem::take(&mut self.ui.settings);
-            settings.apply(ctx, self);
-            self.ui.settings = settings;
-        }
+        self.ui.settings.apply(ctx, &mut self.emulator);
     }
 
     fn save(&mut self, storage: &mut dyn Storage) {

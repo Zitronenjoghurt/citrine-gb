@@ -19,8 +19,8 @@ impl Widget for SettingsWidget<'_> {
             .show(ui, |ui| {
                 let mut ui_scale = self.settings.ui_scale();
                 ui.label("UI Scale");
-                Slider::new(&mut ui_scale, 0.5..=5.0).step_by(0.1).ui(ui);
-                if ui_scale != self.settings.ui_scale() {
+                let scale_result = Slider::new(&mut ui_scale, 0.5..=5.0).step_by(0.1).ui(ui);
+                if scale_result.changed() && !scale_result.dragged() {
                     self.settings.set_ui_scale(ui_scale);
                 }
                 ui.end_row();
@@ -31,6 +31,53 @@ impl Widget for SettingsWidget<'_> {
                 if theme != self.settings.dmg_theme() {
                     self.settings.set_dmg_theme(theme);
                 };
+                ui.end_row();
+
+                let mut matrix_enabled = self.settings.matrix();
+                ui.label("Matrix");
+                ui.checkbox(&mut matrix_enabled, "");
+                if matrix_enabled != self.settings.matrix() {
+                    self.settings.set_matrix(matrix_enabled);
+                }
+                ui.end_row();
+
+                let mut matrix_edge_darkness = self.settings.matrix_edge_darkness();
+                ui.label("Matrix Edge Darkness");
+                Slider::new(&mut matrix_edge_darkness, 0.0..=1.0)
+                    .step_by(0.01)
+                    .ui(ui);
+                if matrix_edge_darkness != self.settings.matrix_edge_darkness() {
+                    self.settings.set_matrix_edge_darkness(matrix_edge_darkness);
+                }
+                ui.end_row();
+
+                let mut matrix_corner_darkness = self.settings.matrix_corner_darkness();
+                ui.label("Matrix Corner Darkness");
+                Slider::new(&mut matrix_corner_darkness, 0.0..=1.0)
+                    .step_by(0.01)
+                    .ui(ui);
+                if matrix_corner_darkness != self.settings.matrix_corner_darkness() {
+                    self.settings
+                        .set_matrix_corner_darkness(matrix_corner_darkness);
+                }
+                ui.end_row();
+
+                let mut ghosting_enabled = self.settings.ghosting();
+                ui.label("Ghosting");
+                ui.checkbox(&mut ghosting_enabled, "");
+                if ghosting_enabled != self.settings.ghosting() {
+                    self.settings.set_ghosting(ghosting_enabled);
+                }
+                ui.end_row();
+
+                let mut ghosting_strength = self.settings.ghosting_strength();
+                ui.label("Ghosting Strength");
+                Slider::new(&mut ghosting_strength, 0.0..=1.0)
+                    .step_by(0.01)
+                    .ui(ui);
+                if ghosting_strength != self.settings.ghosting_strength() {
+                    self.settings.set_ghosting_strength(ghosting_strength);
+                }
                 ui.end_row();
             })
             .response

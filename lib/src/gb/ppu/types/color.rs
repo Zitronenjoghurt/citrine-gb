@@ -11,6 +11,15 @@ impl RGBA {
         Self::new(r, g, b, 0xFF)
     }
 
+    pub const fn hex(hex: u32) -> Self {
+        Self::new(
+            ((hex >> 24) & 0xFF) as u8,
+            ((hex >> 16) & 0xFF) as u8,
+            ((hex >> 8) & 0xFF) as u8,
+            (hex & 0xFF) as u8,
+        )
+    }
+
     pub const fn grey(value: u8) -> Self {
         Self::new(value, value, value, 0xFF)
     }
