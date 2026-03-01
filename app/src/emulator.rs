@@ -1,6 +1,10 @@
+use citrine_gb::error::GbResult;
 use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
+use citrine_gb::persistence::SDump;
+use citrine_gb::rom::Rom;
 use gilrs::EventType::{ButtonPressed, ButtonReleased};
+use std::path::{Path, PathBuf};
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
 const GB_WIDTH: usize = 160;
@@ -18,12 +22,13 @@ pub struct Emulator {
     pub enable_ghosting: bool,
     /// 0.0 (pure smear) to 1.0 (instant, no ghosting)
     pub ghosting_blend: f32,
-
     texture: Option<egui::TextureHandle>,
     last_update: Option<web_time::Instant>,
     time_accumulator: f64,
     pub last_frame_secs: f64,
     last_frame: Vec<u8>,
+    #[cfg(not(target_arch = "wasm32"))]
+    rom_path: Option<PathBuf>,
 }
 
 impl Default for Emulator {
@@ -41,19 +46,21 @@ impl Default for Emulator {
             time_accumulator: 0.0,
             last_frame_secs: 0.0,
             last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
+            #[cfg(not(target_arch = "wasm32"))]
+            rom_path: None,
         }
     }
 }
 
 impl Emulator {
-    pub fn update(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) {
+    pub fn update(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) -> GbResult<()> {
         if self.texture.is_none() {
             self.update_texture(ctx);
         }
 
         if !self.running {
             self.last_update = Some(web_time::Instant::now());
-            return;
+            return Ok(());
         }
 
         self.handle_input(ctx, gil);
@@ -85,6 +92,10 @@ impl Emulator {
         if ran_frame {
             self.update_texture(ctx);
         }
+
+        self.handle_save()?;
+
+        Ok(())
     }
 
     pub fn handle_input(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) {
@@ -164,6 +175,56 @@ impl Emulator {
             });
 
             ui.ctx().request_repaint();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_rom(&mut self, rom: &Rom, path: &Path) -> GbResult<()> {
+        self.rom_path = Some(path.to_owned());
+        let sav_path = path.with_extension("sav");
+        let sdump = if sav_path.exists() {
+            Some(SDump::load(&sav_path)?)
+        } else {
+            None
+        };
+
+        self.running = false;
+
+        self.gb.load_rom(rom)?;
+
+        if let Some(sdump) = sdump {
+            self.gb.put_sram_dump(sdump);
+        }
+
+        self.running = true;
+
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
+        self.gb.load_rom(rom)?;
+        Ok(())
+    }
+
+    pub fn handle_save(&mut self) -> GbResult<()> {
+        // ToDo: Web saves
+        #[cfg(target_arch = "wasm32")]
+        return Ok(());
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(rom_path) = self.rom_path.as_ref() else {
+                return Ok(());
+            };
+
+            let Some(sdump) = self.gb.poll_sram_dump() else {
+                return Ok(());
+            };
+
+            sdump.save(&rom_path.with_extension("sav"))?;
+
+            Ok(())
         }
     }
 

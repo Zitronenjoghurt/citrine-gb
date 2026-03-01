@@ -73,7 +73,10 @@ impl eframe::App for Citrine {
             }
         }
 
-        self.emulator.update(ctx, &mut self.gil);
+        if let Err(err) = self.emulator.update(ctx, &mut self.gil) {
+            self.toasts.error(format!("Emulation Error: {}", err));
+        }
+
         TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
 
         if let Some(panel) = self.ui.panels.left {
@@ -142,7 +145,11 @@ impl Citrine {
 impl Citrine {
     fn handle_load_rom(&mut self, fr: FileResult) {
         let rom = Rom::new(fr.data().unwrap());
-        if let Err(err) = self.emulator.gb.load_rom(&rom) {
+        if let Err(err) = self.emulator.load_rom(
+            &rom,
+            #[cfg(not(target_arch = "wasm32"))]
+            &fr.path,
+        ) {
             self.toasts.error(format!("Failed to load ROM: {}", err));
         } else {
             self.toasts.success(format!("Loaded ROM '{}'", fr.name));
@@ -154,6 +161,7 @@ impl Citrine {
         self.toasts.success("Boot ROM loaded");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn handle_export_e2e(&mut self, fr: FileResult) {
         let dir = fr.directory_path().unwrap();
 
@@ -174,4 +182,7 @@ impl Citrine {
                 .success(format!("Exported E2E to '{}'", dir.display()));
         }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn handle_export_e2e(&mut self, _fr: FileResult) {}
 }

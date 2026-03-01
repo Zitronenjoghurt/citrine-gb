@@ -12,7 +12,7 @@ pub enum FileIntent {
 #[derive(Debug, Clone)]
 pub enum FileResultKind {
     File { data: Vec<u8> },
-    Directory { path: PathBuf },
+    Directory,
 }
 
 #[derive(Debug, Clone)]
@@ -20,19 +20,22 @@ pub struct FileResult {
     pub intent: FileIntent,
     pub name: String,
     pub kind: FileResultKind,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub path: PathBuf,
 }
 
 impl FileResult {
     pub fn data(&self) -> Option<&[u8]> {
         match &self.kind {
             FileResultKind::File { data } => Some(data),
-            FileResultKind::Directory { .. } => None,
+            FileResultKind::Directory => None,
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn directory_path(&self) -> Option<&Path> {
         match &self.kind {
-            FileResultKind::Directory { path } => Some(path),
+            FileResultKind::Directory => Some(&self.path),
             FileResultKind::File { .. } => None,
         }
     }
@@ -208,6 +211,8 @@ impl FilePicker {
             intent: intent.clone(),
             name,
             kind: FileResultKind::File { data },
+            #[cfg(not(target_arch = "wasm32"))]
+            path,
         })
     }
 
@@ -221,7 +226,9 @@ impl FilePicker {
         Some(FileResult {
             intent: intent.clone(),
             name,
-            kind: FileResultKind::Directory { path },
+            kind: FileResultKind::Directory,
+            #[cfg(not(target_arch = "wasm32"))]
+            path,
         })
     }
 
@@ -258,6 +265,8 @@ impl FilePicker {
                 intent: intent.clone(),
                 name,
                 kind: FileResultKind::File { data },
+                #[cfg(not(target_arch = "wasm32"))]
+                path: file.path.unwrap_or_default(),
             });
         }
 

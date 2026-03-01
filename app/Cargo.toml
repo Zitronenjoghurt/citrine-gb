@@ -14,6 +14,7 @@ eframe = { version = "0.33.0", default-features = false, features = ["persistenc
 egui = "0.33.0"
 egui-notify = "0.21.0"
 egui-phosphor = { version = "0.11.0", features = ["regular"] }
+gilrs = "0.11.1"
 log = "0.4.29"
 rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -23,7 +24,6 @@ web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.33.0", default-features = false, features = ["persistence", "wayland", "wgpu", "x11"] }
-gilrs = "0.11.1"
 image = "0.25.9"
 wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
 

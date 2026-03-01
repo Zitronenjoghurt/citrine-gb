@@ -21,6 +21,25 @@ pub enum Mbc {
     Mbc2(mbc2::Mbc2),
 }
 
+impl Mbc {
+    pub fn get_internal_data(&self) -> Option<&[u8]> {
+        if let Self::Mbc2(mbc) = self {
+            Some(mbc.ram.as_slice())
+        } else {
+            None
+        }
+    }
+
+    pub fn put_internal_data(&mut self, data: &[u8]) -> bool {
+        if let Self::Mbc2(mbc) = self {
+            mbc.ram.copy_from_slice(data);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl MbcInterface for Mbc {
     fn on_write(&mut self, addr: u16, value: u8) -> bool {
         match self {

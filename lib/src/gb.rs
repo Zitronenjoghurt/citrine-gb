@@ -1,4 +1,5 @@
 use crate::error::GbResult;
+use crate::persistence::SDump;
 use crate::rom::Rom;
 use ppu::types::framebuffer::Framebuffer;
 
@@ -153,6 +154,14 @@ impl GameBoy {
 
     pub fn release_button(&mut self, button: joypad::JoypadState) {
         self.joypad.release(button);
+    }
+
+    pub fn poll_sram_dump(&mut self) -> Option<SDump> {
+        self.cartridge.poll_sram_dump()
+    }
+
+    pub fn put_sram_dump(&mut self, dump: SDump) {
+        self.cartridge.put_sram_dump(dump);
     }
 
     #[cfg(feature = "debug")]

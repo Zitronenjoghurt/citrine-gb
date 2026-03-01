@@ -824,6 +824,20 @@ pub enum RomCartridgeType {
     HuC1RamBattery = 0xFF,
 }
 
+impl RomCartridgeType {
+    pub fn has_battery(&self) -> bool {
+        matches!(
+            self,
+            Self::Mbc1RamBattery
+                | Self::Mbc2Battery
+                | Self::Mbc3RamBattery
+                | Self::Mbc5RamBattery
+                | Self::Mbc7SensorRumbleRamBattery
+                | Self::HuC1RamBattery
+        )
+    }
+}
+
 impl std::fmt::Display for RomCartridgeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

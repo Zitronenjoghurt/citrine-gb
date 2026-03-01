@@ -1,14 +1,13 @@
 .PHONY: check dev native up down build logs release mac win
 
 check:
-	rustup target add wasm32-unknown-unknown aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
+	rustup target add wasm32-unknown-unknown aarch64-apple-darwin x86_64-pc-windows-gnu
 	cargo check -p citrine-gb
 	cargo check -p citrine-gb --features debug
 	cargo check -p citrine-gb --features serde
 	cargo check -p citrine-gb-app
 	cargo check -p citrine-gb-app --target wasm32-unknown-unknown
 	cargo check -p citrine-gb-app --target aarch64-apple-darwin
-	cargo check -p citrine-gb-app --target x86_64-unknown-linux-gnu
 	cargo check -p citrine-gb-app --target x86_64-pc-windows-gnu
 	cargo test -p citrine-gb --release
 

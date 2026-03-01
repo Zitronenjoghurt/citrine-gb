@@ -1,5 +1,6 @@
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
+use crate::persistence::SDump;
 use crate::rom::header::RomHeader;
 use crate::rom::Rom;
 use crate::{ReadMemory, WriteMemory};
@@ -12,6 +13,8 @@ pub const RAM_BANK_SIZE: usize = 0x2000; // 8KiB
 pub struct Cartridge {
     pub header: RomHeader,
     pub has_rom_loaded: bool,
+    sav_ready: bool,
+    has_battery: bool,
     mbc: mbc::Mbc,
     rom: Vec<[u8; ROM_BANK_SIZE]>,
     ram: Vec<[u8; RAM_BANK_SIZE]>,
@@ -22,6 +25,8 @@ impl Default for Cartridge {
         Self {
             header: RomHeader::default(),
             has_rom_loaded: false,
+            sav_ready: false,
+            has_battery: false,
             mbc: mbc::Mbc::None,
             rom: vec![[0; ROM_BANK_SIZE]; 2],
             ram: vec![[0; RAM_BANK_SIZE]; 1],
@@ -54,6 +59,10 @@ impl Cartridge {
             return Err(GbError::RomTooBig);
         }
 
+        self.has_battery = header
+            .cartridge_type
+            .map(|ct| ct.has_battery())
+            .unwrap_or(false);
         self.header = header;
         self.has_rom_loaded = true;
         self.rom.resize(rom_banks, [0; ROM_BANK_SIZE]);
@@ -65,6 +74,35 @@ impl Cartridge {
     pub fn soft_reset(&mut self) {
         self.mbc.soft_reset();
         self.ram.iter_mut().for_each(|bank| bank.fill(0));
+    }
+
+    pub fn poll_sram_dump(&mut self) -> Option<SDump> {
+        if !self.has_battery && !self.sav_ready {
+            return None;
+        };
+
+        if let Some(data) = self.mbc.get_internal_data() {
+            Some(SDump::from_slice(data))
+        } else {
+            Some(SDump::from_banks(self.ram.as_slice()))
+        }
+    }
+
+    pub fn put_sram_dump(&mut self, dump: SDump) {
+        if !self.has_battery {
+            return;
+        };
+
+        let data = dump.as_slice();
+
+        let internal = self.mbc.put_internal_data(data);
+        if internal {
+            return;
+        };
+
+        for (bank, chunk) in self.ram.iter_mut().zip(data.chunks(RAM_BANK_SIZE)) {
+            bank[..chunk.len()].copy_from_slice(chunk);
+        }
     }
 }
 
@@ -91,8 +129,13 @@ impl ReadMemory for Cartridge {
 
 impl WriteMemory for Cartridge {
     fn write_naive(&mut self, addr: u16, value: u8) {
+        let ram_enabled = self.mbc.ram_bank().is_some();
+
         let consumed = self.mbc.on_write(addr, value);
         if consumed {
+            if !ram_enabled && self.mbc.ram_bank().is_some() {
+                self.sav_ready = true;
+            }
             return;
         }
 
@@ -100,6 +143,10 @@ impl WriteMemory for Cartridge {
             && (0xA000..=0xBFFF).contains(&addr)
         {
             self.ram[bank][(addr - 0xA000) as usize] = value;
+        }
+
+        if !ram_enabled && self.mbc.ram_bank().is_some() {
+            self.sav_ready = true;
         }
     }
 }
