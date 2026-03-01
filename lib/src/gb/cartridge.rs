@@ -70,12 +70,16 @@ impl Cartridge {
 
 impl ReadMemory for Cartridge {
     fn read_naive(&self, addr: u16) -> u8 {
+        if let Some(value) = self.mbc.on_read(addr) {
+            return value;
+        };
+
         match addr {
             0x0000..=0x3FFF => self.rom[self.mbc.rom_bank_low()][addr as usize],
             0x4000..=0x7FFF => self.rom[self.mbc.rom_bank_high()][(addr - 0x4000) as usize],
             0xA000..=0xBFFF => {
-                if self.mbc.ram_enabled() {
-                    self.ram[self.mbc.ram_bank()][(addr - 0xA000) as usize]
+                if let Some(bank) = self.mbc.ram_bank() {
+                    self.ram[bank][(addr - 0xA000) as usize]
                 } else {
                     0xFF
                 }
@@ -87,10 +91,15 @@ impl ReadMemory for Cartridge {
 
 impl WriteMemory for Cartridge {
     fn write_naive(&mut self, addr: u16, value: u8) {
-        self.mbc.on_write(addr, value);
+        let consumed = self.mbc.on_write(addr, value);
+        if consumed {
+            return;
+        }
 
-        if self.mbc.ram_enabled() && (0xA000..=0xBFFF).contains(&addr) {
-            self.ram[self.mbc.ram_bank()][(addr - 0xA000) as usize] = value;
+        if let Some(bank) = self.mbc.ram_bank()
+            && (0xA000..=0xBFFF).contains(&addr)
+        {
+            self.ram[bank][(addr - 0xA000) as usize] = value;
         }
     }
 }

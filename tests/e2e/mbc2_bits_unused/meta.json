@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "mbc2_bits_unused",
+  "description": "Mooneye MBC test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "MBC2 + Battery",
+    "rom_banks": 16,
+    "ram_banks": 0,
+    "crc_32": "183FB2F7",
+    "sha1": "26357EEDE96DCB380A3AB5266149048C1F263087",
+    "sha256": "14813CB3305E52ECFD84887797ED606B6B804DB68196397BB6A7CD0D824D57B3"
+  },
+  "cycles": 4000002
+}

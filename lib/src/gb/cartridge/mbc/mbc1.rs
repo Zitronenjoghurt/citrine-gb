@@ -1,4 +1,4 @@
-use crate::gb::cartridge::mbc::MbcInterface;
+use crate::gb::cartridge::mbc::{mask_rom_bank, MbcInterface};
 
 #[derive(Debug)]
 pub struct Mbc1 {
@@ -25,10 +25,6 @@ impl Mbc1 {
         }
     }
 
-    fn mask_rom_bank(&self, bank: usize) -> usize {
-        bank & (self.rom_bank_count.next_power_of_two() - 1)
-    }
-
     fn write_ram_enabled(&mut self, value: u8) {
         self.ram_enabled = value & 0x0F == 0x0A;
     }
@@ -47,25 +43,27 @@ impl Mbc1 {
 }
 
 impl MbcInterface for Mbc1 {
-    fn ram_enabled(&self) -> bool {
-        self.ram_enabled
-    }
-
-    fn on_write(&mut self, addr: u16, value: u8) {
+    fn on_write(&mut self, addr: u16, value: u8) -> bool {
         match addr {
             0x0000..=0x1FFF => self.write_ram_enabled(value),
             0x2000..=0x3FFF => self.write_rom_bank_number(value),
             0x4000..=0x5FFF => self.write_secondary_register(value),
             0x6000..=0x7FFF => self.write_advanced_banking_mode(value),
             _ => {}
-        }
+        };
+
+        false
+    }
+
+    fn on_read(&self, _addr: u16) -> Option<u8> {
+        None
     }
 
     fn rom_bank_low(&self) -> usize {
         if !self.advanced_banking_mode {
             0
         } else {
-            self.mask_rom_bank((self.secondary_register as usize) << 5)
+            mask_rom_bank((self.secondary_register as usize) << 5, self.rom_bank_count)
         }
     }
 
@@ -76,15 +74,21 @@ impl MbcInterface for Mbc1 {
             self.rom_bank_register as usize
         };
         let bank = (self.secondary_register as usize) << 5 | rom_reg;
-        self.mask_rom_bank(bank)
+        mask_rom_bank(bank, self.rom_bank_count)
     }
 
-    fn ram_bank(&self) -> usize {
-        if !self.advanced_banking_mode || self.ram_bank_count <= 1 {
+    fn ram_bank(&self) -> Option<usize> {
+        if !self.ram_enabled {
+            return None;
+        }
+
+        let bank = if !self.advanced_banking_mode || self.ram_bank_count <= 1 {
             0
         } else {
             (self.secondary_register as usize) & (self.ram_bank_count - 1)
-        }
+        };
+
+        Some(bank)
     }
 
     fn soft_reset(&mut self) {
