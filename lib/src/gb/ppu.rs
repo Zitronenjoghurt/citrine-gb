@@ -152,7 +152,6 @@ impl Ppu {
                     self.fetcher.reset_scanline();
                     self.fifo.start_scanline(self.scx);
                     self.stat.ppu_mode = PpuMode::Drawing;
-                    self.evaluate_stat_interrupts(ic);
                 }
             }
             PpuMode::Drawing => {
@@ -166,7 +165,6 @@ impl Ppu {
                     self.fetcher.reset_scanline();
                     self.blank_timeout = 456 - self.line_dot_counter;
                     self.stat.ppu_mode = PpuMode::HBlank;
-                    self.evaluate_stat_interrupts(ic);
                 }
             }
             PpuMode::HBlank => {
@@ -183,7 +181,6 @@ impl Ppu {
                     } else {
                         self.stat.ppu_mode = PpuMode::OamScan;
                     }
-                    self.evaluate_stat_interrupts(ic);
                 }
             }
             PpuMode::VBlank => {
@@ -199,10 +196,11 @@ impl Ppu {
                     } else {
                         self.blank_timeout = 456;
                     }
-                    self.evaluate_stat_interrupts(ic);
                 }
             }
         }
+
+        self.evaluate_stat_interrupts(ic);
     }
 
     pub fn check_lyc(&mut self) {

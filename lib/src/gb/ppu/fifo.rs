@@ -103,7 +103,7 @@ impl Ppu {
 
                 let color = if let Some(sprite) = sprite {
                     if sprite.color_index == 0
-                        || ((bg.obj_bg_priority || sprite.obj_bg_priority) && bg.color_index != 0)
+                        || ((bg.obj_bg_priority || sprite.obj_bg_priority) && bg_color_index != 0)
                     {
                         self.apply_bg_palette(bg.palette, bg_color_index)
                     } else {

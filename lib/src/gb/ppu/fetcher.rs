@@ -150,12 +150,23 @@ impl Ppu {
                 self.fetcher.state = PixelFetcherState::Push;
             }
             PixelFetcherState::Push => {
+                let was_sprite = self.fetcher.sprite_mode.is_some();
+
                 if self.try_push_to_fifo() {
-                    if self.fetcher.sprite_mode.is_none() {
+                    if !was_sprite {
                         self.fetcher.x += 8;
                     }
+
                     self.fetcher.state = PixelFetcherState::GetTile1;
                     self.fetcher.sprite_mode = None;
+
+                    // Re-enter sprite mode if there are 2 sprites at the same x position
+                    if was_sprite
+                        && self.lcdc.do_render_obj()
+                        && let Some(sprite) = self.scanner.pop_sprite_for_x(self.fifo.lcd_x)
+                    {
+                        self.fetcher.sprite_mode = Some(sprite);
+                    }
                 }
             }
         }
