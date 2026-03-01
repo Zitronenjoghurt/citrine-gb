@@ -29,6 +29,8 @@ pub struct Emulator {
     last_frame: Vec<u8>,
     #[cfg(not(target_arch = "wasm32"))]
     rom_path: Option<PathBuf>,
+    pub last_save: Option<web_time::Instant>,
+    pub save_loaded: bool,
 }
 
 impl Default for Emulator {
@@ -48,6 +50,8 @@ impl Default for Emulator {
             last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
             #[cfg(not(target_arch = "wasm32"))]
             rom_path: None,
+            last_save: None,
+            save_loaded: false,
         }
     }
 }
@@ -194,6 +198,7 @@ impl Emulator {
 
         if let Some(sdump) = sdump {
             self.gb.put_sram_dump(sdump);
+            self.save_loaded = true;
         }
 
         self.running = true;
@@ -214,6 +219,12 @@ impl Emulator {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some(last_save) = self.last_save
+                && last_save.elapsed().as_secs() < 5
+            {
+                return Ok(());
+            }
+
             let Some(rom_path) = self.rom_path.as_ref() else {
                 return Ok(());
             };
@@ -223,6 +234,7 @@ impl Emulator {
             };
 
             sdump.save(&rom_path.with_extension("sav"))?;
+            self.last_save = Some(web_time::Instant::now());
 
             Ok(())
         }

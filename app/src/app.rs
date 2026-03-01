@@ -131,6 +131,31 @@ impl Citrine {
             ui.label(format!("{:.02}ms", self.emulator.last_frame_secs * 1000.0));
 
             ui.label(format!("{} Cycles", self.emulator.gb.debugger.total_cycles));
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Some(last_save) = self.emulator.last_save {
+                    ui.separator();
+
+                    let elapsed = web_time::Instant::now() - last_save;
+                    let label = match elapsed.as_secs() {
+                        0 if elapsed.subsec_micros() == 0 => {
+                            format!("{}ns ago", elapsed.subsec_nanos())
+                        }
+                        0 if elapsed.subsec_millis() == 0 => {
+                            format!("{}µs ago", elapsed.subsec_micros())
+                        }
+                        0 => format!("{}ms ago", elapsed.subsec_millis()),
+                        1..=59 => format!("{}s ago", elapsed.as_secs()),
+                        60..=3599 => format!("{}m ago", elapsed.as_secs() / 60),
+                        _ => format!("{}h ago", elapsed.as_secs() / 3600),
+                    };
+                    ui.label(format!("Last Save: {}", label));
+                } else if !self.emulator.gb.cartridge.supports_sram_saves() {
+                    ui.separator();
+                    ui.label("No saves (cartridge has no battery)");
+                }
+            }
         });
     }
 
@@ -153,6 +178,11 @@ impl Citrine {
             self.toasts.error(format!("Failed to load ROM: {}", err));
         } else {
             self.toasts.success(format!("Loaded ROM '{}'", fr.name));
+            self.ui.settings.dirty = true;
+
+            if self.emulator.save_loaded {
+                self.toasts.success("Loaded save data");
+            }
         }
     }
 

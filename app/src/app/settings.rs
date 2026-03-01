@@ -10,6 +10,7 @@ pub struct Settings {
     matrix_edge_darkness: f32,
     matrix_corner_darkness: f32,
     ghosting_strength: f32,
+    #[serde(skip, default = "default_dirty")]
     pub dirty: bool,
 }
 
@@ -26,9 +27,13 @@ impl Default for Settings {
             matrix_edge_darkness: 0.15,
             matrix_corner_darkness: 0.25,
             ghosting_strength: 0.3,
-            dirty: true,
+            dirty: default_dirty(),
         }
     }
+}
+
+fn default_dirty() -> bool {
+    true
 }
 
 impl Settings {
