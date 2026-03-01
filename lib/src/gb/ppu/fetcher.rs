@@ -59,6 +59,7 @@ impl Ppu {
             && self.fifo.lcd_x >= self.wx.saturating_sub(7)
         {
             self.fifo.reset_bg();
+            self.fifo.scx_discard = 0;
             self.fetcher.reset_scanline();
             self.fetcher.window_mode = true;
             return;
