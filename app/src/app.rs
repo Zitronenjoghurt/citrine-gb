@@ -150,7 +150,18 @@ impl Citrine {
                         60..=3599 => format!("{}m ago", elapsed.as_secs() / 60),
                         _ => format!("{}h ago", elapsed.as_secs() / 3600),
                     };
-                    ui.label(format!("Last Save: {}", label));
+                    ui.label(format!(
+                        "Last SRAM dump: {} ({} always save in-game if possible)",
+                        label,
+                        icons::WARNING
+                    ));
+                } else if self.emulator.gb.cartridge.supports_sram_saves() {
+                    ui.separator();
+                    if self.emulator.save_loaded {
+                        ui.label("Save file loaded");
+                    } else {
+                        ui.label("Game did not save anything yet");
+                    }
                 } else if !self.emulator.gb.cartridge.supports_sram_saves() {
                     ui.separator();
                     ui.label("No saves (cartridge has no battery)");
