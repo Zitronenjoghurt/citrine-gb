@@ -1,4 +1,4 @@
-use crate::gb::cartridge::mbc::{mask_rom_bank, MbcInterface};
+use crate::gb::cartridge::mbc::{mask_bank_number, MbcInterface};
 
 #[derive(Debug)]
 pub struct Mbc1 {
@@ -63,7 +63,7 @@ impl MbcInterface for Mbc1 {
         if !self.advanced_banking_mode {
             0
         } else {
-            mask_rom_bank((self.secondary_register as usize) << 5, self.rom_bank_count)
+            mask_bank_number((self.secondary_register as usize) << 5, self.rom_bank_count)
         }
     }
 
@@ -74,7 +74,7 @@ impl MbcInterface for Mbc1 {
             self.rom_bank_register as usize
         };
         let bank = (self.secondary_register as usize) << 5 | rom_reg;
-        mask_rom_bank(bank, self.rom_bank_count)
+        mask_bank_number(bank, self.rom_bank_count)
     }
 
     fn ram_bank(&self) -> Option<usize> {
