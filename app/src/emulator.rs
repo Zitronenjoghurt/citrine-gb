@@ -3,7 +3,8 @@ use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::persistence::SDump;
 use citrine_gb::rom::Rom;
-use gilrs::EventType::{ButtonPressed, ButtonReleased};
+use gilrs::Axis;
+use gilrs::EventType::{AxisChanged, ButtonPressed, ButtonReleased};
 use std::path::{Path, PathBuf};
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
@@ -103,8 +104,7 @@ impl Emulator {
     }
 
     pub fn handle_input(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) {
-        while let Some(gilrs::Event { event, id, .. }) = gil.next_event() {
-            println!("Gamepad {:?}: {:?}", id, event);
+        while let Some(gilrs::Event { event, .. }) = gil.next_event() {
             match event {
                 ButtonPressed(btn, ..) => {
                     if let Some(button) = gamepad_map(btn) {
@@ -116,6 +116,13 @@ impl Emulator {
                         self.gb.release_button(button);
                     }
                 }
+                AxisChanged(axis, value, ..) => match axis {
+                    Axis::DPadX => self.handle_x_axis(value),
+                    Axis::DPadY => self.handle_y_axis(value),
+                    Axis::LeftStickX => self.handle_x_axis(value),
+                    Axis::LeftStickY => self.handle_y_axis(value),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -147,6 +154,28 @@ impl Emulator {
                 }
             }
         });
+    }
+
+    pub fn handle_x_axis(&mut self, value: f32) {
+        if value < -0.5 {
+            self.gb.press_button(JoypadState::LEFT);
+        } else if value > 0.5 {
+            self.gb.press_button(JoypadState::RIGHT);
+        } else {
+            self.gb.release_button(JoypadState::LEFT);
+            self.gb.release_button(JoypadState::RIGHT);
+        }
+    }
+
+    pub fn handle_y_axis(&mut self, value: f32) {
+        if value < -0.5 {
+            self.gb.press_button(JoypadState::DOWN);
+        } else if value > 0.5 {
+            self.gb.press_button(JoypadState::UP);
+        } else {
+            self.gb.release_button(JoypadState::UP);
+            self.gb.release_button(JoypadState::DOWN);
+        }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -346,8 +375,8 @@ fn gamepad_map(btn: gilrs::Button) -> Option<JoypadState> {
         gilrs::Button::DPadDown => Some(JoypadState::DOWN),
         gilrs::Button::DPadLeft => Some(JoypadState::LEFT),
         gilrs::Button::DPadRight => Some(JoypadState::RIGHT),
-        gilrs::Button::East => Some(JoypadState::A),
-        gilrs::Button::South => Some(JoypadState::B),
+        gilrs::Button::East | gilrs::Button::West => Some(JoypadState::A),
+        gilrs::Button::South | gilrs::Button::North => Some(JoypadState::B),
         gilrs::Button::Start => Some(JoypadState::START),
         gilrs::Button::Select => Some(JoypadState::SELECT),
         _ => None,
