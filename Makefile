@@ -1,4 +1,7 @@
-.PHONY: check dev native up down build logs release mac win
+.PHONY: test check dev native up down build logs release mac win
+
+test:
+	cargo test --release -- --nocapture
 
 check:
 	rustup target add wasm32-unknown-unknown aarch64-apple-darwin x86_64-pc-windows-gnu
@@ -9,11 +12,11 @@ check:
 	cargo check -p citrine-gb-app --target wasm32-unknown-unknown
 	cargo check -p citrine-gb-app --target aarch64-apple-darwin
 	cargo check -p citrine-gb-app --target x86_64-pc-windows-gnu
-	cargo test -p citrine-gb --release
+	test
 
 dev:
 	cargo install trunk
-	cd app && trunk serve --open
+	cd app && trunk serve --release --open
 
 native:
 	cargo run --release --bin citrine-gb-app

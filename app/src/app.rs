@@ -132,40 +132,37 @@ impl Citrine {
 
             ui.label(format!("{} Cycles", self.emulator.gb.debugger.total_cycles));
 
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                if let Some(last_save) = self.emulator.last_save {
-                    ui.separator();
+            if let Some(last_save) = self.emulator.last_save {
+                ui.separator();
 
-                    let elapsed = web_time::Instant::now() - last_save;
-                    let label = match elapsed.as_secs() {
-                        0 if elapsed.subsec_micros() == 0 => {
-                            format!("{}ns ago", elapsed.subsec_nanos())
-                        }
-                        0 if elapsed.subsec_millis() == 0 => {
-                            format!("{}µs ago", elapsed.subsec_micros())
-                        }
-                        0 => format!("{}ms ago", elapsed.subsec_millis()),
-                        1..=59 => format!("{}s ago", elapsed.as_secs()),
-                        60..=3599 => format!("{}m ago", elapsed.as_secs() / 60),
-                        _ => format!("{}h ago", elapsed.as_secs() / 3600),
-                    };
-                    ui.label(format!(
-                        "Last SRAM dump: {} ({} always save in-game if possible)",
-                        label,
-                        icons::WARNING
-                    ));
-                } else if self.emulator.gb.cartridge.supports_sram_saves() {
-                    ui.separator();
-                    if self.emulator.save_loaded {
-                        ui.label("Save file loaded");
-                    } else {
-                        ui.label("Game did not save anything yet");
+                let elapsed = web_time::Instant::now() - last_save;
+                let label = match elapsed.as_secs() {
+                    0 if elapsed.subsec_micros() == 0 => {
+                        format!("{}ns ago", elapsed.subsec_nanos())
                     }
-                } else if !self.emulator.gb.cartridge.supports_sram_saves() {
-                    ui.separator();
-                    ui.label("No saves (cartridge has no battery)");
+                    0 if elapsed.subsec_millis() == 0 => {
+                        format!("{}µs ago", elapsed.subsec_micros())
+                    }
+                    0 => format!("{}ms ago", elapsed.subsec_millis()),
+                    1..=59 => format!("{}s ago", elapsed.as_secs()),
+                    60..=3599 => format!("{}m ago", elapsed.as_secs() / 60),
+                    _ => format!("{}h ago", elapsed.as_secs() / 3600),
+                };
+                ui.label(format!(
+                    "Last SRAM dump: {} ({} always save in-game if possible)",
+                    label,
+                    icons::WARNING
+                ));
+            } else if self.emulator.gb.cartridge.supports_sram_saves() {
+                ui.separator();
+                if self.emulator.save_loaded {
+                    ui.label("Save file loaded");
+                } else {
+                    ui.label("Game did not save anything yet");
                 }
+            } else if !self.emulator.gb.cartridge.supports_sram_saves() {
+                ui.separator();
+                ui.label("No saves (cartridge has no battery)");
             }
         });
     }

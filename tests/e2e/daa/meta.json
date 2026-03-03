@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "daa",
+  "description": "Mooneye acceptance test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "EE2EE0AB",
+    "sha1": "87588FD25B8DEB042310ECCA2E7D7365155504CE",
+    "sha256": "1498D92D70592A07A2493EF764609916616F0B023B21408189E277201E6C14C1"
+  },
+  "cycles": 400000
+}

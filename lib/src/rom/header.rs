@@ -464,6 +464,11 @@ impl RomHeader {
         crc32fast::hash(data)
     }
 
+    #[cfg(feature = "sha2")]
+    pub fn crc32_hex_string(&self) -> String {
+        format!("{:08X}", self.crc32)
+    }
+
     #[cfg(feature = "sha1")]
     pub fn calculate_sha1(data: &[u8]) -> [u8; 20] {
         use sha1::Digest;
@@ -471,9 +476,19 @@ impl RomHeader {
     }
 
     #[cfg(feature = "sha2")]
+    pub fn sha1_hex_string(&self) -> String {
+        self.sha1.iter().map(|b| format!("{:02X}", b)).collect()
+    }
+
+    #[cfg(feature = "sha2")]
     pub fn calculate_sha256(data: &[u8]) -> [u8; 32] {
         use sha2::Digest;
         sha2::Sha256::digest(data).into()
+    }
+
+    #[cfg(feature = "sha2")]
+    pub fn sha256_hex_string(&self) -> String {
+        self.sha256.iter().map(|b| format!("{:02X}", b)).collect()
     }
 
     pub fn rom_size_bytes(&self) -> usize {

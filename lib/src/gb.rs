@@ -1,5 +1,5 @@
 use crate::error::GbResult;
-use crate::persistence::SDump;
+use crate::persistence::sdump::SDump;
 use crate::rom::Rom;
 use ppu::types::framebuffer::Framebuffer;
 

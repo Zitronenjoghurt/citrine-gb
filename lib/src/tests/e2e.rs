@@ -2,7 +2,7 @@ use crate::debug::e2e::E2ETest;
 use crate::gb::GameBoy;
 use crate::rom::header::RomHeader;
 use crate::rom::Rom;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +33,7 @@ fn map_available_roms(dir: &Path, rom_map: &mut HashMap<String, PathBuf>) {
 #[test]
 pub fn run() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let roms_dir = Path::new(manifest_dir).join("../roms");
+    let roms_dir = Path::new(manifest_dir).join("../roms/test");
     let test_dir = Path::new(manifest_dir).join("../tests").join("e2e");
 
     let mut rom_map = HashMap::new();
@@ -42,6 +42,8 @@ pub fn run() {
     let entries = fs::read_dir(&test_dir).unwrap_or_else(|e| {
         panic!("Failed to read e2e test directory at {:?}: {}", test_dir, e);
     });
+
+    let mut used_rom_shas: HashSet<String> = HashSet::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -54,6 +56,8 @@ pub fn run() {
         });
 
         let target_sha = &test.meta.rom.sha256;
+        used_rom_shas.insert(target_sha.clone());
+
         let rom_path = rom_map.get(target_sha).unwrap_or_else(|| {
             panic!(
                 "Missing ROM for test '{}'. Expected SHA256: {}",
@@ -84,5 +88,14 @@ pub fn run() {
         );
 
         println!("✅ E2E Test '{}' passed.", test.meta.name);
+    }
+
+    for (sha, path) in &rom_map {
+        if !used_rom_shas.contains(sha.as_str()) {
+            println!(
+                "⚠️ WARNING: ROM not covered by any E2E test: {:?}",
+                path.display()
+            );
+        }
     }
 }

@@ -1,11 +1,10 @@
 use citrine_gb::error::GbResult;
 use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
-use citrine_gb::persistence::SDump;
+use citrine_gb::persistence::sdump::SDump;
 use citrine_gb::rom::Rom;
 use gilrs::Axis;
 use gilrs::EventType::{AxisChanged, ButtonPressed, ButtonReleased};
-use std::path::{Path, PathBuf};
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
 const GB_WIDTH: usize = 160;
@@ -237,36 +236,84 @@ impl Emulator {
 
     #[cfg(target_arch = "wasm32")]
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
+        self.running = false;
+
         self.gb.load_rom(rom)?;
+
+        let save_key = self.web_rom_save_key();
+
+        let sdump = if let Some(window) = web_sys::window()
+            && let Ok(Some(local_storage)) = window.local_storage()
+            && let Ok(Some(data)) = local_storage.get_item(&save_key)
+            && let Ok(sdump) = SDump::from_base64(&data)
+        {
+            Some(sdump)
+        } else {
+            None
+        };
+
+        if let Some(sdump) = sdump {
+            self.gb.put_sram_dump(sdump);
+            self.save_loaded = true;
+        }
+
+        self.running = true;
+
         Ok(())
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub fn handle_save(&mut self) -> GbResult<()> {
-        // ToDo: Web saves
-        #[cfg(target_arch = "wasm32")]
-        return Ok(());
-
-        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(last_save) = self.last_save
+            && last_save.elapsed().as_secs() < 5
         {
-            if let Some(last_save) = self.last_save
-                && last_save.elapsed().as_secs() < 5
-            {
-                return Ok(());
-            }
-
-            let Some(rom_path) = self.rom_path.as_ref() else {
-                return Ok(());
-            };
-
-            let Some(sdump) = self.gb.poll_sram_dump() else {
-                return Ok(());
-            };
-
-            sdump.save(&rom_path.with_extension("sav"))?;
-            self.last_save = Some(web_time::Instant::now());
-
-            Ok(())
+            return Ok(());
         }
+
+        let Some(sdump) = self.gb.poll_sram_dump() else {
+            return Ok(());
+        };
+
+        let save_key = self.web_rom_save_key();
+        let data = sdump.to_base64()?;
+        drop(sdump);
+
+        if let Some(window) = web_sys::window()
+            && let Ok(Some(local_storage)) = window.local_storage()
+        {
+            let _ = local_storage.set_item(&save_key, &data);
+            self.last_save = Some(web_time::Instant::now());
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn handle_save(&mut self) -> GbResult<()> {
+        if let Some(last_save) = self.last_save
+            && last_save.elapsed().as_secs() < 5
+        {
+            return Ok(());
+        }
+
+        let Some(rom_path) = self.rom_path.as_ref() else {
+            return Ok(());
+        };
+
+        let Some(sdump) = self.gb.poll_sram_dump() else {
+            return Ok(());
+        };
+
+        sdump.save(&rom_path.with_extension("sav"))?;
+        self.last_save = Some(web_time::Instant::now());
+
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn web_rom_save_key(&self) -> String {
+        let rom_hash = self.gb.cartridge.header.sha256_hex_string();
+        format!("sav-{}", rom_hash)
     }
 
     pub fn force_step(&mut self, ctx: &egui::Context, cycle_count: u32) {

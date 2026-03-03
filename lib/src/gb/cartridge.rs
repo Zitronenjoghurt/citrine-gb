@@ -1,6 +1,6 @@
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
-use crate::persistence::SDump;
+use crate::persistence::sdump::SDump;
 use crate::rom::header::RomHeader;
 use crate::rom::Rom;
 use crate::{ReadMemory, WriteMemory};

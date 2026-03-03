@@ -80,17 +80,9 @@ impl From<&RomHeader> for E2EMetaRom {
             cartridge_type: header.cartridge_type.unwrap().to_string(),
             rom_banks: header.rom_banks,
             ram_banks: header.ram_banks,
-            crc_32: format!("{:08X}", header.crc32),
-            sha1: header
-                .sha1
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<String>(),
-            sha256: header
-                .sha256
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<String>(),
+            crc_32: header.crc32_hex_string(),
+            sha1: header.sha1_hex_string(),
+            sha256: header.sha256_hex_string(),
         }
     }
 }
