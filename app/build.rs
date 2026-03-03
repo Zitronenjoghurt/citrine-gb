@@ -1,5 +1,6 @@
 use quote::quote;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::{env, fs};
 
@@ -53,8 +54,12 @@ fn main() {
 
     for (path, stem, meta) in games {
         let raw_data = fs::read(&path).unwrap();
-        let compressed_data = zstd::stream::encode_all(raw_data.as_slice(), 22).unwrap();
-        let compressed_filename = format!("{}.zst", stem);
+        let mut compressed_data = Vec::new();
+        {
+            let mut writer = brotli::CompressorWriter::new(&mut compressed_data, 4096, 11, 22);
+            writer.write_all(&raw_data).unwrap();
+        }
+        let compressed_filename = format!("{}.br", stem);
         let compressed_path = Path::new(&out_dir).join(&compressed_filename);
         fs::write(&compressed_path, compressed_data).unwrap();
 
@@ -98,7 +103,10 @@ fn main() {
             }
 
             pub fn data(&self) -> Vec<u8> {
-                zstd::stream::decode_all(self.data).unwrap()
+                let mut decompressed = Vec::new();
+                let mut decompressor = brotli::Decompressor::new(self.data, 4096);
+                std::io::Read::read_to_end(&mut decompressor, &mut decompressed).expect("Failed to decompress ROM data");
+                decompressed
             }
         }
 

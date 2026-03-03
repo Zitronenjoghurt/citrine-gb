@@ -1,6 +1,6 @@
 [package]
 name = "citrine-gb-app"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [package.metadata.docs.rs]
@@ -10,6 +10,7 @@ targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 [dependencies]
 citrine-gb = { workspace = true, features = ["debug", "serde", "base64"] }
 bitflags = { version = "2.11.0", features = ["serde"] }
+brotli = "8.0.2"
 eframe = { version = "0.33.0", default-features = false, features = ["persistence"] }
 egui = "0.33.0"
 egui-notify = "0.21.0"
@@ -21,7 +22,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 strum = "0.27.2"
 strum_macros = "0.27.2"
 web-time = "1.1.0"
-zstd = "0.13.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.33.0", default-features = false, features = ["persistence", "wayland", "wgpu", "x11"] }
@@ -35,11 +35,11 @@ wasm-bindgen-futures = "0.4.50"
 web-sys = "0.3.70"
 
 [build-dependencies]
+brotli = "8.0.2"
 quote = "1.0.44"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.0.3+spec-1.1.0"
 winresource = "0.1"
-zstd = "0.13.3"
 
 [package.metadata.bundle]
 name = "Citrine"
