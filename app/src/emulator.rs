@@ -28,7 +28,7 @@ pub struct Emulator {
     pub last_frame_secs: f64,
     last_frame: Vec<u8>,
     #[cfg(not(target_arch = "wasm32"))]
-    rom_path: Option<PathBuf>,
+    rom_path: Option<std::path::PathBuf>,
     pub last_save: Option<web_time::Instant>,
     pub save_loaded: bool,
 }
@@ -211,10 +211,12 @@ impl Emulator {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_rom(&mut self, rom: &Rom, path: &Path) -> GbResult<()> {
-        self.rom_path = Some(path.to_owned());
-        let sav_path = path.with_extension("sav");
-        let sdump = if sav_path.exists() {
+    pub fn load_rom(&mut self, rom: &Rom, path: Option<&std::path::Path>) -> GbResult<()> {
+        self.rom_path = path.map(|p| p.to_owned());
+        let sdump = if let Some(path) = path
+            && let sav_path = path.with_extension("sav")
+            && sav_path.exists()
+        {
             Some(SDump::load(&sav_path)?)
         } else {
             None

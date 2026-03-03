@@ -181,7 +181,7 @@ impl Citrine {
         if let Err(err) = self.emulator.load_rom(
             &rom,
             #[cfg(not(target_arch = "wasm32"))]
-            &fr.path,
+            Some(&fr.path),
         ) {
             self.toasts.error(format!("Failed to load ROM: {}", err));
         } else {

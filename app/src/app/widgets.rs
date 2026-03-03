@@ -1,3 +1,4 @@
+pub mod homebrew;
 pub mod panel_menu;
 pub mod registers;
 pub mod rom_info;

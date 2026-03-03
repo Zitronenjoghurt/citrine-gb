@@ -21,15 +21,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 strum = "0.27.2"
 strum_macros = "0.27.2"
 web-time = "1.1.0"
+zstd = "0.13.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.33.0", default-features = false, features = ["persistence", "wayland", "wgpu", "x11"] }
 image = "0.25.9"
 wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
-
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
-ar = "x86_64-w64-mingw32-gcc-ar"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { version = "0.33.0", default-features = false, features = ["glow", "persistence"] }
@@ -38,7 +35,11 @@ wasm-bindgen-futures = "0.4.50"
 web-sys = "0.3.70"
 
 [build-dependencies]
+quote = "1.0.44"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.0.3+spec-1.1.0"
 winresource = "0.1"
+zstd = "0.13.3"
 
 [package.metadata.bundle]
 name = "Citrine"

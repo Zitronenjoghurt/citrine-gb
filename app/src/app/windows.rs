@@ -4,6 +4,7 @@ use egui::{Context, Id, Ui, Widget, WidgetText};
 
 mod debug_actions;
 mod e2e_test;
+mod homebrew;
 mod rom_info;
 mod settings;
 mod time_control;
@@ -16,12 +17,14 @@ bitflags! {
         const DEBUG_ACTIONS = 0b0000_0000_0000_0100;
         const SETTINGS = 0b0000_0000_0000_1000;
         const E2E_TEST = 0b0000_0000_0001_0000;
+        const HOMEBREW = 0b0000_0000_0010_0000;
     }
 }
 
 impl ActiveWindows {
     const ORDER: &'static [ActiveWindows] = &[
         ActiveWindows::SETTINGS,
+        ActiveWindows::HOMEBREW,
         ActiveWindows::ROM_INFO,
         ActiveWindows::TIME_CONTROL,
         ActiveWindows::DEBUG_ACTIONS,
@@ -39,6 +42,7 @@ impl ActiveWindows {
             Self::DEBUG_ACTIONS => debug_actions::DebugActionsWindow::new().show(ctx, app),
             Self::SETTINGS => settings::SettingsWindow::new().show(ctx, app),
             Self::E2E_TEST => e2e_test::E2ETestWindow::new().show(ctx, app),
+            Self::HOMEBREW => homebrew::HomebrewWindow::new().show(ctx, app),
             _ => {}
         });
     }
@@ -50,6 +54,7 @@ impl ActiveWindows {
             Self::DEBUG_ACTIONS => "Debug Actions",
             Self::SETTINGS => "Settings",
             Self::E2E_TEST => "E2E Test",
+            Self::HOMEBREW => "Included Games",
             _ => ""
         })
     }

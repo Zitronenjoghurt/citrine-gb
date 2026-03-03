@@ -1,0 +1,23 @@
+[porklike]
+title = "Porklike"
+author = "binji"
+description = "Enter the tower of Wurstlord. Can you make it to the top and steal his legendary Kielbasa? 9 floors of dangerous traps and enemies await you. Only if you move carefully and master your character's abilities will you become the champion of Porklike."
+license = "MIT"
+links = ["https://binji.itch.io/porklikegb", "https://github.com/binji/porklike.gb"]
+tags = ["Roguelite"]
+
+[sushi_nights]
+title = "Sushi Nights"
+author = "Zal0"
+description = "Play as Hitsuji-kun, and use your trusty grappling hook to swing through buildings and alleys, locate the sushi, and deliver it to your targets."
+license = "MIT"
+links = ["https://zalo.itch.io/sushi-nights", "https://github.com/Zal0/SushiNights"]
+tags = ["Platformer"]
+
+[tobu]
+title = "Tobu Tobu Girl"
+author = "Tangram Games"
+description = "A challenging, vertical platformer where you have to chase after your cat floating into the atmosphere."
+license = "Creative Commons Attribution v4.0 International"
+links = ["https://tangramgames.dk/tobutobugirl", "https://tangramgames.itch.io/tobutobugirl"]
+tags = ["Platformer"]
