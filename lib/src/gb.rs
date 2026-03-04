@@ -3,6 +3,7 @@ use crate::persistence::sdump::SDump;
 use crate::rom::Rom;
 use ppu::types::framebuffer::Framebuffer;
 
+mod apu;
 mod boot_rom;
 pub mod bus;
 pub mod cartridge;
@@ -26,6 +27,7 @@ pub struct GameBoy {
     pub memory: memory::Memory,
     pub timer: timer::Timer,
     pub ppu: ppu::Ppu,
+    pub apu: apu::Apu,
     pub joypad: joypad::Joypad,
     pub model: GbModel,
     pub cycle_counter: u32,
@@ -62,6 +64,7 @@ impl GameBoy {
             memory: memory::Memory::new(),
             timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(model),
+            apu: apu::Apu::new(),
             joypad: joypad::Joypad::new(),
             model,
             cycle_counter: 0,
@@ -99,6 +102,7 @@ impl GameBoy {
             joypad: &mut self.joypad,
             memory: &mut self.memory,
             ppu: &mut self.ppu,
+            apu: &mut self.apu,
             timer: &mut self.timer,
             cycles: &mut self.cycle_counter,
         });

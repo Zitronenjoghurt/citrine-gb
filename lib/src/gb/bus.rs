@@ -1,3 +1,4 @@
+use crate::gb::apu::Apu;
 use crate::gb::boot_rom::BootRom;
 use crate::gb::cartridge::Cartridge;
 use crate::gb::dma::DmaController;
@@ -20,6 +21,7 @@ pub struct CpuBus<'a> {
     pub joypad: &'a mut Joypad,
     pub memory: &'a mut Memory,
     pub ppu: &'a mut Ppu,
+    pub apu: &'a mut Apu,
     pub timer: &'a mut Timer,
     pub cycles: &'a mut u32,
 }
@@ -38,6 +40,7 @@ impl ReadMemory for CpuBus<'_> {
             0xFF00 => self.joypad.read_naive(addr),
             0xFF04..=0xFF07 => self.timer.read_naive(addr),
             0xFF0F => self.ic.flag.into(),
+            0xFF24..=0xFF26 => self.apu.read_naive(addr),
             0xFF46 => self.dma.source,
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.read_naive(addr)
@@ -63,6 +66,7 @@ impl WriteMemory for CpuBus<'_> {
             0xFF00 => self.joypad.write_naive(addr, value),
             0xFF04..=0xFF07 => self.timer.write_naive(addr, value),
             0xFF0F => self.ic.flag = value.into(),
+            0xFF24..=0xFF26 => self.apu.write_naive(addr, value),
             0xFF46 => self.dma.start(value),
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.write_naive(addr, value)
