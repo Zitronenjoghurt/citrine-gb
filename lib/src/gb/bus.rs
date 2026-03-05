@@ -40,7 +40,7 @@ impl ReadMemory for CpuBus<'_> {
             0xFF00 => self.joypad.read_naive(addr),
             0xFF04..=0xFF07 => self.timer.read_naive(addr),
             0xFF0F => self.ic.flag.into(),
-            0xFF10..=0xFF14 | 0xFF24..=0xFF26 => self.apu.read_naive(addr),
+            0xFF10..=0xFF14 | 0xFF16..=0xFF19 | 0xFF24..=0xFF26 => self.apu.read_naive(addr),
             0xFF46 => self.dma.source,
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.read_naive(addr)
@@ -66,7 +66,9 @@ impl WriteMemory for CpuBus<'_> {
             0xFF00 => self.joypad.write_naive(addr, value),
             0xFF04..=0xFF07 => self.timer.write_naive(addr, value),
             0xFF0F => self.ic.flag = value.into(),
-            0xFF10..=0xFF14 | 0xFF24..=0xFF26 => self.apu.write_naive(addr, value),
+            0xFF10..=0xFF14 | 0xFF16..=0xFF19 | 0xFF24..=0xFF26 => {
+                self.apu.write_naive(addr, value)
+            }
             0xFF46 => self.dma.start(value),
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.write_naive(addr, value)

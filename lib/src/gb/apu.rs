@@ -1,13 +1,14 @@
 use crate::gb::apu::channels::channel_1::Channel1;
+use crate::gb::apu::channels::channel_2::Channel2;
 use crate::gb::timer::Timer;
 use crate::{ReadMemory, WriteMemory};
-use global::audio_master_control::AudioMasterControl;
-use global::master_volume_vin::MasterVolumeVin;
-use global::sound_panning::SoundPanning;
+use registers::audio_master_control::AudioMasterControl;
+use registers::master_volume_vin::MasterVolumeVin;
+use registers::sound_panning::SoundPanning;
 
 mod channels;
 mod components;
-mod global;
+mod registers;
 
 const CHARGE_FACTOR: f32 = 0.996;
 const APU_CLOCK_RATE: u32 = 4_194_304;
@@ -22,6 +23,7 @@ pub struct Apu {
     pub nr51: SoundPanning,
     pub nr52: AudioMasterControl,
     pub ch1: Channel1,
+    pub ch2: Channel2,
     capacitor_l: f32,
     capacitor_r: f32,
     downsample_counter: u32,
@@ -41,6 +43,7 @@ impl Default for Apu {
             nr51: Default::default(),
             nr52: Default::default(),
             ch1: Default::default(),
+            ch2: Default::default(),
             capacitor_l: 0.0,
             capacitor_r: 0.0,
             downsample_counter: 0,
@@ -90,10 +93,6 @@ impl Apu {
         }
     }
 
-    pub fn tick(&mut self) {
-        self.ch1.tick();
-    }
-
     fn update_frame_sequencer(&mut self, timer: &Timer, double_speed: bool) {
         let bit = if double_speed { 13 } else { 12 };
         let set_prev = ((self.prev_div >> bit) & 1) == 1;
@@ -124,12 +123,19 @@ impl Apu {
         self.prev_div = timer.div;
     }
 
+    fn tick(&mut self) {
+        self.ch1.tick();
+        self.ch2.tick();
+    }
+
     fn clock_length_counters(&mut self) {
         self.ch1.clock_length();
+        self.ch2.clock_length();
     }
 
     fn clock_volume_envelopes(&mut self) {
         self.ch1.clock_volume_envelope();
+        self.ch2.clock_volume_envelope();
     }
 
     fn clock_sweep(&mut self) {
@@ -150,6 +156,12 @@ impl Apu {
             0.0
         };
 
+        let ch2_sample = if self.ch2.dac_enabled() {
+            1.0 - (self.ch2.sample() as f32 / 7.5)
+        } else {
+            0.0
+        };
+
         let mut left = 0.0;
         let mut right = 0.0;
 
@@ -161,12 +173,20 @@ impl Apu {
             right = ch1_sample;
         };
 
+        if self.nr51.channel_2_left {
+            left += ch2_sample;
+        };
+
+        if self.nr51.channel_2_right {
+            right += ch2_sample;
+        };
+
         left *= (self.nr50.volume_left + 1) as f32;
         left /= 32.0;
         right *= (self.nr50.volume_right + 1) as f32;
         right /= 32.0;
 
-        let any_dac_enabled = self.ch1.dac_enabled();
+        let any_dac_enabled = self.ch1.dac_enabled() || self.ch2.dac_enabled();
 
         let mut out_l = 0.0;
         let mut out_r = 0.0;
@@ -190,6 +210,7 @@ impl ReadMemory for Apu {
     fn read_naive(&self, addr: u16) -> u8 {
         match addr {
             0xFF10..=0xFF14 => self.ch1.read_naive(addr),
+            0xFF16..=0xFF19 => self.ch2.read_naive(addr),
             0xFF24 => self.nr50.into(),
             0xFF25 => self.nr51.into(),
             0xFF26 => self.nr52.into(),
@@ -202,6 +223,7 @@ impl WriteMemory for Apu {
     fn write_naive(&mut self, addr: u16, value: u8) {
         match addr {
             0xFF10..=0xFF14 => self.ch1.write_naive(addr, value),
+            0xFF16..=0xFF19 => self.ch2.write_naive(addr, value),
             0xFF24 => self.nr50 = value.into(),
             0xFF25 => self.nr51 = value.into(),
             0xFF26 => self.nr52 = value.into(),

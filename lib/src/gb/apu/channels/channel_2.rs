@@ -1,33 +1,28 @@
-use crate::gb::apu::components::frequency_sweep::FrequencySweep;
 use crate::gb::apu::components::length_counter::LengthCounter;
 use crate::gb::apu::components::square_wave::SquareWave;
 use crate::gb::apu::components::volume_envelope::VolumeEnvelope;
 use crate::gb::apu::registers::ch12_control::Channel12Control;
 use crate::gb::apu::registers::ch12_timer::Channel12Timer;
 use crate::gb::apu::registers::ch12_volume::Channel12Volume;
-use crate::gb::apu::registers::ch1_sweep::Channel1Sweep;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]
-pub struct Channel1 {
+pub struct Channel2 {
     pub enabled: bool,
     pub length_counter: LengthCounter,
     pub volume_envelope: VolumeEnvelope,
     pub square_wave: SquareWave,
-    pub frequency_sweep: FrequencySweep,
-    /// NR10 (0xFF10)
-    pub sweep: Channel1Sweep,
-    /// NR11 (0xFF11)
+    /// NR21 (0xFF16)
     pub timer: Channel12Timer,
-    /// NR12 (0xFF12)
+    /// NR22 (0xFF17)
     pub volume: Channel12Volume,
-    /// NR13 (0xFF13) => Write-only
+    /// NR23 (0xFF18) => Write-only
     pub period_low: u8,
-    /// NR14 (0xFF14)
+    /// NR24 (0xFF19)
     pub control: Channel12Control,
 }
 
-impl Channel1 {
+impl Channel2 {
     /// Returns the current volume of the channel (0-15)
     pub fn sample(&self) -> u8 {
         if !self.enabled {
@@ -57,8 +52,6 @@ impl Channel1 {
         );
 
         self.square_wave.set_frequency(self.get_period());
-
-        // ToDo: Sweep
     }
 
     pub fn clock_length(&mut self) {
@@ -71,10 +64,6 @@ impl Channel1 {
         self.volume_envelope.clock();
     }
 
-    pub fn clock_sweep(&mut self) {
-        self.frequency_sweep.clock();
-    }
-
     pub fn get_period(&self) -> u16 {
         self.period_low as u16 | (((self.control.period_high & 0b111) as u16) << 8)
     }
@@ -84,30 +73,28 @@ impl Channel1 {
     }
 }
 
-impl ReadMemory for Channel1 {
+impl ReadMemory for Channel2 {
     fn read_naive(&self, addr: u16) -> u8 {
         match addr {
-            0xFF10 => self.sweep.into(),
-            0xFF11 => self.timer.into(),
-            0xFF12 => self.volume.into(),
-            0xFF13 => 0xFF,
-            0xFF14 => self.control.into(),
+            0xFF16 => self.timer.into(),
+            0xFF17 => self.volume.into(),
+            0xFF18 => 0xFF,
+            0xFF19 => self.control.into(),
             _ => 0xFF,
         }
     }
 }
 
-impl WriteMemory for Channel1 {
+impl WriteMemory for Channel2 {
     fn write_naive(&mut self, addr: u16, value: u8) {
         match addr {
-            0xFF10 => self.sweep = value.into(),
-            0xFF11 => {
+            0xFF16 => {
                 self.timer = value.into();
                 self.length_counter
                     .trigger(64u16.saturating_sub(self.timer.initial_length_timer as u16));
                 self.square_wave.set_duty(self.timer.wave_duty);
             }
-            0xFF12 => {
+            0xFF17 => {
                 self.volume = value.into();
                 self.volume_envelope.trigger(
                     self.volume.envelope_direction,
@@ -115,8 +102,8 @@ impl WriteMemory for Channel1 {
                     self.volume.envelope_pace,
                 )
             }
-            0xFF13 => self.period_low = value,
-            0xFF14 => {
+            0xFF18 => self.period_low = value,
+            0xFF19 => {
                 self.control = value.into();
                 self.length_counter.enabled = self.control.length_enable;
                 if self.control.trigger {

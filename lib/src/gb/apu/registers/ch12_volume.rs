@@ -1,6 +1,6 @@
 /// Source: https://gbdev.io/pandocs/Audio_Registers.html#ff12--nr12-channel-1-volume--envelope
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Channel1Volume {
+pub struct Channel12Volume {
     /// Envelope ticks at 64 Hz and will be increased/decreased every x ticks (x = pace)
     /// 0 = envelope disabled
     pub envelope_pace: u8,
@@ -12,7 +12,7 @@ pub struct Channel1Volume {
     pub initial_volume: u8,
 }
 
-impl From<u8> for Channel1Volume {
+impl From<u8> for Channel12Volume {
     fn from(value: u8) -> Self {
         Self {
             envelope_pace: value & 0b111,
@@ -22,8 +22,8 @@ impl From<u8> for Channel1Volume {
     }
 }
 
-impl From<Channel1Volume> for u8 {
-    fn from(value: Channel1Volume) -> Self {
+impl From<Channel12Volume> for u8 {
+    fn from(value: Channel12Volume) -> Self {
         (value.envelope_pace & 0b111)
             | ((value.envelope_direction as u8) << 3)
             | ((value.initial_volume & 0b1111) << 4)
