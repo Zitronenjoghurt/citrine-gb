@@ -8,7 +8,6 @@ pub struct Channel1Control {
     /// Controls whether the channel's length timer is enabled
     pub length_enable: bool,
     /// Write-only
-    /// Writing any value here will trigger Channel 1
     pub trigger: bool,
 }
 

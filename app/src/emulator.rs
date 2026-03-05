@@ -5,6 +5,8 @@ use citrine_gb::persistence::sdump::SDump;
 use citrine_gb::rom::Rom;
 use gilrs::Axis;
 use gilrs::EventType::{AxisChanged, ButtonPressed, ButtonReleased};
+use ringbuf::producer::Producer;
+use ringbuf::HeapProd;
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
 const GB_WIDTH: usize = 160;
@@ -14,6 +16,7 @@ const FRAME_SCALE: usize = 3;
 pub struct Emulator {
     pub gb: GameBoy,
     pub running: bool,
+    pub audio_producer: Option<HeapProd<f32>>,
     pub enable_matrix: bool,
     /// 0.0 to 1.0 (e.g., 0.85 = 15% darker)
     pub matrix_edge_brightness: f32,
@@ -38,6 +41,7 @@ impl Default for Emulator {
         Self {
             gb: GameBoy::new_empty(GbModel::Dmg),
             running: true,
+            audio_producer: None,
             enable_matrix: true,
             matrix_edge_brightness: 0.85,
             matrix_corner_brightness: 0.75,
@@ -95,6 +99,12 @@ impl Emulator {
 
         if ran_frame {
             self.update_texture(ctx);
+
+            if let Some(producer) = &mut self.audio_producer {
+                let samples = &self.gb.apu.audio_buffer;
+                let _ = producer.push_slice(samples);
+                self.gb.apu.audio_buffer.clear();
+            }
         }
 
         self.handle_save()?;

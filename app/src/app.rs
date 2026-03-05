@@ -1,6 +1,7 @@
 use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
 use crate::app::ui_state::UiState;
 use crate::app::widgets::panel_menu::PanelMenu;
+use crate::audio::init_audio;
 use crate::emulator::Emulator;
 use crate::icons;
 use citrine_gb::rom::Rom;
@@ -8,6 +9,8 @@ use eframe::{Frame, Storage};
 use egui::{CentralPanel, Context, FontDefinitions, SidePanel, TopBottomPanel, Widget};
 use egui_notify::Toasts;
 use gilrs::Gilrs;
+use ringbuf::traits::Split;
+use ringbuf::HeapRb;
 
 mod file_picker;
 mod panels;
@@ -27,6 +30,8 @@ pub struct Citrine {
     pub gil: Gilrs,
     #[serde(skip, default)]
     pub toasts: Toasts,
+    #[serde(skip, default)]
+    audio_stream: Option<cpal::Stream>,
 }
 
 impl Default for Citrine {
@@ -37,6 +42,7 @@ impl Default for Citrine {
             file_picker: FilePicker::default(),
             gil: default_gilrs(),
             toasts: Toasts::default(),
+            audio_stream: None,
         }
     }
 }
@@ -53,6 +59,25 @@ impl Citrine {
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
             .unwrap_or_default();
         app.file_picker.set_drop_intent(FileIntent::LoadRom);
+
+        let ring_buffer = HeapRb::<f32>::new(8192);
+        let (producer, consumer) = ring_buffer.split();
+
+        app.emulator.audio_producer = Some(producer);
+
+        match init_audio(consumer) {
+            Ok((stream, sample_rate)) => {
+                app.audio_stream = Some(stream);
+                app.emulator.gb.apu.output_sample_rate = sample_rate;
+                app.toasts
+                    .success(format!("Audio backend initialized ({} Hz)", sample_rate));
+            }
+            Err(err) => {
+                app.toasts
+                    .error(format!("Failed to initialize audio backend: {}", err));
+            }
+        }
+
         app
     }
 
