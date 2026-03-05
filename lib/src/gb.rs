@@ -122,6 +122,8 @@ impl GameBoy {
         if self.cycle_counter >= self.model.frame_cycles() {
             self.cycle_counter -= self.model.frame_cycles();
         }
+
+        self.apu.flush_audio();
     }
 
     pub fn run_cycles(&mut self, cycles: u32) {

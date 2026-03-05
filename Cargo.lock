@@ -430,6 +430,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "blip_buf"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d01761ce5061c5345c211c47958ee76989241021a9e3c16d3c0a35a309462fb5"
+
+[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -623,6 +629,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
+ "blip_buf",
  "citrine-gb",
  "crc32fast",
  "png",
@@ -1467,7 +1474,7 @@ dependencies = [
  "vec_map",
  "wasm-bindgen",
  "web-sys",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]

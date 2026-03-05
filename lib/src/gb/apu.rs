@@ -2,6 +2,7 @@ use crate::gb::apu::channels::channel_1::Channel1;
 use crate::gb::apu::channels::channel_2::Channel2;
 use crate::gb::timer::Timer;
 use crate::{ReadMemory, WriteMemory};
+use blip_buf::BlipBuf;
 use registers::audio_master_control::AudioMasterControl;
 use registers::master_volume_vin::MasterVolumeVin;
 use registers::sound_panning::SoundPanning;
@@ -12,9 +13,9 @@ mod registers;
 
 const CHARGE_FACTOR: f32 = 0.996;
 const APU_CLOCK_RATE: u32 = 4_194_304;
-const MAX_AUDIO_BUFFER_SIZE: usize = 4096;
+const MAX_AUDIO_BUFFER_SIZE: u32 = 4096;
+const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 
-#[derive(Debug)]
 pub struct Apu {
     /// Increments at a frequency of 512 Hz
     div_apu: u8,
@@ -24,18 +25,24 @@ pub struct Apu {
     pub nr52: AudioMasterControl,
     pub ch1: Channel1,
     pub ch2: Channel2,
-    capacitor_l: f32,
-    capacitor_r: f32,
-    downsample_counter: u32,
-    acc_l: f32,
-    acc_r: f32,
-    acc_samples: u32,
+    hpf_capacitor_l: f32,
+    hpf_capacitor_r: f32,
+    pub blip_l: BlipBuf,
+    pub blip_r: BlipBuf,
+    time: u32,
+    prev_l: i32,
+    prev_r: i32,
     pub output_sample_rate: u32,
     pub audio_buffer: Vec<f32>,
 }
 
 impl Default for Apu {
     fn default() -> Self {
+        let mut blip_l = BlipBuf::new(MAX_AUDIO_BUFFER_SIZE);
+        let mut blip_r = BlipBuf::new(MAX_AUDIO_BUFFER_SIZE);
+        blip_l.set_rates(APU_CLOCK_RATE as f64, DEFAULT_SAMPLE_RATE as f64);
+        blip_r.set_rates(APU_CLOCK_RATE as f64, DEFAULT_SAMPLE_RATE as f64);
+
         Self {
             div_apu: 0,
             prev_div: 0,
@@ -44,13 +51,14 @@ impl Default for Apu {
             nr52: Default::default(),
             ch1: Default::default(),
             ch2: Default::default(),
-            capacitor_l: 0.0,
-            capacitor_r: 0.0,
-            downsample_counter: 0,
-            acc_l: 0.0,
-            acc_r: 0.0,
-            acc_samples: 0,
-            output_sample_rate: 44_100,
+            hpf_capacitor_l: 0.0,
+            hpf_capacitor_r: 0.0,
+            blip_l,
+            blip_r,
+            time: 0,
+            prev_l: 0,
+            prev_r: 0,
+            output_sample_rate: DEFAULT_SAMPLE_RATE,
             audio_buffer: vec![],
         }
     }
@@ -68,28 +76,51 @@ impl Apu {
         for _ in 0..ticks {
             self.tick();
 
-            let (l, r) = self.sample();
-            self.acc_l += l;
-            self.acc_r += r;
-            self.acc_samples += 1;
+            let (out_l_f, out_r_f) = self.sample();
+            let current_l = (out_l_f * 1000.0) as i32;
+            let current_r = (out_r_f * 1000.0) as i32;
 
-            self.downsample_counter += self.output_sample_rate;
+            let delta_l = current_l - self.prev_l;
+            let delta_r = current_r - self.prev_r;
 
-            if self.downsample_counter >= APU_CLOCK_RATE {
-                self.downsample_counter -= APU_CLOCK_RATE;
-
-                let avg_l = self.acc_l / self.acc_samples as f32;
-                let avg_r = self.acc_r / self.acc_samples as f32;
-
-                if self.audio_buffer.len() < MAX_AUDIO_BUFFER_SIZE {
-                    self.audio_buffer.push(avg_l);
-                    self.audio_buffer.push(avg_r);
-                }
-
-                self.acc_l = 0.0;
-                self.acc_r = 0.0;
-                self.acc_samples = 0;
+            if delta_l != 0 {
+                self.blip_l.add_delta(self.time, delta_l);
+                self.prev_l = current_l;
             }
+
+            if delta_r != 0 {
+                self.blip_r.add_delta(self.time, delta_r);
+                self.prev_r = current_r;
+            }
+
+            self.time += 1;
+        }
+    }
+
+    pub fn flush_audio(&mut self) {
+        self.blip_l.end_frame(self.time);
+        self.blip_r.end_frame(self.time);
+        self.time = 0; // Reset APU clock time
+
+        let available_samples = self.blip_l.samples_avail() as usize;
+        let mut out_l = vec![0i16; available_samples];
+        let mut out_r = vec![0i16; available_samples];
+
+        self.blip_l.read_samples(&mut out_l, false);
+        self.blip_r.read_samples(&mut out_r, false);
+
+        for i in 0..available_samples {
+            let raw_l = out_l[i] as f32 / 1000.0;
+            let raw_r = out_r[i] as f32 / 1000.0;
+
+            let filtered_l = raw_l - self.hpf_capacitor_l;
+            let filtered_r = raw_r - self.hpf_capacitor_r;
+
+            self.hpf_capacitor_l = raw_l - filtered_l * CHARGE_FACTOR;
+            self.hpf_capacitor_r = raw_r - filtered_r * CHARGE_FACTOR;
+
+            self.audio_buffer.push(filtered_l);
+            self.audio_buffer.push(filtered_r);
         }
     }
 
@@ -166,11 +197,11 @@ impl Apu {
         let mut right = 0.0;
 
         if self.nr51.channel_1_left {
-            left = ch1_sample;
+            left += ch1_sample;
         };
 
         if self.nr51.channel_1_right {
-            right = ch1_sample;
+            right += ch1_sample;
         };
 
         if self.nr51.channel_2_left {
@@ -188,21 +219,11 @@ impl Apu {
 
         let any_dac_enabled = self.ch1.dac_enabled() || self.ch2.dac_enabled();
 
-        let mut out_l = 0.0;
-        let mut out_r = 0.0;
-
         if any_dac_enabled {
-            out_l = left - self.capacitor_l;
-            out_r = right - self.capacitor_r;
-
-            self.capacitor_l = left - out_l * CHARGE_FACTOR;
-            self.capacitor_r = right - out_r * CHARGE_FACTOR;
+            (left, right)
         } else {
-            self.capacitor_l *= CHARGE_FACTOR;
-            self.capacitor_r *= CHARGE_FACTOR;
+            (0.0, 0.0)
         }
-
-        (out_l, out_r)
     }
 }
 
