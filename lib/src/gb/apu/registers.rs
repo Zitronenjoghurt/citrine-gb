@@ -1,5 +1,5 @@
 pub mod audio_master_control;
-pub mod ch12_control;
+pub mod ch123_control;
 pub mod ch12_timer;
 pub mod ch12_volume;
 pub mod ch1_sweep;

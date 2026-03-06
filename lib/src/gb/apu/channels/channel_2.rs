@@ -1,7 +1,7 @@
 use crate::gb::apu::components::length_counter::LengthCounter;
 use crate::gb::apu::components::square_wave::SquareWave;
 use crate::gb::apu::components::volume_envelope::VolumeEnvelope;
-use crate::gb::apu::registers::ch12_control::Channel12Control;
+use crate::gb::apu::registers::ch123_control::Channel123Control;
 use crate::gb::apu::registers::ch12_timer::Channel12Timer;
 use crate::gb::apu::registers::ch12_volume::Channel12Volume;
 use crate::{ReadMemory, WriteMemory};
@@ -19,7 +19,7 @@ pub struct Channel2 {
     /// NR23 (0xFF18) => Write-only
     pub period_low: u8,
     /// NR24 (0xFF19)
-    pub control: Channel12Control,
+    pub control: Channel123Control,
 }
 
 impl Channel2 {

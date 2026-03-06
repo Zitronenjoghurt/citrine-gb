@@ -20,4 +20,8 @@ impl LengthCounter {
             self.counter = length;
         }
     }
+
+    pub fn reload(&mut self, length: u16) {
+        self.counter = length;
+    }
 }

@@ -1,5 +1,6 @@
 use crate::gb::apu::channels::channel_1::Channel1;
 use crate::gb::apu::channels::channel_2::Channel2;
+use crate::gb::apu::channels::channel_3::Channel3;
 use crate::gb::timer::Timer;
 use crate::{ReadMemory, WriteMemory};
 use blip_buf::BlipBuf;
@@ -25,6 +26,7 @@ pub struct Apu {
     pub nr52: AudioMasterControl,
     pub ch1: Channel1,
     pub ch2: Channel2,
+    pub ch3: Channel3,
     hpf_capacitor_l: f32,
     hpf_capacitor_r: f32,
     pub blip_l: BlipBuf,
@@ -51,6 +53,7 @@ impl Default for Apu {
             nr52: Default::default(),
             ch1: Default::default(),
             ch2: Default::default(),
+            ch3: Default::default(),
             hpf_capacitor_l: 0.0,
             hpf_capacitor_r: 0.0,
             blip_l,
@@ -157,11 +160,13 @@ impl Apu {
     fn tick(&mut self) {
         self.ch1.tick();
         self.ch2.tick();
+        self.ch3.tick();
     }
 
     fn clock_length_counters(&mut self) {
         self.ch1.clock_length();
         self.ch2.clock_length();
+        self.ch3.clock_length();
     }
 
     fn clock_volume_envelopes(&mut self) {
@@ -181,14 +186,20 @@ impl Apu {
             return (0.0, 0.0);
         };
 
-        let ch1_sample = if self.ch1.dac_enabled() {
+        let ch1_sample = if self.ch1.dac_enabled() && self.ch1.enabled {
             1.0 - (self.ch1.sample() as f32 / 7.5)
         } else {
             0.0
         };
 
-        let ch2_sample = if self.ch2.dac_enabled() {
+        let ch2_sample = if self.ch2.dac_enabled() && self.ch2.enabled {
             1.0 - (self.ch2.sample() as f32 / 7.5)
+        } else {
+            0.0
+        };
+
+        let ch3_sample = if self.ch3.dac_enabled() && self.ch3.enabled {
+            1.0 - (self.ch3.sample() as f32 / 7.5)
         } else {
             0.0
         };
@@ -212,12 +223,21 @@ impl Apu {
             right += ch2_sample;
         };
 
+        if self.nr51.channel_3_left {
+            left += ch3_sample;
+        };
+
+        if self.nr51.channel_3_right {
+            right += ch3_sample;
+        };
+
         left *= (self.nr50.volume_left + 1) as f32;
         left /= 32.0;
         right *= (self.nr50.volume_right + 1) as f32;
         right /= 32.0;
 
-        let any_dac_enabled = self.ch1.dac_enabled() || self.ch2.dac_enabled();
+        let any_dac_enabled =
+            self.ch1.dac_enabled() || self.ch2.dac_enabled() || self.ch3.dac_enabled();
 
         if any_dac_enabled {
             (left, right)
@@ -232,6 +252,7 @@ impl ReadMemory for Apu {
         match addr {
             0xFF10..=0xFF14 => self.ch1.read_naive(addr),
             0xFF16..=0xFF19 => self.ch2.read_naive(addr),
+            0xFF1A..=0xFF1E | 0xFF30..=0xFF3F => self.ch3.read_naive(addr),
             0xFF24 => self.nr50.into(),
             0xFF25 => self.nr51.into(),
             0xFF26 => self.nr52.into(),
@@ -245,6 +266,7 @@ impl WriteMemory for Apu {
         match addr {
             0xFF10..=0xFF14 => self.ch1.write_naive(addr, value),
             0xFF16..=0xFF19 => self.ch2.write_naive(addr, value),
+            0xFF1A..=0xFF1E | 0xFF30..=0xFF3F => self.ch3.write_naive(addr, value),
             0xFF24 => self.nr50 = value.into(),
             0xFF25 => self.nr51 = value.into(),
             0xFF26 => self.nr52 = value.into(),
