@@ -393,14 +393,18 @@ impl Emulator {
                         let mut pixel_b = b;
 
                         if self.enable_matrix {
+                            let c0 = self.gb.ppu.dmg_theme.palette()[0];
+
                             if dx == FRAME_SCALE - 1 && dy == FRAME_SCALE - 1 {
-                                pixel_r = (pixel_r as f32 * self.matrix_corner_brightness) as u8;
-                                pixel_g = (pixel_g as f32 * self.matrix_corner_brightness) as u8;
-                                pixel_b = (pixel_b as f32 * self.matrix_corner_brightness) as u8;
+                                let t = self.matrix_corner_brightness;
+                                pixel_r = (pixel_r as f32 * t + c0.r() as f32 * (1.0 - t)) as u8;
+                                pixel_g = (pixel_g as f32 * t + c0.g() as f32 * (1.0 - t)) as u8;
+                                pixel_b = (pixel_b as f32 * t + c0.b() as f32 * (1.0 - t)) as u8;
                             } else if dx == FRAME_SCALE - 1 || dy == FRAME_SCALE - 1 {
-                                pixel_r = (pixel_r as f32 * self.matrix_edge_brightness) as u8;
-                                pixel_g = (pixel_g as f32 * self.matrix_edge_brightness) as u8;
-                                pixel_b = (pixel_b as f32 * self.matrix_edge_brightness) as u8;
+                                let t = self.matrix_edge_brightness;
+                                pixel_r = (pixel_r as f32 * t + c0.r() as f32 * (1.0 - t)) as u8;
+                                pixel_g = (pixel_g as f32 * t + c0.g() as f32 * (1.0 - t)) as u8;
+                                pixel_b = (pixel_b as f32 * t + c0.b() as f32 * (1.0 - t)) as u8;
                             }
                         }
 
