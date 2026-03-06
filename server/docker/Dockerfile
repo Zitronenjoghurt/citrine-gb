@@ -1,6 +1,6 @@
 FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /citrine
-RUN apt-get update && apt-get install -y pkg-config libudev-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pkg-config libudev-dev libasound2-dev && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install trunk
 

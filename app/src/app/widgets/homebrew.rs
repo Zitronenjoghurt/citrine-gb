@@ -1,18 +1,15 @@
-use crate::app::settings::Settings;
-use crate::emulator::Emulator;
 use crate::homebrew::HOMEBREW_GAMES;
-use crate::icons;
+use crate::{icons, Citrine};
 use citrine_gb::rom::Rom;
 use egui::{Response, ScrollArea, Ui, Widget};
 
 pub struct HomebrewList<'a> {
-    emulator: &'a mut Emulator,
-    settings: &'a mut Settings,
+    app: &'a mut Citrine,
 }
 
 impl<'a> HomebrewList<'a> {
-    pub fn new(emulator: &'a mut Emulator, settings: &'a mut Settings) -> Self {
-        Self { emulator, settings }
+    pub fn new(app: &'a mut Citrine) -> Self {
+        Self { app }
     }
 }
 
@@ -39,12 +36,13 @@ impl Widget for HomebrewList<'_> {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui.button("Load").clicked() {
+                                            self.app.try_start_audio();
                                             let rom = Rom::new(&game.data());
                                             #[cfg(not(target_arch = "wasm32"))]
-                                            let _ = self.emulator.load_rom(&rom, None);
+                                            let _ = self.app.emulator.load_rom(&rom, None);
                                             #[cfg(target_arch = "wasm32")]
-                                            let _ = self.emulator.load_rom(&rom);
-                                            self.settings.dirty = true;
+                                            let _ = self.app.emulator.load_rom(&rom);
+                                            self.app.ui.settings.dirty = true;
                                         }
                                     },
                                 );

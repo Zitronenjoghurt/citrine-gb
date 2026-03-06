@@ -19,6 +19,6 @@ impl AppWindow for HomebrewWindow {
     }
 
     fn ui(&mut self, ui: &mut Ui, app: &mut Citrine) {
-        HomebrewList::new(&mut app.emulator, &mut app.ui.settings).ui(ui);
+        HomebrewList::new(app).ui(ui);
     }
 }
