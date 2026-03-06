@@ -32,6 +32,7 @@ image = "0.25.9"
 wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { version = "0.17.3", features = ["wasm-bindgen"] }
 eframe = { version = "0.33.0", default-features = false, features = ["glow", "persistence"] }
 poll-promise = { version = "0.3.0", features = ["web"] }
 wasm-bindgen-futures = "0.4.50"

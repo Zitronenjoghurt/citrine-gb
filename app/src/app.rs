@@ -1,7 +1,7 @@
 use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
 use crate::app::ui_state::UiState;
 use crate::app::widgets::panel_menu::PanelMenu;
-use crate::audio::init_audio;
+use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
 use citrine_gb::rom::Rom;
@@ -9,8 +9,6 @@ use eframe::{Frame, Storage};
 use egui::{CentralPanel, Context, FontDefinitions, SidePanel, TopBottomPanel, Widget};
 use egui_notify::Toasts;
 use gilrs::Gilrs;
-use ringbuf::traits::Split;
-use ringbuf::HeapRb;
 
 mod file_picker;
 mod panels;
@@ -31,7 +29,7 @@ pub struct Citrine {
     #[serde(skip, default)]
     pub toasts: Toasts,
     #[serde(skip, default)]
-    audio_stream: Option<cpal::Stream>,
+    audio: Option<Audio>,
 }
 
 impl Default for Citrine {
@@ -42,7 +40,7 @@ impl Default for Citrine {
             file_picker: FilePicker::default(),
             gil: default_gilrs(),
             toasts: Toasts::default(),
-            audio_stream: None,
+            audio: None,
         }
     }
 }
@@ -60,23 +58,9 @@ impl Citrine {
             .unwrap_or_default();
         app.file_picker.set_drop_intent(FileIntent::LoadRom);
 
-        let ring_buffer = HeapRb::<f32>::new(8192);
-        let (producer, consumer) = ring_buffer.split();
-
+        let (audio, producer) = Audio::new();
+        app.audio = Some(audio);
         app.emulator.audio_producer = Some(producer);
-
-        match init_audio(consumer) {
-            Ok((stream, sample_rate)) => {
-                app.audio_stream = Some(stream);
-                app.emulator.gb.apu.set_sample_rate(sample_rate);
-                app.toasts
-                    .success(format!("Audio backend initialized ({} Hz)", sample_rate));
-            }
-            Err(err) => {
-                app.toasts
-                    .error(format!("Failed to initialize audio backend: {}", err));
-            }
-        }
 
         app
     }
@@ -199,9 +183,34 @@ impl Citrine {
     }
 }
 
+// Audio
+impl Citrine {
+    pub fn try_start_audio(&mut self) {
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+
+        if audio.stream.is_some() {
+            return;
+        };
+
+        match audio.try_start() {
+            Ok(sample_rate) => {
+                self.emulator.gb.apu.set_sample_rate(sample_rate);
+                self.toasts
+                    .success(format!("Audio started ({} Hz)", sample_rate));
+            }
+            Err(err) => {
+                self.toasts.error(format!("Failed to start audio: {}", err));
+            }
+        }
+    }
+}
+
 // File handling
 impl Citrine {
     fn handle_load_rom(&mut self, fr: FileResult) {
+        self.try_start_audio();
         let rom = Rom::new(fr.data().unwrap());
         if let Err(err) = self.emulator.load_rom(
             &rom,
@@ -220,6 +229,7 @@ impl Citrine {
     }
 
     fn handle_load_boot_rom(&mut self, fr: FileResult) {
+        self.try_start_audio();
         self.emulator.gb.load_boot_rom(fr.data().unwrap());
         self.ui.settings.dirty = true;
         self.toasts.success("Boot ROM loaded");
