@@ -76,6 +76,7 @@ impl GameBoy {
     }
 
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
+        let sample_rate = self.apu.output_sample_rate;
         let boot_rom = if !self.boot_rom.rom.is_empty() {
             Some(self.boot_rom.rom.clone())
         } else {
@@ -84,11 +85,14 @@ impl GameBoy {
 
         *self = Self::new(self.model, boot_rom, rom.provided_header_checksum()?);
         self.cartridge.load_rom(rom)?;
+        self.apu.set_sample_rate(sample_rate);
         Ok(())
     }
 
     pub fn load_boot_rom(&mut self, rom: &[u8]) {
+        let sample_rate = self.apu.output_sample_rate;
         *self = Self::new(self.model, Some(rom.to_vec()), 0x00);
+        self.apu.set_sample_rate(sample_rate);
     }
 
     pub fn step(&mut self) {

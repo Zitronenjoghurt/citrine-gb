@@ -68,7 +68,7 @@ impl Citrine {
         match init_audio(consumer) {
             Ok((stream, sample_rate)) => {
                 app.audio_stream = Some(stream);
-                app.emulator.gb.apu.output_sample_rate = sample_rate;
+                app.emulator.gb.apu.set_sample_rate(sample_rate);
                 app.toasts
                     .success(format!("Audio backend initialized ({} Hz)", sample_rate));
             }
@@ -221,6 +221,7 @@ impl Citrine {
 
     fn handle_load_boot_rom(&mut self, fr: FileResult) {
         self.emulator.gb.load_boot_rom(fr.data().unwrap());
+        self.ui.settings.dirty = true;
         self.toasts.success("Boot ROM loaded");
     }
 

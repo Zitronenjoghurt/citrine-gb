@@ -13,11 +13,13 @@ pub fn init_audio(mut consumer: HeapCons<f32>) -> anyhow::Result<(cpal::Stream, 
     let sample_rate = supported_config.sample_rate() as u32;
     let config = supported_config.config();
 
+    let mut last_sample = 0.0;
     let stream = device.build_output_stream(
         &config,
         move |data: &mut [f32], _| {
             for sample in data.iter_mut() {
-                *sample = consumer.try_pop().unwrap_or(0.0);
+                last_sample = consumer.try_pop().unwrap_or(last_sample);
+                *sample = last_sample;
             }
         },
         |err| eprintln!("Audio stream error: {}", err),

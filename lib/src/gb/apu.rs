@@ -13,9 +13,8 @@ mod channels;
 mod components;
 mod registers;
 
-const CHARGE_FACTOR: f32 = 0.996;
 const APU_CLOCK_RATE: u32 = 4_194_304;
-const MAX_AUDIO_BUFFER_SIZE: u32 = 4096;
+const MAX_AUDIO_BUFFER_SIZE: u32 = 8192;
 const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 
 pub struct Apu {
@@ -37,6 +36,7 @@ pub struct Apu {
     prev_l: i32,
     prev_r: i32,
     pub output_sample_rate: u32,
+    pub charge_factor: f32,
     pub audio_buffer: Vec<f32>,
 }
 
@@ -65,6 +65,7 @@ impl Default for Apu {
             prev_l: 0,
             prev_r: 0,
             output_sample_rate: DEFAULT_SAMPLE_RATE,
+            charge_factor: charge_factor(DEFAULT_SAMPLE_RATE),
             audio_buffer: vec![],
         }
     }
@@ -122,8 +123,8 @@ impl Apu {
             let filtered_l = raw_l - self.hpf_capacitor_l;
             let filtered_r = raw_r - self.hpf_capacitor_r;
 
-            self.hpf_capacitor_l = raw_l - filtered_l * CHARGE_FACTOR;
-            self.hpf_capacitor_r = raw_r - filtered_r * CHARGE_FACTOR;
+            self.hpf_capacitor_l = raw_l - filtered_l * self.charge_factor;
+            self.hpf_capacitor_r = raw_r - filtered_r * self.charge_factor;
 
             self.audio_buffer.push(filtered_l);
             self.audio_buffer.push(filtered_r);
@@ -267,6 +268,15 @@ impl Apu {
             (0.0, 0.0)
         }
     }
+
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.output_sample_rate = sample_rate;
+        self.blip_l
+            .set_rates(APU_CLOCK_RATE as f64, sample_rate as f64);
+        self.blip_r
+            .set_rates(APU_CLOCK_RATE as f64, sample_rate as f64);
+        self.charge_factor = charge_factor(sample_rate);
+    }
 }
 
 impl ReadMemory for Apu {
@@ -297,4 +307,8 @@ impl WriteMemory for Apu {
             _ => {}
         }
     }
+}
+
+pub fn charge_factor(sample_rate: u32) -> f32 {
+    0.999958_f64.powf(APU_CLOCK_RATE as f64 / sample_rate as f64) as f32
 }
