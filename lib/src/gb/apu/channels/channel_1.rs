@@ -3,8 +3,8 @@ use crate::gb::apu::components::length_counter::LengthCounter;
 use crate::gb::apu::components::square_wave::SquareWave;
 use crate::gb::apu::components::volume_envelope::VolumeEnvelope;
 use crate::gb::apu::registers::ch123_control::Channel123Control;
+use crate::gb::apu::registers::ch124_volume::Channel124Volume;
 use crate::gb::apu::registers::ch12_timer::Channel12Timer;
-use crate::gb::apu::registers::ch12_volume::Channel12Volume;
 use crate::gb::apu::registers::ch1_sweep::Channel1Sweep;
 use crate::{ReadMemory, WriteMemory};
 
@@ -20,7 +20,7 @@ pub struct Channel1 {
     /// NR11 (0xFF11)
     pub timer: Channel12Timer,
     /// NR12 (0xFF12)
-    pub volume: Channel12Volume,
+    pub volume: Channel124Volume,
     /// NR13 (0xFF13) => Write-only
     pub period_low: u8,
     /// NR14 (0xFF14)
@@ -58,7 +58,16 @@ impl Channel1 {
 
         self.square_wave.set_frequency(self.get_period());
 
-        // ToDo: Sweep
+        let disable = self.frequency_sweep.trigger(
+            self.get_period(),
+            self.sweep.pace,
+            self.sweep.individual_step,
+            self.sweep.direction,
+        );
+
+        if disable {
+            self.enabled = false;
+        }
     }
 
     pub fn clock_length(&mut self) {
@@ -72,11 +81,29 @@ impl Channel1 {
     }
 
     pub fn clock_sweep(&mut self) {
-        self.frequency_sweep.clock();
+        let (disable, new_period) = self.frequency_sweep.clock(
+            self.sweep.pace,
+            self.sweep.individual_step,
+            self.sweep.direction,
+        );
+
+        if disable {
+            self.enabled = false;
+        }
+
+        if let Some(period) = new_period {
+            self.set_period(period);
+            self.square_wave.set_frequency(period);
+        }
     }
 
     pub fn get_period(&self) -> u16 {
         self.period_low as u16 | (((self.control.period_high & 0b111) as u16) << 8)
+    }
+
+    pub fn set_period(&mut self, period: u16) {
+        self.period_low = (period & 0xFF) as u8;
+        self.control.period_high = ((period >> 8) & 0b111) as u8;
     }
 
     pub fn dac_enabled(&self) -> bool {
@@ -104,7 +131,7 @@ impl WriteMemory for Channel1 {
             0xFF11 => {
                 self.timer = value.into();
                 self.length_counter
-                    .trigger(64u16.saturating_sub(self.timer.initial_length_timer as u16));
+                    .reload(64u16.saturating_sub(self.timer.initial_length_timer as u16));
                 self.square_wave.set_duty(self.timer.wave_duty);
             }
             0xFF12 => {

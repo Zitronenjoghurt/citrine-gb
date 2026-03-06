@@ -2,8 +2,8 @@ use crate::gb::apu::components::length_counter::LengthCounter;
 use crate::gb::apu::components::square_wave::SquareWave;
 use crate::gb::apu::components::volume_envelope::VolumeEnvelope;
 use crate::gb::apu::registers::ch123_control::Channel123Control;
+use crate::gb::apu::registers::ch124_volume::Channel124Volume;
 use crate::gb::apu::registers::ch12_timer::Channel12Timer;
-use crate::gb::apu::registers::ch12_volume::Channel12Volume;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]
@@ -15,7 +15,7 @@ pub struct Channel2 {
     /// NR21 (0xFF16)
     pub timer: Channel12Timer,
     /// NR22 (0xFF17)
-    pub volume: Channel12Volume,
+    pub volume: Channel124Volume,
     /// NR23 (0xFF18) => Write-only
     pub period_low: u8,
     /// NR24 (0xFF19)
@@ -91,7 +91,7 @@ impl WriteMemory for Channel2 {
             0xFF16 => {
                 self.timer = value.into();
                 self.length_counter
-                    .trigger(64u16.saturating_sub(self.timer.initial_length_timer as u16));
+                    .reload(64u16.saturating_sub(self.timer.initial_length_timer as u16));
                 self.square_wave.set_duty(self.timer.wave_duty);
             }
             0xFF17 => {
