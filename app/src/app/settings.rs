@@ -1,3 +1,4 @@
+use crate::audio::Audio;
 use crate::emulator::Emulator;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 
@@ -10,6 +11,7 @@ pub struct Settings {
     matrix_edge_darkness: f32,
     matrix_corner_darkness: f32,
     ghosting_strength: f32,
+    volume: f32,
     #[serde(skip, default = "default_dirty")]
     pub dirty: bool,
 }
@@ -27,6 +29,7 @@ impl Default for Settings {
             matrix_edge_darkness: 0.15,
             matrix_corner_darkness: 0.25,
             ghosting_strength: 0.3,
+            volume: 0.25,
             dirty: default_dirty(),
         }
     }
@@ -37,7 +40,12 @@ fn default_dirty() -> bool {
 }
 
 impl Settings {
-    pub fn apply(&mut self, ctx: &egui::Context, emulator: &mut Emulator) {
+    pub fn apply(
+        &mut self,
+        ctx: &egui::Context,
+        audio: &mut Option<Audio>,
+        emulator: &mut Emulator,
+    ) {
         if !self.dirty {
             return;
         }
@@ -49,6 +57,10 @@ impl Settings {
         emulator.matrix_edge_brightness = 1.0 - self.matrix_edge_darkness;
         emulator.matrix_corner_brightness = 1.0 - self.matrix_corner_darkness;
         emulator.ghosting_blend = 1.0 - self.ghosting_strength;
+
+        if let Some(audio) = audio {
+            audio.set_volume(self.volume);
+        };
 
         self.dirty = false;
     }
@@ -117,6 +129,15 @@ impl Settings {
 
     pub fn set_ghosting_strength(&mut self, strength: f32) {
         self.ghosting_strength = strength;
+        self.set_dirty();
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume;
         self.set_dirty();
     }
 }

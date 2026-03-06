@@ -104,7 +104,9 @@ impl eframe::App for Citrine {
         self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
 
-        self.ui.settings.apply(ctx, &mut self.emulator);
+        self.ui
+            .settings
+            .apply(ctx, &mut self.audio, &mut self.emulator);
     }
 
     fn save(&mut self, storage: &mut dyn Storage) {

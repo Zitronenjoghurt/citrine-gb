@@ -25,6 +25,14 @@ impl Widget for SettingsWidget<'_> {
                 }
                 ui.end_row();
 
+                let mut volume = self.settings.volume();
+                ui.label("Volume");
+                Slider::new(&mut volume, 0.0..=1.0).step_by(0.01).ui(ui);
+                if volume != self.settings.volume() {
+                    self.settings.set_volume(volume);
+                }
+                ui.end_row();
+
                 let mut theme = self.settings.dmg_theme();
                 ui.label("Theme");
                 ThemeSelector::new(&mut theme).ui(ui);
