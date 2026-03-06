@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "env_logger",
