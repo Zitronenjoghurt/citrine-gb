@@ -1,6 +1,5 @@
 use crate::app::settings::{Settings, SettingsTab};
 use egui::{Response, ScrollArea, Ui, Widget};
-use strum::IntoEnumIterator;
 
 pub struct SettingsBar<'a> {
     settings: &'a mut Settings,
@@ -30,7 +29,7 @@ impl Widget for SettingsBar<'_> {
             ui.separator();
             ScrollArea::vertical().show(ui, |ui| {
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                    for tab in SettingsTab::iter() {
+                    for tab in SettingsTab::iter_with_dev_mode(self.settings.dev_mode) {
                         ui.selectable_value(
                             &mut self.settings.current_tab,
                             tab,

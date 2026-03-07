@@ -42,11 +42,14 @@ impl Widget for TimeControl<'_> {
                 if ui.button(start_stop).clicked() {
                     self.emulator.running = !self.emulator.running;
                 }
-            });
 
-            if !self.emulator.running {
                 ui.separator();
 
+                ui.label(format!("{} Cycles", self.emulator.gb.debugger.total_cycles));
+            });
+
+            ui.separator();
+            if !self.emulator.running {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label("Step");
@@ -74,6 +77,8 @@ impl Widget for TimeControl<'_> {
                             .ui(ui);
                     });
                 });
+            } else {
+                ui.small("Pause for fine-grained stepping");
             }
 
             ui.separator();

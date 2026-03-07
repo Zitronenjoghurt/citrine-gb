@@ -5,11 +5,12 @@ use crate::emulator::Emulator;
 use crate::icons;
 use citrine_gb::rom::Rom;
 use eframe::{Frame, Storage};
-use egui::{CentralPanel, Context, FontDefinitions, TopBottomPanel, Widget};
+use egui::{CentralPanel, Context, FontDefinitions, TopBottomPanel};
 use egui_dock::DockState;
 use egui_notify::Toasts;
 use gilrs::Gilrs;
 
+mod events;
 mod file_picker;
 mod settings;
 mod tabs;
@@ -21,8 +22,6 @@ pub struct Citrine {
     pub dock: DockState<tabs::Tab>,
     pub ui: UiState,
     #[serde(skip, default)]
-    pub tab_queue: tabs::TabQueue,
-    #[serde(skip, default)]
     pub emulator: Emulator,
     #[serde(skip, default)]
     pub file_picker: FilePicker,
@@ -32,6 +31,8 @@ pub struct Citrine {
     pub toasts: Toasts,
     #[serde(skip, default)]
     pub audio: Option<Audio>,
+    #[serde(skip, default)]
+    pub events: events::AppEventQueue,
 }
 
 impl Default for Citrine {
@@ -40,12 +41,12 @@ impl Default for Citrine {
         Self {
             dock,
             ui: UiState::default(),
-            tab_queue: tabs::TabQueue::default(),
             emulator: Emulator::default(),
             file_picker: FilePicker::default(),
             gil: default_gilrs(),
             toasts: Toasts::default(),
             audio: None,
+            events: events::AppEventQueue::default(),
         }
     }
 }
@@ -99,7 +100,8 @@ impl eframe::App for Citrine {
         CentralPanel::default().show(ctx, |ui| {
             let mut viewer = tabs::TabViewer {
                 emulator: &mut self.emulator,
-                tab_queue: &mut self.tab_queue,
+                events: &mut self.events,
+                file_picker: &mut self.file_picker,
                 ui: &mut self.ui,
             };
 
@@ -108,15 +110,12 @@ impl eframe::App for Citrine {
                 .show_leaf_collapse_buttons(false)
                 .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
-
-            for tab in self.tab_queue.take() {
-                self.open_tab(tab);
-            }
         });
 
         self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
 
+        self.handle_event_queue();
         self.ui
             .settings
             .apply(ctx, &mut self.audio, &mut self.emulator);
@@ -137,20 +136,38 @@ impl Citrine {
             ui.menu_button(icons::FOLDER, |ui| {
                 if ui.button("Load ROM").clicked() {
                     self.file_picker.open(FileIntent::LoadRom);
-                    ui.close_kind(egui::UiKind::Menu);
                 }
                 if ui.button("Load Boot ROM").clicked() {
                     self.file_picker.open(FileIntent::LoadBootRom);
-                    ui.close_kind(egui::UiKind::Menu);
                 }
             });
 
-            if ui.button(icons::GAME_CONTROLLER).clicked() {
-                self.open_tab(tabs::Tab::GameBoy);
+            if ui.button(icons::JOYSTICK).clicked() {
+                self.open_tab(tabs::Tab::Homebrew);
             }
 
             if ui.button(icons::GEAR).clicked() {
                 self.open_tab(tabs::Tab::Settings);
+            }
+
+            ui.menu_button(icons::INFO, |ui| {
+                if ui.button("ROM Info").clicked() {
+                    self.open_tab(tabs::Tab::RomInfo);
+                }
+            });
+
+            if self.ui.settings.dev_mode {
+                ui.menu_button(icons::BRACKETS_CURLY, |ui| {
+                    if ui.button("Time Control").clicked() {
+                        self.open_tab(tabs::Tab::TimeControl);
+                    }
+                    if ui.button("Registers").clicked() {
+                        self.open_tab(tabs::Tab::Registers);
+                    }
+                    if ui.button("E2E Tests").clicked() {
+                        self.open_tab(tabs::Tab::E2ETest);
+                    }
+                });
             }
 
             //ui.separator();
@@ -279,4 +296,31 @@ impl Citrine {
 
     #[cfg(target_arch = "wasm32")]
     fn handle_export_e2e(&mut self, _fr: FileResult) {}
+}
+
+// Events
+impl Citrine {
+    fn handle_event_queue(&mut self) {
+        for event in self.events.take() {
+            self.handle_event(event);
+        }
+    }
+
+    fn handle_event(&mut self, event: events::AppEvent) {
+        match event {
+            events::AppEvent::LoadRomData { data } => {
+                self.handle_load_rom_data(data);
+            }
+        }
+    }
+
+    fn handle_load_rom_data(&mut self, data: Vec<u8>) {
+        self.try_start_audio();
+        let rom = Rom::new(&data);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = self.emulator.load_rom(&rom, None);
+        #[cfg(target_arch = "wasm32")]
+        let _ = self.app.emulator.load_rom(&rom);
+        self.ui.settings.dirty = true;
+    }
 }

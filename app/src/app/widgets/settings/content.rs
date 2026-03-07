@@ -1,5 +1,5 @@
 use crate::app::settings::{Settings, SettingsTab};
-use crate::app::widgets::enum_select::EnumSelect;
+use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::reset_slider::ResetSlider;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 use egui::{Grid, Response, ScrollArea, Ui, Widget};
@@ -41,16 +41,17 @@ impl SettingsContent<'_> {
             .num_columns(2)
             .show(ui, |ui| {
                 ui.label("UI Scale");
-
                 let response = ResetSlider::new(&mut s.ui_scale, 0.5..=5.0)
                     .step_by(0.1)
                     .default_value(Settings::DEFAULT_UI_SCALE)
                     .ui(ui);
-
                 if response.drag_stopped() || (response.changed() && !response.dragged()) {
                     s.dirty = true;
                 }
+                ui.end_row();
 
+                ui.label("Developer Mode");
+                s.dirty |= ui.checkbox(&mut s.dev_mode, "").changed();
                 ui.end_row();
             });
     }
@@ -84,7 +85,7 @@ impl SettingsContent<'_> {
             .num_columns(2)
             .show(ui, |ui| {
                 ui.label("Theme");
-                s.dirty |= EnumSelect::new(&mut s.dmg_theme, "enum_select_dmg_theme")
+                s.dirty |= GenericSelect::from_enum(&mut s.dmg_theme, "enum_select_dmg_theme")
                     .default_value(DmgTheme::Citrine)
                     .ui(ui)
                     .changed();

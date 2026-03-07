@@ -2,6 +2,7 @@ use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
+use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -15,6 +16,7 @@ pub struct Settings {
     pub ghosting_strength: f32,
     pub volume: f32,
     pub current_tab: SettingsTab,
+    pub dev_mode: bool,
     #[serde(skip, default = "default_dirty")]
     pub dirty: bool,
 }
@@ -31,6 +33,7 @@ impl Default for Settings {
             ghosting_strength: Self::DEFAULT_GHOSTING_STRENGTH,
             volume: Self::DEFAULT_VOLUME,
             current_tab: SettingsTab::default(),
+            dev_mode: false,
             dirty: default_dirty(),
         }
     }
@@ -104,5 +107,9 @@ impl SettingsTab {
             SettingsTab::Style => icons::PAINT_BRUSH_HOUSEHOLD,
             SettingsTab::Developer => icons::BRACKETS_CURLY,
         }
+    }
+
+    pub fn iter_with_dev_mode(dev_mode: bool) -> impl Iterator<Item = SettingsTab> {
+        SettingsTab::iter().filter(move |tab| dev_mode || *tab != SettingsTab::Developer)
     }
 }
