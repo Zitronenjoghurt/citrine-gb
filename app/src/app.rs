@@ -1,25 +1,27 @@
 use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
 use crate::app::ui_state::UiState;
-use crate::app::widgets::panel_menu::PanelMenu;
 use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
 use citrine_gb::rom::Rom;
 use eframe::{Frame, Storage};
-use egui::{CentralPanel, Context, FontDefinitions, SidePanel, TopBottomPanel, Widget};
+use egui::{CentralPanel, Context, FontDefinitions, TopBottomPanel, Widget};
+use egui_dock::DockState;
 use egui_notify::Toasts;
 use gilrs::Gilrs;
 
 mod file_picker;
-mod panels;
 mod settings;
+mod tabs;
 mod ui_state;
 mod widgets;
-mod windows;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
+    pub dock: DockState<tabs::Tab>,
     pub ui: UiState,
+    #[serde(skip, default)]
+    pub tab_queue: tabs::TabQueue,
     #[serde(skip, default)]
     pub emulator: Emulator,
     #[serde(skip, default)]
@@ -29,13 +31,16 @@ pub struct Citrine {
     #[serde(skip, default)]
     pub toasts: Toasts,
     #[serde(skip, default)]
-    audio: Option<Audio>,
+    pub audio: Option<Audio>,
 }
 
 impl Default for Citrine {
     fn default() -> Self {
+        let dock = DockState::new(vec![tabs::Tab::GameBoy]);
         Self {
+            dock,
             ui: UiState::default(),
+            tab_queue: tabs::TabQueue::default(),
             emulator: Emulator::default(),
             file_picker: FilePicker::default(),
             gil: default_gilrs(),
@@ -74,6 +79,9 @@ impl Citrine {
 
 impl eframe::App for Citrine {
     fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
+        // ToDo: Handle this more efficiently => e.g. pause emulator if not visible
+        ctx.request_repaint();
+
         if let Some(result) = self.file_picker.poll(ctx) {
             match result.intent {
                 FileIntent::LoadRom => self.handle_load_rom(result),
@@ -88,18 +96,23 @@ impl eframe::App for Citrine {
 
         TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
 
-        if let Some(panel) = self.ui.panels.left {
-            SidePanel::left("left_panel").show(ctx, |ui| panel.ui(ui, self));
-        }
+        CentralPanel::default().show(ctx, |ui| {
+            let mut viewer = tabs::TabViewer {
+                emulator: &mut self.emulator,
+                tab_queue: &mut self.tab_queue,
+                ui: &mut self.ui,
+            };
 
-        if let Some(panel) = self.ui.panels.right {
-            SidePanel::right("right_panel").show(ctx, |ui| panel.ui(ui, self));
-        }
+            egui_dock::DockArea::new(&mut self.dock)
+                .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
+                .show_leaf_collapse_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_inside(ui, &mut viewer);
 
-        CentralPanel::default().show(ctx, |ui| self.central_panel(ui));
-
-        let active_windows = self.ui.windows.active;
-        active_windows.show_all(ctx, self);
+            for tab in self.tab_queue.take() {
+                self.open_tab(tab);
+            }
+        });
 
         self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
@@ -132,56 +145,61 @@ impl Citrine {
                 }
             });
 
-            self.ui.windows.active.toggle_menu(ui);
-
-            PanelMenu::new(icons::ALIGN_LEFT_SIMPLE, &mut self.ui.panels.left).ui(ui);
-            PanelMenu::new(icons::ALIGN_RIGHT_SIMPLE, &mut self.ui.panels.right).ui(ui);
-
-            ui.separator();
-
-            ui.label(format!("{:.02}ms", self.emulator.last_frame_secs * 1000.0));
-
-            ui.label(format!("{} Cycles", self.emulator.gb.debugger.total_cycles));
-
-            if let Some(last_save) = self.emulator.last_save {
-                ui.separator();
-
-                let elapsed = web_time::Instant::now() - last_save;
-                let label = match elapsed.as_secs() {
-                    0 if elapsed.subsec_micros() == 0 => {
-                        format!("{}ns ago", elapsed.subsec_nanos())
-                    }
-                    0 if elapsed.subsec_millis() == 0 => {
-                        format!("{}µs ago", elapsed.subsec_micros())
-                    }
-                    0 => format!("{}ms ago", elapsed.subsec_millis()),
-                    1..=59 => format!("{}s ago", elapsed.as_secs()),
-                    60..=3599 => format!("{}m ago", elapsed.as_secs() / 60),
-                    _ => format!("{}h ago", elapsed.as_secs() / 3600),
-                };
-                ui.label(format!(
-                    "Last SRAM dump: {} ({} always save in-game if possible)",
-                    label,
-                    icons::WARNING
-                ));
-            } else if self.emulator.gb.cartridge.supports_sram_saves() {
-                ui.separator();
-                if self.emulator.save_loaded {
-                    ui.label("Save file loaded");
-                } else {
-                    ui.label("Game did not save anything yet");
-                }
-            } else if !self.emulator.gb.cartridge.supports_sram_saves() {
-                ui.separator();
-                ui.label("No saves (cartridge has no battery)");
+            if ui.button(icons::GAME_CONTROLLER).clicked() {
+                self.open_tab(tabs::Tab::GameBoy);
             }
+
+            if ui.button(icons::GEAR).clicked() {
+                self.open_tab(tabs::Tab::Settings);
+            }
+
+            //ui.separator();
+            //
+            //ui.label(format!("{:.02}ms", self.emulator.last_frame_secs * 1000.0));
+            //
+            //ui.label(format!("{} Cycles", self.emulator.gb.debugger.total_cycles));
+            //
+            //if let Some(last_save) = self.emulator.last_save {
+            //    ui.separator();
+            //
+            //    let elapsed = web_time::Instant::now() - last_save;
+            //    let label = match elapsed.as_secs() {
+            //        0 if elapsed.subsec_micros() == 0 => {
+            //            format!("{}ns ago", elapsed.subsec_nanos())
+            //        }
+            //        0 if elapsed.subsec_millis() == 0 => {
+            //            format!("{}µs ago", elapsed.subsec_micros())
+            //        }
+            //        0 => format!("{}ms ago", elapsed.subsec_millis()),
+            //        1..=59 => format!("{}s ago", elapsed.as_secs()),
+            //        60..=3599 => format!("{}m ago", elapsed.as_secs() / 60),
+            //        _ => format!("{}h ago", elapsed.as_secs() / 3600),
+            //    };
+            //    ui.label(format!(
+            //        "Last SRAM dump: {} ({} always save in-game if possible)",
+            //        label,
+            //        icons::WARNING
+            //    ));
+            //} else if self.emulator.gb.cartridge.supports_sram_saves() {
+            //    ui.separator();
+            //    if self.emulator.save_loaded {
+            //        ui.label("Save file loaded");
+            //    } else {
+            //        ui.label("Game did not save anything yet");
+            //    }
+            //} else if !self.emulator.gb.cartridge.supports_sram_saves() {
+            //    ui.separator();
+            //    ui.label("No saves (cartridge has no battery)");
+            //}
         });
     }
 
-    fn central_panel(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            self.emulator.ui(ui);
-        });
+    fn open_tab(&mut self, tab: tabs::Tab) {
+        if let Some((surface, node, tab_idx)) = self.dock.find_tab(&tab) {
+            self.dock.set_active_tab((surface, node, tab_idx));
+        } else {
+            self.dock.main_surface_mut().push_to_focused_leaf(tab);
+        }
     }
 }
 

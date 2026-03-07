@@ -8,13 +8,16 @@ all-features = true
 targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 
 [dependencies]
-citrine-gb = { workspace = true, features = ["debug", "serde", "base64"] }
+citrine-gb = { workspace = true, features = ["debug", "serde", "base64", "strum"] }
 anyhow = "1.0.102"
-bitflags = { version = "2.11.0", features = ["serde"] }
 brotli = "8.0.2"
 cpal = "0.17.3"
 eframe = { version = "0.33.0", default-features = false, features = ["persistence"] }
 egui = "0.33.0"
+egui-aesthetix = "0.2.4"
+egui_commonmark = "0.22.0"
+egui_dock = { version = "0.18.0", features = ["serde"] }
+egui-modal = "0.6.0"
 egui-notify = "0.21.0"
 egui-phosphor = { version = "0.11.0", features = ["regular"] }
 gilrs = "0.11.1"
@@ -22,8 +25,8 @@ log = "0.4.29"
 rfd = "0.17.2"
 ringbuf = "0.4.8"
 serde = { version = "1.0.228", features = ["derive"] }
-strum = "0.27.2"
-strum_macros = "0.27.2"
+strum = "0.28.0"
+strum_macros = "0.28.0"
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

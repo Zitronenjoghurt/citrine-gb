@@ -1,6 +1,7 @@
+pub mod enum_select;
 pub mod homebrew;
-pub mod panel_menu;
 pub mod registers;
+pub mod reset_slider;
 pub mod rom_info;
 pub mod settings;
 pub mod theme_selector;

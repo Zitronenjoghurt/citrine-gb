@@ -215,8 +215,6 @@ impl Emulator {
                 ui.add_space((leftover_x / 2.0).floor());
                 ui.image(egui::load::SizedTexture::new(tex.id(), final_size));
             });
-
-            ui.ctx().request_repaint();
         }
     }
 

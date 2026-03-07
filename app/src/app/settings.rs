@@ -1,17 +1,20 @@
 use crate::audio::Audio;
 use crate::emulator::Emulator;
+use crate::icons;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
+use strum_macros::EnumIter;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
-    ui_scale: f32,
-    dmg_theme: DmgTheme,
-    matrix: bool,
-    ghosting: bool,
-    matrix_edge_darkness: f32,
-    matrix_corner_darkness: f32,
-    ghosting_strength: f32,
-    volume: f32,
+    pub ui_scale: f32,
+    pub dmg_theme: DmgTheme,
+    pub matrix: bool,
+    pub ghosting: bool,
+    pub matrix_edge_darkness: f32,
+    pub matrix_corner_darkness: f32,
+    pub ghosting_strength: f32,
+    pub volume: f32,
+    pub current_tab: SettingsTab,
     #[serde(skip, default = "default_dirty")]
     pub dirty: bool,
 }
@@ -19,17 +22,15 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            #[cfg(target_arch = "wasm32")]
-            ui_scale: 3.0,
-            #[cfg(not(target_arch = "wasm32"))]
-            ui_scale: 1.5,
+            ui_scale: Self::DEFAULT_UI_SCALE,
             dmg_theme: DmgTheme::default(),
             matrix: false,
             ghosting: false,
-            matrix_edge_darkness: 0.15,
-            matrix_corner_darkness: 0.25,
-            ghosting_strength: 0.3,
-            volume: 0.25,
+            matrix_edge_darkness: Self::DEFAULT_MATRIX_EDGE_DARKNESS,
+            matrix_corner_darkness: Self::DEFAULT_MATRIX_CORNER_DARKNESS,
+            ghosting_strength: Self::DEFAULT_GHOSTING_STRENGTH,
+            volume: Self::DEFAULT_VOLUME,
+            current_tab: SettingsTab::default(),
             dirty: default_dirty(),
         }
     }
@@ -40,6 +41,15 @@ fn default_dirty() -> bool {
 }
 
 impl Settings {
+    pub const DEFAULT_VOLUME: f32 = 0.25;
+    #[cfg(target_arch = "wasm32")]
+    pub const DEFAULT_UI_SCALE: f32 = 2.5;
+    #[cfg(not(target_arch = "wasm32"))]
+    pub const DEFAULT_UI_SCALE: f32 = 1.5;
+    pub const DEFAULT_MATRIX_EDGE_DARKNESS: f32 = 0.15;
+    pub const DEFAULT_MATRIX_CORNER_DARKNESS: f32 = 0.25;
+    pub const DEFAULT_GHOSTING_STRENGTH: f32 = 0.3;
+
     pub fn apply(
         &mut self,
         ctx: &egui::Context,
@@ -64,80 +74,35 @@ impl Settings {
 
         self.dirty = false;
     }
+}
 
-    fn set_dirty(&mut self) {
-        self.dirty = true;
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter,
+)]
+pub enum SettingsTab {
+    #[default]
+    General,
+    Sound,
+    Style,
+    Developer,
+}
+
+impl SettingsTab {
+    pub fn title(&self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Sound => "Sound",
+            SettingsTab::Style => "Style",
+            SettingsTab::Developer => "Developer",
+        }
     }
 
-    pub fn ui_scale(&self) -> f32 {
-        self.ui_scale
-    }
-
-    pub fn set_ui_scale(&mut self, scale: f32) {
-        self.ui_scale = scale;
-        self.set_dirty();
-    }
-
-    pub fn dmg_theme(&self) -> DmgTheme {
-        self.dmg_theme
-    }
-
-    pub fn set_dmg_theme(&mut self, theme: DmgTheme) {
-        self.dmg_theme = theme;
-        self.set_dirty();
-    }
-
-    pub fn ghosting(&self) -> bool {
-        self.ghosting
-    }
-
-    pub fn set_ghosting(&mut self, ghosting: bool) {
-        self.ghosting = ghosting;
-        self.set_dirty();
-    }
-
-    pub fn matrix(&self) -> bool {
-        self.matrix
-    }
-
-    pub fn set_matrix(&mut self, matrix: bool) {
-        self.matrix = matrix;
-        self.set_dirty();
-    }
-
-    pub fn matrix_edge_darkness(&self) -> f32 {
-        self.matrix_edge_darkness
-    }
-
-    pub fn set_matrix_edge_darkness(&mut self, darkness: f32) {
-        self.matrix_edge_darkness = darkness;
-        self.set_dirty();
-    }
-
-    pub fn matrix_corner_darkness(&self) -> f32 {
-        self.matrix_corner_darkness
-    }
-
-    pub fn set_matrix_corner_darkness(&mut self, darkness: f32) {
-        self.matrix_corner_darkness = darkness;
-        self.set_dirty();
-    }
-
-    pub fn ghosting_strength(&self) -> f32 {
-        self.ghosting_strength
-    }
-
-    pub fn set_ghosting_strength(&mut self, strength: f32) {
-        self.ghosting_strength = strength;
-        self.set_dirty();
-    }
-
-    pub fn volume(&self) -> f32 {
-        self.volume
-    }
-
-    pub fn set_volume(&mut self, volume: f32) {
-        self.volume = volume;
-        self.set_dirty();
+    pub fn icon(&self) -> &'static str {
+        match self {
+            SettingsTab::General => icons::GEAR_SIX,
+            SettingsTab::Sound => icons::SPEAKER_HIGH,
+            SettingsTab::Style => icons::PAINT_BRUSH_HOUSEHOLD,
+            SettingsTab::Developer => icons::BRACKETS_CURLY,
+        }
     }
 }

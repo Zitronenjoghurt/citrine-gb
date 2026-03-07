@@ -3,6 +3,7 @@ use std::fmt::Display;
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "strum", derive(strum_macros::EnumIter))]
 pub enum DmgTheme {
     #[default]
     Citrine,
