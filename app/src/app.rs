@@ -5,9 +5,9 @@ use crate::emulator::Emulator;
 use crate::icons;
 use citrine_gb::rom::Rom;
 use eframe::{Frame, Storage};
-use egui::{CentralPanel, Context, FontDefinitions, TopBottomPanel};
+use egui::{CentralPanel, Color32, Context, FontDefinitions, TopBottomPanel};
 use egui_dock::DockState;
-use egui_notify::Toasts;
+use egui_notify::{Toast, Toasts};
 use gilrs::Gilrs;
 
 mod events;
@@ -83,6 +83,11 @@ impl eframe::App for Citrine {
         // ToDo: Handle this more efficiently => e.g. pause emulator if not visible
         ctx.request_repaint();
 
+        self.render(ctx);
+        if self.ui.settings.focus_mode && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.toggle_focus_mode();
+        }
+
         if let Some(result) = self.file_picker.poll(ctx) {
             match result.intent {
                 FileIntent::LoadRom => self.handle_load_rom(result),
@@ -94,23 +99,6 @@ impl eframe::App for Citrine {
         if let Err(err) = self.emulator.update(ctx, &mut self.gil) {
             self.toasts.error(format!("Emulation Error: {}", err));
         }
-
-        TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
-
-        CentralPanel::default().show(ctx, |ui| {
-            let mut viewer = tabs::TabViewer {
-                emulator: &mut self.emulator,
-                events: &mut self.events,
-                file_picker: &mut self.file_picker,
-                ui: &mut self.ui,
-            };
-
-            egui_dock::DockArea::new(&mut self.dock)
-                .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
-                .show_leaf_collapse_buttons(false)
-                .show_leaf_close_all_buttons(false)
-                .show_inside(ui, &mut viewer);
-        });
 
         self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
@@ -128,6 +116,33 @@ impl eframe::App for Citrine {
 
 // Rendering
 impl Citrine {
+    fn render(&mut self, ctx: &Context) {
+        if self.ui.settings.focus_mode {
+            self.render_focus_mode(ctx);
+        } else {
+            self.render_normal_mode(ctx);
+        }
+    }
+
+    fn render_normal_mode(&mut self, ctx: &Context) {
+        TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
+
+        CentralPanel::default().show(ctx, |ui| {
+            let mut viewer = tabs::TabViewer {
+                emulator: &mut self.emulator,
+                events: &mut self.events,
+                file_picker: &mut self.file_picker,
+                ui: &mut self.ui,
+            };
+
+            egui_dock::DockArea::new(&mut self.dock)
+                .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
+                .show_leaf_collapse_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_inside(ui, &mut viewer);
+        });
+    }
+
     fn top_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Citrine");
@@ -155,6 +170,10 @@ impl Citrine {
                     self.open_tab(tabs::Tab::RomInfo);
                 }
             });
+
+            if ui.button(icons::FRAME_CORNERS).clicked() {
+                self.toggle_focus_mode();
+            }
 
             if self.ui.settings.dev_mode {
                 ui.menu_button(icons::BRACKETS_CURLY, |ui| {
@@ -209,6 +228,25 @@ impl Citrine {
             //    ui.label("No saves (cartridge has no battery)");
             //}
         });
+    }
+
+    fn toggle_focus_mode(&mut self) {
+        self.ui.settings.focus_mode = !self.ui.settings.focus_mode;
+        if self.ui.settings.focus_mode {
+            self.toasts
+                .add(Toast::info("Focus mode enabled. Press ESC to exit."))
+                .duration(None);
+        }
+    }
+
+    fn render_focus_mode(&mut self, ctx: &Context) {
+        CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(Color32::BLACK))
+            .show(ctx, |ui| {
+                ui.centered_and_justified(|ui| {
+                    self.emulator.ui(ui);
+                });
+            });
     }
 
     fn open_tab(&mut self, tab: tabs::Tab) {
@@ -320,7 +358,7 @@ impl Citrine {
         #[cfg(not(target_arch = "wasm32"))]
         let _ = self.emulator.load_rom(&rom, None);
         #[cfg(target_arch = "wasm32")]
-        let _ = self.app.emulator.load_rom(&rom);
+        let _ = self.emulator.load_rom(&rom);
         self.ui.settings.dirty = true;
     }
 }

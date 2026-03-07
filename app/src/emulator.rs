@@ -11,7 +11,6 @@ use ringbuf::HeapProd;
 const FRAME_TIME: f64 = 1.0 / 59.7275;
 const GB_WIDTH: usize = 160;
 const GB_HEIGHT: usize = 144;
-const FRAME_SCALE: usize = 3;
 
 pub struct Emulator {
     pub gb: GameBoy,
@@ -28,6 +27,7 @@ pub struct Emulator {
     texture: Option<egui::TextureHandle>,
     last_update: Option<web_time::Instant>,
     time_accumulator: f64,
+    pub render_scale: usize,
     pub last_frame_secs: f64,
     last_frame: Vec<u8>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -50,6 +50,7 @@ impl Default for Emulator {
             texture: None,
             last_update: None,
             time_accumulator: 0.0,
+            render_scale: 3,
             last_frame_secs: 0.0,
             last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
             #[cfg(not(target_arch = "wasm32"))]
@@ -188,32 +189,42 @@ impl Emulator {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let available = ui.available_size();
+        let float_scale = (available.x / GB_WIDTH as f32)
+            .min(available.y / GB_HEIGHT as f32)
+            .max(1.0);
+
+        let (ideal_render_scale, display_size) = if self.enable_matrix {
+            let int_scale = float_scale.floor();
+            (
+                int_scale as usize,
+                egui::vec2(GB_WIDTH as f32 * int_scale, GB_HEIGHT as f32 * int_scale),
+            )
+        } else {
+            (
+                1_usize,
+                egui::vec2(
+                    GB_WIDTH as f32 * float_scale,
+                    GB_HEIGHT as f32 * float_scale,
+                ),
+            )
+        };
+
+        if self.render_scale != ideal_render_scale {
+            self.render_scale = ideal_render_scale;
+            self.update_texture(ui.ctx());
+        }
+
         if let Some(tex) = &self.texture {
-            let available = ui.available_size();
-
-            let tex_width = (GB_WIDTH * FRAME_SCALE) as f32;
-            let tex_height = (GB_HEIGHT * FRAME_SCALE) as f32;
-
-            let scale_x = available.x / tex_width;
-            let scale_y = available.y / tex_height;
-
-            let mut scale_factor = scale_x.min(scale_y);
-
-            if self.enable_matrix {
-                scale_factor = scale_factor.floor().max(1.0);
-            }
-
-            let final_size = egui::vec2(tex_width * scale_factor, tex_height * scale_factor);
-
-            let leftover_x = (available.x - final_size.x).max(0.0);
-            let leftover_y = (available.y - final_size.y).max(0.0);
+            let leftover_x = (available.x - display_size.x).max(0.0);
+            let leftover_y = (available.y - display_size.y).max(0.0);
 
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
 
             ui.add_space((leftover_y / 2.0).floor());
             ui.horizontal(|ui| {
                 ui.add_space((leftover_x / 2.0).floor());
-                ui.image(egui::load::SizedTexture::new(tex.id(), final_size));
+                ui.image(egui::load::SizedTexture::new(tex.id(), display_size));
             });
         }
     }
@@ -348,8 +359,9 @@ impl Emulator {
     }
 
     fn update_texture(&mut self, ctx: &egui::Context) {
-        let upscaled_width = GB_WIDTH * FRAME_SCALE;
-        let upscaled_height = GB_HEIGHT * FRAME_SCALE;
+        let scale = self.render_scale;
+        let upscaled_width = GB_WIDTH * scale;
+        let upscaled_height = GB_HEIGHT * scale;
 
         let current_raw = self.gb.frame().as_slice();
         let mut upscaled_data = vec![0u8; upscaled_width * upscaled_height * 4];
@@ -380,10 +392,10 @@ impl Emulator {
                 self.last_frame[orig_idx + 2] = b;
                 self.last_frame[orig_idx + 3] = a;
 
-                for dy in 0..FRAME_SCALE {
-                    for dx in 0..FRAME_SCALE {
-                        let up_x = x * FRAME_SCALE + dx;
-                        let up_y = y * FRAME_SCALE + dy;
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let up_x = x * scale + dx;
+                        let up_y = y * scale + dy;
                         let up_idx = (up_y * upscaled_width + up_x) * 4;
 
                         let mut pixel_r = r;
@@ -393,12 +405,12 @@ impl Emulator {
                         if self.enable_matrix {
                             let c0 = self.gb.ppu.dmg_theme.palette()[0];
 
-                            if dx == FRAME_SCALE - 1 && dy == FRAME_SCALE - 1 {
+                            if dx == scale - 1 && dy == scale - 1 {
                                 let t = self.matrix_corner_brightness;
                                 pixel_r = (pixel_r as f32 * t + c0.r() as f32 * (1.0 - t)) as u8;
                                 pixel_g = (pixel_g as f32 * t + c0.g() as f32 * (1.0 - t)) as u8;
                                 pixel_b = (pixel_b as f32 * t + c0.b() as f32 * (1.0 - t)) as u8;
-                            } else if dx == FRAME_SCALE - 1 || dy == FRAME_SCALE - 1 {
+                            } else if dx == scale - 1 || dy == scale - 1 {
                                 let t = self.matrix_edge_brightness;
                                 pixel_r = (pixel_r as f32 * t + c0.r() as f32 * (1.0 - t)) as u8;
                                 pixel_g = (pixel_g as f32 * t + c0.g() as f32 * (1.0 - t)) as u8;

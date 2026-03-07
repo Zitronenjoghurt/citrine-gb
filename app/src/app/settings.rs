@@ -17,6 +17,7 @@ pub struct Settings {
     pub volume: f32,
     pub current_tab: SettingsTab,
     pub dev_mode: bool,
+    pub focus_mode: bool,
     #[serde(skip, default = "default_dirty")]
     pub dirty: bool,
 }
@@ -34,6 +35,7 @@ impl Default for Settings {
             volume: Self::DEFAULT_VOLUME,
             current_tab: SettingsTab::default(),
             dev_mode: false,
+            focus_mode: false,
             dirty: default_dirty(),
         }
     }
