@@ -30,35 +30,42 @@ impl Widget for HomebrewList<'_> {
                                 false,
                             )
                             .show_header(ui, |ui| {
-                                ui.label(egui::RichText::new(game.title).strong().size(16.0));
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.button("Load").clicked() {
-                                            self.events.load_rom_data(game.data())
-                                        }
-                                    },
-                                );
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(game.title).strong().size(16.0),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.button("Load").clicked() {
+                                                    self.events.load_rom_data(game.data())
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.small(game.tag_str());
+                                });
                             })
                             .body(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        egui::RichText::new(format!("By {}", game.author))
+                                        egui::RichText::new(format!("by {}", game.author))
                                             .italics(),
                                     );
-
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.small(game.tag_str());
-                                        },
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "• {} {}",
+                                            icons::SCALES,
+                                            game.license
+                                        ))
+                                        .weak(),
                                     );
                                 });
                                 ui.separator();
                                 ui.label(game.description);
                                 ui.add_space(8.0);
-                                ui.small(format!("{} {}", icons::SCALES, game.license));
+                                game.show_links(ui);
                             });
                         });
                     }

@@ -1,4 +1,4 @@
-use crate::app::settings::{Settings, SettingsTab};
+use crate::app::ui_state::settings::{Settings, SettingsTab};
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::reset_slider::ResetSlider;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;

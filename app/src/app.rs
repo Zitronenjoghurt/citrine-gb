@@ -12,7 +12,6 @@ use gilrs::Gilrs;
 
 mod events;
 mod file_picker;
-mod settings;
 mod tabs;
 mod ui_state;
 mod widgets;

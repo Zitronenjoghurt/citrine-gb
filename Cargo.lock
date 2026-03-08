@@ -662,6 +662,7 @@ dependencies = [
  "image",
  "log",
  "poll-promise",
+ "proc-macro2",
  "quote",
  "rfd",
  "ringbuf",

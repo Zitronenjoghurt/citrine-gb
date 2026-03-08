@@ -1,4 +1,4 @@
-use crate::app::settings::{Settings, SettingsTab};
+use crate::app::ui_state::settings::{Settings, SettingsTab};
 use egui::{Response, ScrollArea, Ui, Widget};
 
 pub struct SettingsBar<'a> {

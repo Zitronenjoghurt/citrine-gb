@@ -1,23 +1,54 @@
+[adjustris]
+title = "Adjustris"
+author = "Dave VanEe"
+description = "Adjustris is an open source tetris-like that lets you make your own pieces to use in the game."
+license = "Creative Commons Zero v1.0 Universal"
+links = [
+    { url = "https://github.com/tbsp/Adjustris", kind = "github" }
+]
+tags = ["Puzzle"]
+
 [porklike]
 title = "Porklike"
-author = "binji"
+author = "Krystian Majewski"
 description = "Enter the tower of Wurstlord. Can you make it to the top and steal his legendary Kielbasa? 9 floors of dangerous traps and enemies await you. Only if you move carefully and master your character's abilities will you become the champion of Porklike."
 license = "MIT"
-links = ["https://binji.itch.io/porklikegb", "https://github.com/binji/porklike.gb"]
+links = [
+    { url = "https://binji.itch.io/porklikegb", kind = "itch" },
+    { url = "https://github.com/binji/porklike.gb", kind = "github" }
+]
 tags = ["Roguelite"]
+
+[shock_lobster]
+title = "Shock Lobster"
+author = "Dave VanEe"
+description = "Venture forth on your quest as a lowly lobster imbued with magical powers, determined to inflict lethal damage to whatever stands in your way!"
+license = "zlib License"
+links = [
+    { url = "https://tbsp.itch.io/shock-lobster", kind = "itch" },
+    { url = "https://github.com/tbsp/shock-lobster", kind = "github" }
+]
+tags = ["Action"]
 
 [sushi_nights]
 title = "Sushi Nights"
 author = "Zal0"
 description = "Play as Hitsuji-kun, and use your trusty grappling hook to swing through buildings and alleys, locate the sushi, and deliver it to your targets."
 license = "MIT"
-links = ["https://zalo.itch.io/sushi-nights", "https://github.com/Zal0/SushiNights"]
+links = [
+    { url = "https://zalo.itch.io/sushi-nights", kind = "itch" },
+    { url = "https://github.com/Zal0/SushiNights", kind = "github" }
+]
 tags = ["Platformer"]
 
 [tobu]
 title = "Tobu Tobu Girl"
 author = "Tangram Games"
-description = "A challenging, vertical platformer where you have to chase after your cat floating into the atmosphere."
+description = "Your cat is floating into the atmosphere and you are the only one who can save it. Jump, dash, and flap your arms to maneuver around perilous obstacles racing against the clock to retrieve your pet friend before it is too late!"
 license = "Creative Commons Attribution v4.0 International"
-links = ["https://tangramgames.dk/tobutobugirl", "https://tangramgames.itch.io/tobutobugirl"]
+links = [
+    { url = "https://tangramgames.dk/tobutobugirl", kind = "official" },
+    { url = "https://tangramgames.itch.io/tobutobugirl", kind = "itch" },
+    { url = "https://github.com/SimonLarsen/tobutobugirl", kind = "github" }
+]
 tags = ["Platformer"]

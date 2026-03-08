@@ -11,9 +11,33 @@ struct GameMeta {
     description: String,
     license: String,
     #[serde(default)]
-    links: Vec<String>,
+    links: Vec<Link>,
     #[serde(default)]
     tags: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Link {
+    url: String,
+    kind: LinkKind,
+}
+
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum LinkKind {
+    Itch,
+    Github,
+    Official,
+}
+
+impl LinkKind {
+    fn as_tokens(&self) -> proc_macro2::TokenStream {
+        match self {
+            LinkKind::Itch => quote! { LinkKind::Itch },
+            LinkKind::Github => quote! { LinkKind::Github },
+            LinkKind::Official => quote! { LinkKind::Official },
+        }
+    }
 }
 
 fn main() {
@@ -67,7 +91,11 @@ fn main() {
         let author = meta.author;
         let description = meta.description;
         let license = meta.license;
-        let link_tokens = meta.links.iter().map(|link| quote! { #link });
+        let link_tokens = meta.links.iter().map(|link| {
+            let url = &link.url;
+            let kind = link.kind.as_tokens();
+            quote! { HomebrewLink { url: #url, kind: #kind } }
+        });
         let tag_tokens = meta.tags.iter().map(|tag| quote! { #tag });
 
         game_tokens.push(quote! {
@@ -86,13 +114,26 @@ fn main() {
 
     let final_code = quote! {
         #[derive(Clone, Copy)]
+        pub enum LinkKind {
+            Itch,
+            Github,
+            Official,
+        }
+
+        #[derive(Clone, Copy)]
+        pub struct HomebrewLink {
+            pub url: &'static str,
+            pub kind: LinkKind,
+        }
+
+        #[derive(Clone, Copy)]
         pub struct HomebrewGame {
             pub id: &'static str,
             pub title: &'static str,
             pub author: &'static str,
             pub description: &'static str,
             pub license: &'static str,
-            pub links: &'static [&'static str],
+            pub links: &'static [HomebrewLink],
             pub tags: &'static [&'static str],
             data: &'static [u8],
         }

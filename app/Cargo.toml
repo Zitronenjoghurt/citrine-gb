@@ -43,6 +43,7 @@ web-sys = "0.3.70"
 
 [build-dependencies]
 brotli = "8.0.2"
+proc-macro2 = "1.0.106"
 quote = "1.0.44"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.0.3+spec-1.1.0"
