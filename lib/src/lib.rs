@@ -10,6 +10,8 @@ pub mod rom;
 mod tests;
 mod utils;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub trait ReadMemory {
     fn read_naive(&self, addr: u16) -> u8;
 }

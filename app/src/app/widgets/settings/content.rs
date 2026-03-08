@@ -1,4 +1,5 @@
 use crate::app::ui_state::settings::{Settings, SettingsTab};
+use crate::app::ui_state::ui_theme::UiTheme;
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::reset_slider::ResetSlider;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
@@ -50,6 +51,13 @@ impl SettingsContent<'_> {
                 }
                 ui.end_row();
 
+                ui.label("UI Theme");
+                s.dirty |= GenericSelect::from_enum(&mut s.ui_theme, "enum_select_ui_theme")
+                    .default_value(UiTheme::default())
+                    .ui(ui)
+                    .changed();
+                ui.end_row();
+
                 ui.label("Developer Mode");
                 s.dirty |= ui.checkbox(&mut s.dev_mode, "").changed();
                 ui.end_row();
@@ -86,7 +94,7 @@ impl SettingsContent<'_> {
             .show(ui, |ui| {
                 ui.label("Theme");
                 s.dirty |= GenericSelect::from_enum(&mut s.dmg_theme, "enum_select_dmg_theme")
-                    .default_value(DmgTheme::Citrine)
+                    .default_value(DmgTheme::default())
                     .ui(ui)
                     .changed();
                 ui.end_row();

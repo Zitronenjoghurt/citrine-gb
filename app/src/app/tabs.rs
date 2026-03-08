@@ -8,12 +8,14 @@ use strum_macros::EnumIter;
 mod e2e;
 mod game_boy;
 mod homebrew;
+mod info;
 mod registers;
 mod rom_info;
 mod settings;
 mod time_control;
 
 pub struct TabViewer<'a> {
+    pub commonmark: &'a mut egui_commonmark::CommonMarkCache,
     pub emulator: &'a mut Emulator,
     pub events: &'a mut AppEventQueue,
     pub file_picker: &'a mut FilePicker,
@@ -36,10 +38,15 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             Tab::RomInfo => rom_info::show(self, ui),
             Tab::E2ETest => e2e::show(self, ui),
             Tab::Homebrew => homebrew::show(self, ui),
+            Tab::Info => info::show(self, ui),
         }
     }
 
     fn is_closeable(&self, tab: &Self::Tab) -> bool {
+        tab.closable()
+    }
+
+    fn allowed_in_windows(&self, tab: &mut Self::Tab) -> bool {
         tab.closable()
     }
 }
@@ -53,6 +60,7 @@ pub enum Tab {
     RomInfo,
     E2ETest,
     Homebrew,
+    Info,
 }
 
 impl Tab {
@@ -65,6 +73,7 @@ impl Tab {
             Tab::RomInfo => "ROM Info",
             Tab::E2ETest => "E2E Tests",
             Tab::Homebrew => "Homebrew",
+            Tab::Info => "General Info",
         }
     }
 

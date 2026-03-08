@@ -1,3 +1,4 @@
+use crate::app::ui_state::ui_theme::UiTheme;
 use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
@@ -8,6 +9,7 @@ use strum_macros::EnumIter;
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub ui_scale: f32,
+    pub ui_theme: UiTheme,
     pub dmg_theme: DmgTheme,
     pub matrix: bool,
     pub ghosting: bool,
@@ -26,6 +28,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ui_scale: Self::DEFAULT_UI_SCALE,
+            ui_theme: Default::default(),
             dmg_theme: DmgTheme::default(),
             matrix: false,
             ghosting: false,
@@ -66,6 +69,7 @@ impl Settings {
         }
 
         ctx.set_pixels_per_point(self.ui_scale);
+        self.ui_theme.apply(ctx);
         emulator.gb.ppu.dmg_theme = self.dmg_theme;
         emulator.enable_matrix = self.matrix;
         emulator.enable_ghosting = self.ghosting;
@@ -97,7 +101,7 @@ impl SettingsTab {
         match self {
             SettingsTab::General => "General",
             SettingsTab::Sound => "Sound",
-            SettingsTab::Style => "Style",
+            SettingsTab::Style => "GB Style",
             SettingsTab::Developer => "Developer",
         }
     }

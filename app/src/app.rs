@@ -1,4 +1,5 @@
 use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
+use crate::app::tabs::Tab;
 use crate::app::ui_state::UiState;
 use crate::audio::Audio;
 use crate::emulator::Emulator;
@@ -6,9 +7,11 @@ use crate::icons;
 use citrine_gb::rom::Rom;
 use eframe::{Frame, Storage};
 use egui::{CentralPanel, Color32, Context, FontDefinitions, TopBottomPanel};
+use egui_commonmark::CommonMarkCache;
 use egui_dock::DockState;
 use egui_notify::{Toast, Toasts};
 use gilrs::Gilrs;
+use strum::IntoEnumIterator;
 
 mod events;
 mod file_picker;
@@ -18,7 +21,7 @@ mod widgets;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
-    pub dock: DockState<tabs::Tab>,
+    pub dock: DockState<Tab>,
     pub ui: UiState,
     #[serde(skip, default)]
     pub emulator: Emulator,
@@ -32,11 +35,13 @@ pub struct Citrine {
     pub audio: Option<Audio>,
     #[serde(skip, default)]
     pub events: events::AppEventQueue,
+    #[serde(skip, default)]
+    pub commonmark: CommonMarkCache,
 }
 
 impl Default for Citrine {
     fn default() -> Self {
-        let dock = DockState::new(vec![tabs::Tab::GameBoy]);
+        let dock = DockState::new(vec![Tab::GameBoy]);
         Self {
             dock,
             ui: UiState::default(),
@@ -46,6 +51,7 @@ impl Default for Citrine {
             toasts: Toasts::default(),
             audio: None,
             events: events::AppEventQueue::default(),
+            commonmark: CommonMarkCache::default(),
         }
     }
 }
@@ -57,6 +63,8 @@ fn default_gilrs() -> Gilrs {
 impl Citrine {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         Self::setup_fonts(&cc.egui_ctx);
+        catppuccin_egui::set_theme(&cc.egui_ctx, catppuccin_egui::MOCHA);
+
         let mut app = cc
             .storage
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
@@ -128,6 +136,7 @@ impl Citrine {
 
         CentralPanel::default().show(ctx, |ui| {
             let mut viewer = tabs::TabViewer {
+                commonmark: &mut self.commonmark,
                 emulator: &mut self.emulator,
                 events: &mut self.events,
                 file_picker: &mut self.file_picker,
@@ -154,38 +163,70 @@ impl Citrine {
                 if ui.button("Load Boot ROM").clicked() {
                     self.file_picker.open(FileIntent::LoadBootRom);
                 }
-            });
+            })
+            .response
+            .on_hover_text("File Menu");
 
-            if ui.button(icons::JOYSTICK).clicked() {
-                self.open_tab(tabs::Tab::Homebrew);
+            if ui
+                .button(icons::JOYSTICK)
+                .on_hover_text("Homebrew Games")
+                .clicked()
+            {
+                self.open_tab(Tab::Homebrew);
             }
 
-            if ui.button(icons::GEAR).clicked() {
-                self.open_tab(tabs::Tab::Settings);
+            if ui
+                .button(icons::GEAR)
+                .on_hover_text("Emulator Settings")
+                .clicked()
+            {
+                self.open_tab(Tab::Settings);
             }
 
             ui.menu_button(icons::INFO, |ui| {
-                if ui.button("ROM Info").clicked() {
-                    self.open_tab(tabs::Tab::RomInfo);
+                if ui.button("General").clicked() {
+                    self.open_tab(Tab::Info);
                 }
-            });
+                if ui.button("ROM").clicked() {
+                    self.open_tab(Tab::RomInfo);
+                }
+            })
+            .response
+            .on_hover_text("Information & Details");
 
-            if ui.button(icons::FRAME_CORNERS).clicked() {
+            if ui
+                .button(icons::FRAME_CORNERS)
+                .on_hover_text("Toggle Focus Mode (Hide UI)")
+                .clicked()
+            {
                 self.toggle_focus_mode();
             }
 
             if self.ui.settings.dev_mode {
                 ui.menu_button(icons::BRACKETS_CURLY, |ui| {
                     if ui.button("Time Control").clicked() {
-                        self.open_tab(tabs::Tab::TimeControl);
+                        self.open_tab(Tab::TimeControl);
                     }
                     if ui.button("Registers").clicked() {
-                        self.open_tab(tabs::Tab::Registers);
+                        self.open_tab(Tab::Registers);
                     }
                     if ui.button("E2E Tests").clicked() {
-                        self.open_tab(tabs::Tab::E2ETest);
+                        self.open_tab(Tab::E2ETest);
                     }
-                });
+                })
+                .response
+                .on_hover_text("Developer Tools");
+            }
+
+            ui.separator();
+
+            if ui
+                .button("Reset Layout")
+                .on_hover_text("Restore default tab layout")
+                .clicked()
+            {
+                // Reset the dock state back to just the Game Boy tab
+                self.dock = egui_dock::DockState::new(vec![Tab::GameBoy]);
             }
 
             //ui.separator();
@@ -248,9 +289,29 @@ impl Citrine {
             });
     }
 
-    fn open_tab(&mut self, tab: tabs::Tab) {
-        if let Some((surface, node, tab_idx)) = self.dock.find_tab(&tab) {
-            self.dock.set_active_tab((surface, node, tab_idx));
+    fn open_tab(&mut self, tab: Tab) {
+        if let Some((surface_idx, node_idx, tab_idx)) = self.dock.find_tab(&tab) {
+            self.dock.set_active_tab((surface_idx, node_idx, tab_idx));
+            return;
+        }
+
+        let mut tools_node = None;
+        for t in Tab::iter().filter(|t| *t != Tab::GameBoy) {
+            if let Some((surface_idx, node_idx, _)) = self.dock.find_tab(&t) {
+                tools_node = Some((surface_idx, node_idx));
+                break;
+            }
+        }
+
+        let gb_loc = self.dock.find_tab(&Tab::GameBoy);
+        if let Some((surface_idx, node_idx)) = tools_node {
+            self.dock
+                .set_focused_node_and_surface((surface_idx, node_idx));
+            self.dock.main_surface_mut().push_to_focused_leaf(tab);
+        } else if let Some((_gb_surface, gb_node, _)) = gb_loc {
+            self.dock
+                .main_surface_mut()
+                .split_right(gb_node, 0.7, vec![tab]);
         } else {
             self.dock.main_surface_mut().push_to_focused_leaf(tab);
         }

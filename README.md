@@ -9,23 +9,10 @@ The core functionality is available as a [standalone crate](lib/README.md).
 
 # Features
 
-- Supports Windows, MacOS and Web
-- Plays Game Boy games with MBC1, MBC2 and MBC3 cartridges (no RTC support yet)
-- Controller support for native (not web)
-- Complete Game Boy audio
-- (M-)Cycle-accurate instruction and memory timing
-- Save states for games that included a battery
-- Included open source homebrew games
-- Basic debugging tools
+Read [FEATURES.md](FEATURES.md) for a list of current and planned features.
 
-# Planned
+# Supported platforms
 
-- UI overhaul
-- Improved controller support
-- Game Boy Color support
-- Support for more cartridge types
-- Improved UX
-- Accuracy improvements (more E2E tests)
-- Better save states (for all games)
-- RTC support
-- Core library (documentation) improvements (DX)
+- Windows
+- MacOS
+- Web (via [Citrine Web](https://gb.lemon.industries))

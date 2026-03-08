@@ -148,8 +148,10 @@ impl Emulator {
                     egui::Key::S | egui::Key::ArrowDown => Some(JoypadState::DOWN),
                     egui::Key::A | egui::Key::ArrowLeft => Some(JoypadState::LEFT),
                     egui::Key::D | egui::Key::ArrowRight => Some(JoypadState::RIGHT),
-                    egui::Key::Q | egui::Key::Z | egui::Key::Y => Some(JoypadState::A),
-                    egui::Key::E | egui::Key::X => Some(JoypadState::B),
+                    egui::Key::Q | egui::Key::Z | egui::Key::Y | egui::Key::O => {
+                        Some(JoypadState::A)
+                    }
+                    egui::Key::E | egui::Key::X | egui::Key::P => Some(JoypadState::B),
                     egui::Key::Enter | egui::Key::Space => Some(JoypadState::START),
                     egui::Key::Backspace => Some(JoypadState::SELECT),
                     _ => None,

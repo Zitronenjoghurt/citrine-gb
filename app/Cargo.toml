@@ -11,13 +11,12 @@ targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 citrine-gb = { workspace = true, features = ["debug", "serde", "base64", "strum"] }
 anyhow = "1.0.102"
 brotli = "8.0.2"
+catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
 cpal = "0.17.3"
 eframe = { version = "0.33.0", default-features = false, features = ["persistence"] }
 egui = "0.33.0"
-egui-aesthetix = "0.2.4"
 egui_commonmark = "0.22.0"
 egui_dock = { version = "0.18.0", features = ["serde"] }
-egui-modal = "0.6.0"
 egui-notify = "0.21.0"
 egui-phosphor = { version = "0.11.0", features = ["regular"] }
 gilrs = "0.11.1"
