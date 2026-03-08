@@ -1,3 +1,18 @@
+# 0.5.0 - 2026-03-08
+
+## Added
+
+- Tabs system with custom splitting and window-popout
+- Focus mode for only viewing the Game Boy screen
+- Info panel
+- UI themes
+
+## Changed
+
+- Full UI redesign
+
+---
+
 # 0.4.0 - 2026-03-06
 
 ## Added

@@ -51,7 +51,7 @@ fn default_dirty() -> bool {
 impl Settings {
     pub const DEFAULT_VOLUME: f32 = 0.25;
     #[cfg(target_arch = "wasm32")]
-    pub const DEFAULT_UI_SCALE: f32 = 2.5;
+    pub const DEFAULT_UI_SCALE: f32 = 2.0;
     #[cfg(not(target_arch = "wasm32"))]
     pub const DEFAULT_UI_SCALE: f32 = 1.5;
     pub const DEFAULT_MATRIX_EDGE_DARKNESS: f32 = 0.15;

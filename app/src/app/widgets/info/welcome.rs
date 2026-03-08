@@ -2,7 +2,7 @@ pub fn build() -> String {
     format!(
         r#"
 # Welcome to Citrine v{}
-Thanks for using my emulator! If you find any issues, please report them on [GitHub](https://github.com/Zitronenjoghurt/citrine-gb/issues).\
+Thanks for using my emulator! If you find any issues, please report them on [GitHub](https://github.com/Zitronenjoghurt/citrine-gb/issues).
 
 Native version (Windows, MacOS): [GitHub](https://github.com/Zitronenjoghurt/citrine-gb/releases/latest)\
 Web Version: [Citrine Web](https://gb.lemon.industries)

@@ -42,7 +42,7 @@ pub struct Citrine {
 impl Default for Citrine {
     fn default() -> Self {
         let dock = DockState::new(vec![Tab::GameBoy]);
-        Self {
+        let mut app = Self {
             dock,
             ui: UiState::default(),
             emulator: Emulator::default(),
@@ -52,7 +52,9 @@ impl Default for Citrine {
             audio: None,
             events: events::AppEventQueue::default(),
             commonmark: CommonMarkCache::default(),
-        }
+        };
+        app.open_tab(Tab::Info);
+        app
     }
 }
 
@@ -276,6 +278,8 @@ impl Citrine {
             self.toasts
                 .add(Toast::info("Focus mode enabled. Press ESC to exit."))
                 .duration(None);
+        } else {
+            self.toasts.dismiss_all_toasts();
         }
     }
 
@@ -311,7 +315,7 @@ impl Citrine {
         } else if let Some((_gb_surface, gb_node, _)) = gb_loc {
             self.dock
                 .main_surface_mut()
-                .split_right(gb_node, 0.7, vec![tab]);
+                .split_right(gb_node, 0.6, vec![tab]);
         } else {
             self.dock.main_surface_mut().push_to_focused_leaf(tab);
         }
