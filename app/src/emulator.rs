@@ -16,6 +16,7 @@ pub struct Emulator {
     pub gb: GameBoy,
     pub running: bool,
     pub audio_producer: Option<HeapProd<f32>>,
+    pub audio_overrun_samples: u128,
     pub enable_matrix: bool,
     /// 0.0 to 1.0 (e.g., 0.85 = 15% darker)
     pub matrix_edge_brightness: f32,
@@ -29,6 +30,7 @@ pub struct Emulator {
     time_accumulator: f64,
     pub render_scale: usize,
     pub last_frame_secs: f64,
+    pub total_frames: u128,
     last_frame: Vec<u8>,
     #[cfg(not(target_arch = "wasm32"))]
     rom_path: Option<std::path::PathBuf>,
@@ -42,6 +44,7 @@ impl Default for Emulator {
             gb: GameBoy::new_empty(GbModel::Dmg),
             running: true,
             audio_producer: None,
+            audio_overrun_samples: 0,
             enable_matrix: true,
             matrix_edge_brightness: 0.85,
             matrix_corner_brightness: 0.75,
@@ -52,6 +55,7 @@ impl Default for Emulator {
             time_accumulator: 0.0,
             render_scale: 3,
             last_frame_secs: 0.0,
+            total_frames: 0,
             last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
             #[cfg(not(target_arch = "wasm32"))]
             rom_path: None,
@@ -103,9 +107,18 @@ impl Emulator {
 
             if let Some(producer) = &mut self.audio_producer {
                 let samples = &self.gb.apu.audio_buffer;
-                let _ = producer.push_slice(samples);
+
+                let pushed = producer.push_slice(samples);
+                if pushed < samples.len() {
+                    let dropped = samples.len() - pushed;
+                    self.audio_overrun_samples =
+                        self.audio_overrun_samples.wrapping_add(dropped as u128);
+                }
+
                 self.gb.apu.audio_buffer.clear();
             }
+
+            self.total_frames = self.total_frames.wrapping_add(1);
         }
 
         self.handle_save()?;

@@ -22,3 +22,4 @@
 - Core library (documentation) improvements (DX)
 - Improved controller support
 - Recordings / Screenshots
+- Mobile layout / support (Android, Web)

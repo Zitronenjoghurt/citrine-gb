@@ -1,3 +1,4 @@
+pub mod audio_debug;
 pub mod generic_select;
 pub mod homebrew;
 pub mod info;

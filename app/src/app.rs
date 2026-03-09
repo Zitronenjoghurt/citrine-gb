@@ -76,6 +76,7 @@ impl Citrine {
         let (audio, producer) = Audio::new();
         app.audio = Some(audio);
         app.emulator.audio_producer = Some(producer);
+        app.emulator.running = false;
 
         app
     }
@@ -138,6 +139,7 @@ impl Citrine {
 
         CentralPanel::default().show(ctx, |ui| {
             let mut viewer = tabs::TabViewer {
+                audio: &mut self.audio,
                 commonmark: &mut self.commonmark,
                 emulator: &mut self.emulator,
                 events: &mut self.events,
@@ -212,6 +214,9 @@ impl Citrine {
                     if ui.button("Registers").clicked() {
                         self.open_tab(Tab::Registers);
                     }
+                    if ui.button("Audio Debug").clicked() {
+                        self.open_tab(Tab::AudioDebug);
+                    }
                     if ui.button("E2E Tests").clicked() {
                         self.open_tab(Tab::E2ETest);
                     }
@@ -228,7 +233,7 @@ impl Citrine {
                 .clicked()
             {
                 // Reset the dock state back to just the Game Boy tab
-                self.dock = egui_dock::DockState::new(vec![Tab::GameBoy]);
+                self.dock = DockState::new(vec![Tab::GameBoy]);
             }
 
             //ui.separator();

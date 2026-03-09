@@ -96,11 +96,11 @@ impl WriteMemory for Channel2 {
             }
             0xFF17 => {
                 self.volume = value.into();
-                self.volume_envelope.trigger(
-                    self.volume.envelope_direction,
-                    self.volume.initial_volume,
-                    self.volume.envelope_pace,
-                )
+                //self.volume_envelope.trigger(
+                //    self.volume.envelope_direction,
+                //    self.volume.initial_volume,
+                //    self.volume.envelope_pace,
+                //)
             }
             0xFF18 => self.period_low = value,
             0xFF19 => {

@@ -122,11 +122,11 @@ impl WriteMemory for Channel4 {
             }
             0xFF21 => {
                 self.volume = value.into();
-                self.volume_envelope.trigger(
-                    self.volume.envelope_direction,
-                    self.volume.initial_volume,
-                    self.volume.envelope_pace,
-                );
+                //self.volume_envelope.trigger(
+                //    self.volume.envelope_direction,
+                //    self.volume.initial_volume,
+                //    self.volume.envelope_pace,
+                //);
             }
             0xFF22 => self.frequency = value.into(),
             0xFF23 => {

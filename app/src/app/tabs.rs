@@ -1,10 +1,12 @@
 use crate::app::events::AppEventQueue;
 use crate::app::file_picker::FilePicker;
 use crate::app::ui_state::UiState;
+use crate::audio::Audio;
 use crate::emulator::Emulator;
 use egui::{Ui, WidgetText};
 use strum_macros::EnumIter;
 
+mod audio_debug;
 mod e2e;
 mod game_boy;
 mod homebrew;
@@ -15,6 +17,7 @@ mod settings;
 mod time_control;
 
 pub struct TabViewer<'a> {
+    pub audio: &'a mut Option<Audio>,
     pub commonmark: &'a mut egui_commonmark::CommonMarkCache,
     pub emulator: &'a mut Emulator,
     pub events: &'a mut AppEventQueue,
@@ -39,6 +42,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             Tab::E2ETest => e2e::show(self, ui),
             Tab::Homebrew => homebrew::show(self, ui),
             Tab::Info => info::show(self, ui),
+            Tab::AudioDebug => audio_debug::show(self, ui),
         }
     }
 
@@ -53,14 +57,15 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter)]
 pub enum Tab {
-    GameBoy,
-    Settings,
-    TimeControl,
-    Registers,
-    RomInfo,
+    AudioDebug,
     E2ETest,
+    GameBoy,
     Homebrew,
     Info,
+    Registers,
+    RomInfo,
+    Settings,
+    TimeControl,
 }
 
 impl Tab {
@@ -74,6 +79,7 @@ impl Tab {
             Tab::E2ETest => "E2E Tests",
             Tab::Homebrew => "Homebrew",
             Tab::Info => "General Info",
+            Tab::AudioDebug => "Audio Debug",
         }
     }
 
