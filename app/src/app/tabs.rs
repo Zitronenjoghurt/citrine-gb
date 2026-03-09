@@ -6,6 +6,8 @@ use crate::emulator::Emulator;
 use egui::{Ui, WidgetText};
 use strum_macros::EnumIter;
 
+mod apu;
+mod apu_waves;
 mod audio_debug;
 mod e2e;
 mod game_boy;
@@ -43,6 +45,8 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             Tab::Homebrew => homebrew::show(self, ui),
             Tab::Info => info::show(self, ui),
             Tab::AudioDebug => audio_debug::show(self, ui),
+            Tab::Apu => apu::show(self, ui),
+            Tab::ApuWaves => apu_waves::show(self, ui),
         }
     }
 
@@ -57,6 +61,8 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter)]
 pub enum Tab {
+    Apu,
+    ApuWaves,
     AudioDebug,
     E2ETest,
     GameBoy,
@@ -80,6 +86,8 @@ impl Tab {
             Tab::Homebrew => "Homebrew",
             Tab::Info => "General Info",
             Tab::AudioDebug => "Audio Debug",
+            Tab::Apu => "APU",
+            Tab::ApuWaves => "APU Waves",
         }
     }
 

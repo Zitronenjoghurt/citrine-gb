@@ -179,11 +179,7 @@ impl Citrine {
                 self.open_tab(Tab::Homebrew);
             }
 
-            if ui
-                .button(icons::GEAR)
-                .on_hover_text("Emulator Settings")
-                .clicked()
-            {
+            if ui.button(icons::GEAR).on_hover_text("Settings").clicked() {
                 self.open_tab(Tab::Settings);
             }
 
@@ -207,12 +203,20 @@ impl Citrine {
             }
 
             if self.ui.settings.dev_mode {
-                ui.menu_button(icons::BRACKETS_CURLY, |ui| {
-                    if ui.button("Time Control").clicked() {
-                        self.open_tab(Tab::TimeControl);
+                ui.menu_button(icons::CIRCUITRY, |ui| {
+                    if ui.button("APU").clicked() {
+                        self.open_tab(Tab::Apu);
                     }
                     if ui.button("Registers").clicked() {
                         self.open_tab(Tab::Registers);
+                    }
+                })
+                .response
+                .on_hover_text("Hardware Views");
+
+                ui.menu_button(icons::BRACKETS_CURLY, |ui| {
+                    if ui.button("Time Control").clicked() {
+                        self.open_tab(Tab::TimeControl);
                     }
                     if ui.button("Audio Debug").clicked() {
                         self.open_tab(Tab::AudioDebug);
@@ -222,7 +226,7 @@ impl Citrine {
                     }
                 })
                 .response
-                .on_hover_text("Developer Tools");
+                .on_hover_text("Debug Tools");
             }
 
             ui.separator();
@@ -418,6 +422,7 @@ impl Citrine {
             events::AppEvent::LoadRomData { data } => {
                 self.handle_load_rom_data(data);
             }
+            events::AppEvent::OpenTab { tab } => self.open_tab(tab),
         }
     }
 

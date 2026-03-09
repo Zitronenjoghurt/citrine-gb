@@ -90,7 +90,13 @@ impl CpuBusInterface for CpuBus<'_> {
     fn cycle(&mut self) {
         self.timer.cycle(self.ic);
         self.ppu.cycle(self.ic, self.dma.active);
-        self.apu.cycle(self.timer, false); // ToDo: adjust for double speed mode
+        // ToDo: adjust for double speed mode
+        self.apu.cycle(
+            self.timer,
+            false,
+            #[cfg(feature = "debug")]
+            self.debugger,
+        );
 
         if let Some((src, dst)) = self.dma.cycle() {
             self.write_naive(dst, self.read_naive(src));

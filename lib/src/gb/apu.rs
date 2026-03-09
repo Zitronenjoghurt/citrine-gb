@@ -13,8 +13,8 @@ mod channels;
 mod components;
 mod registers;
 
-const APU_CLOCK_RATE: u32 = 4_194_304;
-const MAX_AUDIO_BUFFER_SIZE: u32 = 8192;
+pub const APU_CLOCK_RATE: u32 = 4_194_304;
+pub const MAX_AUDIO_BUFFER_SIZE: u32 = 8192;
 const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 
 pub struct Apu {
@@ -76,14 +76,22 @@ impl Apu {
         Self::default()
     }
 
-    pub fn cycle(&mut self, timer: &Timer, double_speed: bool) {
+    pub fn cycle(
+        &mut self,
+        timer: &Timer,
+        double_speed: bool,
+        #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
+    ) {
         self.update_frame_sequencer(timer, double_speed);
         let ticks = if double_speed { 2 } else { 4 };
 
         for _ in 0..ticks {
             self.tick();
 
-            let (out_l_f, out_r_f) = self.sample();
+            let (out_l_f, out_r_f) = self.sample(
+                #[cfg(feature = "debug")]
+                debugger,
+            );
             let current_l = (out_l_f * 1000.0) as i32;
             let current_r = (out_r_f * 1000.0) as i32;
 
@@ -107,7 +115,7 @@ impl Apu {
     pub fn flush_audio(&mut self) {
         self.blip_l.end_frame(self.time);
         self.blip_r.end_frame(self.time);
-        self.time = 0; // Reset APU clock time
+        self.time = 0;
 
         let available_samples = self.blip_l.samples_avail() as usize;
         let mut out_l = vec![0i16; available_samples];
@@ -188,34 +196,76 @@ impl Apu {
 
 // Sampling
 impl Apu {
-    pub fn sample(&mut self) -> (f32, f32) {
+    pub fn sample(
+        &mut self,
+        #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
+    ) -> (f32, f32) {
         if !self.nr52.audio_enabled {
             return (0.0, 0.0);
         };
 
-        let ch1_sample = if self.ch1.dac_enabled() {
+        let ch1_sample = 'ch1: {
+            if !self.ch1.dac_enabled() {
+                break 'ch1 0.0;
+            }
+
+            #[cfg(feature = "debug")]
+            if !debugger.channel_1_enabled() {
+                break 'ch1 0.0;
+            }
+
             1.0 - (self.ch1.sample() as f32 / 7.5)
-        } else {
-            0.0
         };
 
-        let ch2_sample = if self.ch2.dac_enabled() {
+        let ch2_sample = 'ch2: {
+            if !self.ch2.dac_enabled() {
+                break 'ch2 0.0;
+            }
+
+            #[cfg(feature = "debug")]
+            if !debugger.channel_2_enabled() {
+                break 'ch2 0.0;
+            }
+
             1.0 - (self.ch2.sample() as f32 / 7.5)
-        } else {
-            0.0
         };
 
-        let ch3_sample = if self.ch3.dac_enabled() {
+        let ch3_sample = 'ch3: {
+            if !self.ch3.dac_enabled() {
+                break 'ch3 0.0;
+            }
+
+            #[cfg(feature = "debug")]
+            if !debugger.channel_3_enabled() {
+                break 'ch3 0.0;
+            }
+
             1.0 - (self.ch3.sample() as f32 / 7.5)
-        } else {
-            0.0
         };
 
-        let ch4_sample = if self.ch4.dac_enabled() {
+        let ch4_sample = 'ch4: {
+            if !self.ch4.dac_enabled() {
+                break 'ch4 0.0;
+            }
+
+            #[cfg(feature = "debug")]
+            if !debugger.channel_4_enabled() {
+                break 'ch4 0.0;
+            }
+
             1.0 - (self.ch4.sample() as f32 / 7.5)
-        } else {
-            0.0
         };
+
+        #[cfg(feature = "debug")]
+        {
+            debugger.record_apu_channels(
+                self.output_sample_rate,
+                ch1_sample,
+                ch2_sample,
+                ch3_sample,
+                ch4_sample,
+            );
+        }
 
         let mut left = 0.0;
         let mut right = 0.0;

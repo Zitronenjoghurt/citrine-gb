@@ -1,5 +1,8 @@
+use crate::app::tabs::Tab;
+
 pub enum AppEvent {
     LoadRomData { data: Vec<u8> },
+    OpenTab { tab: Tab },
 }
 
 #[derive(Default)]
@@ -18,5 +21,9 @@ impl AppEventQueue {
 
     pub fn load_rom_data(&mut self, data: Vec<u8>) {
         self.queue.push(AppEvent::LoadRomData { data });
+    }
+
+    pub fn open_tab(&mut self, tab: Tab) {
+        self.queue.push(AppEvent::OpenTab { tab });
     }
 }

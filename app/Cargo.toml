@@ -19,6 +19,7 @@ egui_commonmark = "0.22.0"
 egui_dock = { version = "0.18.0", features = ["serde"] }
 egui-notify = "0.21.0"
 egui-phosphor = { version = "0.11.0", features = ["regular"] }
+egui_plot = "0.34.1"
 gilrs = "0.11.1"
 log = "0.4.29"
 rfd = "0.17.2"

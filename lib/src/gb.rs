@@ -3,7 +3,7 @@ use crate::persistence::sdump::SDump;
 use crate::rom::Rom;
 use ppu::types::framebuffer::Framebuffer;
 
-mod apu;
+pub mod apu;
 mod boot_rom;
 pub mod bus;
 pub mod cartridge;
