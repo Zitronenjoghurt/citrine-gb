@@ -129,6 +129,13 @@ impl CpuBusInterface for CpuBus<'_> {
 
         self.write_naive(addr, value);
     }
+
+    #[cfg(feature = "debug")]
+    fn analyze_at(&mut self, addr: u16) {
+        if self.debugger.static_analysis_enabled {
+            self.debugger.disassembly.analyze(self.cartridge, addr);
+        }
+    }
 }
 
 pub trait CpuBusInterface {
@@ -144,6 +151,9 @@ pub trait CpuBusInterface {
         self.write(addr, lo(value));
         self.write(addr + 1, hi(value));
     }
+
+    #[cfg(feature = "debug")]
+    fn analyze_at(&mut self, addr: u16);
 }
 
 impl ICInterface for CpuBus<'_> {

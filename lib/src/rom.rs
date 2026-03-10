@@ -1,4 +1,3 @@
-use crate::disassembler::Disassembly;
 use crate::error::GbResult;
 use crate::rom::header::RomHeader;
 use std::path::Path;
@@ -83,9 +82,5 @@ impl Rom {
 
     pub fn actual_global_checksum(&self) -> GbResult<u16> {
         RomHeader::calculate_global_checksum(&self.data)
-    }
-
-    pub fn entrypoint(&self) -> GbResult<Disassembly> {
-        RomHeader::parse_entrypoint(&self.data)
     }
 }

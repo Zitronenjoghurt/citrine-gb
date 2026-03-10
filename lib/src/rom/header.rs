@@ -1,4 +1,3 @@
-use crate::disassembler::Disassembly;
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::{RAM_BANK_SIZE, ROM_BANK_SIZE};
 use crate::utils::formatting::format_byte_size;
@@ -26,7 +25,6 @@ pub struct RomHeader {
     pub actual_header_checksum: u8,
     pub provided_global_checksum: u16,
     pub actual_global_checksum: u16,
-    pub entrypoint: Disassembly,
     #[cfg(feature = "crc32fast")]
     pub crc32: u32,
     #[cfg(feature = "sha1")]
@@ -52,7 +50,6 @@ impl RomHeader {
             actual_header_checksum: Self::calculate_header_checksum(data)?,
             provided_global_checksum: Self::parse_global_checksum(data)?,
             actual_global_checksum: Self::calculate_global_checksum(data)?,
-            entrypoint: Self::parse_entrypoint(data)?,
             #[cfg(feature = "crc32fast")]
             crc32: Self::calculate_crc32(data),
             #[cfg(feature = "sha1")]
@@ -448,15 +445,6 @@ impl RomHeader {
             return Err(GbError::RomTooSmall);
         }
         Ok(u16::from_be_bytes([data[0x14E], data[0x14F]]))
-    }
-
-    pub fn parse_entrypoint(data: &[u8]) -> GbResult<Disassembly> {
-        if data.len() < 0x150 {
-            return Err(GbError::RomTooSmall);
-        }
-        let mut entrypoint = Disassembly::new();
-        entrypoint.decode_range(&data, 0x100, 0x104);
-        Ok(entrypoint)
     }
 
     #[cfg(feature = "crc32fast")]

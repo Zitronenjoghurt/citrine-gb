@@ -1,3 +1,4 @@
+use crate::disassembler::{Disassembly, DisassemblySource};
 use crate::gb::apu::APU_CLOCK_RATE;
 use std::collections::{HashSet, VecDeque};
 
@@ -7,6 +8,8 @@ const MAX_PLOT_SAMPLES: usize = 2048;
 
 #[derive(Debug, Default)]
 pub struct Debugger {
+    pub disassembly: Disassembly,
+    pub static_analysis_enabled: bool,
     pub breakpoints: HashSet<u16>,
     pub total_cycles: u128,
     apu_channel_sample_counter: u32,

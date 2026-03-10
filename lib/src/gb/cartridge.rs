@@ -1,9 +1,11 @@
+use crate::disassembler::DisassemblySource;
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
 use crate::persistence::sdump::SDump;
 use crate::rom::header::RomHeader;
 use crate::rom::Rom;
 use crate::{ReadMemory, WriteMemory};
+use std::fmt::{Display, Formatter};
 
 mod mbc;
 
@@ -149,5 +151,60 @@ impl WriteMemory for Cartridge {
             self.ram[bank][(addr - 0xA000) as usize] = value;
             self.sram_dirty = true;
         }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RomLocation {
+    pub bank: u32,
+    pub offset: u16,
+}
+
+impl RomLocation {
+    pub fn offset(&self, offset: i16) -> RomLocation {
+        RomLocation {
+            bank: self.bank,
+            offset: (self.offset as i16 + offset) as u16,
+        }
+    }
+}
+
+impl Display for RomLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:08X}{:04X}", self.bank, self.offset)
+    }
+}
+
+impl DisassemblySource for Cartridge {
+    fn read_rom_address(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x3FFF => self.rom[self.mbc.rom_bank_low()][addr as usize],
+            0x4000..=0x7FFF => self.rom[self.mbc.rom_bank_high()][(addr - 0x4000) as usize],
+            _ => 0xFF,
+        }
+    }
+
+    fn probe_rom_location(&self, addr: u16) -> RomLocation {
+        match addr {
+            0x0000..=0x3FFF => RomLocation {
+                bank: self.mbc.rom_bank_low() as u32,
+                offset: addr,
+            },
+            0x4000..=0x7FFF => RomLocation {
+                bank: self.mbc.rom_bank_high() as u32,
+                offset: addr - 0x4000,
+            },
+            _ => RomLocation {
+                bank: 0,
+                offset: addr,
+            },
+        }
+    }
+
+    fn read_rom_location(&self, loc: RomLocation) -> u8 {
+        self.rom
+            .get(loc.bank as usize)
+            .map(|bank| bank.get(loc.offset as usize).copied().unwrap_or(0xFF))
+            .unwrap_or(0xFF)
     }
 }

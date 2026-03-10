@@ -1,11 +1,17 @@
+use crate::gb::cartridge::RomLocation;
 use crate::instructions::Instruction;
-use crate::ReadMemory;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Display;
+
+pub trait DisassemblySource {
+    fn read_rom_address(&self, addr: u16) -> u8;
+    fn probe_rom_location(&self, addr: u16) -> RomLocation;
+    fn read_rom_location(&self, loc: RomLocation) -> u8;
+}
 
 #[derive(Debug, Copy, Clone)]
 pub struct DecodedInstruction {
-    pub addr: u16,
+    pub loc: RomLocation,
     pub instruction: Instruction,
     pub ctx: [u8; 3],
 }
@@ -14,8 +20,8 @@ impl Display for DecodedInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:04X}: {}",
-            self.addr,
+            "{} = {}",
+            self.loc,
             self.instruction.string_context(&self.ctx)
         )
     }
@@ -23,20 +29,49 @@ impl Display for DecodedInstruction {
 
 #[derive(Debug, Default)]
 pub struct Disassembly {
-    entries: BTreeMap<u16, DecodedInstruction>,
+    entries: BTreeMap<RomLocation, DecodedInstruction>,
 }
 
-// ToDo: Recursive traversal => trace jumps, etc.
 impl Disassembly {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn decode_at(&mut self, mem: &impl ReadMemory, addr: u16) -> DecodedInstruction {
+    pub fn analyze(&mut self, src: &impl DisassemblySource, start: u16) {
+        let mut worklist = VecDeque::new();
+        worklist.push_back(start);
+
+        while let Some(addr) = worklist.pop_front() {
+            if addr > 0x7FFF {
+                continue;
+            }
+
+            let decoded = self.decode(src, addr);
+            if self.has_collision(decoded.loc)
+                || addr < 0x4000 && addr + decoded.instruction.length() as u16 > 0x4000
+            {
+                // Collided with existing instruction (falsely analyzing data) or crosses bank boundary (non-deterministic)
+                continue;
+            }
+
+            self.entries.insert(decoded.loc, decoded);
+
+            let flow = decoded.instruction.flow_control(addr, &decoded.ctx);
+            for succ in flow
+                .successors(addr, decoded.instruction.length() as u16)
+                .into_iter()
+                .flatten()
+            {
+                worklist.push_back(succ);
+            }
+        }
+    }
+
+    fn decode(&mut self, src: &impl DisassemblySource, addr: u16) -> DecodedInstruction {
         let mut ctx = [0u8; 3];
-        ctx[0] = mem.read_naive(addr);
-        ctx[1] = mem.read_naive(addr + 1);
-        ctx[2] = mem.read_naive(addr + 2);
+        ctx[0] = src.read_rom_address(addr);
+        ctx[1] = src.read_rom_address(addr.wrapping_add(1));
+        ctx[2] = src.read_rom_address(addr.wrapping_add(2));
 
         let instruction = if ctx[0] != 0xCB {
             Instruction::decode(ctx[0])
@@ -44,29 +79,26 @@ impl Disassembly {
             Instruction::decode_prefixed(ctx[1])
         };
 
-        let entry = DecodedInstruction {
-            addr,
+        DecodedInstruction {
+            loc: src.probe_rom_location(addr),
             instruction,
             ctx,
-        };
-
-        self.entries.insert(addr, entry);
-        entry
+        }
     }
 
-    pub fn decode_range(&mut self, mem: &impl ReadMemory, start: u16, end: u16) {
-        let mut addr = start;
-        while addr >= start && addr <= end {
-            let entry = self.decode_at(mem, addr);
-            if let Some(jump_addr) = entry
-                .instruction
-                .unconditional_jump_target(addr, &entry.ctx)
+    fn has_collision(&self, loc: RomLocation) -> bool {
+        self.entries.contains_key(&loc) || self.location_overlaps_existing(loc)
+    }
+
+    fn location_overlaps_existing(&self, loc: RomLocation) -> bool {
+        for lookback in 1..=2 {
+            if let Some(existing) = self.entries.get(&loc.offset(-(lookback as i16)))
+                && existing.instruction.length() > lookback
             {
-                addr = jump_addr;
-            } else {
-                addr += entry.instruction.length() as u16;
+                return true;
             }
         }
+        false
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &DecodedInstruction> {
@@ -80,5 +112,30 @@ impl Display for Disassembly {
             writeln!(f, "{entry}")?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum FlowControl {
+    Continue,
+    Jump(u16),
+    ConditionalJump(u16),
+    UnknownJump,
+    Call(u16),
+    Return,
+    ConditionalReturn,
+}
+
+impl FlowControl {
+    pub fn successors(&self, address: u16, instr_length: u16) -> [Option<u16>; 2] {
+        let fallthrough = address.wrapping_add(instr_length);
+        match self {
+            FlowControl::Continue => [Some(fallthrough), None],
+            FlowControl::Jump(target) => [Some(*target), None],
+            FlowControl::ConditionalJump(target) => [Some(*target), Some(fallthrough)],
+            FlowControl::Call(target) => [Some(*target), Some(fallthrough)],
+            FlowControl::ConditionalReturn => [Some(fallthrough), None],
+            FlowControl::UnknownJump | FlowControl::Return => [None, None],
+        }
     }
 }

@@ -1,3 +1,5 @@
+use crate::disassembler::FlowControl;
+use crate::disassembler::FlowControl::ConditionalReturn;
 use std::fmt::Display;
 
 #[allow(non_camel_case_types)]
@@ -762,24 +764,28 @@ impl Instruction {
         }
     }
 
-    pub fn unconditional_jump_target(&self, address: u16, context: &[u8]) -> Option<u16> {
+    pub fn flow_control(&self, address: u16, context: &[u8]) -> FlowControl {
         let n1 = context.get(1).copied().unwrap_or(0);
         let n2 = context.get(2).copied().unwrap_or(0);
         let nn = u16::from_le_bytes([n1, n2]);
 
         match self {
-            Self::JP_nn => Some(nn),
             Self::JR_n => {
                 let offset = n1 as i8;
-                Some(
-                    address
-                        .wrapping_add(self.length() as u16)
-                        .wrapping_add(offset as u16),
-                )
+                FlowControl::Jump(address.wrapping_add(2).wrapping_add(offset as u16))
             }
-            Self::CALL_nn => Some(nn),
-            Self::RST_n(tgt) => Some(*tgt as u16),
-            _ => None,
+            Self::JR_c_n(_) => {
+                let offset = n1 as i8;
+                FlowControl::ConditionalJump(address.wrapping_add(2).wrapping_add(offset as u16))
+            }
+            Self::RET_c(_) => ConditionalReturn,
+            Self::RET | Self::RETI => FlowControl::Return,
+            Self::JP_c_nn(_) => FlowControl::ConditionalJump(nn),
+            Self::JP_nn => FlowControl::Jump(nn),
+            Self::JP_HL => FlowControl::UnknownJump,
+            Self::CALL_c_nn(_) | Self::CALL_nn => FlowControl::Call(nn),
+            Self::RST_n(addr) => FlowControl::Call(*addr as u16),
+            _ => FlowControl::Continue,
         }
     }
 }
