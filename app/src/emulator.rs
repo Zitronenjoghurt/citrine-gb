@@ -1,3 +1,4 @@
+use citrine_gb::disassembly::DisassemblySource;
 use citrine_gb::error::GbResult;
 use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
@@ -73,6 +74,12 @@ impl Emulator {
 
         if !self.running {
             self.last_update = Some(web_time::Instant::now());
+            return Ok(());
+        }
+
+        let current_loc = self.gb.cartridge.probe_rom_location(self.gb.cpu.pc);
+        if self.gb.debugger.breakpoints.contains(&current_loc) {
+            self.running = false;
             return Ok(());
         }
 

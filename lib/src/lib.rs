@@ -1,9 +1,9 @@
 #[cfg(feature = "debug")]
 mod debug;
-mod disassembler;
+pub mod disassembly;
 pub mod error;
 pub mod gb;
-mod instructions;
+pub mod instructions;
 pub mod persistence;
 pub mod rom;
 #[cfg(test)]

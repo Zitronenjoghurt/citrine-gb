@@ -20,6 +20,7 @@ pub struct Settings {
     pub current_tab: SettingsTab,
     pub dev_mode: bool,
     pub focus_mode: bool,
+    pub track_pc: bool,
     #[serde(skip, default = "default_dirty")]
     pub dirty: bool,
 }
@@ -39,6 +40,7 @@ impl Default for Settings {
             current_tab: SettingsTab::default(),
             dev_mode: false,
             focus_mode: false,
+            track_pc: false,
             dirty: default_dirty(),
         }
     }

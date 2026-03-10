@@ -1,6 +1,7 @@
+use crate::disassembly::DisassemblySource;
 use crate::gb::apu::Apu;
 use crate::gb::boot_rom::BootRom;
-use crate::gb::cartridge::Cartridge;
+use crate::gb::cartridge::{Cartridge, RomLocation};
 use crate::gb::dma::DmaController;
 use crate::gb::ic::{ICInterface, InterruptController};
 use crate::gb::joypad::Joypad;
@@ -136,6 +137,11 @@ impl CpuBusInterface for CpuBus<'_> {
             self.debugger.disassembly.analyze(self.cartridge, addr);
         }
     }
+
+    #[cfg(feature = "debug")]
+    fn probe_rom_location(&self, addr: u16) -> RomLocation {
+        self.cartridge.probe_rom_location(addr)
+    }
 }
 
 pub trait CpuBusInterface {
@@ -153,7 +159,12 @@ pub trait CpuBusInterface {
     }
 
     #[cfg(feature = "debug")]
-    fn analyze_at(&mut self, addr: u16);
+    fn analyze_at(&mut self, _addr: u16) {}
+
+    #[cfg(feature = "debug")]
+    fn probe_rom_location(&self, _addr: u16) -> RomLocation {
+        RomLocation::default()
+    }
 }
 
 impl ICInterface for CpuBus<'_> {

@@ -1,5 +1,5 @@
-use crate::disassembler::FlowControl;
-use crate::disassembler::FlowControl::ConditionalReturn;
+use crate::disassembly::FlowControl;
+use crate::disassembly::FlowControl::ConditionalReturn;
 use std::fmt::Display;
 
 #[allow(non_camel_case_types)]
@@ -89,6 +89,7 @@ pub enum Instruction {
     BIT_r(u8, R8),
     RES_r(u8, R8),
     SET_r(u8, R8),
+    Invalid(u8),
 }
 
 impl Instruction {
@@ -339,7 +340,7 @@ impl Instruction {
             0b11_11_10_11 => Self::EI,                     // 0xFB
             0b11_11_11_10 => Self::CP_n,                   // 0xFE
             0b11_11_11_11 => Self::RST_n(0x38),            // 0xFF
-            _ => panic!("Invalid unprefixed opcode: {:02X}", opcode),
+            _ => Self::Invalid(opcode),
         }
     }
 
@@ -644,7 +645,8 @@ impl Instruction {
             | Self::LDH_A_C
             | Self::LD_SP_HL
             | Self::DI
-            | Self::EI => 1,
+            | Self::EI
+            | Self::Invalid(_) => 1,
             Self::LD_r_n(_)
             | Self::JR_n
             | Self::JR_c_n(_)
@@ -761,6 +763,7 @@ impl Instruction {
             Self::BIT_r(n, r8) => format!("BIT {n:02X}, {r8}"),
             Self::RES_r(n, r8) => format!("RES {n:02X}, {r8}"),
             Self::SET_r(n, r8) => format!("SET {n:02X}, {r8}"),
+            Self::Invalid(op) => format!("INVALID OP ({op:02X})"),
         }
     }
 
@@ -785,6 +788,7 @@ impl Instruction {
             Self::JP_HL => FlowControl::UnknownJump,
             Self::CALL_c_nn(_) | Self::CALL_nn => FlowControl::Call(nn),
             Self::RST_n(addr) => FlowControl::Call(*addr as u16),
+            Self::Invalid(_) => FlowControl::Invalid,
             _ => FlowControl::Continue,
         }
     }
@@ -866,6 +870,7 @@ impl Display for Instruction {
             Self::BIT_r(n, r8) => write!(f, "BIT {n:02X}, {r8}"),
             Self::RES_r(n, r8) => write!(f, "RES {n:02X}, {r8}"),
             Self::SET_r(n, r8) => write!(f, "SET {n:02X}, {r8}"),
+            Self::Invalid(op) => write!(f, "INVALID OP ({op:02X})"),
         }
     }
 }

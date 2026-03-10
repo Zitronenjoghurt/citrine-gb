@@ -1,4 +1,4 @@
-use crate::disassembler::DisassemblySource;
+use crate::disassembly::DisassemblySource;
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
 use crate::persistence::sdump::SDump;
@@ -154,7 +154,7 @@ impl WriteMemory for Cartridge {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct RomLocation {
     pub bank: u32,
     pub offset: u16,
@@ -171,7 +171,11 @@ impl RomLocation {
 
 impl Display for RomLocation {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:08X}{:04X}", self.bank, self.offset)
+        if self.bank > 0xFF {
+            write!(f, "{:04X}:{:04X}", self.bank, self.offset)
+        } else {
+            write!(f, "{:02X}:{:04X}", self.bank, self.offset)
+        }
     }
 }
 

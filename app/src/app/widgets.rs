@@ -1,6 +1,7 @@
 pub mod apu;
 pub mod apu_waves;
 pub mod audio_debug;
+pub mod disassembly;
 pub mod generic_select;
 pub mod homebrew;
 pub mod info;

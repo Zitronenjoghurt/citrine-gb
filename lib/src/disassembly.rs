@@ -104,6 +104,18 @@ impl Disassembly {
     pub fn iter(&self) -> impl Iterator<Item = &DecodedInstruction> {
         self.entries.values()
     }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get_by_index(&self, index: usize) -> Option<&DecodedInstruction> {
+        self.entries.values().nth(index)
+    }
 }
 
 impl Display for Disassembly {
@@ -124,6 +136,7 @@ pub enum FlowControl {
     Call(u16),
     Return,
     ConditionalReturn,
+    Invalid,
 }
 
 impl FlowControl {
@@ -135,7 +148,7 @@ impl FlowControl {
             FlowControl::ConditionalJump(target) => [Some(*target), Some(fallthrough)],
             FlowControl::Call(target) => [Some(*target), Some(fallthrough)],
             FlowControl::ConditionalReturn => [Some(fallthrough), None],
-            FlowControl::UnknownJump | FlowControl::Return => [None, None],
+            FlowControl::UnknownJump | FlowControl::Return | FlowControl::Invalid => [None, None],
         }
     }
 }

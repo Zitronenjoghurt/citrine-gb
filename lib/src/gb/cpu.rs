@@ -34,6 +34,7 @@ pub struct Cpu {
     pub ime_next: bool,
     pub halted: bool,
     pub model: GbModel,
+    pub invalid_opcode: bool,
 }
 
 impl Cpu {
@@ -72,6 +73,7 @@ impl Cpu {
             ime_next: false,
             halted: false,
             model: GbModel::Dmg,
+            invalid_opcode: false,
         }
     }
 
@@ -97,6 +99,7 @@ impl Cpu {
             ime_next: false,
             halted: false,
             model: GbModel::Cgb,
+            invalid_opcode: false,
         }
     }
 
@@ -108,11 +111,9 @@ impl Cpu {
     }
 
     pub fn step(&mut self, bus: &mut impl Bus) {
-        #[cfg(feature = "debug")]
-        {
-            if bus.break_at(self.pc) {
-                return;
-            }
+        if self.invalid_opcode {
+            bus.cycle();
+            return;
         }
 
         if self.halted {
@@ -203,6 +204,7 @@ impl Cpu {
             Instruction::BIT_r(index, r8) => self.bit_r(bus, r8, index),
             Instruction::RES_r(index, r8) => self.res_r(bus, r8, index),
             Instruction::SET_r(index, r8) => self.set_r(bus, r8, index),
+            Instruction::Invalid(_) => self.invalid_opcode = true,
         }
 
         self.fetch(bus);

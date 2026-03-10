@@ -204,6 +204,9 @@ impl Citrine {
 
             if self.ui.settings.dev_mode {
                 ui.menu_button(icons::CIRCUITRY, |ui| {
+                    if ui.button("Disassembly").clicked() {
+                        self.open_tab(Tab::Disassembly);
+                    }
                     if ui.button("APU").clicked() {
                         self.open_tab(Tab::Apu);
                     }

@@ -1,5 +1,6 @@
-use crate::disassembler::{Disassembly, DisassemblySource};
+use crate::disassembly::Disassembly;
 use crate::gb::apu::APU_CLOCK_RATE;
+use crate::gb::cartridge::RomLocation;
 use std::collections::{HashSet, VecDeque};
 
 pub mod e2e;
@@ -10,7 +11,7 @@ const MAX_PLOT_SAMPLES: usize = 2048;
 pub struct Debugger {
     pub disassembly: Disassembly,
     pub static_analysis_enabled: bool,
-    pub breakpoints: HashSet<u16>,
+    pub breakpoints: HashSet<RomLocation>,
     pub total_cycles: u128,
     apu_channel_sample_counter: u32,
     pub ch1_samples: VecDeque<f32>,
@@ -38,10 +39,6 @@ impl Debugger {
 }
 
 impl DebuggerInterface for Debugger {
-    fn break_at(&self, addr: u16) -> bool {
-        self.breakpoints.contains(&addr)
-    }
-
     fn record_apu_channels(&mut self, sample_rate: u32, ch1: f32, ch2: f32, ch3: f32, ch4: f32) {
         if !self.should_sample_apu_channels(sample_rate) {
             self.apu_channel_sample_counter += 1;
@@ -85,10 +82,6 @@ impl DebuggerInterface for Debugger {
 }
 
 pub trait DebuggerInterface {
-    fn break_at(&self, _addr: u16) -> bool {
-        false
-    }
-
     fn record_apu_channels(
         &mut self,
         _sample_rate: u32,
@@ -122,8 +115,4 @@ pub trait DebuggerAccess {
     fn debugger_mut(&mut self) -> &mut dyn DebuggerInterface;
 }
 
-impl<T: DebuggerAccess> DebuggerInterface for T {
-    fn break_at(&self, addr: u16) -> bool {
-        self.debugger().break_at(addr)
-    }
-}
+impl<T: DebuggerAccess> DebuggerInterface for T {}
