@@ -212,7 +212,7 @@ impl Cpu {
 
     pub fn fetch(&mut self, bus: &mut impl Bus) {
         #[cfg(feature = "debug")]
-        bus.analyze_at(self.pc);
+        bus.on_fetch(self.pc);
         self.ir = self.read_program(bus);
     }
 

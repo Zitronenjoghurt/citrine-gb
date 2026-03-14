@@ -1,7 +1,7 @@
 use citrine_gb::disassembly::{Disassembly, DisassemblySource};
 use citrine_gb::gb::cartridge::{Cartridge, RomLocation};
 use citrine_gb::gb::cpu::Cpu;
-use citrine_gb::instructions::Instruction;
+use citrine_gb::instructions::{Instruction, Operand};
 use egui::{Response, ScrollArea, Ui, Widget};
 use std::collections::HashSet;
 
@@ -38,7 +38,8 @@ impl<'a> DisassemblyView<'a> {
 
 impl Widget for DisassemblyView<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let current_loc = self.cartridge.probe_rom_location(self.cpu.pc);
+        let active_pc = self.cpu.pc.saturating_sub(1);
+        let current_loc = self.cartridge.probe_rom_location(active_pc);
         let row_count = self.disassembly.len();
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let is_dark_mode = ui.visuals().dark_mode;
@@ -59,13 +60,14 @@ impl Widget for DisassemblyView<'_> {
         let mut scroll_area = ScrollArea::vertical().auto_shrink(false);
 
         if *self.track_pc
-            && let Some(pc_index) = self.disassembly.iter().position(|d| d.loc == current_loc)
+            && let Some(pc_index) = self.disassembly.iter().position(|d| {
+                let end_loc = d.loc.offset(d.instruction.length() as i16);
+                current_loc >= d.loc && current_loc < end_loc
+            })
         {
             let item_top = pc_index as f32 * effective_row_height;
             let half_screen = ui.available_height() / 2.0;
-
             let center_offset = item_top - half_screen + (effective_row_height / 2.0);
-
             scroll_area = scroll_area.vertical_scroll_offset(center_offset.max(0.0));
         }
 
@@ -75,7 +77,8 @@ impl Widget for DisassemblyView<'_> {
                     continue;
                 };
 
-                let is_pc = current_loc == decoded.loc;
+                let end_loc = decoded.loc.offset(decoded.instruction.length() as i16);
+                let is_pc = current_loc >= decoded.loc && current_loc < end_loc;
                 let is_bp = self.breakpoints.contains(&decoded.loc);
 
                 let (rect, response) = ui.allocate_exact_size(
@@ -119,15 +122,38 @@ impl Widget for DisassemblyView<'_> {
                     ui.visuals().weak_text_color(),
                 );
 
-                let text = decoded.instruction.string_context(&decoded.ctx);
-                let color = instruction_color(&decoded.instruction, is_dark_mode);
+                let mnemonic = decoded.instruction.mnemonic();
+                let mnemonic_color = instruction_color(&decoded.instruction, is_dark_mode);
+
                 ui.painter().text(
                     egui::pos2(x + 70.0, y),
                     egui::Align2::LEFT_CENTER,
-                    text,
+                    mnemonic,
                     font.clone(),
-                    color,
+                    mnemonic_color,
                 );
+
+                let operands = decoded.instruction.operands(&decoded.ctx);
+
+                if let Some(op1) = &operands[0] {
+                    ui.painter().text(
+                        egui::pos2(x + 115.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        op1.to_string(),
+                        font.clone(),
+                        operand_color(op1, is_dark_mode),
+                    );
+                }
+
+                if let Some(op2) = &operands[1] {
+                    ui.painter().text(
+                        egui::pos2(x + 160.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        op2.to_string(),
+                        font.clone(),
+                        operand_color(op2, is_dark_mode),
+                    );
+                }
             }
         });
 
@@ -254,5 +280,52 @@ fn instruction_color(instr: &Instruction, is_dark_mode: bool) -> egui::Color32 {
             }
         }
         Instruction::Invalid(_) => egui::Color32::RED,
+    }
+}
+
+fn operand_color(op: &Operand, is_dark_mode: bool) -> egui::Color32 {
+    match op {
+        Operand::Reg(_) => {
+            if is_dark_mode {
+                egui::Color32::from_rgb(255, 180, 140)
+            } else {
+                egui::Color32::from_rgb(180, 100, 30)
+            }
+        }
+        Operand::Cond(_) => {
+            if is_dark_mode {
+                egui::Color32::from_rgb(220, 220, 160)
+            } else {
+                egui::Color32::from_rgb(130, 130, 0)
+            }
+        }
+        Operand::MemReg(_) => {
+            if is_dark_mode {
+                egui::Color32::from_rgb(160, 220, 255)
+            } else {
+                egui::Color32::from_rgb(0, 120, 180)
+            }
+        }
+        Operand::Imm8(_) | Operand::Imm16(_) => {
+            if is_dark_mode {
+                egui::Color32::from_rgb(180, 255, 180)
+            } else {
+                egui::Color32::from_rgb(30, 130, 30)
+            }
+        }
+        Operand::Address(_) => {
+            if is_dark_mode {
+                egui::Color32::from_rgb(240, 180, 255)
+            } else {
+                egui::Color32::from_rgb(140, 30, 160)
+            }
+        }
+        Operand::Offset(_) | Operand::SpOffset(_) => {
+            if is_dark_mode {
+                egui::Color32::from_rgb(160, 255, 230)
+            } else {
+                egui::Color32::from_rgb(0, 140, 120)
+            }
+        }
     }
 }

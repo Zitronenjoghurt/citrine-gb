@@ -14,6 +14,7 @@ pub struct DecodedInstruction {
     pub loc: RomLocation,
     pub instruction: Instruction,
     pub ctx: [u8; 3],
+    pub confidence: Confidence,
 }
 
 impl Display for DecodedInstruction {
@@ -37,37 +38,85 @@ impl Disassembly {
         Self::default()
     }
 
-    pub fn analyze(&mut self, src: &impl DisassemblySource, start: u16) {
-        let mut worklist = VecDeque::new();
-        worklist.push_back(start);
+    pub fn on_fetch(&mut self, src: &impl DisassemblySource, start: u16) {
+        self.analyze(src, start, Confidence::Fetched);
+    }
 
-        while let Some(addr) = worklist.pop_front() {
+    pub fn analyze(
+        &mut self,
+        src: &impl DisassemblySource,
+        start: u16,
+        start_confidence: Confidence,
+    ) {
+        let mut worklist = VecDeque::new();
+        worklist.push_back((start, start_confidence));
+
+        while let Some((addr, current_conf)) = worklist.pop_front() {
             if addr > 0x7FFF {
                 continue;
             }
 
-            let decoded = self.decode(src, addr);
-            if self.has_collision(decoded.loc)
-                || addr < 0x4000 && addr + decoded.instruction.length() as u16 > 0x4000
+            let loc = src.probe_rom_location(addr);
+            if let Some(existing) = self.entries.get(&loc)
+                && existing.confidence >= current_conf
             {
-                // Collided with existing instruction (falsely analyzing data) or crosses bank boundary (non-deterministic)
+                continue;
+            }
+
+            let decoded = self.decode(src, addr, current_conf);
+            if matches!(decoded.instruction, Instruction::Invalid(_)) {
+                continue;
+            }
+
+            let len = decoded.instruction.length() as u16;
+            if addr < 0x4000 && addr + len > 0x4000 {
+                continue;
+            }
+
+            if !self.resolve_overlaps(&decoded) {
                 continue;
             }
 
             self.entries.insert(decoded.loc, decoded);
 
+            let propagate_conf = if current_conf == Confidence::Fetched {
+                Confidence::Unconditional
+            } else {
+                current_conf
+            };
+
+            let fallthrough = addr.wrapping_add(len);
             let flow = decoded.instruction.flow_control(addr, &decoded.ctx);
-            for succ in flow
-                .successors(addr, decoded.instruction.length() as u16)
-                .into_iter()
-                .flatten()
-            {
-                worklist.push_back(succ);
+
+            match flow {
+                FlowControl::Continue => {
+                    worklist.push_back((fallthrough, propagate_conf));
+                }
+                FlowControl::Jump(target) => {
+                    worklist.push_back((target, propagate_conf));
+                }
+                FlowControl::Call(target) => {
+                    worklist.push_back((target, propagate_conf));
+                    worklist.push_back((fallthrough, propagate_conf));
+                }
+                FlowControl::ConditionalJump(target) => {
+                    worklist.push_back((target, Confidence::Conditional));
+                    worklist.push_back((fallthrough, propagate_conf));
+                }
+                FlowControl::ConditionalReturn => {
+                    worklist.push_back((fallthrough, propagate_conf));
+                }
+                FlowControl::Return | FlowControl::UnknownJump | FlowControl::Invalid => {}
             }
         }
     }
 
-    fn decode(&mut self, src: &impl DisassemblySource, addr: u16) -> DecodedInstruction {
+    fn decode(
+        &mut self,
+        src: &impl DisassemblySource,
+        addr: u16,
+        confidence: Confidence,
+    ) -> DecodedInstruction {
         let mut ctx = [0u8; 3];
         ctx[0] = src.read_rom_address(addr);
         ctx[1] = src.read_rom_address(addr.wrapping_add(1));
@@ -83,22 +132,43 @@ impl Disassembly {
             loc: src.probe_rom_location(addr),
             instruction,
             ctx,
+            confidence,
         }
     }
 
-    fn has_collision(&self, loc: RomLocation) -> bool {
-        self.entries.contains_key(&loc) || self.location_overlaps_existing(loc)
-    }
+    fn resolve_overlaps(&mut self, decoded: &DecodedInstruction) -> bool {
+        let mut overlapping_locs = Vec::new();
+        let len = decoded.instruction.length() as i16;
 
-    fn location_overlaps_existing(&self, loc: RomLocation) -> bool {
-        for lookback in 1..=2 {
-            if let Some(existing) = self.entries.get(&loc.offset(-(lookback as i16)))
-                && existing.instruction.length() > lookback
-            {
-                return true;
+        for lookback in 1..=3 {
+            let prev_loc = decoded.loc.offset(-lookback);
+            if let Some(existing) = self.entries.get(&prev_loc)
+                && existing.instruction.length() as i16 > lookback
+            {}
+        }
+
+        for lookforward in 0..len {
+            let next_loc = decoded.loc.offset(lookforward);
+            if self.entries.contains_key(&next_loc) {
+                overlapping_locs.push(next_loc);
             }
         }
-        false
+
+        overlapping_locs.sort();
+        overlapping_locs.dedup();
+
+        for loc in &overlapping_locs {
+            let existing = self.entries.get(loc).unwrap();
+            if existing.confidence >= decoded.confidence {
+                return false;
+            }
+        }
+
+        for loc in overlapping_locs {
+            self.entries.remove(&loc);
+        }
+
+        true
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &DecodedInstruction> {
@@ -151,4 +221,15 @@ impl FlowControl {
             FlowControl::UnknownJump | FlowControl::Return | FlowControl::Invalid => [None, None],
         }
     }
+}
+
+/// The confidence of a disassembly entry.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confidence {
+    /// The entry is reachable through conditional branching of executed instructions.
+    Conditional,
+    /// The entry is reachable through unconditional branching of executed instructions.
+    Unconditional,
+    /// The CPU actually fetched the entry.
+    Fetched,
 }

@@ -684,86 +684,171 @@ impl Instruction {
         }
     }
 
-    pub fn string_context(&self, context: &[u8]) -> String {
+    pub const fn mnemonic(&self) -> &'static str {
+        match self {
+            Self::NOP => "NOP",
+            Self::LD_rr_nn(_)
+            | Self::LD_rr_A(_)
+            | Self::LD_A_rr(_)
+            | Self::LD_nn_SP
+            | Self::LD_r_n(_)
+            | Self::LD_r_r(_, _)
+            | Self::LD_nn_A
+            | Self::LD_A_nn
+            | Self::LD_HL_SP_n
+            | Self::LD_SP_HL => "LD",
+            Self::INC_rr(_) | Self::INC_r(_) => "INC",
+            Self::DEC_rr(_) | Self::DEC_r(_) => "DEC",
+            Self::ADD_HL_rr(_) | Self::ADD_r(_) | Self::ADD_n | Self::ADD_SP_n => "ADD",
+            Self::ADC_r(_) | Self::ADC_n => "ADC",
+            Self::SUB_r(_) | Self::SUB_n => "SUB",
+            Self::SBC_r(_) | Self::SBC_n => "SBC",
+            Self::AND_r(_) | Self::AND_n => "AND",
+            Self::XOR_r(_) | Self::XOR_n => "XOR",
+            Self::OR_r(_) | Self::OR_n => "OR",
+            Self::CP_r(_) | Self::CP_n => "CP",
+            Self::RLCA => "RLCA",
+            Self::RRCA => "RRCA",
+            Self::RLA => "RLA",
+            Self::RRA => "RRA",
+            Self::DAA => "DAA",
+            Self::CPL => "CPL",
+            Self::SCF => "SCF",
+            Self::CCF => "CCF",
+            Self::JR_n | Self::JR_c_n(_) => "JR",
+            Self::STOP => "STOP",
+            Self::HALT => "HALT",
+            Self::POP(_) => "POP",
+            Self::PUSH(_) => "PUSH",
+            Self::RET_c(_) | Self::RET => "RET",
+            Self::RETI => "RETI",
+            Self::JP_c_nn(_) | Self::JP_nn | Self::JP_HL => "JP",
+            Self::CALL_c_nn(_) | Self::CALL_nn => "CALL",
+            Self::RST_n(_) => "RST",
+            Self::LDH_C_A | Self::LDH_A_C | Self::LDH_n_A | Self::LDH_A_n => "LDH",
+            Self::DI => "DI",
+            Self::EI => "EI",
+            Self::RLC_r(_) => "RLC",
+            Self::RRC_r(_) => "RRC",
+            Self::RL_r(_) => "RL",
+            Self::RR_r(_) => "RR",
+            Self::SLA_r(_) => "SLA",
+            Self::SRA_r(_) => "SRA",
+            Self::SWAP_r(_) => "SWAP",
+            Self::SRL_r(_) => "SRL",
+            Self::BIT_r(_, _) => "BIT",
+            Self::RES_r(_, _) => "RES",
+            Self::SET_r(_, _) => "SET",
+            Self::Invalid(_) => "INVALID",
+        }
+    }
+
+    pub fn operands(&self, context: &[u8]) -> [Option<Operand>; 2] {
         let n1 = context.get(1).copied().unwrap_or(0);
         let n2 = context.get(2).copied().unwrap_or(0);
         let nn = u16::from_le_bytes([n1, n2]);
 
+        use Operand::*;
+
         match self {
-            Self::NOP => String::from("NOP"),
-            Self::LD_rr_nn(r16) => format!("LD {r16}, {nn:04X}"),
-            Self::LD_rr_A(r16mem) => format!("LD {r16mem}, A"),
-            Self::LD_A_rr(r16mem) => format!("LD A, {r16mem}"),
-            Self::LD_nn_SP => format!("LD {nn:04X}, SP"),
-            Self::INC_rr(r16) => format!("INC {r16}"),
-            Self::DEC_rr(r16) => format!("DEC {r16}"),
-            Self::ADD_HL_rr(r16) => format!("ADD HL, {r16}"),
-            Self::INC_r(r8) => format!("INC {r8}"),
-            Self::DEC_r(r8) => format!("DEC {r8}"),
-            Self::LD_r_n(r8) => format!("LD {r8}, {n1:02X}"),
-            Self::RLCA => String::from("RLCA"),
-            Self::RRCA => String::from("RRCA"),
-            Self::RLA => String::from("RLA"),
-            Self::RRA => String::from("RRA"),
-            Self::DAA => String::from("DAA"),
-            Self::CPL => String::from("CPL"),
-            Self::SCF => String::from("SCF"),
-            Self::CCF => String::from("CCF"),
-            Self::JR_n => format!("JR {n1:02X}"),
-            Self::JR_c_n(cond) => format!("JR {cond}, {n1:02X}"),
-            Self::STOP => String::from("STOP"),
-            Self::HALT => String::from("HALT"),
-            Self::LD_r_r(r81, r82) => format!("LD {r81}, {r82}"),
-            Self::ADD_r(r8) => format!("ADD {r8}"),
-            Self::ADC_r(r8) => format!("ADC {r8}"),
-            Self::SUB_r(r8) => format!("SUB {r8}"),
-            Self::SBC_r(r8) => format!("SBC {r8}"),
-            Self::AND_r(r8) => format!("AND {r8}"),
-            Self::XOR_r(r8) => format!("XOR {r8}"),
-            Self::OR_r(r8) => format!("OR {r8}"),
-            Self::CP_r(r8) => format!("CP {r8}"),
-            Self::ADD_n => format!("ADD {n1:02X}"),
-            Self::ADC_n => format!("ADC {n1:02X}"),
-            Self::SUB_n => format!("SUB {n1:02X}"),
-            Self::SBC_n => format!("SBC {n1:02X}"),
-            Self::AND_n => format!("AND {n1:02X}"),
-            Self::XOR_n => format!("XOR {n1:02X}"),
-            Self::OR_n => format!("OR {n1:02X}"),
-            Self::CP_n => format!("CP {n1:02X}"),
-            Self::POP(stk) => format!("POP {stk}"),
-            Self::PUSH(stk) => format!("PUSH {stk}"),
-            Self::RET_c(cond) => format!("RET {cond}"),
-            Self::RET => String::from("RET"),
-            Self::RETI => String::from("RETI"),
-            Self::JP_c_nn(cond) => format!("JP {cond}, {nn:04X}"),
-            Self::JP_nn => format!("JP {nn:04X}"),
-            Self::JP_HL => String::from("JP HL"),
-            Self::CALL_c_nn(cond) => format!("CALL {cond}, {nn:04X}"),
-            Self::CALL_nn => format!("CALL {nn:04X}"),
-            Self::RST_n(tgt) => format!("RST {tgt:02X}"),
-            Self::LDH_C_A => String::from("LDH C, A"),
-            Self::LDH_A_C => String::from("LDH A, C"),
-            Self::LDH_n_A => format!("LDH {n1:02X}, A"),
-            Self::LDH_A_n => format!("LDH A, {n1:02X}"),
-            Self::LD_nn_A => format!("LD {nn:04X}, A"),
-            Self::LD_A_nn => format!("LD A, {nn:04X}"),
-            Self::ADD_SP_n => format!("ADD SP, {:02X}", n1 as i8),
-            Self::LD_HL_SP_n => format!("LD HL, SP+{:02X}", n1 as i8),
-            Self::LD_SP_HL => String::from("LD SP, HL"),
-            Self::DI => String::from("DI"),
-            Self::EI => String::from("EI"),
-            Self::RLC_r(r8) => format!("RLC {r8}"),
-            Self::RRC_r(r8) => format!("RRC {r8}"),
-            Self::RL_r(r8) => format!("RL {r8}"),
-            Self::RR_r(r8) => format!("RR {r8}"),
-            Self::SLA_r(r8) => format!("SLA {r8}"),
-            Self::SRA_r(r8) => format!("SRA {r8}"),
-            Self::SWAP_r(r8) => format!("SWAP {r8}"),
-            Self::SRL_r(r8) => format!("SRL {r8}"),
-            Self::BIT_r(n, r8) => format!("BIT {n:02X}, {r8}"),
-            Self::RES_r(n, r8) => format!("RES {n:02X}, {r8}"),
-            Self::SET_r(n, r8) => format!("SET {n:02X}, {r8}"),
-            Self::Invalid(op) => format!("INVALID OP ({op:02X})"),
+            Self::NOP
+            | Self::RLCA
+            | Self::RRCA
+            | Self::RLA
+            | Self::RRA
+            | Self::DAA
+            | Self::CPL
+            | Self::SCF
+            | Self::CCF
+            | Self::STOP
+            | Self::HALT
+            | Self::RET
+            | Self::RETI
+            | Self::DI
+            | Self::EI
+            | Self::Invalid(_) => [None, None],
+
+            Self::LD_rr_nn(r) => [Some(Reg(r.as_str())), Some(Imm16(nn))],
+            Self::LD_rr_A(r) => [Some(MemReg(r.as_str())), Some(Reg("A"))],
+            Self::LD_A_rr(r) => [Some(Reg("A")), Some(MemReg(r.as_str()))],
+            Self::LD_nn_SP => [Some(Address(nn)), Some(Reg("SP"))],
+
+            Self::INC_rr(r) | Self::DEC_rr(r) => [Some(Reg(r.as_str())), None],
+            Self::ADD_HL_rr(r) => [Some(Reg("HL")), Some(Reg(r.as_str()))],
+
+            Self::INC_r(r)
+            | Self::DEC_r(r)
+            | Self::ADD_r(r)
+            | Self::ADC_r(r)
+            | Self::SUB_r(r)
+            | Self::SBC_r(r)
+            | Self::AND_r(r)
+            | Self::XOR_r(r)
+            | Self::OR_r(r)
+            | Self::CP_r(r)
+            | Self::RLC_r(r)
+            | Self::RRC_r(r)
+            | Self::RL_r(r)
+            | Self::RR_r(r)
+            | Self::SLA_r(r)
+            | Self::SRA_r(r)
+            | Self::SWAP_r(r)
+            | Self::SRL_r(r) => [Some(Reg(r.as_str())), None],
+
+            Self::ADD_n
+            | Self::ADC_n
+            | Self::SUB_n
+            | Self::SBC_n
+            | Self::AND_n
+            | Self::XOR_n
+            | Self::OR_n
+            | Self::CP_n => [Some(Imm8(n1)), None],
+
+            Self::LD_r_n(r) => [Some(Reg(r.as_str())), Some(Imm8(n1))],
+            Self::LD_r_r(r1, r2) => [Some(Reg(r1.as_str())), Some(Reg(r2.as_str()))],
+
+            Self::JR_n => [Some(Offset(n1 as i8)), None],
+            Self::JR_c_n(c) => [Some(Cond(c.as_str())), Some(Offset(n1 as i8))],
+            Self::JP_c_nn(c) | Self::CALL_c_nn(c) => [Some(Cond(c.as_str())), Some(Address(nn))],
+            Self::JP_nn | Self::CALL_nn => [Some(Address(nn)), None],
+            Self::JP_HL => [Some(Reg("HL")), None],
+            Self::RET_c(c) => [Some(Cond(c.as_str())), None],
+            Self::RST_n(tgt) => [Some(Imm8(*tgt)), None],
+
+            Self::POP(stk) | Self::PUSH(stk) => [Some(Reg(stk.as_str())), None],
+
+            Self::LDH_C_A => [Some(MemReg("C")), Some(Reg("A"))],
+            Self::LDH_A_C => [Some(Reg("A")), Some(MemReg("C"))],
+            Self::LDH_n_A => [Some(Imm8(n1)), Some(Reg("A"))],
+            Self::LDH_A_n => [Some(Reg("A")), Some(Imm8(n1))],
+            Self::LD_nn_A => [Some(Address(nn)), Some(Reg("A"))],
+            Self::LD_A_nn => [Some(Reg("A")), Some(Address(nn))],
+
+            Self::ADD_SP_n => [Some(Reg("SP")), Some(Offset(n1 as i8))],
+            Self::LD_HL_SP_n => [Some(Reg("HL")), Some(SpOffset(n1 as i8))],
+            Self::LD_SP_HL => [Some(Reg("SP")), Some(Reg("HL"))],
+
+            Self::BIT_r(n, r) | Self::RES_r(n, r) | Self::SET_r(n, r) => {
+                [Some(Imm8(*n)), Some(Reg(r.as_str()))]
+            }
+        }
+    }
+
+    pub fn string_context(&self, context: &[u8]) -> String {
+        let op_array = self.operands(context);
+        let mnem = self.mnemonic();
+
+        match op_array {
+            [Some(op1), Some(op2)] => format!("{mnem} {op1}, {op2}"),
+            [Some(op1), None] => format!("{mnem} {op1}"),
+            [None, None] => {
+                if let Self::Invalid(op) = self {
+                    format!("{mnem} OP ({op:02X})")
+                } else {
+                    mnem.to_string()
+                }
+            }
+            _ => mnem.to_string(),
         }
     }
 
@@ -887,9 +972,24 @@ pub enum R8 {
     A = 7,
 }
 
+impl R8 {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+            Self::E => "E",
+            Self::H => "H",
+            Self::L => "L",
+            Self::HL => "HL",
+            Self::A => "A",
+        }
+    }
+}
+
 impl Display for R8 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -901,9 +1001,20 @@ pub enum R16 {
     SP = 3,
 }
 
+impl R16 {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BC => "BC",
+            Self::DE => "DE",
+            Self::HL => "HL",
+            Self::SP => "SP",
+        }
+    }
+}
+
 impl Display for R16 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -915,9 +1026,20 @@ pub enum R16Mem {
     HLdec = 3,
 }
 
+impl R16Mem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BC => "BC",
+            Self::DE => "DE",
+            Self::HLinc => "HL+",
+            Self::HLdec => "HL-",
+        }
+    }
+}
+
 impl Display for R16Mem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -929,9 +1051,20 @@ pub enum R16Stk {
     AF = 3,
 }
 
+impl R16Stk {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BC => "BC",
+            Self::DE => "DE",
+            Self::HL => "HL",
+            Self::AF => "AF",
+        }
+    }
+}
+
 impl Display for R16Stk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -943,8 +1076,58 @@ pub enum Cond {
     C = 3,
 }
 
+impl Cond {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NZ => "NZ",
+            Self::Z => "Z",
+            Self::NC => "NC",
+            Self::C => "C",
+        }
+    }
+}
+
 impl Display for Cond {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Operand {
+    Cond(&'static str),
+    Reg(&'static str),
+    MemReg(&'static str),
+    Imm8(u8),
+    Imm16(u16),
+    Address(u16),
+    Offset(i8),
+    SpOffset(i8),
+}
+
+impl Display for Operand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cond(s) => write!(f, "{s}"),
+            Self::Reg(s) => write!(f, "{s}"),
+            Self::MemReg(s) => write!(f, "{s}"),
+            Self::Imm8(n) => write!(f, "{n:02X}"),
+            Self::Imm16(nn) => write!(f, "{nn:04X}"),
+            Self::Address(nn) => write!(f, "{nn:04X}"),
+            Self::Offset(e) => {
+                if *e >= 0 {
+                    write!(f, "+{:02X}", *e)
+                } else {
+                    write!(f, "-{:02X}", e.abs())
+                }
+            }
+            Self::SpOffset(e) => {
+                if *e >= 0 {
+                    write!(f, "SP+{:02X}", *e)
+                } else {
+                    write!(f, "SP-{:02X}", e.abs())
+                }
+            }
+        }
     }
 }

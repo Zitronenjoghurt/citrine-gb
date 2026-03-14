@@ -132,9 +132,9 @@ impl CpuBusInterface for CpuBus<'_> {
     }
 
     #[cfg(feature = "debug")]
-    fn analyze_at(&mut self, addr: u16) {
+    fn on_fetch(&mut self, addr: u16) {
         if self.debugger.static_analysis_enabled {
-            self.debugger.disassembly.analyze(self.cartridge, addr);
+            self.debugger.disassembly.on_fetch(self.cartridge, addr);
         }
     }
 
@@ -159,7 +159,7 @@ pub trait CpuBusInterface {
     }
 
     #[cfg(feature = "debug")]
-    fn analyze_at(&mut self, _addr: u16) {}
+    fn on_fetch(&mut self, _addr: u16) {}
 
     #[cfg(feature = "debug")]
     fn probe_rom_location(&self, _addr: u16) -> RomLocation {
