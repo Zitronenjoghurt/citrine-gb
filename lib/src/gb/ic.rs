@@ -1,4 +1,5 @@
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InterruptController {
     pub enable: InterruptFlags,
     pub flag: InterruptFlags,
@@ -85,6 +86,7 @@ impl Interrupt {
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InterruptFlags {
     pub joypad: bool,
     pub serial: bool,

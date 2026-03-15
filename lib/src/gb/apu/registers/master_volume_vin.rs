@@ -4,6 +4,7 @@
 ///
 /// The amplifier never mutes a non-silent input
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MasterVolumeVin {
     pub volume_right: u8,
     pub vin_right: bool,

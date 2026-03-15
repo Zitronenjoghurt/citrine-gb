@@ -1,5 +1,6 @@
 /// Source: https://gbdev.io/pandocs/Audio_Registers.html#ff14--nr14-channel-1-period-high--control
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel123Control {
     /// Write-only
     /// Upper 3 bits of the 11-bit period

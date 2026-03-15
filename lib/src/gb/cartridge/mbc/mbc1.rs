@@ -1,6 +1,7 @@
 use crate::gb::cartridge::mbc::{mask_bank_number, MbcInterface};
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mbc1 {
     pub ram_enabled: bool,
     pub rom_bank_count: usize,

@@ -16,6 +16,7 @@ pub trait MbcInterface {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Mbc {
     None,
     Mbc1(mbc1::Mbc1),

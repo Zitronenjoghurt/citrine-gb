@@ -7,6 +7,7 @@ use crate::gb::apu::registers::ch12_timer::Channel12Timer;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel2 {
     pub enabled: bool,
     pub length_counter: LengthCounter,

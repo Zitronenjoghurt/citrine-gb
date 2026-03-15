@@ -1,4 +1,5 @@
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VolumeEnvelope {
     /// Direction of the envelope
     pub increasing: bool,

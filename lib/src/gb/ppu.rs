@@ -20,7 +20,9 @@ pub const SCREEN_HEIGHT: usize = 144;
 const VRAM_BANK_SIZE: usize = 0x2000; // 8KiB
 const OAM_SIZE: usize = 160; // Bytes
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ppu {
+    #[cfg_attr(feature = "serde", serde(skip, default))]
     frame: Framebuffer,
     model: GbModel,
     pub frame_ready: bool,
@@ -35,8 +37,10 @@ pub struct Ppu {
     pub line_dot_counter: u16,
     // Memory
     /// Video RAM (2 banks on CGB)
+    #[cfg_attr(feature = "serde", serde(with = "serde_vram"))]
     vram: [[u8; VRAM_BANK_SIZE]; 2],
     /// Sprite attribute table
+    #[cfg_attr(feature = "serde", serde(with = "serde_oam"))]
     oam: [u8; OAM_SIZE],
     /// LCD control
     pub lcdc: LCDC,
@@ -65,10 +69,12 @@ pub struct Ppu {
     /// BG palette index (CGB)
     bcps: u8,
     /// Internal BG palette RAM, accessed via BCPS
+    #[cfg_attr(feature = "serde", serde(with = "serde_64"))]
     bg_palette_ram: [u8; 64],
     /// OBJ palette index (CGB)
     ocps: u8,
     /// Internal OBJ palette RAM, accessed via OCPS
+    #[cfg_attr(feature = "serde", serde(with = "serde_64"))]
     obj_palette_ram: [u8; 64],
     /// OBJ priority mode (CGB)
     opri: u8,
@@ -447,5 +453,64 @@ impl WriteMemory for Ppu {
             0xFF6C => self.opri = value & 0x01,
             _ => {}
         }
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_oam {
+    use super::OAM_SIZE;
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(oam: &[u8; OAM_SIZE], s: S) -> Result<S::Ok, S::Error> {
+        oam.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; OAM_SIZE], D::Error> {
+        let vec: Vec<u8> = Vec::deserialize(d)?;
+        vec.try_into()
+            .map_err(|_| D::Error::custom("OAM size mismatch during deserialization"))
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_vram {
+    use super::VRAM_BANK_SIZE;
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        vram: &[[u8; VRAM_BANK_SIZE]; 2],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        (&vram[0][..], &vram[1][..]).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<[[u8; VRAM_BANK_SIZE]; 2], D::Error> {
+        let (b0, b1): (Vec<u8>, Vec<u8>) = Deserialize::deserialize(d)?;
+
+        let bank0 = b0
+            .try_into()
+            .map_err(|_| D::Error::custom("VRAM Bank 0 size mismatch"))?;
+        let bank1 = b1
+            .try_into()
+            .map_err(|_| D::Error::custom("VRAM Bank 1 size mismatch"))?;
+
+        Ok([bank0, bank1])
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_64 {
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(arr: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
+        arr.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
+        let vec: Vec<u8> = Vec::deserialize(d)?;
+        vec.try_into()
+            .map_err(|_| D::Error::custom("Size mismatch (expected 64)"))
     }
 }

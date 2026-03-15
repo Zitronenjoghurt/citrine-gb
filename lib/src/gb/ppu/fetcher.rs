@@ -4,10 +4,10 @@ use crate::gb::ppu::types::tile::TileLine;
 use crate::gb::ppu::Ppu;
 use crate::ReadMemory;
 
-// ToDo: Differentiate between bg/win pixel fetcher and sprite pixel fetcher
 /// Responsible for loading data into the pixel FIFO
 /// Continuously active throughout mode 3 (Drawing)
 #[derive(Debug, Default, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PixelFetcher {
     pub state: PixelFetcherState,
     pub x: u8,
@@ -40,6 +40,7 @@ impl PixelFetcher {
 
 /// What the pixel fetcher's task is during the next dot
 #[derive(Debug, Default, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PixelFetcherState {
     #[default]
     GetTile1,

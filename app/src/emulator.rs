@@ -3,7 +3,7 @@ use citrine_gb::disassembly::DisassemblySource;
 use citrine_gb::error::GbResult;
 use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
-use citrine_gb::persistence::sdump::SDump;
+use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb::rom::Rom;
 use gilrs::Axis;
 use gilrs::EventType::{AxisChanged, ButtonPressed, ButtonReleased};
@@ -265,7 +265,7 @@ impl Emulator {
             && let sav_path = path.with_extension("sav")
             && sav_path.exists()
         {
-            Some(SDump::load(&sav_path)?)
+            Some(SramDump::load(&sav_path)?)
         } else {
             None
         };
@@ -295,7 +295,7 @@ impl Emulator {
         let sdump = if let Some(window) = web_sys::window()
             && let Ok(Some(local_storage)) = window.local_storage()
             && let Ok(Some(data)) = local_storage.get_item(&save_key)
-            && let Ok(sdump) = SDump::from_base64(&data)
+            && let Ok(sdump) = SramDump::from_base64(&data)
         {
             Some(sdump)
         } else {
@@ -320,7 +320,7 @@ impl Emulator {
             return Ok(());
         }
 
-        let Some(sdump) = self.gb.poll_sram_dump() else {
+        let Some(sdump) = self.gb.poll_sram_dump(false) else {
             return Ok(());
         };
 
@@ -350,7 +350,7 @@ impl Emulator {
             return Ok(());
         };
 
-        let Some(sdump) = self.gb.poll_sram_dump() else {
+        let Some(sdump) = self.gb.poll_sram_dump(false) else {
             return Ok(());
         };
 

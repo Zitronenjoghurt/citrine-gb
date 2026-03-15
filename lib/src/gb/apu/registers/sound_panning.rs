@@ -1,6 +1,7 @@
 /// Source: https://gbdev.io/pandocs/Audio_Registers.html#ff25--nr51-sound-panning
 /// Controls in which output (left/right) a channel is played
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SoundPanning {
     pub channel_1_right: bool,
     pub channel_2_right: bool,

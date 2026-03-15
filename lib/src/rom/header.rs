@@ -10,6 +10,7 @@ pub const NINTENDO_LOGO: [u8; 48] = [
 ];
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RomHeader {
     pub title: String,
     pub valid_nintendo_logo: bool,
@@ -497,6 +498,7 @@ impl RomHeader {
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RomCgbMode {
     #[default]
     None = 0x00,
@@ -514,6 +516,7 @@ impl Display for RomCgbMode {
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RomLicensee {
     #[default]
     Unknown,
@@ -796,6 +799,7 @@ impl std::fmt::Display for RomLicensee {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RomCartridgeType {
     RomOnly = 0x00,
     Mbc1 = 0x01,

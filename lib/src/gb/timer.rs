@@ -2,6 +2,7 @@ use crate::gb::ic::ICInterface;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Timer {
     pub div: u16,
     pub tima: u8,

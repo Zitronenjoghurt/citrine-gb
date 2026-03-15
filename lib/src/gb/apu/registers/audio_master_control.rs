@@ -1,5 +1,6 @@
 /// Source: https://gbdev.io/pandocs/Audio_Registers.html#ff26--nr52-audio-master-control
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AudioMasterControl {
     // Read-only, do not control whether the channels are active => allows to check if they are active
     pub channel_1_enabled: bool,

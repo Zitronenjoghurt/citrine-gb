@@ -1,4 +1,5 @@
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SquareWave {
     pub duty_pattern: u8,
     pub duty_step: u8,

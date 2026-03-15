@@ -1,4 +1,5 @@
 #[derive(Debug, Default, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Sprite {
     /// Horizontal position + 8
     pub y: u8,
@@ -21,6 +22,7 @@ impl From<[u8; 4]> for Sprite {
 }
 
 #[derive(Debug, Default, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SpriteFlags {
     /// 0 = Sprite is always rendered above background
     /// 1 = Background colors 1-3 overlay sprite, sprite is still rendered above color 0

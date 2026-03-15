@@ -1,5 +1,4 @@
 use crate::error::GbResult;
-use crate::persistence::sdump::SDump;
 use crate::rom::Rom;
 use ppu::types::framebuffer::Framebuffer;
 
@@ -16,11 +15,14 @@ pub mod ppu;
 pub mod timer;
 
 // ToDo: CGB specific registers like speed mode
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GameBoy {
+    #[cfg_attr(feature = "serde", serde(skip, default))]
     pub boot_rom: boot_rom::BootRom,
     pub cpu: cpu::Cpu,
     pub cartridge: cartridge::Cartridge,
     #[cfg(feature = "debug")]
+    #[cfg_attr(feature = "serde", serde(skip, default))]
     pub debugger: crate::debug::Debugger,
     pub dma: dma::DmaController,
     pub ic: ic::InterruptController,
@@ -166,12 +168,59 @@ impl GameBoy {
         self.joypad.release(button);
     }
 
-    pub fn poll_sram_dump(&mut self) -> Option<SDump> {
-        self.cartridge.poll_sram_dump()
+    #[cfg(feature = "persistence")]
+    pub fn poll_sram_dump(
+        &mut self,
+        force: bool,
+    ) -> Option<super::persistence::sram_dump::SramDump> {
+        self.cartridge.poll_sram_dump(force)
     }
 
-    pub fn put_sram_dump(&mut self, dump: SDump) {
+    #[cfg(feature = "persistence")]
+    pub fn put_sram_dump(&mut self, dump: super::persistence::sram_dump::SramDump) {
         self.cartridge.put_sram_dump(dump);
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn dump_full(&mut self) -> GbResult<Vec<u8>> {
+        let sram = self.poll_sram_dump(true);
+        let dump_ref = super::persistence::full_dump::FullDumpRef { gb: self, sram };
+        #[cfg(feature = "brotli")]
+        {
+            dump_ref.to_brotli()
+        }
+        #[cfg(not(feature = "brotli"))]
+        {
+            dump_ref.to_rmp()
+        }
+    }
+
+    #[cfg(all(feature = "persistence", feature = "serde_json"))]
+    pub fn dump_json(&mut self) -> GbResult<String> {
+        let sram = self.poll_sram_dump(true);
+        let dump_ref = super::persistence::full_dump::FullDumpRef { gb: self, sram };
+        dump_ref.to_json_pretty()
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn from_dump(data: &[u8]) -> GbResult<Self> {
+        let dump = {
+            #[cfg(feature = "brotli")]
+            {
+                super::persistence::full_dump::FullDump::from_brotli(data)?
+            }
+            #[cfg(not(feature = "brotli"))]
+            {
+                super::persistence::full_dump::FullDump::from_rmp(data)?
+            }
+        };
+
+        let mut gb = dump.gb;
+        if let Some(sram) = dump.sram {
+            gb.put_sram_dump(sram);
+        }
+
+        Ok(gb)
     }
 
     #[cfg(feature = "debug")]
@@ -186,10 +235,11 @@ impl GameBoy {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[repr(u8)]
 pub enum GbModel {
     #[default]
-    Dmg,
-    Cgb,
+    Dmg = 0,
+    Cgb = 1,
 }
 
 impl GbModel {

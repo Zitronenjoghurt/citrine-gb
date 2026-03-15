@@ -1,7 +1,6 @@
 use crate::disassembly::DisassemblySource;
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
-use crate::persistence::sdump::SDump;
 use crate::rom::header::RomHeader;
 use crate::rom::Rom;
 use crate::{ReadMemory, WriteMemory};
@@ -12,13 +11,16 @@ mod mbc;
 pub const ROM_BANK_SIZE: usize = 0x4000; // 16KiB
 pub const RAM_BANK_SIZE: usize = 0x2000; // 8KiB
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cartridge {
     pub header: RomHeader,
     pub has_rom_loaded: bool,
     has_battery: bool,
     sram_dirty: bool,
     mbc: mbc::Mbc,
+    #[cfg_attr(feature = "serde", serde(skip, default))]
     rom: Vec<[u8; ROM_BANK_SIZE]>,
+    #[cfg_attr(feature = "serde", serde(skip, default))]
     ram: Vec<[u8; RAM_BANK_SIZE]>,
 }
 
@@ -78,15 +80,21 @@ impl Cartridge {
         self.ram.iter_mut().for_each(|bank| bank.fill(0));
     }
 
-    pub fn poll_sram_dump(&mut self) -> Option<SDump> {
-        if !self.has_battery || !self.sram_dirty {
+    #[cfg(feature = "persistence")]
+    pub fn poll_sram_dump(
+        &mut self,
+        force: bool,
+    ) -> Option<crate::persistence::sram_dump::SramDump> {
+        if !self.has_battery || (!self.sram_dirty && !force) {
             return None;
         };
 
         let dump = if let Some(data) = self.mbc.get_internal_data() {
-            Some(SDump::from_slice(data))
+            Some(crate::persistence::sram_dump::SramDump::from_slice(data))
         } else {
-            Some(SDump::from_banks(self.ram.as_slice()))
+            Some(crate::persistence::sram_dump::SramDump::from_banks(
+                self.ram.as_slice(),
+            ))
         };
 
         self.sram_dirty = false;
@@ -94,7 +102,8 @@ impl Cartridge {
         dump
     }
 
-    pub fn put_sram_dump(&mut self, dump: SDump) {
+    #[cfg(feature = "persistence")]
+    pub fn put_sram_dump(&mut self, dump: crate::persistence::sram_dump::SramDump) {
         if !self.has_battery {
             return;
         };

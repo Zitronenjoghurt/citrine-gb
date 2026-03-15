@@ -5,6 +5,7 @@ use crate::gb::ppu::Ppu;
 use std::collections::VecDeque;
 
 #[derive(Debug, Default, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FifoPixel {
     /// A value between 0 and 3
     pub color_index: u8,
@@ -17,6 +18,7 @@ pub struct FifoPixel {
 }
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PixelFifo {
     // Separated queues, but mixed when popping items
     // Can hold up to 8 pixels each

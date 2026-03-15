@@ -1,4 +1,3 @@
-use egui::DroppedFile;
 use std::path::{Path, PathBuf};
 
 /// Describes what a file operation is for.
@@ -66,43 +65,26 @@ impl FileIntent {
             Self::ExportE2E => &[],
         }
     }
+}
 
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::LoadRom => "Drop ROM file here",
-            Self::LoadBootRom => "Drop Boot ROM file here",
-            Self::ExportE2E => "Select a directory",
-        }
-    }
-
-    pub fn accepts(&self, filename: &str) -> bool {
-        let filters = self.filters();
-        if filters.is_empty() {
-            return true;
-        }
-        let lower = filename.to_lowercase();
-        filters
-            .iter()
-            .flat_map(|f| f.extensions.iter())
-            .any(|ext| lower.ends_with(&format!(".{ext}")))
-    }
+#[derive(Debug, Clone)]
+pub enum SaveResult {
+    Success(String),
+    Cancelled,
+    Error(String),
 }
 
 #[derive(Default)]
 pub struct FilePicker {
-    drop_intent: Option<FileIntent>,
     #[cfg(not(target_arch = "wasm32"))]
     pending_result: Option<FileResult>,
     #[cfg(target_arch = "wasm32")]
     pending: Option<PendingRequest>,
+    pending_save: Option<poll_promise::Promise<SaveResult>>,
 }
 
 impl FilePicker {
-    pub fn set_drop_intent(&mut self, intent: impl Into<Option<FileIntent>>) {
-        self.drop_intent = intent.into();
-    }
-
-    pub fn poll(&mut self, ctx: &egui::Context) -> Option<FileResult> {
+    pub fn poll(&mut self) -> Option<FileResult> {
         #[cfg(not(target_arch = "wasm32"))]
         if self.pending_result.is_some() {
             return self.pending_result.take();
@@ -117,7 +99,18 @@ impl FilePicker {
             }
         }
 
-        self.check_dropped_files(ctx)
+        None
+    }
+
+    pub fn poll_save(&mut self) -> Option<SaveResult> {
+        if let Some(pending) = &self.pending_save
+            && let Some(result) = pending.ready()
+        {
+            let res = result.clone();
+            self.pending_save = None;
+            return Some(res);
+        }
+        None
     }
 
     pub fn open(&mut self, intent: FileIntent) {
@@ -168,30 +161,42 @@ impl FilePicker {
         }
     }
 
-    pub fn save(&self, intent: &FileIntent, filename: &str, data: &[u8]) {
+    pub fn save(&mut self, filename: &str, data: &[u8]) {
+        let data = data.to_vec();
+
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut dialog = rfd::FileDialog::new().set_file_name(filename);
-            for filter in intent.filters() {
-                dialog = dialog.add_filter(filter.label, filter.extensions);
-            }
-            if let Some(path) = dialog.save_file() {
-                let _ = std::fs::write(path, data);
-            }
+            let dialog = rfd::FileDialog::new().set_file_name(filename);
+            let result = if let Some(path) = dialog.save_file() {
+                match std::fs::write(&path, &data) {
+                    Ok(_) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        SaveResult::Success(name)
+                    }
+                    Err(e) => SaveResult::Error(e.to_string()),
+                }
+            } else {
+                SaveResult::Cancelled
+            };
+            self.pending_save = Some(poll_promise::Promise::from_ready(result));
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            let mut dialog = rfd::AsyncFileDialog::new().set_file_name(filename);
-            for filter in intent.filters() {
-                dialog = dialog.add_filter(filter.label, filter.extensions);
-            }
-            let data = data.to_vec();
-            wasm_bindgen_futures::spawn_local(async move {
+            let dialog = rfd::AsyncFileDialog::new().set_file_name(filename);
+            self.pending_save = Some(poll_promise::Promise::spawn_local(async move {
                 if let Some(handle) = dialog.save_file().await {
-                    let _ = handle.write(&data).await;
+                    match handle.write(&data).await {
+                        Ok(_) => SaveResult::Success(handle.file_name()),
+                        Err(e) => SaveResult::Error(e.to_string()),
+                    }
+                } else {
+                    SaveResult::Cancelled
                 }
-            });
+            }));
         }
     }
 
@@ -230,74 +235,5 @@ impl FilePicker {
             #[cfg(not(target_arch = "wasm32"))]
             path,
         })
-    }
-
-    fn check_dropped_files(&self, ctx: &egui::Context) -> Option<FileResult> {
-        let intent = self.drop_intent.as_ref()?;
-        let dropped: Vec<DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
-
-        for file in dropped {
-            let name = file
-                .path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| file.name.clone());
-
-            if !intent.accepts(&name) {
-                continue;
-            }
-
-            let data = if let Some(bytes) = &file.bytes {
-                bytes.to_vec()
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(path) = &file.path {
-                    std::fs::read(path).ok()?
-                } else {
-                    continue;
-                }
-                #[cfg(target_arch = "wasm32")]
-                continue;
-            };
-
-            return Some(FileResult {
-                intent: intent.clone(),
-                name,
-                kind: FileResultKind::File { data },
-                #[cfg(not(target_arch = "wasm32"))]
-                path: file.path.unwrap_or_default(),
-            });
-        }
-
-        None
-    }
-
-    pub fn show_drop_overlay(&self, ctx: &egui::Context) {
-        use egui::{Align2, Color32, Id, LayerId, Order, TextStyle};
-
-        if self.drop_intent.is_none() {
-            return;
-        }
-        if ctx.input(|i| i.raw.hovered_files.is_empty()) {
-            return;
-        }
-
-        let label = match &self.drop_intent {
-            Some(FileIntent::LoadRom) => "Drop ROM file here",
-            _ => "Drop file here",
-        };
-
-        let painter =
-            ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("file_drop_target")));
-        let rect = ctx.screen_rect();
-        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(192));
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            label,
-            TextStyle::Heading.resolve(&ctx.style()),
-            Color32::WHITE,
-        );
     }
 }

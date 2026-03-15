@@ -17,6 +17,7 @@ pub const APU_CLOCK_RATE: u32 = 4_194_304;
 pub const MAX_AUDIO_BUFFER_SIZE: u32 = 8192;
 const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Apu {
     /// Increments at a frequency of 512 Hz
     div_apu: u8,
@@ -30,7 +31,9 @@ pub struct Apu {
     pub ch4: Channel4,
     hpf_capacitor_l: f32,
     hpf_capacitor_r: f32,
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_blip_buf"))]
     pub blip_l: BlipBuf,
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_blip_buf"))]
     pub blip_r: BlipBuf,
     time: u32,
     prev_l: i32,
@@ -38,6 +41,11 @@ pub struct Apu {
     pub output_sample_rate: u32,
     pub charge_factor: f32,
     pub audio_buffer: Vec<f32>,
+}
+
+#[cfg(feature = "serde")]
+fn default_blip_buf() -> BlipBuf {
+    BlipBuf::new(MAX_AUDIO_BUFFER_SIZE)
 }
 
 impl Default for Apu {

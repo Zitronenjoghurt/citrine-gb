@@ -1,5 +1,6 @@
 /// Source: https://gbdev.io/pandocs/Audio_Registers.html#ff12--nr12-channel-1-volume--envelope
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel124Volume {
     /// Envelope ticks at 64 Hz and will be increased/decreased every x ticks (x = pace)
     /// 0 = envelope disabled

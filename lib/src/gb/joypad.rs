@@ -2,6 +2,7 @@ use crate::gb::ic::{ICInterface, Interrupt};
 use crate::{ReadMemory, WriteMemory};
 use bitflags::bitflags;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Joypad {
     register: u8,
     held: JoypadState,
@@ -95,6 +96,7 @@ impl ReadMemory for Joypad {
 
 bitflags! {
     #[derive(Default, Debug, Clone, Copy)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct JoypadState: u8 {
         const A = 0b0000_0001;
         const B = 0b0000_0010;

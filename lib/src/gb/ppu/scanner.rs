@@ -2,6 +2,7 @@ use crate::gb::ppu::types::sprite::Sprite;
 use crate::gb::ppu::Ppu;
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OamScanner {
     // Takes 2 dots to scan 1 entry in oam => 80 dots total
     dot_progress: u8,

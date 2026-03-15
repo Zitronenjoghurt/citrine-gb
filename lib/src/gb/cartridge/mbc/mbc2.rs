@@ -1,12 +1,19 @@
 use crate::gb::cartridge::mbc::{mask_bank_number, MbcInterface};
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mbc2 {
     pub ram_enabled: bool,
     // 512 half-bytes of RAM (only the lower nibble of each byte is used)
+    #[cfg_attr(feature = "serde", serde(skip, default = "new_ram_default"))]
     pub ram: Box<[u8; 512]>,
     pub rom_bank_count: usize,
     pub rom_bank_register: u8,
+}
+
+#[cfg(feature = "serde")]
+fn new_ram_default() -> Box<[u8; 512]> {
+    Box::new([0; 512])
 }
 
 impl Mbc2 {

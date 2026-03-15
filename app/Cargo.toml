@@ -8,7 +8,7 @@ all-features = true
 targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 
 [dependencies]
-citrine-gb = { workspace = true, features = ["debug", "serde", "base64", "strum"] }
+citrine-gb = { workspace = true, features = ["debug", "persistence", "base64", "brotli", "strum"] }
 anyhow = "1.0.102"
 brotli = "8.0.2"
 catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
@@ -22,6 +22,7 @@ egui-phosphor = { version = "0.11.0", features = ["regular"] }
 egui_plot = "0.34.1"
 gilrs = "0.11.1"
 log = "0.4.29"
+poll-promise = { version = "0.3.0" }
 rfd = "0.17.2"
 ringbuf = "0.4.8"
 serde = { version = "1.0.228", features = ["derive"] }

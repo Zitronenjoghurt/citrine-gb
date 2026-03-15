@@ -4,9 +4,13 @@ const WRAM_BANK_SIZE: usize = 0x1000; // 4KiB
 const HRAM_SIZE: usize = 127; // Bytes
 const IO_SIZE: usize = 128; // Bytes
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Memory {
+    #[cfg_attr(feature = "serde", serde(with = "serde_wram"))]
     wram: Vec<[u8; WRAM_BANK_SIZE]>,
+    #[cfg_attr(feature = "serde", serde(with = "serde_hram"))]
     hram: [u8; HRAM_SIZE],
+    #[cfg_attr(feature = "serde", serde(with = "serde_io"))]
     // ToDo: Put in IO components (e.g. Timer, Serial, Joypad)
     io: [u8; IO_SIZE],
 }
@@ -52,5 +56,66 @@ impl WriteMemory for Memory {
             0xFFFF => self.io[0x7F] = value,
             _ => {}
         }
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_wram {
+    use super::WRAM_BANK_SIZE;
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        wram: &Vec<[u8; WRAM_BANK_SIZE]>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let slices: Vec<&[u8]> = wram.iter().map(|bank| bank.as_slice()).collect();
+        slices.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<[u8; WRAM_BANK_SIZE]>, D::Error> {
+        let vec_of_vecs: Vec<Vec<u8>> = Vec::deserialize(d)?;
+        let mut wram = Vec::with_capacity(vec_of_vecs.len());
+
+        for vec in vec_of_vecs {
+            let bank: [u8; WRAM_BANK_SIZE] = vec
+                .try_into()
+                .map_err(|_| D::Error::custom("WRAM bank size mismatch"))?;
+            wram.push(bank);
+        }
+        Ok(wram)
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_hram {
+    use super::HRAM_SIZE;
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(hram: &[u8; HRAM_SIZE], s: S) -> Result<S::Ok, S::Error> {
+        hram.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; HRAM_SIZE], D::Error> {
+        let vec: Vec<u8> = Vec::deserialize(d)?;
+        vec.try_into()
+            .map_err(|_| D::Error::custom("HRAM size mismatch"))
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_io {
+    use super::IO_SIZE;
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(io: &[u8; IO_SIZE], s: S) -> Result<S::Ok, S::Error> {
+        io.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; IO_SIZE], D::Error> {
+        let vec: Vec<u8> = Vec::deserialize(d)?;
+        vec.try_into()
+            .map_err(|_| D::Error::custom("IO size mismatch"))
     }
 }

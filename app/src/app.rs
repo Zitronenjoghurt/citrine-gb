@@ -1,4 +1,4 @@
-use crate::app::file_picker::{FileIntent, FilePicker, FileResult};
+use crate::app::file_picker::{FileIntent, FilePicker, FileResult, SaveResult};
 use crate::app::tabs::Tab;
 use crate::app::ui_state::UiState;
 use crate::audio::Audio;
@@ -11,6 +11,7 @@ use egui_commonmark::CommonMarkCache;
 use egui_dock::DockState;
 use egui_notify::{Toast, Toasts};
 use gilrs::Gilrs;
+use std::io::Write;
 use strum::IntoEnumIterator;
 
 mod events;
@@ -71,7 +72,6 @@ impl Citrine {
             .storage
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
             .unwrap_or_default();
-        app.file_picker.set_drop_intent(FileIntent::LoadRom);
 
         let (audio, producer) = Audio::new();
         app.audio = Some(audio);
@@ -100,7 +100,7 @@ impl eframe::App for Citrine {
             self.toggle_focus_mode();
         }
 
-        if let Some(result) = self.file_picker.poll(ctx) {
+        if let Some(result) = self.file_picker.poll() {
             match result.intent {
                 FileIntent::LoadRom => self.handle_load_rom(result),
                 FileIntent::LoadBootRom => self.handle_load_boot_rom(result),
@@ -108,11 +108,22 @@ impl eframe::App for Citrine {
             }
         }
 
+        if let Some(save_result) = self.file_picker.poll_save() {
+            match save_result {
+                SaveResult::Success(filename) => {
+                    self.toasts.success(format!("Saved to '{}'", filename));
+                }
+                SaveResult::Error(err) => {
+                    self.toasts.error(format!("Failed to save: {}", err));
+                }
+                SaveResult::Cancelled => {}
+            }
+        }
+
         if let Err(err) = self.emulator.update(ctx, &mut self.gil) {
             self.toasts.error(format!("Emulation Error: {}", err));
         }
 
-        self.file_picker.show_drop_overlay(ctx);
         self.toasts.show(ctx);
 
         self.handle_event_queue();
@@ -228,6 +239,9 @@ impl Citrine {
                     if ui.button("Performance").clicked() {
                         self.open_tab(Tab::Performance);
                     }
+                    if ui.button("Actions").clicked() {
+                        self.open_tab(Tab::DebugActions)
+                    }
                     if ui.button("Audio Debug").clicked() {
                         self.open_tab(Tab::AudioDebug);
                     }
@@ -246,48 +260,8 @@ impl Citrine {
                 .on_hover_text("Restore default tab layout")
                 .clicked()
             {
-                // Reset the dock state back to just the Game Boy tab
                 self.dock = DockState::new(vec![Tab::GameBoy]);
             }
-
-            //ui.separator();
-            //
-            //ui.label(format!("{:.02}ms", self.emulator.last_frame_secs * 1000.0));
-            //
-            //ui.label(format!("{} Cycles", self.emulator.gb.debugger.total_cycles));
-            //
-            //if let Some(last_save) = self.emulator.last_save {
-            //    ui.separator();
-            //
-            //    let elapsed = web_time::Instant::now() - last_save;
-            //    let label = match elapsed.as_secs() {
-            //        0 if elapsed.subsec_micros() == 0 => {
-            //            format!("{}ns ago", elapsed.subsec_nanos())
-            //        }
-            //        0 if elapsed.subsec_millis() == 0 => {
-            //            format!("{}µs ago", elapsed.subsec_micros())
-            //        }
-            //        0 => format!("{}ms ago", elapsed.subsec_millis()),
-            //        1..=59 => format!("{}s ago", elapsed.as_secs()),
-            //        60..=3599 => format!("{}m ago", elapsed.as_secs() / 60),
-            //        _ => format!("{}h ago", elapsed.as_secs() / 3600),
-            //    };
-            //    ui.label(format!(
-            //        "Last SRAM dump: {} ({} always save in-game if possible)",
-            //        label,
-            //        icons::WARNING
-            //    ));
-            //} else if self.emulator.gb.cartridge.supports_sram_saves() {
-            //    ui.separator();
-            //    if self.emulator.save_loaded {
-            //        ui.label("Save file loaded");
-            //    } else {
-            //        ui.label("Game did not save anything yet");
-            //    }
-            //} else if !self.emulator.gb.cartridge.supports_sram_saves() {
-            //    ui.separator();
-            //    ui.label("No saves (cartridge has no battery)");
-            //}
         });
     }
 

@@ -4,6 +4,7 @@ pub mod disassembly;
 pub mod error;
 pub mod gb;
 pub mod instructions;
+#[cfg(feature = "persistence")]
 pub mod persistence;
 pub mod rom;
 #[cfg(test)]

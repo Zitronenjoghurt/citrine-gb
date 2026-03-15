@@ -1,4 +1,5 @@
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel4Frequency {
     /// Influences the frequency formula, (value of 0 = 0.5)
     pub clock_divider: u8,

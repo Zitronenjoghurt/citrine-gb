@@ -9,6 +9,7 @@ use crate::gb::apu::registers::ch1_sweep::Channel1Sweep;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel1 {
     pub enabled: bool,
     pub length_counter: LengthCounter,

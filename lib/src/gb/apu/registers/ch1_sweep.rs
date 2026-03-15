@@ -1,5 +1,6 @@
 /// Source: https://gbdev.io/pandocs/Audio_Registers.html#ff10--nr10-channel-1-sweep
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel1Sweep {
     pub individual_step: u8,
     /// False = Addition / Increase

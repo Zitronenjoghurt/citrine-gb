@@ -3,6 +3,7 @@ use crate::gb::apu::registers::ch123_control::Channel123Control;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel3 {
     pub enabled: bool,
     pub wave_step: u8,

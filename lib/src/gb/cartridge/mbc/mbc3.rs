@@ -1,6 +1,7 @@
 use crate::gb::cartridge::mbc::{mask_bank_number, MbcInterface};
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mbc3 {
     pub has_rtc: bool,
     pub ram_rtc_enabled: bool,

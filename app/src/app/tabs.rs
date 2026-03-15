@@ -9,6 +9,7 @@ use strum_macros::EnumIter;
 mod apu;
 mod apu_waves;
 mod audio_debug;
+mod debug_actions;
 mod disassembly;
 mod e2e;
 mod game_boy;
@@ -51,6 +52,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             Tab::ApuWaves => apu_waves::show(self, ui),
             Tab::Disassembly => disassembly::show(self, ui),
             Tab::Performance => performance::show(self, ui),
+            Tab::DebugActions => debug_actions::show(self, ui),
         }
     }
 
@@ -68,6 +70,7 @@ pub enum Tab {
     Apu,
     ApuWaves,
     AudioDebug,
+    DebugActions,
     Disassembly,
     E2ETest,
     GameBoy,
@@ -96,6 +99,7 @@ impl Tab {
             Tab::ApuWaves => "APU Waves",
             Tab::Disassembly => "Disassembly",
             Tab::Performance => "Performance",
+            Tab::DebugActions => "Debug Actions",
         }
     }
 

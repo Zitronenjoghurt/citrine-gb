@@ -9,6 +9,12 @@ pub enum GbError {
     IO(#[from] std::io::Error),
     #[error("Missing ROM cartridge type")]
     MissingRomCartridgeType,
+    #[cfg(feature = "rmp-serde")]
+    #[error("RMP decode error: {0}")]
+    RmpDecode(#[from] rmp_serde::decode::Error),
+    #[cfg(feature = "rmp-serde")]
+    #[error("RMP encode error: {0}")]
+    RmpEncode(#[from] rmp_serde::encode::Error),
     #[error("ROM too small")]
     RomTooSmall,
     #[error("ROM size exceeded expected rom bank count")]

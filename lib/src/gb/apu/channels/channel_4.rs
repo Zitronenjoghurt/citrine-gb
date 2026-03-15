@@ -5,6 +5,7 @@ use crate::gb::apu::registers::ch4_frequency::Channel4Frequency;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Channel4 {
     pub enabled: bool,
     pub lfsr: u16,

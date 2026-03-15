@@ -3,6 +3,7 @@ use crate::gb::ppu::types::mode::PpuMode;
 /// Source: https://gbdev.io/pandocs/STAT.html#ff41--stat-lcd-status
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct STAT {
     pub lyc_interrupt: bool,
     pub mode2_interrupt: bool, // OAMSearch interrupt

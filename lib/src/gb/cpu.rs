@@ -18,6 +18,7 @@ pub trait Bus: CpuBusInterface + ICInterface + crate::debug::DebuggerInterface {
 impl<T: CpuBusInterface + ICInterface + crate::debug::DebuggerInterface> Bus for T {}
 
 #[derive(Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cpu {
     pub a: u8,
     pub b: u8,
@@ -956,6 +957,7 @@ impl Cpu {
 }
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Flags {
     /// Z = Set to true if the result of the operation is equal to 0
     pub zero: bool,

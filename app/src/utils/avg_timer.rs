@@ -27,13 +27,12 @@ impl AvgTimer {
     pub fn stop(&mut self) {
         let now = web_time::Instant::now();
         let elapsed = (now - self.start).as_secs_f32();
-        self.ema_secs.update(elapsed, 300);
+        self.ema_secs.update(elapsed, 1200);
 
         if let Some(last) = self.last_stop {
             let interval = (now - last).as_secs_f32();
             if interval > 0.0 {
-                self.ema_interval
-                    .update(interval, self.updates_per_sec().round() as usize * 10);
+                self.ema_interval.update(interval, 1200);
             }
         }
         self.last_stop = Some(now);
