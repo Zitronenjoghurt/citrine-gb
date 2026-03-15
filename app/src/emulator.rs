@@ -77,7 +77,10 @@ impl Emulator {
             return Ok(());
         }
 
-        let current_loc = self.gb.cartridge.probe_rom_location(self.gb.cpu.pc);
+        let current_loc = self
+            .gb
+            .cartridge
+            .probe_rom_location(self.gb.cpu.pc.saturating_sub(1));
         if self.gb.debugger.breakpoints.contains(&current_loc) {
             self.running = false;
             return Ok(());

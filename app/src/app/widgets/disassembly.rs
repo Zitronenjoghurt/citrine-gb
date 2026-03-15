@@ -1,8 +1,8 @@
-use citrine_gb::disassembly::{Disassembly, DisassemblySource};
+use citrine_gb::disassembly::{Confidence, Disassembly, DisassemblySource};
 use citrine_gb::gb::cartridge::{Cartridge, RomLocation};
 use citrine_gb::gb::cpu::Cpu;
 use citrine_gb::instructions::{Instruction, Operand};
-use egui::{Response, ScrollArea, Ui, Widget};
+use egui::{Response, ScrollArea, Stroke, Ui, Widget};
 use std::collections::HashSet;
 
 pub struct DisassemblyView<'a> {
@@ -34,10 +34,143 @@ impl<'a> DisassemblyView<'a> {
             row_height: 20.0,
         }
     }
+
+    fn draw_row(
+        &mut self,
+        ui: &mut Ui,
+        index: usize,
+        current_loc: RomLocation,
+        font: &egui::FontId,
+        is_dark_mode: bool,
+    ) {
+        let Some(decoded) = self.disassembly.get_by_index(index) else {
+            return;
+        };
+
+        let end_loc = decoded.loc.offset(decoded.instruction.length() as i16);
+        let is_pc = current_loc >= decoded.loc && current_loc < end_loc;
+        let is_bp = self.breakpoints.contains(&decoded.loc);
+
+        let (rect, row_response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), self.row_height),
+            egui::Sense::click(),
+        );
+
+        row_response.context_menu(|ui| {
+            ui.label(format!("Location: {}", decoded.loc));
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.small(
+                    decoded
+                        .instruction_bytes()
+                        .iter()
+                        .map(|b| format!("0x{:02X}", b))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                ui.small("•");
+                ui.small(format!("{} machine cycles", decoded.machine_cycles()));
+                ui.small("•");
+                match decoded.confidence {
+                    Confidence::Fetched => ui.small("Was fetched by the CPU"),
+                    Confidence::Unconditional => {
+                        ui.small("Reachable through unconditional branching")
+                    }
+                    Confidence::Conditional => ui.small("Reachable through conditional branching"),
+                }
+            });
+            ui.label(decoded.educational_text());
+        });
+
+        let gutter_width = 24.0;
+        let bp_rect = egui::Rect::from_min_size(rect.min, egui::vec2(gutter_width, rect.height()));
+        let bp_hovered = ui.rect_contains_pointer(bp_rect);
+
+        if bp_hovered && row_response.clicked() && !self.breakpoints.remove(&decoded.loc) {
+            self.breakpoints.insert(decoded.loc);
+        }
+
+        let row_hovered = row_response.hovered() && !bp_hovered;
+        let bg = if is_pc {
+            ui.visuals().selection.bg_fill
+        } else if row_hovered {
+            if is_dark_mode {
+                egui::Color32::from_white_alpha(15)
+            } else {
+                egui::Color32::from_black_alpha(10)
+            }
+        } else if index.is_multiple_of(2) {
+            ui.visuals().faint_bg_color
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+
+        if bg != egui::Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, 0.0, bg);
+        }
+
+        let bp_center = egui::pos2(rect.left() + 10.0, rect.center().y);
+        if is_bp {
+            ui.painter()
+                .circle_filled(bp_center, 4.0, ui.visuals().error_fg_color);
+        } else if bp_hovered {
+            ui.painter().circle_stroke(
+                bp_center,
+                4.0,
+                Stroke::new(1.0, ui.visuals().error_fg_color),
+            );
+        }
+
+        let y = rect.center().y;
+
+        ui.painter().text(
+            egui::pos2(rect.left() + gutter_width, y),
+            egui::Align2::LEFT_CENTER,
+            decoded.loc.to_string(),
+            font.clone(),
+            ui.visuals().weak_text_color(),
+        );
+
+        let mnemonic_color = instruction_color(&decoded.instruction, is_dark_mode);
+        ui.painter().text(
+            egui::pos2(rect.left() + gutter_width + 70.0, y),
+            egui::Align2::LEFT_CENTER,
+            decoded.instruction.mnemonic(),
+            font.clone(),
+            mnemonic_color,
+        );
+
+        let operands = decoded.instruction.operands(&decoded.ctx);
+        let mut op_x = gutter_width + 115.0;
+        for op in operands.iter().flatten() {
+            ui.painter().text(
+                egui::pos2(rect.left() + op_x, y),
+                egui::Align2::LEFT_CENTER,
+                op.to_string(),
+                font.clone(),
+                operand_color(op, is_dark_mode),
+            );
+            op_x += 45.0;
+        }
+
+        let (conf_str, conf_color) = match decoded.confidence {
+            Confidence::Fetched => ("Fetch", egui::Color32::from_rgb(100, 200, 100)),
+            Confidence::Unconditional => ("Uncond", egui::Color32::from_rgb(200, 200, 100)),
+            Confidence::Conditional => ("Cond", egui::Color32::from_rgb(200, 150, 100)),
+        };
+
+        ui.painter().text(
+            egui::pos2(rect.right() - 8.0, y),
+            egui::Align2::RIGHT_CENTER,
+            conf_str,
+            font.clone(),
+            conf_color,
+        );
+    }
 }
 
 impl Widget for DisassemblyView<'_> {
-    fn ui(self, ui: &mut Ui) -> Response {
+    fn ui(mut self, ui: &mut Ui) -> Response {
         let active_pc = self.cpu.pc.saturating_sub(1);
         let current_loc = self.cartridge.probe_rom_location(active_pc);
         let row_count = self.disassembly.len();
@@ -71,89 +204,12 @@ impl Widget for DisassemblyView<'_> {
             scroll_area = scroll_area.vertical_scroll_offset(center_offset.max(0.0));
         }
 
-        let output = scroll_area.show_rows(ui, self.row_height, row_count, |ui, range| {
+        let row_height = self.row_height;
+        let output = scroll_area.show_rows(ui, row_height, row_count, |ui, range| {
             for i in range {
-                let Some(decoded) = self.disassembly.get_by_index(i) else {
-                    continue;
-                };
-
-                let end_loc = decoded.loc.offset(decoded.instruction.length() as i16);
-                let is_pc = current_loc >= decoded.loc && current_loc < end_loc;
-                let is_bp = self.breakpoints.contains(&decoded.loc);
-
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), self.row_height),
-                    egui::Sense::click(),
-                );
-
-                let bg = if is_pc {
-                    ui.visuals().selection.bg_fill
-                } else if response.hovered() {
-                    ui.visuals().widgets.hovered.bg_fill
-                } else if i % 2 == 0 {
-                    ui.visuals().faint_bg_color
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-
-                if bg != egui::Color32::TRANSPARENT {
-                    ui.painter().rect_filled(rect, 0.0, bg);
-                }
-
-                if is_bp {
-                    let center = egui::pos2(rect.left() + 10.0, rect.center().y);
-                    ui.painter()
-                        .circle_filled(center, 4.0, ui.visuals().error_fg_color);
-                }
-
-                if response.clicked() && !self.breakpoints.remove(&decoded.loc) {
-                    self.breakpoints.insert(decoded.loc);
-                }
-
-                let x = rect.left() + 24.0;
-                let y = rect.center().y;
-
-                let addr_text = format!("{}", decoded.loc);
-                ui.painter().text(
-                    egui::pos2(x, y),
-                    egui::Align2::LEFT_CENTER,
-                    addr_text,
-                    font.clone(),
-                    ui.visuals().weak_text_color(),
-                );
-
-                let mnemonic = decoded.instruction.mnemonic();
-                let mnemonic_color = instruction_color(&decoded.instruction, is_dark_mode);
-
-                ui.painter().text(
-                    egui::pos2(x + 70.0, y),
-                    egui::Align2::LEFT_CENTER,
-                    mnemonic,
-                    font.clone(),
-                    mnemonic_color,
-                );
-
-                let operands = decoded.instruction.operands(&decoded.ctx);
-
-                if let Some(op1) = &operands[0] {
-                    ui.painter().text(
-                        egui::pos2(x + 115.0, y),
-                        egui::Align2::LEFT_CENTER,
-                        op1.to_string(),
-                        font.clone(),
-                        operand_color(op1, is_dark_mode),
-                    );
-                }
-
-                if let Some(op2) = &operands[1] {
-                    ui.painter().text(
-                        egui::pos2(x + 160.0, y),
-                        egui::Align2::LEFT_CENTER,
-                        op2.to_string(),
-                        font.clone(),
-                        operand_color(op2, is_dark_mode),
-                    );
-                }
+                ui.push_id(i, |ui| {
+                    self.draw_row(ui, i, current_loc, &font, is_dark_mode);
+                });
             }
         });
 

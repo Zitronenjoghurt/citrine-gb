@@ -17,6 +17,21 @@ pub struct DecodedInstruction {
     pub confidence: Confidence,
 }
 
+impl DecodedInstruction {
+    pub fn instruction_bytes(&self) -> &[u8] {
+        let len = if self.instruction.is_prefixed() { 2 } else { 1 };
+        &self.ctx[0..len]
+    }
+
+    pub fn machine_cycles(&self) -> u8 {
+        self.instruction.machine_cycles()
+    }
+
+    pub fn educational_text(&self) -> String {
+        self.instruction.educational_text(&self.ctx)
+    }
+}
+
 impl Display for DecodedInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

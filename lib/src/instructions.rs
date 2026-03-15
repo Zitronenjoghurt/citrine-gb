@@ -684,6 +684,20 @@ impl Instruction {
         }
     }
 
+    pub fn is_prefixed(&self) -> bool {
+        matches!(
+            self,
+            Self::RLC_r(_)
+                | Self::RRC_r(_)
+                | Self::RL_r(_)
+                | Self::RR_r(_)
+                | Self::SLA_r(_)
+                | Self::SRA_r(_)
+                | Self::SWAP_r(_)
+                | Self::SRL_r(_)
+        )
+    }
+
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::NOP => "NOP",
@@ -877,6 +891,74 @@ impl Instruction {
             _ => FlowControl::Continue,
         }
     }
+
+    pub fn educational_text(&self, context: &[u8]) -> String {
+        let n1 = context.get(1).copied().unwrap_or(0);
+        let n2 = context.get(2).copied().unwrap_or(0);
+        let nn = u16::from_le_bytes([n1, n2]);
+
+        match self {
+            Self::NOP => "No operation. This instruction doesn't do anything, but can be used to add a delay of one machine cycle and increment PC by one.".to_string(),
+            Self::LD_rr_nn(r16) => format!("Loads the next 2 immediate bytes (0x{nn:04X}) into the register pair {r16}."),
+            Self::LD_rr_A(r16) => {
+                let (reg, extra) = if *r16 == R16Mem::HLinc {
+                    ("HL", " (Additionally increment register pair HL by one.)")
+                } else if *r16 == R16Mem::HLdec {
+                    ("HL", " (Additionally decrement register pair HL by one.)")
+                } else {
+                    (r16.as_str(), "")
+                };
+                format!("Loads data from register A into memory at the address specified by register pair {reg}.{extra}")
+            },
+            Self::LD_A_rr(r16) => {
+                let (reg, extra) = if *r16 == R16Mem::HLinc {
+                    ("HL", " (Additionally increment register pair HL by one.)")
+                } else if *r16 == R16Mem::HLdec {
+                    ("HL", " (Additionally decrement register pair HL by one.)")
+                } else {
+                    (r16.as_str(), "")
+                };
+                format!("Loads data from memory at the address specified by register pair {reg} into register A.{extra}")
+            },
+            Self::LD_nn_SP => format!("Loads data addressed by the stack pointer to the address specified by the next 2 immediate bytes (0x{nn:04X})."),
+            Self::INC_rr(r16) => if *r16 == R16::HL {
+                "Increments the value at the address specified by register pair HL by one.".to_string()
+            } else {
+                format!("Increments the value of register pair {r16} by one.")
+            },
+            Self::DEC_rr(r16) => if *r16 == R16::HL {
+                "Decrements the value at the address specified by register pair HL by one.".to_string()
+            } else {
+                format!("Decrements the value of register pair {r16} by one.")
+            },
+            _ => "Educational text to be implemented".to_string()
+        }
+    }
+
+    pub fn machine_cycles(&self) -> u8 {
+        match self {
+            Self::NOP => 1,
+            Self::LD_rr_nn(_) => 3,
+            Self::LD_rr_A(_) => 2,
+            Self::LD_A_rr(_) => 2,
+            Self::LD_nn_SP => 5,
+            Self::INC_rr(r16) => {
+                if *r16 == R16::HL {
+                    3
+                } else {
+                    2
+                }
+            }
+            Self::DEC_rr(r16) => {
+                if *r16 == R16::HL {
+                    3
+                } else {
+                    2
+                }
+            }
+            _ => 0,
+        }
+    }
 }
 
 impl Display for Instruction {
@@ -993,7 +1075,7 @@ impl Display for R8 {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum R16 {
     BC = 0,
     DE = 1,
@@ -1018,7 +1100,7 @@ impl Display for R16 {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum R16Mem {
     BC = 0,
     DE = 1,
