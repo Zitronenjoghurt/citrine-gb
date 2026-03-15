@@ -8,7 +8,7 @@ pub mod persistence;
 pub mod rom;
 #[cfg(test)]
 mod tests;
-mod utils;
+pub mod utils;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

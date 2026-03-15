@@ -1,3 +1,4 @@
+use crate::utils::avg_timer::AvgTimer;
 use citrine_gb::disassembly::DisassemblySource;
 use citrine_gb::error::GbResult;
 use citrine_gb::gb::joypad::JoypadState;
@@ -30,7 +31,8 @@ pub struct Emulator {
     last_update: Option<web_time::Instant>,
     time_accumulator: f64,
     pub render_scale: usize,
-    pub last_frame_secs: f64,
+    pub update_avg_timer: AvgTimer,
+    pub frame_avg_timer: AvgTimer,
     pub total_frames: u128,
     last_frame: Vec<u8>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -55,7 +57,8 @@ impl Default for Emulator {
             last_update: None,
             time_accumulator: 0.0,
             render_scale: 3,
-            last_frame_secs: 0.0,
+            update_avg_timer: AvgTimer::default(),
+            frame_avg_timer: AvgTimer::default(),
             total_frames: 0,
             last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
             #[cfg(not(target_arch = "wasm32"))]
@@ -68,6 +71,8 @@ impl Default for Emulator {
 
 impl Emulator {
     pub fn update(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) -> GbResult<()> {
+        self.update_avg_timer.start();
+
         if self.texture.is_none() {
             self.update_texture(ctx);
         }
@@ -103,11 +108,9 @@ impl Emulator {
 
         let mut ran_frame = false;
         while self.time_accumulator >= FRAME_TIME {
-            let start = web_time::Instant::now();
-
+            self.frame_avg_timer.start();
             self.gb.run_frame();
-
-            self.last_frame_secs = start.elapsed().as_secs_f64();
+            self.frame_avg_timer.stop();
             self.time_accumulator -= FRAME_TIME;
             ran_frame = true;
         }
@@ -133,6 +136,7 @@ impl Emulator {
 
         self.handle_save()?;
 
+        self.update_avg_timer.stop();
         Ok(())
     }
 

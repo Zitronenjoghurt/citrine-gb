@@ -14,6 +14,7 @@ mod e2e;
 mod game_boy;
 mod homebrew;
 mod info;
+mod performance;
 mod registers;
 mod rom_info;
 mod settings;
@@ -49,6 +50,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             Tab::Apu => apu::show(self, ui),
             Tab::ApuWaves => apu_waves::show(self, ui),
             Tab::Disassembly => disassembly::show(self, ui),
+            Tab::Performance => performance::show(self, ui),
         }
     }
 
@@ -71,6 +73,7 @@ pub enum Tab {
     GameBoy,
     Homebrew,
     Info,
+    Performance,
     Registers,
     RomInfo,
     Settings,
@@ -92,6 +95,7 @@ impl Tab {
             Tab::Apu => "APU",
             Tab::ApuWaves => "APU Waves",
             Tab::Disassembly => "Disassembly",
+            Tab::Performance => "Performance",
         }
     }
 

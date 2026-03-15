@@ -90,6 +90,8 @@ impl Citrine {
 
 impl eframe::App for Citrine {
     fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
+        self.ui.update_avg_timer.start();
+
         // ToDo: Handle this more efficiently => e.g. pause emulator if not visible
         ctx.request_repaint();
 
@@ -117,6 +119,8 @@ impl eframe::App for Citrine {
         self.ui
             .settings
             .apply(ctx, &mut self.audio, &mut self.emulator);
+
+        self.ui.update_avg_timer.stop();
     }
 
     fn save(&mut self, storage: &mut dyn Storage) {
@@ -220,6 +224,9 @@ impl Citrine {
                 ui.menu_button(icons::BRACKETS_CURLY, |ui| {
                     if ui.button("Time Control").clicked() {
                         self.open_tab(Tab::TimeControl);
+                    }
+                    if ui.button("Performance").clicked() {
+                        self.open_tab(Tab::Performance);
                     }
                     if ui.button("Audio Debug").clicked() {
                         self.open_tab(Tab::AudioDebug);

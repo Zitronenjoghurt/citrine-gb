@@ -5,6 +5,7 @@ pub mod disassembly;
 pub mod generic_select;
 pub mod homebrew;
 pub mod info;
+pub mod performance;
 pub mod registers;
 pub mod reset_slider;
 pub mod rom_info;
