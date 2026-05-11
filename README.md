@@ -1,4 +1,5 @@
 [![Crates.io](https://img.shields.io/crates/v/citrine-gb)](https://crates.io/crates/citrine-gb)
+![](http://tokei.lemon.industries/b1/github/Zitronenjoghurt/citrine-gb?category=code&type=Rust&logo=https://simpleicons.org/icons/rust.svg)
 
 # Citrine
 
