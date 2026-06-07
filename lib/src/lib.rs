@@ -6,6 +6,8 @@ pub mod gb;
 pub mod instructions;
 #[cfg(feature = "persistence")]
 pub mod persistence;
+#[cfg(feature = "recording")]
+pub mod recording;
 pub mod rom;
 #[cfg(test)]
 mod tests;

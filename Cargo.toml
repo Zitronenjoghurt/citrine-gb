@@ -1,6 +1,11 @@
 [workspace]
-members = ["app", "lib", "server"]
+members = ["app", "lab", "lab/sameboy-sys", "lib", "server"]
 resolver = "3"
 
 [workspace.dependencies]
 citrine-gb = { path = "lib" }
+
+# SameBoy's C core never changes (it's a pinned submodule), so always optimize it even in dev
+# builds — compiling it at -O0 makes lab runs dramatically slower for no iteration benefit.
+[profile.dev.package.sameboy-sys]
+opt-level = 3

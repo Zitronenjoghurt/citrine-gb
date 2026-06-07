@@ -22,3 +22,5 @@ target
 app/dist
 /build
 /roms
+/lab/report.json
+/lab/diff

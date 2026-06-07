@@ -8,7 +8,7 @@ all-features = true
 targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 
 [dependencies]
-citrine-gb = { workspace = true, features = ["debug", "persistence", "base64", "brotli", "strum"] }
+citrine-gb = { workspace = true, features = ["debug", "persistence", "recording", "base64", "brotli", "strum"] }
 anyhow = "1.0.102"
 brotli = "8.0.2"
 catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }

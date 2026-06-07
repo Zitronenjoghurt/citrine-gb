@@ -1,3 +1,6 @@
 [submodule "tests/cpu-adtennant"]
 	path = tests/cpu-adtennant
 	url = https://github.com/adtennant/GameboyCPUTests.git
+[submodule "lab/SameBoy"]
+	path = lab/SameBoy
+	url = https://github.com/LIJI32/SameBoy.git

@@ -1,3 +1,4 @@
+use crate::recorder::InputRecorder;
 use crate::utils::avg_timer::AvgTimer;
 use citrine_gb::disassembly::DisassemblySource;
 use citrine_gb::error::GbResult;
@@ -39,6 +40,7 @@ pub struct Emulator {
     rom_path: Option<std::path::PathBuf>,
     pub last_save: Option<web_time::Instant>,
     pub save_loaded: bool,
+    pub recorder: InputRecorder,
 }
 
 impl Default for Emulator {
@@ -65,6 +67,7 @@ impl Default for Emulator {
             rom_path: None,
             last_save: None,
             save_loaded: false,
+            recorder: InputRecorder::default(),
         }
     }
 }
@@ -140,17 +143,36 @@ impl Emulator {
         Ok(())
     }
 
+    /// Begin recording input from the current emulator state.
+    pub fn start_recording(&mut self) {
+        self.recorder.start(&self.gb);
+    }
+
+    /// Press a button, also feeding the input recorder when it is active.
+    pub fn press(&mut self, button: JoypadState) {
+        let total_cycles = self.gb.debugger.total_cycles;
+        self.gb.press_button(button);
+        self.recorder.record(total_cycles, button, true);
+    }
+
+    /// Release a button, also feeding the input recorder when it is active.
+    pub fn release(&mut self, button: JoypadState) {
+        let total_cycles = self.gb.debugger.total_cycles;
+        self.gb.release_button(button);
+        self.recorder.record(total_cycles, button, false);
+    }
+
     pub fn handle_input(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) {
         while let Some(gilrs::Event { event, .. }) = gil.next_event() {
             match event {
                 ButtonPressed(btn, ..) => {
                     if let Some(button) = gamepad_map(btn) {
-                        self.gb.press_button(button);
+                        self.press(button);
                     }
                 }
                 ButtonReleased(btn, ..) => {
                     if let Some(button) = gamepad_map(btn) {
-                        self.gb.release_button(button);
+                        self.release(button);
                     }
                 }
                 AxisChanged(axis, value, ..) => match axis {
@@ -186,9 +208,9 @@ impl Emulator {
 
                 if let Some(button) = button {
                     if *pressed {
-                        self.gb.press_button(button);
+                        self.press(button);
                     } else {
-                        self.gb.release_button(button);
+                        self.release(button);
                     }
                 }
             }
@@ -197,23 +219,23 @@ impl Emulator {
 
     pub fn handle_x_axis(&mut self, value: f32) {
         if value < -0.5 {
-            self.gb.press_button(JoypadState::LEFT);
+            self.press(JoypadState::LEFT);
         } else if value > 0.5 {
-            self.gb.press_button(JoypadState::RIGHT);
+            self.press(JoypadState::RIGHT);
         } else {
-            self.gb.release_button(JoypadState::LEFT);
-            self.gb.release_button(JoypadState::RIGHT);
+            self.release(JoypadState::LEFT);
+            self.release(JoypadState::RIGHT);
         }
     }
 
     pub fn handle_y_axis(&mut self, value: f32) {
         if value < -0.5 {
-            self.gb.press_button(JoypadState::DOWN);
+            self.press(JoypadState::DOWN);
         } else if value > 0.5 {
-            self.gb.press_button(JoypadState::UP);
+            self.press(JoypadState::UP);
         } else {
-            self.gb.release_button(JoypadState::UP);
-            self.gb.release_button(JoypadState::DOWN);
+            self.release(JoypadState::UP);
+            self.release(JoypadState::DOWN);
         }
     }
 

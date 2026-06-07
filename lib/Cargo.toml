@@ -12,6 +12,7 @@ exclude = [".DS_Store"]
 default = []
 debug = ["crc32fast", "png", "serde", "serde_json", "sha1", "sha2"]
 persistence = ["serde", "rmp-serde", "bitflags/serde"]
+recording = ["serde", "serde_json", "bitflags/serde"]
 strum = ["dep:strum", "strum_macros"]
 
 [dependencies]
