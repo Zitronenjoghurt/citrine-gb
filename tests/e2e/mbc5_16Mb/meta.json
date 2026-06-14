@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "mbc5_16Mb",
+  "description": "Mooneye MBC test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "MBC5",
+    "rom_banks": 128,
+    "ram_banks": 0,
+    "crc_32": "6B4755D4",
+    "sha1": "6CB3BD907F659E9E28ED2F2923B271214C715D11",
+    "sha256": "315AC9D9D7A3ADDA80F5FA8DEE5826912BD99961E9539BD39CA8B440464AE794"
+  },
+  "cycles": 200002
+}

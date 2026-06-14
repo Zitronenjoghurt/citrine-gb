@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "boot_regs-dmgABC",
+  "description": "Mooneye boot test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "3C927587",
+    "sha1": "CE3B41122254856BE333FB08611EE47E78612169",
+    "sha256": "50B4869BFDF6F69E14F82AC4D673C1983B29439157CF84BB422268069766C3C5"
+  },
+  "cycles": 200001
+}
