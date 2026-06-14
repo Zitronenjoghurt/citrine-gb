@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "ie_push",
+  "description": "Mooneye CPU test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "A3D04D56",
+    "sha1": "B4CD15C0CA45238B043CD1694D0BF9B0035B82BC",
+    "sha256": "F80DF1B48CA2F81D4EC43B9C66BE5F0B30F0D409603D256CC5C7CFC6241C0120"
+  },
+  "cycles": 200000
+}

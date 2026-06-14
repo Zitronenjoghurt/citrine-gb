@@ -227,16 +227,22 @@ impl Cpu {
     }
 
     fn interrupt_handler(&mut self, bus: &mut impl Bus) {
-        if self.ime
-            && let Some(interrupt) = bus.take_interrupt()
-        {
+        if self.ime && bus.has_pending_interrupt() {
             self.ime = false;
             self.ime_next = false;
 
             bus.cycle();
             bus.cycle();
-            self.push_word(bus, self.pc.wrapping_sub(1));
-            self.pc = interrupt.vector();
+
+            let return_address = self.pc.wrapping_sub(1);
+            self.push(bus, hi(return_address));
+
+            let vector = bus
+                .take_interrupt()
+                .map_or(0x0000, |interrupt| interrupt.vector());
+
+            self.push(bus, lo(return_address));
+            self.pc = vector;
 
             self.fetch(bus);
         }
