@@ -573,6 +573,7 @@ impl Cpu {
 
     pub fn reti(&mut self, bus: &mut impl Bus) {
         self.ret(bus);
+        self.ime = true;
         self.ime_next = true;
     }
 

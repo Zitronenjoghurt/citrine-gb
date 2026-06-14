@@ -10,6 +10,8 @@
 - Inverted DMG post-boot `F` flags (half-carry/carry are now set when the header checksum is non-zero)
 - Interrupt dispatch now reads the target vector from `IE` after pushing the high byte of the return
   address, so a stack push onto `$FFFF` can redirect or cancel the interrupt
+- `RETI` now enables `IME` immediately instead of after the following instruction (it was incorrectly
+  treated like `EI`), so an interrupt pending when a handler returns is serviced without a one-instruction delay
 - Building the library standalone with only the `debug` feature failed to compile (`serde` now also
   enables `bitflags/serde`)
 

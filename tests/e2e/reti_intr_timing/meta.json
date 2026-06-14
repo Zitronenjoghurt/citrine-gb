@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "reti_intr_timing",
+  "description": "Mooneye CPU test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "F503FD63",
+    "sha1": "C05E96F29EAC0AC3FFD1F150F19F8FBB7038C986",
+    "sha256": "A98440BFB0E4F29EF762515E4B842E2777BC35445A30903ED86799CF18DC5C55"
+  },
+  "cycles": 200002
+}
