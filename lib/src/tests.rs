@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 mod cpu;
 mod e2e;
+mod halt;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct TestBus {

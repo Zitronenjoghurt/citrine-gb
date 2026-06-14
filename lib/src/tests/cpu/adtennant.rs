@@ -129,6 +129,7 @@ impl From<&TestState> for Cpu {
             ime: false,
             ime_next: false,
             halted: false,
+            halt_bug: false,
             model: GbModel::Dmg,
             invalid_opcode: false,
         }

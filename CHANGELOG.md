@@ -16,6 +16,8 @@
   trigger (previously they only fired if the program counter happened to sit on them at a frame boundary)
 - Unused I/O register bits now read as 1 (serial `SC`, `TAC`) and unmapped I/O registers read `0xFF`;
   `IE` is now a full 8-bit read/write register
+- The HALT bug is now emulated: executing `HALT` with `IME` cleared while an interrupt is already
+  pending no longer halts, and the byte after `HALT` is read twice (matching original hardware)
 - Building the library standalone with only the `debug` feature failed to compile (`serde` now also
   enables `bitflags/serde`)
 

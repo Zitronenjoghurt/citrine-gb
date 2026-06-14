@@ -34,6 +34,7 @@ pub struct Cpu {
     pub ime: bool,
     pub ime_next: bool,
     pub halted: bool,
+    pub halt_bug: bool,
     pub model: GbModel,
     pub invalid_opcode: bool,
 }
@@ -73,6 +74,7 @@ impl Cpu {
             ime: false,
             ime_next: false,
             halted: false,
+            halt_bug: false,
             model: GbModel::Dmg,
             invalid_opcode: false,
         }
@@ -99,6 +101,7 @@ impl Cpu {
             ime: false,
             ime_next: false,
             halted: false,
+            halt_bug: false,
             model: GbModel::Cgb,
             invalid_opcode: false,
         }
@@ -151,7 +154,13 @@ impl Cpu {
             Instruction::JR_n => self.jr_n(bus),
             Instruction::JR_c_n(cond) => self.jr_c_n(bus, cond),
             Instruction::STOP => {}
-            Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => self.halted = true,
+            Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => {
+                if !self.ime && bus.has_pending_interrupt() {
+                    self.halt_bug = true;
+                } else {
+                    self.halted = true;
+                }
+            }
             Instruction::LD_r_r(dest, src) => self.ld_r_r(bus, dest, src),
             Instruction::ADD_r(r8) => self.add_r(bus, r8),
             Instruction::ADC_r(r8) => self.adc_r(bus, r8),
@@ -214,7 +223,13 @@ impl Cpu {
     pub fn fetch(&mut self, bus: &mut impl Bus) {
         #[cfg(feature = "debug")]
         bus.on_fetch(self.pc);
-        self.ir = self.read_program(bus);
+
+        if self.halt_bug {
+            self.halt_bug = false;
+            self.ir = bus.read(self.pc);
+        } else {
+            self.ir = self.read_program(bus);
+        }
     }
 
     pub fn decode(&mut self, bus: &mut impl Bus) -> Instruction {
