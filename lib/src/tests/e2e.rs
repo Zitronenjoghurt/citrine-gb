@@ -1,7 +1,7 @@
 use crate::debug::e2e::E2ETest;
 use crate::gb::GameBoy;
-use crate::rom::header::RomHeader;
 use crate::rom::Rom;
+use crate::rom::header::RomHeader;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};

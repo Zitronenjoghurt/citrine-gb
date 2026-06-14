@@ -1,9 +1,9 @@
+use crate::gb::GbModel;
 use crate::gb::ic::{ICInterface, Interrupt};
 use crate::gb::ppu::fetcher::PixelFetcher;
 use crate::gb::ppu::fifo::PixelFifo;
 use crate::gb::ppu::scanner::OamScanner;
 use crate::gb::ppu::types::theme::DmgTheme;
-use crate::gb::GbModel;
 use crate::{ReadMemory, WriteMemory};
 use types::framebuffer::Framebuffer;
 use types::lcdc::LCDC;
@@ -459,7 +459,7 @@ impl WriteMemory for Ppu {
 #[cfg(feature = "serde")]
 mod serde_oam {
     use super::OAM_SIZE;
-    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
     pub fn serialize<S: Serializer>(oam: &[u8; OAM_SIZE], s: S) -> Result<S::Ok, S::Error> {
         oam.as_slice().serialize(s)
@@ -475,7 +475,7 @@ mod serde_oam {
 #[cfg(feature = "serde")]
 mod serde_vram {
     use super::VRAM_BANK_SIZE;
-    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
     pub fn serialize<S: Serializer>(
         vram: &[[u8; VRAM_BANK_SIZE]; 2],
@@ -502,7 +502,7 @@ mod serde_vram {
 
 #[cfg(feature = "serde")]
 mod serde_64 {
-    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
     pub fn serialize<S: Serializer>(arr: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
         arr.as_slice().serialize(s)

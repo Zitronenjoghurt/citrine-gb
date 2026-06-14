@@ -1,7 +1,7 @@
 use crate::emulator::{Button, FrameEmulator, SCREEN_HEIGHT, SCREEN_WIDTH};
 use citrine_gb::gb::GbModel;
-use std::ffi::c_void;
 use sameboy_sys as sys;
+use std::ffi::c_void;
 
 /// State shared with the C callbacks via SameBoy's user-data pointer.
 struct Ctx {
@@ -217,7 +217,9 @@ impl FrameEmulator for SameBoyEmulator {
 fn bytemuck_cast(pixels: &[u32]) -> &[u8] {
     // SAFETY: `u32` has no padding and any bit pattern is valid `u8`; the resulting slice covers
     // exactly the same bytes and borrows `pixels` for its lifetime.
-    unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, std::mem::size_of_val(pixels)) }
+    unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, std::mem::size_of_val(pixels))
+    }
 }
 
 // SAFETY: `SameBoyEmulator` owns its `GB_gameboy_t` exclusively (one `GB_alloc`, freed in `Drop`).

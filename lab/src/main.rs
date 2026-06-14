@@ -105,9 +105,7 @@ fn build_metrics(spec: &str) -> anyhow::Result<Vec<Box<dyn FrameMetric>>> {
     spec.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|name| {
-            metrics::by_name(name).with_context(|| format!("unknown metric '{name}'"))
-        })
+        .map(|name| metrics::by_name(name).with_context(|| format!("unknown metric '{name}'")))
         .collect()
 }
 

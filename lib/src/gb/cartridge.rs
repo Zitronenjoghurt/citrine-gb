@@ -1,8 +1,8 @@
 use crate::disassembly::DisassemblySource;
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
-use crate::rom::header::RomHeader;
 use crate::rom::Rom;
+use crate::rom::header::RomHeader;
 use crate::{ReadMemory, WriteMemory};
 use std::fmt::{Display, Formatter};
 

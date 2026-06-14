@@ -19,9 +19,7 @@ pub struct ConsoleReporter {
 
 impl Default for ConsoleReporter {
     fn default() -> Self {
-        Self {
-            max_rows: Some(30),
-        }
+        Self { max_rows: Some(30) }
     }
 }
 
@@ -149,8 +147,14 @@ impl FrameDumper {
             self.skipped += 1;
             return Ok(());
         }
-        write_png(&self.dir.join(format!("frame_{index:05}_ref.png")), &reference.rgba)?;
-        write_png(&self.dir.join(format!("frame_{index:05}_cand.png")), &candidate.rgba)?;
+        write_png(
+            &self.dir.join(format!("frame_{index:05}_ref.png")),
+            &reference.rgba,
+        )?;
+        write_png(
+            &self.dir.join(format!("frame_{index:05}_cand.png")),
+            &candidate.rgba,
+        )?;
         write_png(
             &self.dir.join(format!("frame_{index:05}_diff.png")),
             &diff_rgba(&reference.rgba, &candidate.rgba),
@@ -161,8 +165,16 @@ impl FrameDumper {
 
     /// Print a one-line summary of what was written. Call after the run completes.
     pub fn finish(&self) {
-        let kind = if self.all_frames { "frame" } else { "diverging frame" };
-        println!("png-diff: dumped {} {kind}(s) to {}", self.dumped, self.dir.display());
+        let kind = if self.all_frames {
+            "frame"
+        } else {
+            "diverging frame"
+        };
+        println!(
+            "png-diff: dumped {} {kind}(s) to {}",
+            self.dumped,
+            self.dir.display()
+        );
         if self.skipped > 0 {
             println!(
                 "png-diff: {} more {kind}(s) NOT dumped (raise --max-dumps or pass 0 for no limit)",

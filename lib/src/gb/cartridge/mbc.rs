@@ -4,6 +4,7 @@ use crate::rom::header::{RomCartridgeType, RomHeader};
 mod mbc1;
 mod mbc2;
 mod mbc3;
+mod mbc5;
 
 pub trait MbcInterface {
     /// Returns `true` if the write was consumed by the MBC
@@ -22,6 +23,7 @@ pub enum Mbc {
     Mbc1(mbc1::Mbc1),
     Mbc2(mbc2::Mbc2),
     Mbc3(mbc3::Mbc3),
+    Mbc5(mbc5::Mbc5),
 }
 
 impl Mbc {
@@ -50,6 +52,7 @@ impl MbcInterface for Mbc {
             Self::Mbc1(mbc) => mbc.on_write(addr, value),
             Self::Mbc2(mbc) => mbc.on_write(addr, value),
             Self::Mbc3(mbc) => mbc.on_write(addr, value),
+            Self::Mbc5(mbc) => mbc.on_write(addr, value),
         }
     }
 
@@ -59,6 +62,7 @@ impl MbcInterface for Mbc {
             Self::Mbc1(mbc) => mbc.on_read(addr),
             Self::Mbc2(mbc) => mbc.on_read(addr),
             Self::Mbc3(mbc) => mbc.on_read(addr),
+            Self::Mbc5(mbc) => mbc.on_read(addr),
         }
     }
 
@@ -68,6 +72,7 @@ impl MbcInterface for Mbc {
             Self::Mbc1(mbc) => mbc.rom_bank_low(),
             Self::Mbc2(mbc) => mbc.rom_bank_low(),
             Self::Mbc3(mbc) => mbc.rom_bank_low(),
+            Self::Mbc5(mbc) => mbc.rom_bank_low(),
         }
     }
 
@@ -77,6 +82,7 @@ impl MbcInterface for Mbc {
             Self::Mbc1(mbc) => mbc.rom_bank_high(),
             Self::Mbc2(mbc) => mbc.rom_bank_high(),
             Self::Mbc3(mbc) => mbc.rom_bank_high(),
+            Self::Mbc5(mbc) => mbc.rom_bank_high(),
         }
     }
 
@@ -86,6 +92,7 @@ impl MbcInterface for Mbc {
             Self::Mbc1(mbc) => mbc.ram_bank(),
             Self::Mbc2(mbc) => mbc.ram_bank(),
             Self::Mbc3(mbc) => mbc.ram_bank(),
+            Self::Mbc5(mbc) => mbc.ram_bank(),
         }
     }
 
@@ -95,6 +102,7 @@ impl MbcInterface for Mbc {
             Self::Mbc1(mbc) => mbc.soft_reset(),
             Self::Mbc2(mbc) => mbc.soft_reset(),
             Self::Mbc3(mbc) => mbc.soft_reset(),
+            Self::Mbc5(mbc) => mbc.soft_reset(),
         }
     }
 }
@@ -123,6 +131,14 @@ impl TryFrom<&RomHeader> for Mbc {
             }
             RomCartridgeType::Mbc3TimerBattery | RomCartridgeType::Mbc3TimerRamBattery => {
                 Self::Mbc3(mbc3::Mbc3::new(header.rom_banks, header.ram_banks, true))
+            }
+            RomCartridgeType::Mbc5
+            | RomCartridgeType::Mbc5Ram
+            | RomCartridgeType::Mbc5RamBattery
+            | RomCartridgeType::Mbc5Rumble
+            | RomCartridgeType::Mbc5RumbleRam
+            | RomCartridgeType::Mbc5RumbleRamBattery => {
+                Self::Mbc5(mbc5::Mbc5::new(header.rom_banks, header.ram_banks))
             }
             _ => Self::None,
         };

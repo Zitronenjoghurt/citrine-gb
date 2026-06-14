@@ -62,7 +62,7 @@ impl WriteMemory for Memory {
 #[cfg(feature = "serde")]
 mod serde_wram {
     use super::WRAM_BANK_SIZE;
-    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
     pub fn serialize<S: Serializer>(
         wram: &Vec<[u8; WRAM_BANK_SIZE]>,
@@ -91,7 +91,7 @@ mod serde_wram {
 #[cfg(feature = "serde")]
 mod serde_hram {
     use super::HRAM_SIZE;
-    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
     pub fn serialize<S: Serializer>(hram: &[u8; HRAM_SIZE], s: S) -> Result<S::Ok, S::Error> {
         hram.as_slice().serialize(s)
@@ -107,7 +107,7 @@ mod serde_hram {
 #[cfg(feature = "serde")]
 mod serde_io {
     use super::IO_SIZE;
-    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
     pub fn serialize<S: Serializer>(io: &[u8; IO_SIZE], s: S) -> Result<S::Ok, S::Error> {
         io.as_slice().serialize(s)

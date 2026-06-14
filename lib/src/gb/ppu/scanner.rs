@@ -1,5 +1,5 @@
-use crate::gb::ppu::types::sprite::Sprite;
 use crate::gb::ppu::Ppu;
+use crate::gb::ppu::types::sprite::Sprite;
 
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

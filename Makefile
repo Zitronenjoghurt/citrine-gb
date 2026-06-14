@@ -1,4 +1,11 @@
-.PHONY: test check dev native up down build logs release mac win
+.PHONY: test test-mooneye build-tests check dev native up down build logs release mac win
+
+build-tests:
+	git submodule update --init tests/mooneye
+	$(MAKE) -C tests/mooneye
+
+test-mooneye: build-tests
+	cargo test --release --test mooneye
 
 test:
 	cargo test --release -- --nocapture

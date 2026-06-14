@@ -1,5 +1,5 @@
-use crate::gb::cpu::Cpu;
 use crate::gb::GbModel;
+use crate::gb::cpu::Cpu;
 use crate::tests::TestBus;
 use std::path::PathBuf;
 

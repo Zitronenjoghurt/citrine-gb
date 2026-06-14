@@ -1,7 +1,7 @@
 use crate::gb::apu::components::length_counter::LengthCounter;
 use crate::gb::apu::components::volume_envelope::VolumeEnvelope;
-use crate::gb::apu::registers::ch124_volume::Channel124Volume;
 use crate::gb::apu::registers::ch4_frequency::Channel4Frequency;
+use crate::gb::apu::registers::ch124_volume::Channel124Volume;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]

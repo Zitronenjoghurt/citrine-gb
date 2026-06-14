@@ -1,4 +1,4 @@
-use crate::gb::cartridge::mbc::{mask_bank_number, MbcInterface};
+use crate::gb::cartridge::mbc::{MbcInterface, mask_bank_number};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

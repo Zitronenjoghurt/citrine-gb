@@ -179,7 +179,12 @@ impl Aggregator {
         }
     }
 
-    fn finish(self, metrics: &[Box<dyn FrameMetric>], ref_name: &str, cand_name: &str) -> ComparisonReport {
+    fn finish(
+        self,
+        metrics: &[Box<dyn FrameMetric>],
+        ref_name: &str,
+        cand_name: &str,
+    ) -> ComparisonReport {
         let n = self.compared;
         let summaries = metrics
             .iter()
@@ -263,7 +268,13 @@ fn produce<E: FrameEmulator>(
             .unwrap_or_else(|_| Vec::with_capacity(FRAME_BYTES));
         emu.render_into(&mut rgba);
         // A send error means the consumer has gone away (early stop / error) — just bow out.
-        if tx.send(CycleFrame { cycle: emu.total_cycles(), rgba }).is_err() {
+        if tx
+            .send(CycleFrame {
+                cycle: emu.total_cycles(),
+                rgba,
+            })
+            .is_err()
+        {
             break;
         }
     }
@@ -285,6 +296,20 @@ fn produce<E: FrameEmulator>(
 /// sub-frame sampling skew (two independent emulators latch their framebuffers a few hundred cycles
 /// apart, so a game update landing in that gap shows up one frame early/late). `tolerance` is
 /// ignored in [`Alignment::Emission`].
+/// Sum of absolute per-channel (RGB) differences between two frame buffers — a cheap proxy for
+/// "how different do these look". Used to pick the most visually similar candidate in the
+/// tolerance window for dumps, so a timing-shifted frame isn't shown as a diff when a near-match
+/// sits a few steps away. Mirrors the channels [`diff_rgba`] amplifies (RGB, skipping alpha).
+fn frame_distance(a: &[u8], b: &[u8]) -> u64 {
+    let mut sum = 0u64;
+    for i in (0..a.len()).step_by(4) {
+        for c in 0..3 {
+            sum += (a[i + c] as i32 - b[i + c] as i32).unsigned_abs() as u64;
+        }
+    }
+    sum
+}
+
 pub fn run_streaming<R, C>(
     reference: R,
     candidate: C,
@@ -320,10 +345,26 @@ where
         let (cand_recycle_tx, cand_recycle_rx) = channel::<Vec<u8>>();
 
         let ref_handle = scope.spawn(move || {
-            produce(reference, rom, boot_rom, recording, max_frames, ref_tx, ref_recycle_rx)
+            produce(
+                reference,
+                rom,
+                boot_rom,
+                recording,
+                max_frames,
+                ref_tx,
+                ref_recycle_rx,
+            )
         });
         let cand_handle = scope.spawn(move || {
-            produce(candidate, rom, boot_rom, recording, cand_count, cand_tx, cand_recycle_rx)
+            produce(
+                candidate,
+                rom,
+                boot_rom,
+                recording,
+                cand_count,
+                cand_tx,
+                cand_recycle_rx,
+            )
         });
 
         // Persistent scratch frames reused every iteration; nothing here is reallocated per frame.
@@ -394,7 +435,9 @@ where
 
                     // Extend the window until it reaches `tol_cycles` past the reference cycle.
                     while !stream_done
-                        && window.back().is_none_or(|b| b.cycle <= r.cycle + tol_cycles)
+                        && window
+                            .back()
+                            .is_none_or(|b| b.cycle <= r.cycle + tol_cycles)
                     {
                         match pending.take().or_else(|| cand_rx.recv().ok()) {
                             Some(nf) => window.push_back(nf),
@@ -435,10 +478,16 @@ where
 
                     let mut best = vec![f64::NAN; metrics.len()];
                     let mut any_identical = false;
-                    // Representative candidate for image dumps: an exact match if one exists in the
-                    // window, otherwise the nearest in cycle.
+                    // Representative candidate for image dumps. Preference order:
+                    //   1. an exact match anywhere in the window — then the frame merely arrived a
+                    //      few steps early/late and is not a real diff (it won't be dumped at all,
+                    //      since `diverged` below is `!any_identical`);
+                    //   2. otherwise the *most visually similar* candidate in the window — not the
+                    //      nearest in cycle, which is often the timing-shifted frame we want tolerance
+                    //      to look past. This makes the dumped diff the faintest one available.
                     let mut rep_idx = nearest;
                     let mut rep_identical = false;
+                    let mut rep_dist = u64::MAX;
                     for wi in lo..=hi {
                         std::mem::swap(&mut cand_raw.rgba, &mut window[wi].rgba);
                         let cf: &Frame = if normalize {
@@ -451,9 +500,18 @@ where
                         keep_best(&mut best, &scores);
                         let identical = rf.rgba == cf.rgba;
                         any_identical |= identical;
-                        if identical && !rep_identical {
-                            rep_idx = wi;
-                            rep_identical = true;
+                        if identical {
+                            if !rep_identical {
+                                rep_idx = wi;
+                                rep_identical = true;
+                            }
+                        } else if !rep_identical {
+                            // No exact match yet: keep the closest-looking candidate as the fallback.
+                            let dist = frame_distance(&rf.rgba, &cf.rgba);
+                            if dist < rep_dist {
+                                rep_dist = dist;
+                                rep_idx = wi;
+                            }
                         }
                         std::mem::swap(&mut cand_raw.rgba, &mut window[wi].rgba);
                     }

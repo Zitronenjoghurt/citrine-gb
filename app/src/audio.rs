@@ -3,8 +3,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::consumer::Consumer;
 use ringbuf::traits::Split;
 use ringbuf::{HeapCons, HeapProd, HeapRb};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub struct Audio {
     pub stream: Option<cpal::Stream>,

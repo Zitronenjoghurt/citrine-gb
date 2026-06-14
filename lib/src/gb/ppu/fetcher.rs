@@ -1,8 +1,8 @@
+use crate::ReadMemory;
+use crate::gb::ppu::Ppu;
 use crate::gb::ppu::fifo::FifoPixel;
 use crate::gb::ppu::types::sprite::Sprite;
 use crate::gb::ppu::types::tile::TileLine;
-use crate::gb::ppu::Ppu;
-use crate::ReadMemory;
 
 /// Responsible for loading data into the pixel FIFO
 /// Continuously active throughout mode 3 (Drawing)

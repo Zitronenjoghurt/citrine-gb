@@ -4,3 +4,6 @@
 [submodule "lab/SameBoy"]
 	path = lab/SameBoy
 	url = https://github.com/LIJI32/SameBoy.git
+[submodule "tests/mooneye"]
+	path = tests/mooneye
+	url = https://github.com/Gekkio/mooneye-test-suite.git

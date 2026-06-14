@@ -1,7 +1,7 @@
 //! Source: https://gbdev.io/pandocs/pixel_fifo.html and https://ashiepaws.github.io/GBEDG/ppu/
 
-use crate::gb::ppu::types::color::RGBA;
 use crate::gb::ppu::Ppu;
+use crate::gb::ppu::types::color::RGBA;
 use std::collections::VecDeque;
 
 #[derive(Debug, Default, Copy, Clone)]

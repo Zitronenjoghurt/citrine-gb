@@ -1,3 +1,18 @@
+# Unreleased
+
+## Added
+
+- MBC5 cartridge support
+- Per-ROM mooneye test suite runner (`make test-mooneye`)
+
+## Fixed
+
+- Inverted DMG post-boot `F` flags (half-carry/carry are now set when the header checksum is non-zero)
+- Building the library standalone with only the `debug` feature failed to compile (`serde` now also
+  enables `bitflags/serde`)
+
+---
+
 # 0.5.0 - 2026-03-08
 
 ## Added

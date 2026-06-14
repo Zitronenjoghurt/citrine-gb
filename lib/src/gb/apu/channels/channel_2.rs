@@ -1,9 +1,9 @@
 use crate::gb::apu::components::length_counter::LengthCounter;
 use crate::gb::apu::components::square_wave::SquareWave;
 use crate::gb::apu::components::volume_envelope::VolumeEnvelope;
+use crate::gb::apu::registers::ch12_timer::Channel12Timer;
 use crate::gb::apu::registers::ch123_control::Channel123Control;
 use crate::gb::apu::registers::ch124_volume::Channel124Volume;
-use crate::gb::apu::registers::ch12_timer::Channel12Timer;
 use crate::{ReadMemory, WriteMemory};
 
 #[derive(Debug, Default)]

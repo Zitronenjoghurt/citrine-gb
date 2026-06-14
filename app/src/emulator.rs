@@ -8,8 +8,8 @@ use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb::rom::Rom;
 use gilrs::Axis;
 use gilrs::EventType::{AxisChanged, ButtonPressed, ButtonReleased};
-use ringbuf::producer::Producer;
 use ringbuf::HeapProd;
+use ringbuf::producer::Producer;
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
 const GB_WIDTH: usize = 160;
