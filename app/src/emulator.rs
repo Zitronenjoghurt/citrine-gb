@@ -1,6 +1,5 @@
 use crate::recorder::InputRecorder;
 use crate::utils::avg_timer::AvgTimer;
-use citrine_gb::disassembly::DisassemblySource;
 use citrine_gb::error::GbResult;
 use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
@@ -85,15 +84,6 @@ impl Emulator {
             return Ok(());
         }
 
-        let current_loc = self
-            .gb
-            .cartridge
-            .probe_rom_location(self.gb.cpu.pc.saturating_sub(1));
-        if self.gb.debugger.breakpoints.contains(&current_loc) {
-            self.running = false;
-            return Ok(());
-        }
-
         self.handle_input(ctx, gil);
 
         let now = web_time::Instant::now();
@@ -116,6 +106,12 @@ impl Emulator {
             self.frame_avg_timer.stop();
             self.time_accumulator -= FRAME_TIME;
             ran_frame = true;
+
+            if self.gb.debugger.hit_breakpoint {
+                self.gb.debugger.hit_breakpoint = false;
+                self.running = false;
+                break;
+            }
         }
 
         if ran_frame {

@@ -12,6 +12,7 @@ pub struct Debugger {
     pub disassembly: Disassembly,
     pub static_analysis_enabled: bool,
     pub breakpoints: HashSet<RomLocation>,
+    pub hit_breakpoint: bool,
     pub total_cycles: u128,
     apu_channel_sample_counter: u32,
     pub ch1_samples: VecDeque<f32>,

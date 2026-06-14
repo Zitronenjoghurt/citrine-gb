@@ -39,6 +39,8 @@ impl ReadMemory for CpuBus<'_> {
             0xA000..=0xBFFF => self.cartridge.read_naive(addr),
             0xFE00..=0xFE9F => self.ppu.read_naive(addr),
             0xFF00 => self.joypad.read_naive(addr),
+            0xFF01 => self.memory.read_naive(addr),
+            0xFF02 => (self.memory.read_naive(addr) & 0x81) | 0x7E,
             0xFF04..=0xFF07 => self.timer.read_naive(addr),
             0xFF0F => self.ic.flag.into(),
             0xFF10..=0xFF14 | 0xFF16..=0xFF1E | 0xFF20..=0xFF26 | 0xFF30..=0xFF3F => {
@@ -48,7 +50,8 @@ impl ReadMemory for CpuBus<'_> {
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.read_naive(addr)
             }
-            0xFFFF => self.ic.enable.into(),
+            0xFFFF => self.ic.enable,
+            0xFF00..=0xFF7F => 0xFF,
             _ => self.memory.read_naive(addr),
         }
     }
@@ -76,7 +79,7 @@ impl WriteMemory for CpuBus<'_> {
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C => {
                 self.ppu.write_naive(addr, value)
             }
-            0xFFFF => self.ic.enable = value.into(),
+            0xFFFF => self.ic.enable = value,
             _ => self.memory.write_naive(addr, value),
         }
 

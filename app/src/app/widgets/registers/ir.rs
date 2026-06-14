@@ -1,6 +1,6 @@
 use crate::app::widgets::registers::flag_text;
 use citrine_gb::gb::cpu::Cpu;
-use citrine_gb::gb::ic::InterruptController;
+use citrine_gb::gb::ic::{Interrupt, InterruptController};
 use egui::{Grid, Widget};
 
 pub struct InterruptRegisters<'a> {
@@ -31,31 +31,31 @@ impl Widget for InterruptRegisters<'_> {
 
                     ui.label("VBK");
                     ui.label(flag_text(self.ic.flag.vblank));
-                    ui.label(flag_text(self.ic.enable.vblank));
+                    ui.label(flag_text(self.ic.is_enabled(Interrupt::VBlank)));
                     ui.label("");
                     ui.end_row();
 
                     ui.label("LCD");
                     ui.label(flag_text(self.ic.flag.lcd));
-                    ui.label(flag_text(self.ic.enable.lcd));
+                    ui.label(flag_text(self.ic.is_enabled(Interrupt::Lcd)));
                     ui.label("");
                     ui.end_row();
 
                     ui.label("TIM");
                     ui.label(flag_text(self.ic.flag.timer));
-                    ui.label(flag_text(self.ic.enable.timer));
+                    ui.label(flag_text(self.ic.is_enabled(Interrupt::Timer)));
                     ui.label("");
                     ui.end_row();
 
                     ui.label("SRL");
                     ui.label(flag_text(self.ic.flag.serial));
-                    ui.label(flag_text(self.ic.enable.serial));
+                    ui.label(flag_text(self.ic.is_enabled(Interrupt::Serial)));
                     ui.label("");
                     ui.end_row();
 
                     ui.label("JPD");
                     ui.label(flag_text(self.ic.flag.joypad));
-                    ui.label(flag_text(self.ic.enable.joypad));
+                    ui.label(flag_text(self.ic.is_enabled(Interrupt::Joypad)));
                     ui.label("");
                     ui.end_row();
 

@@ -1,0 +1,17 @@
+{
+  "model": "Dmg",
+  "theme": "GreyScale",
+  "name": "unused_hwio-GS",
+  "description": "Mooneye Hardware I/O test rom",
+  "rom": {
+    "title": "mooneye-gb test",
+    "licensee": "Unknown Licensee",
+    "cartridge_type": "ROM Only",
+    "rom_banks": 2,
+    "ram_banks": 0,
+    "crc_32": "3E93FC10",
+    "sha1": "3BAA4A28649B49EC05038E6C8512C2147E18B9DC",
+    "sha256": "1588928B71C596E41C58C9F414A18A0F906C0BF82A1DFDE9D4CEFC624A2D193D"
+  },
+  "cycles": 150002
+}

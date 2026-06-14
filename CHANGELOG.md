@@ -12,6 +12,10 @@
   address, so a stack push onto `$FFFF` can redirect or cancel the interrupt
 - `RETI` now enables `IME` immediately instead of after the following instruction (it was incorrectly
   treated like `EI`), so an interrupt pending when a handler returns is serviced without a one-instruction delay
+- Debugger breakpoints are now checked every instruction instead of once per frame, so they actually
+  trigger (previously they only fired if the program counter happened to sit on them at a frame boundary)
+- Unused I/O register bits now read as 1 (serial `SC`, `TAC`) and unmapped I/O registers read `0xFF`;
+  `IE` is now a full 8-bit read/write register
 - Building the library standalone with only the `debug` feature failed to compile (`serde` now also
   enables `bitflags/serde`)
 

@@ -90,7 +90,7 @@ impl ReadMemory for Timer {
             0xFF04 => (self.div >> 8) as u8,
             0xFF05 => self.tima,
             0xFF06 => self.tma,
-            0xFF07 => self.tac,
+            0xFF07 => self.tac | 0xF8,
             _ => 0xFF,
         }
     }

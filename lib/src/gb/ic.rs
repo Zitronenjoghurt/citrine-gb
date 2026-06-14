@@ -1,14 +1,14 @@
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InterruptController {
-    pub enable: InterruptFlags,
+    pub enable: u8,
     pub flag: InterruptFlags,
 }
 
 impl Default for InterruptController {
     fn default() -> Self {
         Self {
-            enable: 0x00.into(),
+            enable: 0x00,
             flag: 0xE1.into(),
         }
     }
@@ -21,6 +21,10 @@ impl InterruptController {
 
     pub fn soft_reset(&mut self) {
         *self = Self::default();
+    }
+
+    pub fn is_enabled(&self, interrupt: Interrupt) -> bool {
+        self.enable & interrupt.mask() != 0
     }
 }
 
@@ -41,7 +45,7 @@ impl ICInterface for InterruptController {
 
     fn take_interrupt(&mut self) -> Option<Interrupt> {
         for interrupt in Interrupt::PRIORITY {
-            if self.enable.is_enabled(*interrupt) && self.flag.is_enabled(*interrupt) {
+            if self.is_enabled(*interrupt) && self.flag.is_enabled(*interrupt) {
                 self.flag.set(*interrupt, false);
                 return Some(*interrupt);
             }
@@ -50,9 +54,8 @@ impl ICInterface for InterruptController {
     }
 
     fn has_pending_interrupt(&self) -> bool {
-        let enable: u8 = self.enable.into();
         let flags: u8 = self.flag.into();
-        (enable & flags & 0x1F) != 0
+        (self.enable & flags & 0x1F) != 0
     }
 }
 
@@ -73,6 +76,16 @@ impl Interrupt {
         Self::Serial,
         Self::Joypad,
     ];
+
+    pub fn mask(&self) -> u8 {
+        match self {
+            Self::VBlank => 0x01,
+            Self::Lcd => 0x02,
+            Self::Timer => 0x04,
+            Self::Serial => 0x08,
+            Self::Joypad => 0x10,
+        }
+    }
 
     pub fn vector(&self) -> u16 {
         match self {

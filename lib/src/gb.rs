@@ -120,6 +120,18 @@ impl GameBoy {
         while !self.ppu.frame_ready {
             self.step();
 
+            #[cfg(feature = "debug")]
+            if !self.debugger.breakpoints.is_empty() {
+                use crate::disassembly::DisassemblySource;
+                let loc = self
+                    .cartridge
+                    .probe_rom_location(self.cpu.pc.wrapping_sub(1));
+                if self.debugger.breakpoints.contains(&loc) {
+                    self.debugger.hit_breakpoint = true;
+                    return;
+                }
+            }
+
             if !self.ppu.lcdc.lcd_enabled && self.cycle_counter >= self.model.frame_cycles() {
                 break;
             }
