@@ -1,4 +1,7 @@
-.PHONY: test test-mooneye build-tests check dev native up down build logs release mac win
+.PHONY: test test-mooneye build-tests check dev native up down build logs release mac win results
+
+results: build-tests
+	cargo run --release -p citrine-gb-lab --bin collect
 
 build-tests:
 	git submodule update --init tests/mooneye

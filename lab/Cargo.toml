@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "citrine-gb-lab"
 path = "src/main.rs"
 
+[[bin]]
+name = "collect"
+path = "src/bin/collect.rs"
+
 [dependencies]
 citrine-gb = { workspace = true, features = ["debug", "recording"] }
 sameboy-sys = { path = "sameboy-sys" }
