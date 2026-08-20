@@ -3,7 +3,6 @@ use citrine_gb::gb::ppu::types::theme::DmgTheme;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::rom::Rom;
 
-/// Adapter driving the Citrine emulator (`citrine_gb`) through the [`FrameEmulator`] trait.
 pub struct CitrineEmulator {
     gb: GameBoy,
     model: GbModel,
@@ -25,9 +24,8 @@ impl Default for CitrineEmulator {
 }
 
 impl CitrineEmulator {
-    /// End-of-frame bookkeeping, mirroring `GameBoy::run_frame`: flush the APU so `blip_buf`'s clock
-    /// is reset each frame (otherwise it overflows after a few hundred frames), and drop the audio
-    /// samples since the lab does not consume them (otherwise the buffer grows unbounded).
+    /// Mirrors `GameBoy::run_frame`. Without the flush `blip_buf`'s clock overflows after a few
+    /// hundred frames, and the unread samples grow unbounded.
     fn finish_frame(&mut self) {
         self.gb.apu.flush_audio();
         self.gb.apu.audio_buffer.clear();
@@ -41,8 +39,6 @@ impl FrameEmulator for CitrineEmulator {
 
     fn load(&mut self, rom: &[u8], boot_rom: Option<&[u8]>, model: GbModel) -> anyhow::Result<()> {
         self.model = model;
-        // `new_empty` followed by `load_rom` reproduces Citrine's no-boot-rom post-boot state
-        // (registers set in `Cpu::new_dmg`/`new_cgb`). With a boot ROM, Citrine boots from power-on.
         self.gb = GameBoy::new_empty(model);
         if let Some(boot) = boot_rom {
             self.gb.load_boot_rom(boot);
@@ -51,8 +47,7 @@ impl FrameEmulator for CitrineEmulator {
         self.gb
             .load_rom(&rom)
             .map_err(|e| anyhow::anyhow!("citrine failed to load rom: {e:?}"))?;
-        // Evenly-spaced greys [0xFF, 0xAA, 0x55, 0x00] so output is palette-independent and matches
-        // SameBoy's forced grey palette after canonical normalization.
+        // Evenly-spaced greys, matching SameBoy's forced grey palette after normalization.
         self.gb.ppu.dmg_theme = DmgTheme::GreyScale;
         Ok(())
     }
@@ -67,7 +62,7 @@ impl FrameEmulator for CitrineEmulator {
     }
 
     fn total_cycles(&self) -> u64 {
-        // `debugger.total_cycles` counts M-cycles; the harness unit is T-cycles.
+        // M-cycles -> T-cycles.
         self.gb.debugger.total_cycles as u64 * 4
     }
 
@@ -84,8 +79,7 @@ impl FrameEmulator for CitrineEmulator {
             return true;
         }
 
-        // Mirror `GameBoy::run_frame`: emit an artificial frame each frame's worth of cycles while
-        // the LCD is disabled, matching SameBoy's LCD-off vblank callbacks.
+        // Emit an artificial frame while the LCD is off, matching SameBoy's LCD-off vblanks.
         if !self.gb.ppu.lcdc.lcd_enabled && self.gb.cycle_counter >= frame_cycles {
             self.gb.cycle_counter -= frame_cycles;
             self.finish_frame();

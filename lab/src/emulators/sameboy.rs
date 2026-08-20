@@ -3,15 +3,10 @@ use citrine_gb::gb::GbModel;
 use sameboy_sys as sys;
 use std::ffi::c_void;
 
-/// State shared with the C callbacks via SameBoy's user-data pointer.
 struct Ctx {
     frame_ready: bool,
 }
 
-/// Adapter driving SameBoy (the reference emulator) through the [`FrameEmulator`] trait.
-///
-/// SameBoy is a C library reached through `sameboy-sys`. This wrapper owns the instance, a pixel
-/// buffer it renders into, and a [`Ctx`] the vblank callback flips when a frame completes.
 pub struct SameBoyEmulator {
     gb: *mut sys::GB_gameboy_t,
     ctx: Box<Ctx>,
@@ -22,14 +17,13 @@ pub struct SameBoyEmulator {
     model: GbModel,
 }
 
-/// Pack r,g,b so the in-memory byte order of the u32 is `[r, g, b, a]` on little-endian targets,
-/// letting us reinterpret pixels as RGBA directly.
+/// Packs to `[r, g, b, a]` in memory on little-endian targets, so pixels reinterpret as RGBA.
 extern "C" fn rgb_encode(_gb: *mut sys::GB_gameboy_t, r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFFu32 << 24)
 }
 
 extern "C" fn vblank(gb: *mut sys::GB_gameboy_t, _ty: sys::GB_vblank_type_t) {
-    // SAFETY: user data always points at the owning `Box<Ctx>` for the lifetime of the instance.
+    // SAFETY: user data points at the owning `Box<Ctx>` for the instance's lifetime.
     unsafe {
         let ctx = sys::GB_get_user_data(gb) as *mut Ctx;
         if !ctx.is_null() {
@@ -82,18 +76,15 @@ impl SameBoyEmulator {
             sys::GB_set_user_data(self.gb, &mut *self.ctx as *mut Ctx as *mut c_void);
             sys::GB_set_rgb_encode_callback(self.gb, rgb_encode);
             sys::GB_set_vblank_callback(self.gb, vblank);
-            // Force a clean, evenly-spaced greyscale so the DMG shades are palette-independent and
-            // line up with Citrine's `DmgTheme::GreyScale` after canonical normalization.
+            // Matches Citrine's `DmgTheme::GreyScale` after normalization.
             sys::GB_set_color_correction_mode(self.gb, sys::GB_COLOR_CORRECTION_DISABLED);
             sys::GB_set_palette(self.gb, &raw const sys::GB_PALETTE_GREY);
-            // Run flat-out: disable SameBoy's real-time 60 fps sync (it `nanosleep`s otherwise),
-            // but keep every frame (no frame skip) so the comparison sees a complete sequence.
+            // Without turbo the core `nanosleep`s to real-time 60 fps.
             sys::GB_set_turbo_mode(self.gb, true, true);
             self.resize_pixel_buffer();
         }
     }
 
-    /// (Re)allocate and rebind the pixel buffer to the current screen dimensions.
     unsafe fn resize_pixel_buffer(&mut self) {
         unsafe {
             self.width = sys::GB_get_screen_width(self.gb) as usize;
@@ -104,14 +95,12 @@ impl SameBoyEmulator {
         }
     }
 
-    /// Program the canonical post-boot CPU registers, mirroring Citrine's `Cpu::new_dmg` /
-    /// `Cpu::new_cgb` so both emulators start byte-identical at the CPU level (no boot ROM).
+    /// Mirrors Citrine's `Cpu::new_dmg`/`new_cgb` so both start byte-identical without a boot ROM.
     fn set_post_boot_registers(&mut self, rom: &[u8]) {
         let header_checksum = rom.get(0x014D).copied().unwrap_or(0);
         let regs = unsafe { &mut *sys::GB_get_registers(self.gb) };
         match self.model {
             GbModel::Dmg => {
-                // F = 0xB0 (Z,H,C) when the stored header checksum byte is 0, else 0x80 (Z).
                 let f: u16 = if header_checksum == 0 { 0xB0 } else { 0x80 };
                 regs.af = 0x0100 | f;
                 regs.bc = 0x0013;
@@ -147,7 +136,7 @@ impl FrameEmulator for SameBoyEmulator {
             unsafe {
                 sys::GB_init(self.gb, sys_model(model));
             }
-            // Re-init clears callbacks/user-data; wire them again.
+            // Re-init clears callbacks and user data.
             self.wire_callbacks();
         }
 
@@ -159,8 +148,6 @@ impl FrameEmulator for SameBoyEmulator {
             sys::GB_reset(self.gb);
             self.resize_pixel_buffer();
         }
-        // Without a boot ROM, jump straight to the cartridge entry point with post-boot registers.
-        // (SameBoy needs a boot ROM to run on its own, so prefer providing one.)
         if boot_rom.is_none() {
             self.set_post_boot_registers(rom);
         }
@@ -177,7 +164,7 @@ impl FrameEmulator for SameBoyEmulator {
     }
 
     fn total_cycles(&self) -> u64 {
-        // SameBoy counts 8 MiHz ticks; the harness unit is T-cycles (~4.19 MHz), so halve.
+        // SameBoy counts 8 MiHz ticks; the harness unit is T-cycles.
         self.total_ticks / 2
     }
 
@@ -189,12 +176,8 @@ impl FrameEmulator for SameBoyEmulator {
     }
 
     fn render_into(&self, out: &mut Vec<u8>) {
-        // Reinterpret the u32 pixels (encoded as [r,g,b,a] bytes) as a flat RGBA buffer, cropped/
-        // padded to the Game Boy screen if SameBoy ever reports different dimensions.
         out.clear();
         out.reserve(SCREEN_WIDTH * SCREEN_HEIGHT * 4);
-        // Fast path: SameBoy already reports the exact screen size, so the pixel buffer is a
-        // contiguous RGBA frame we can copy wholesale (its bytes are little-endian [r,g,b,a]).
         if self.width == SCREEN_WIDTH && self.height == SCREEN_HEIGHT {
             let bytes = bytemuck_cast(&self.pixels);
             out.extend_from_slice(bytes);
@@ -213,20 +196,17 @@ impl FrameEmulator for SameBoyEmulator {
     }
 }
 
-/// Reinterpret a `&[u32]` as the underlying `&[u8]` (little-endian byte order) without copying.
 fn bytemuck_cast(pixels: &[u32]) -> &[u8] {
-    // SAFETY: `u32` has no padding and any bit pattern is valid `u8`; the resulting slice covers
-    // exactly the same bytes and borrows `pixels` for its lifetime.
+    // SAFETY: any bit pattern of a padding-free `u32` is a valid `u8`, and the slice borrows
+    // `pixels` for its lifetime.
     unsafe {
         std::slice::from_raw_parts(pixels.as_ptr() as *const u8, std::mem::size_of_val(pixels))
     }
 }
 
-// SAFETY: `SameBoyEmulator` owns its `GB_gameboy_t` exclusively (one `GB_alloc`, freed in `Drop`).
-// The raw pointer, the boxed `Ctx`, and the pixel buffer are only ever touched through `&mut self`,
-// so a value is only used by whichever single thread currently owns it. The streaming runner moves
-// the whole value to a worker thread and never aliases it; SameBoy itself is not thread-safe, but
-// confining one instance to one thread at a time is sound.
+// SAFETY: everything owned here is only reached through `&mut self`, so the value is only ever
+// used by the one thread holding it. SameBoy is not thread-safe, but confining an instance to a
+// single thread at a time is sound.
 unsafe impl Send for SameBoyEmulator {}
 
 impl Drop for SameBoyEmulator {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-/// Files only needed for the interactive debugger / cheat search, which we disable.
+/// Only needed for the interactive debugger / cheat search, which we disable.
 const SKIP_FILES: &[&str] = &[
     "debugger.c",
     "sm83_disassembler.c",
@@ -16,7 +16,6 @@ fn main() {
         );
     }
 
-    // Pull the version string out of SameBoy's version.mk (`VERSION := x.y.z`).
     let version_mk = std::fs::read_to_string("../SameBoy/version.mk")
         .expect("failed to read ../SameBoy/version.mk");
     let version = version_mk

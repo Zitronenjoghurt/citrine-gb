@@ -1,19 +1,14 @@
-//! Reporters render a [`ComparisonReport`] to some output, and [`FrameDumper`] writes PNGs of
-//! diverging frames as they stream past. Implement [`Reporter`] to add a summary format.
-
 use crate::emulator::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::metric::Polarity;
 use crate::runner::ComparisonReport;
 use std::path::{Path, PathBuf};
 
-/// Consumes a finished comparison result and emits it somewhere (stdout, a file, ...).
 pub trait Reporter {
     fn emit(&self, report: &ComparisonReport) -> anyhow::Result<()>;
 }
 
-/// Prints a per-frame metric table and an aggregate summary to stdout.
 pub struct ConsoleReporter {
-    /// Cap on per-frame rows printed (the summary always reflects all frames). `None` = all rows.
+    /// Caps printed rows only; the summary always reflects all frames.
     pub max_rows: Option<usize>,
 }
 
@@ -47,7 +42,6 @@ impl Reporter for ConsoleReporter {
             ),
         }
 
-        // Header — annotate each column with its unit (e.g. `psnr (dB)`) where it has one.
         print!("\n{:>6}", "frame");
         for s in &report.summaries {
             let label = if s.unit.is_empty() {
@@ -91,7 +85,6 @@ impl Reporter for ConsoleReporter {
     }
 }
 
-/// Writes the full report to a JSON file.
 pub struct JsonReporter {
     pub path: PathBuf,
 }
@@ -105,17 +98,13 @@ impl Reporter for JsonReporter {
     }
 }
 
-/// Streaming PNG dumper: fed every compared frame pair as the run progresses, it writes
-/// `reference`, `candidate` and a `diff` PNG for the frames worth keeping. Because it consumes
-/// frames on the fly, the runner never has to retain the whole sequence in memory.
+/// Writes `reference`, `candidate` and `diff` PNGs as pairs stream past.
 pub struct FrameDumper {
     dir: PathBuf,
-    /// Cap on how many frames to dump (avoids thousands of files). `None` = all.
+    /// `None` = no cap.
     max_dumps: Option<usize>,
-    /// Dump every compared frame; when `false`, only frames that diverge are dumped.
     all_frames: bool,
     dumped: usize,
-    /// Number of dump-worthy frames skipped after hitting `max_dumps`.
     skipped: usize,
 }
 
@@ -131,8 +120,6 @@ impl FrameDumper {
         })
     }
 
-    /// Offer one compared frame pair to the dumper. Cheap to call for every frame; it writes only
-    /// the ones it cares about and respects the dump cap.
     pub fn handle(
         &mut self,
         index: usize,
@@ -163,7 +150,6 @@ impl FrameDumper {
         Ok(())
     }
 
-    /// Print a one-line summary of what was written. Call after the run completes.
     pub fn finish(&self) {
         let kind = if self.all_frames {
             "frame"
@@ -184,7 +170,7 @@ impl FrameDumper {
     }
 }
 
-/// Amplified per-channel absolute difference, on a black background, for visual inspection.
+/// Amplified per-channel absolute difference on black, for visual inspection.
 fn diff_rgba(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; a.len()];
     for i in (0..a.len()).step_by(4) {

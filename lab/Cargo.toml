@@ -1,7 +1,8 @@
 [package]
 name = "citrine-gb-lab"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+publish = false
 
 [lib]
 name = "citrine_lab"
@@ -14,6 +15,10 @@ path = "src/main.rs"
 [[bin]]
 name = "collect"
 path = "src/bin/collect.rs"
+
+[[bin]]
+name = "analyze"
+path = "src/bin/analyze.rs"
 
 [dependencies]
 citrine-gb = { workspace = true, features = ["debug", "recording"] }

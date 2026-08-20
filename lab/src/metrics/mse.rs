@@ -1,15 +1,12 @@
 use crate::emulator::Frame;
 use crate::metric::{FrameMetric, Polarity};
 
-/// Largest possible MSE for 8-bit channels: every channel maximally apart (`255²`).
-const MAX_MSE: f64 = 255.0 * 255.0; // 65025
+const MAX_MSE: f64 = 255.0 * 255.0;
 
-/// PSNR reported for byte-identical frames, where the true value is infinite. Sits just above the
-/// largest finite 8-bit PSNR (a single 1-LSB pixel difference tops out around 96 dB), so it reads
-/// as "no measurable error" without poisoning the average with `inf`.
+/// Stand-in for the infinite PSNR of identical frames. Sits just above the largest finite 8-bit
+/// PSNR (~96 dB for a single 1-LSB difference), so averages stay meaningful.
 const PSNR_IDENTICAL: f64 = 100.0;
 
-/// Mean of the squared per-channel differences over R, G and B (alpha ignored).
 fn mean_squared_error(reference: &Frame, candidate: &Frame) -> f64 {
     let mut sum = 0.0f64;
     let mut count = 0u64;
@@ -27,11 +24,7 @@ fn mean_squared_error(reference: &Frame, candidate: &Frame) -> f64 {
     if count == 0 { 0.0 } else { sum / count as f64 }
 }
 
-/// Mean squared error over the R, G and B channels (alpha ignored).
-///
-/// Range is `0.0` (identical) to `65025.0` (every channel maximally different). This is an absolute
-/// error in squared 8-bit-intensity units, not a normalized ratio — see [`Nmse`] for a 0..1 version
-/// and [`Psnr`] for the decibel form.
+/// Absolute error over R, G and B in squared 8-bit intensity units, `0.0` to `65025.0`.
 pub struct Mse;
 
 impl FrameMetric for Mse {
@@ -48,9 +41,7 @@ impl FrameMetric for Mse {
     }
 }
 
-/// Normalized mean squared error: [`Mse`] divided by the maximum possible MSE (`255²`).
-///
-/// Range is `0.0` (identical) to `1.0` (every channel maximally different).
+/// [`Mse`] divided by the maximum possible MSE, `0.0` (identical) to `1.0`.
 pub struct Nmse;
 
 impl FrameMetric for Nmse {
@@ -67,10 +58,7 @@ impl FrameMetric for Nmse {
     }
 }
 
-/// Peak signal-to-noise ratio in decibels: `10·log₁₀(255² / MSE)`.
-///
-/// Higher is more similar. Byte-identical frames (MSE = 0, PSNR = ∞) are reported as
-/// [`PSNR_IDENTICAL`] dB so the metric stays finite and averageable.
+/// Peak signal-to-noise ratio in decibels, `10·log₁₀(255² / MSE)`.
 pub struct Psnr;
 
 impl FrameMetric for Psnr {

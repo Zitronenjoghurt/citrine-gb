@@ -1,36 +1,26 @@
-//! One-shot thesis result collection.
-//!
-//! Captures the emulator's current accuracy state in a single run:
-//! 1. The mooneye acceptance suite (per-test pass/fail, per-category counts), executed in-process
-//!    with the same result-detection convention as `lib/tests/mooneye.rs`.
-//! 2. A SameBoy-vs-Citrine frame diff for every ROM in `roms/games/` and `roms/test/`
-//!    (dmg-acid2 + blargg), across a sweep of alignment tolerances, without writing diff PNGs.
-//!
-//! Results land in `experiments/runs/<date>_<git-short-hash>/` as a stable, diff-friendly
-//! `results.json` plus CSV tables, meant to be committed so runs can be compared as the
-//! emulator progresses. Per-frame scores (for plots) are opt-in via `--per-frame` and
-//! gitignored because of their size.
+//! Captures the emulator's accuracy in one run — the mooneye suite plus a SameBoy frame diff over
+//! every local ROM — into `experiments/runs/<date>_<git-short-hash>/`. See `experiments/README.md`.
 //!
 //! Usage: `make results`, or `cargo run --release -p citrine-gb-lab --bin collect -- [options]`.
 
 use anyhow::Context;
 use citrine_gb::gb::{GameBoy, GbModel};
-use citrine_gb::rom::header::RomHeader;
 use citrine_gb::rom::Rom;
+use citrine_gb::rom::header::RomHeader;
 use citrine_lab::metric::FrameMetric;
 use citrine_lab::metrics;
 use citrine_lab::recording::Recording;
-use citrine_lab::runner::{run_streaming, Alignment, ComparisonReport};
+use citrine_lab::runner::{Alignment, ComparisonReport, run_streaming};
 use clap::Parser;
 use std::collections::BTreeMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-/// Metrics captured for every diff run, in report column order.
+/// In report column order.
 const METRICS: [&str; 6] = ["exact", "px_match", "mse", "nmse", "psnr", "ssim"];
 
 #[derive(Parser, Debug)]
@@ -130,7 +120,6 @@ struct MooneyeTest {
     category: String,
     /// `pass` or `fail`.
     result: String,
-    /// Failure detail (`reported failure`, `timeout`, unexpected registers, load error).
     #[serde(skip_serializing_if = "String::is_empty")]
     note: String,
 }
@@ -151,7 +140,7 @@ struct DiffRun {
     compared_frames: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     divergent_frames: Option<usize>,
-    /// Share of compared frames with a byte-identical match: 1 - divergent/compared.
+    /// 1 - divergent/compared.
     #[serde(skip_serializing_if = "Option::is_none")]
     match_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,9 +171,7 @@ const MAX_CYCLES: u32 = 30_000_000;
 const PASS_REGS: [u8; 6] = [3, 5, 8, 13, 21, 34];
 const FAIL_REGS: [u8; 6] = [0x42; 6];
 
-/// Mirrors `DMG_SUITE` in `lib/tests/mooneye.rs`: ROMs under `acceptance/` or `emulator-only/`
-/// whose file name is either variant-free (no `-`) or whose variant suffix (after the last `-`)
-/// targets DMG (`G` or `dmg`).
+/// Mirrors `DMG_SUITE` in `lib/tests/mooneye.rs`.
 fn dmg_suite_match(rel: &str) -> bool {
     if !(rel.starts_with("acceptance/") || rel.starts_with("emulator-only/")) {
         return false;
@@ -238,8 +225,8 @@ fn collect_mooneye_roms(build_root: &Path) -> anyhow::Result<Vec<(String, PathBu
     Ok(roms)
 }
 
-/// Same pass/fail convention as `lib/tests/mooneye.rs`: run until the `LD B, B` marker, then
-/// check B..L for the Fibonacci pass signature.
+/// Same convention as `lib/tests/mooneye.rs`: run to `LD B, B`, then check B..L for the pass
+/// signature.
 fn run_mooneye_rom(path: &Path) -> Result<(), String> {
     let data = std::fs::read(path).map_err(|e| format!("load error: {e}"))?;
     let rom = Rom::new(&data);
@@ -332,7 +319,6 @@ struct RomConfig {
     rom: Vec<u8>,
     category: &'static str,
     model: GbModel,
-    /// Recording file name + parsed recording, when one matches this ROM's SHA-256.
     recording: Option<(String, Recording)>,
 }
 
@@ -354,7 +340,7 @@ fn model_name(model: GbModel) -> &'static str {
     }
 }
 
-/// Recordings in `roms/*.json`, keyed by uppercase ROM SHA-256.
+/// Keyed by uppercase ROM SHA-256.
 fn discover_recordings(root: &Path) -> BTreeMap<String, (String, Recording)> {
     let mut recordings = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(root.join("roms")) else {
@@ -412,7 +398,6 @@ fn discover_roms(root: &Path, only: Option<&str>) -> anyhow::Result<Vec<RomConfi
         } else {
             GbModel::Dmg
         };
-        // Input-free run for every ROM; an additional replay run when a recording matches.
         if let Some((rec_name, recording)) = recordings.remove(&sha) {
             let rec_model = recording.model;
             configs.push(RomConfig {
@@ -742,7 +727,6 @@ fn write_outputs(out_dir: &Path, results: &Results) -> anyhow::Result<()> {
         }
         write_csv(&out_dir.join("diff_results.csv"), &rows)?;
 
-        // Pivots: ROM rows x tolerance columns, for direct use as thesis tables.
         let tolerances = &results.meta.tolerances;
         for (file, value) in [
             (

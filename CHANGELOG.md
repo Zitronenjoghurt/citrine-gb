@@ -2,24 +2,27 @@
 
 ## Added
 
+- Disassembly tab with static ROM analysis, instruction breakpoints and per-instruction reference info
+- Audio Debug and APU Waves tabs for inspecting the sound hardware while a game runs
+- Performance tab showing emulation and frame timings
+- Input recording (Debug Actions tab): captures button presses with cycle timestamps for replay
+- Full emulator state dump as JSON
 - MBC5 cartridge support
+- Frame-by-frame accuracy comparison against the SameBoy reference emulator (`lab/`), with committed
+  result snapshots under `experiments/`
 - Per-ROM mooneye test suite runner (`make test-mooneye`)
 
 ## Fixed
 
-- Inverted DMG post-boot `F` flags (half-carry/carry are now set when the header checksum is non-zero)
-- Interrupt dispatch now reads the target vector from `IE` after pushing the high byte of the return
-  address, so a stack push onto `$FFFF` can redirect or cancel the interrupt
-- `RETI` now enables `IME` immediately instead of after the following instruction (it was incorrectly
-  treated like `EI`), so an interrupt pending when a handler returns is serviced without a one-instruction delay
-- Debugger breakpoints are now checked every instruction instead of once per frame, so they actually
-  trigger (previously they only fired if the program counter happened to sit on them at a frame boundary)
-- Unused I/O register bits now read as 1 (serial `SC`, `TAC`) and unmapped I/O registers read `0xFF`;
-  `IE` is now a full 8-bit read/write register
-- The HALT bug is now emulated: executing `HALT` with `IME` cleared while an interrupt is already
-  pending no longer halts, and the byte after `HALT` is read twice (matching original hardware)
-- Building the library standalone with only the `debug` feature failed to compile (`serde` now also
-  enables `bitflags/serde`)
+- Inverted DMG post-boot `F` flags (half-carry/carry are set when the header checksum is non-zero)
+- Interrupt dispatch now reads the target vector from `IE` after pushing the return address, so a
+  stack push onto `$FFFF` can redirect or cancel the interrupt
+- `RETI` now enables `IME` immediately instead of after the following instruction
+- Breakpoints are now checked every instruction instead of once per frame, so they actually trigger
+- Unused I/O register bits now read as 1 (serial `SC`, `TAC`), unmapped I/O registers read `0xFF`,
+  and `IE` is a full 8-bit read/write register
+- The HALT bug is now emulated
+- Building the library standalone with only the `debug` feature failed to compile
 
 ---
 
@@ -51,7 +54,7 @@
 
 ## Changed
 
-- Matrix now uses the current themes brightest color as its base color for the grid
+- Matrix now uses the current theme's brightest color as its grid base color
 
 ---
 
@@ -59,7 +62,7 @@
 
 ## Added
 
-- MBC3 (without RTC) support, enabling playing games like Pokémon Red/Blue
+- MBC3 (without RTC) support, enabling games like Pokémon Red/Blue
 - Saves in web
 - Bundled homebrew demo games
 
@@ -76,13 +79,12 @@
 - Support for MBC2 cartridges
 - Configurable matrix/grid overlay
 - Configurable ghosting
-- Save functionality (native only, planned for web) for compatible cartridges (that have a battery and generally support
-  saving on actual hardware)
+- Save functionality for cartridges with a battery (native only, planned for web)
 - Darker, original Game Boy theme
 
 ## Fixed
 
-- Window scrolling glitches (especially prominent in Super Mario Land 2)
+- Window scrolling glitches (most visible in Super Mario Land 2)
 - Sprite overlap glitches
 - Messy frame pacing
 
@@ -93,7 +95,7 @@
 ## Features
 
 - MacOS (arm), Windows and Web support
-- Plays most Rom only and MBC1 game boy games
+- Plays most ROM-only and MBC1 Game Boy games
 - (M-)Cycle-accurate instruction and memory timing
 - Debug tools like viewing registers in-ui, cycle stepping, end-to-end test exports
 

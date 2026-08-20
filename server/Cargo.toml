@@ -1,7 +1,10 @@
 [package]
 name = "citrine-gb-server"
-version = "0.5.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
 
 [dependencies]
 axum = "0.8.8"

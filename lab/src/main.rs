@@ -1,8 +1,3 @@
-//! CLI entry point for the Citrine lab.
-//!
-//! Replays an input recording (or runs input-free) on Citrine and SameBoy, then scores the two
-//! frame sequences with the requested metrics.
-
 use anyhow::Context;
 use citrine_gb::gb::GbModel;
 use citrine_lab::emulators::{CitrineEmulator, SameBoyEmulator};
@@ -138,7 +133,6 @@ fn main() -> anyhow::Result<()> {
         recording.events.len()
     );
 
-    // Optional streaming PNG dumper — fed each frame pair as it is compared.
     let mut dumper = match args.dump_divergences {
         Some(dir) => Some(FrameDumper::new(
             dir,
@@ -160,8 +154,7 @@ fn main() -> anyhow::Result<()> {
     );
     progress.enable_steady_tick(Duration::from_millis(80));
 
-    // SameBoy is the reference; Citrine is the candidate under test. They run on their own threads;
-    // this closure runs on the main thread for every compared pair.
+    // SameBoy is the reference; Citrine is the candidate under test.
     let mut divergent = 0usize;
     let report = run_streaming(
         SameBoyEmulator::new(),

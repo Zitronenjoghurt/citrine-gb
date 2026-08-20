@@ -1,11 +1,11 @@
 [package]
 name = "citrine-gb"
 description = "A cycle-accurate game boy emulator. (Work in progress)"
-homepage = "https://gb.lemon.industries"
-repository = "https://github.com/Zitronenjoghurt/citrine-gb"
-license = "MIT"
-version = "0.5.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 exclude = [".DS_Store"]
 
 [features]

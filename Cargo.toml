@@ -1,6 +1,17 @@
 [workspace]
 members = ["app", "lab", "lab/sameboy-sys", "lib", "server"]
+# The lab needs the SameBoy submodule and local ROMs, so a bare `cargo build`/`cargo test` at the
+# root skips it. Build it explicitly with `-p citrine-gb-lab`.
+default-members = ["app", "lib", "server"]
 resolver = "3"
+
+# Single source of truth for the release version: bump it here and every shipped crate follows.
+[workspace.package]
+version = "0.6.0"
+edition = "2024"
+license = "MIT"
+homepage = "https://gb.lemon.industries"
+repository = "https://github.com/Zitronenjoghurt/citrine-gb"
 
 [workspace.dependencies]
 citrine-gb = { path = "lib" }

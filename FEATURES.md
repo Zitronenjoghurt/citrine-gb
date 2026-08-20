@@ -3,11 +3,11 @@
 - Full Game Boy video and audio
 - Support for Windows, MacOS and Web
 - Controller support
-- Plays Game Boy games with MBC1, MBC2 and MBC3 cartridges (no RTC support yet)
+- Plays Game Boy games with MBC1, MBC2, MBC3 (no RTC yet) and MBC5 cartridges
 - (M-)Cycle-accurate instruction and memory timing
 - Save states for games that included a battery
 - Includes bundled open source homebrew games
-- Basic debugging tools
+- Debugging tools: disassembly with breakpoints, register/APU inspection, state dumps, input recording
 
 # Planned
 

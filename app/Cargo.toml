@@ -1,7 +1,11 @@
 [package]
 name = "citrine-gb-app"
-version = "0.5.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
 
 [package.metadata.docs.rs]
 all-features = true
@@ -47,7 +51,7 @@ brotli = "8.0.2"
 proc-macro2 = "1.0.106"
 quote = "1.0.44"
 serde = { version = "1.0.228", features = ["derive"] }
-toml = "1.0.3+spec-1.1.0"
+toml = "1.0.3"
 winresource = "0.1"
 
 [package.metadata.bundle]

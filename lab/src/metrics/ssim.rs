@@ -1,10 +1,8 @@
 use crate::emulator::Frame;
 use crate::metric::{FrameMetric, Polarity};
 
-/// Structural Similarity Index, computed on luminance over non-overlapping windows.
-///
-/// Range is roughly `-1.0..=1.0`, where `1.0` means structurally identical. Uses the standard
-/// constants for 8-bit images (`C1 = (0.01·255)²`, `C2 = (0.03·255)²`).
+/// Structural Similarity Index over luminance in non-overlapping windows, roughly `-1.0..=1.0`
+/// with `1.0` meaning structurally identical. Uses the standard 8-bit constants.
 pub struct Ssim {
     window: usize,
 }
@@ -18,7 +16,6 @@ impl Default for Ssim {
 const C1: f64 = (0.01 * 255.0) * (0.01 * 255.0);
 const C2: f64 = (0.03 * 255.0) * (0.03 * 255.0);
 
-/// BT.601 luma of one RGBA pixel.
 #[inline]
 fn luma(p: &[u8]) -> f64 {
     0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64
@@ -47,9 +44,8 @@ impl FrameMetric for Ssim {
                 let bh = win.min(h - y);
                 let n = (bw * bh) as f64;
 
-                // Single streaming pass over the window: accumulate Σa, Σb, Σa², Σb², Σab and
-                // derive mean/variance/covariance from them. Luma is computed inline straight from
-                // the RGBA bytes, so no per-frame luma plane is allocated.
+                // One streaming pass: accumulate Σa, Σb, Σa², Σb², Σab, deriving the moments from
+                // them. Luma is computed inline, so no luma plane is allocated.
                 let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0.0, 0.0, 0.0, 0.0, 0.0);
                 for dy in 0..bh {
                     let row = (y + dy) * w + x;
@@ -66,7 +62,6 @@ impl FrameMetric for Ssim {
                 }
 
                 let (ma, mb) = (sa / n, sb / n);
-                // Sample variance/covariance (divide by n-1 when possible).
                 let denom = (n - 1.0).max(1.0);
                 let va = (saa - sa * ma) / denom;
                 let vb = (sbb - sb * mb) / denom;

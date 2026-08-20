@@ -1,7 +1,21 @@
-.PHONY: test test-mooneye build-tests check dev native up down build logs release mac win results
+.PHONY: test test-mooneye build-tests lab lab-deps check dev native up down build logs release mac win publish results significance
 
-results: build-tests
+# Read from [workspace.package] in Cargo.toml; override with `make release v=x.y.z`.
+VERSION := $(or $(v),$(shell sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml))
+
+results: build-tests lab-deps
 	cargo run --release -p citrine-gb-lab --bin collect
+
+significance: lab-deps
+	cargo run --release -p citrine-gb-lab --bin analyze
+
+# The lab is not a default workspace member, so `check`/`test` skip it; check it explicitly.
+lab: lab-deps
+	cargo clippy -p citrine-gb-lab --all-targets
+	cargo test --release -p citrine-gb-lab
+
+lab-deps:
+	git submodule update --init lab/SameBoy
 
 build-tests:
 	git submodule update --init tests/mooneye
@@ -47,20 +61,20 @@ logs:
 release: check mac win
 
 mac:
-	@if [ -z "$(v)" ]; then echo "Error: Version parameter is required. Use 'make mac v=x.y.z'"; exit 1; fi
+	@if [ -z "$(VERSION)" ]; then echo "Error: could not read version from Cargo.toml"; exit 1; fi
 	cd app && CARGO_TARGET_DIR=../target cargo bundle --target aarch64-apple-darwin --release
-	mkdir -p build/macos/v$(v)
-	cp -r "target/aarch64-apple-darwin/release/bundle/osx/Citrine.app" "build/macos/v$(v)/Citrine v$(v).app"
-	codesign --force --deep --sign "https://github.com/Zitronenjoghurt" "build/macos/v$(v)/Citrine v$(v).app"
-	cd build/macos/v$(v) && zip -r citrine-v$(v)-mac-arm64.zip "Citrine v$(v).app"
-	@echo "MacOS app bundle created and signed"
+	mkdir -p build/macos/v$(VERSION)
+	cp -r "target/aarch64-apple-darwin/release/bundle/osx/Citrine.app" "build/macos/v$(VERSION)/Citrine v$(VERSION).app"
+	codesign --force --deep --sign "https://github.com/Zitronenjoghurt" "build/macos/v$(VERSION)/Citrine v$(VERSION).app"
+	cd build/macos/v$(VERSION) && zip -r citrine-v$(VERSION)-mac-arm64.zip "Citrine v$(VERSION).app"
+	@echo "MacOS app bundle v$(VERSION) created and signed"
 
 win:
-	@if [ -z "$(v)" ]; then echo "Error: Version parameter is required. Use 'make win v=x.y.z'"; exit 1; fi
+	@if [ -z "$(VERSION)" ]; then echo "Error: could not read version from Cargo.toml"; exit 1; fi
 	cargo build --target x86_64-pc-windows-gnu --release --bin citrine-gb-app
-	mkdir -p build/windows/v$(v)
-	cp target/x86_64-pc-windows-gnu/release/citrine-gb-app.exe "build/windows/v$(v)/Citrine v$(v).exe"
-	cd build/windows/v$(v) && zip -r citrine-v$(v)-win-64.zip "Citrine v$(v).exe"
+	mkdir -p build/windows/v$(VERSION)
+	cp target/x86_64-pc-windows-gnu/release/citrine-gb-app.exe "build/windows/v$(VERSION)/Citrine v$(VERSION).exe"
+	cd build/windows/v$(VERSION) && zip -r citrine-v$(VERSION)-win-64.zip "Citrine v$(VERSION).exe"
 	@echo "Windows executable built and zipped"
 
 publish:

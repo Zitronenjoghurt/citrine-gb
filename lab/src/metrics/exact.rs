@@ -22,7 +22,7 @@ impl FrameMetric for ExactFrame {
     }
 }
 
-/// Fraction of pixels (0.0..=1.0) that are exactly equal across all channels.
+/// Fraction of pixels that are exactly equal across all channels.
 pub struct ExactPixelRatio;
 
 impl FrameMetric for ExactPixelRatio {

@@ -1,6 +1,3 @@
-//! Integration tests for the lab: metrics on synthetic frames, and the replay driver on both
-//! emulators.
-
 use citrine_gb::gb::GbModel;
 use citrine_lab::emulator::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use citrine_lab::emulators::{CitrineEmulator, SameBoyEmulator};
@@ -27,7 +24,6 @@ fn metrics_identical_frames() {
     assert_eq!(ExactPixelRatio.compare(&a, &b), 1.0);
     assert_eq!(Mse.compare(&a, &b), 0.0);
     assert_eq!(Nmse.compare(&a, &b), 0.0);
-    // Identical frames have infinite PSNR; reported as the finite "identical" sentinel.
     assert!(Psnr.compare(&a, &b) >= 100.0);
     assert!((Ssim::default().compare(&a, &b) - 1.0).abs() < 1e-9);
 }
@@ -39,34 +35,26 @@ fn metrics_fully_different_frames() {
 
     assert_eq!(ExactFrame.compare(&black, &white), 0.0);
     assert_eq!(ExactPixelRatio.compare(&black, &white), 0.0);
-    // Every channel maxed apart: 255^2 = 65025.
     assert!((Mse.compare(&black, &white) - 65025.0).abs() < 1e-6);
-    // Normalized to its max, that's exactly 1.0.
     assert!((Nmse.compare(&black, &white) - 1.0).abs() < 1e-9);
-    // PSNR = 10·log10(65025 / 65025) = 0 dB.
     assert!(Psnr.compare(&black, &white).abs() < 1e-9);
-    // Structurally flat-but-opposite frames score poorly.
     assert!(Ssim::default().compare(&black, &white) < 0.1);
 }
 
 #[test]
 fn px_match_counts_partial_overlap() {
-    // Half the pixels match, half differ.
     let a = solid(2, 1, [0, 0, 0]);
     let mut b = solid(2, 1, [0, 0, 0]);
-    // Make the second pixel of `b` differ.
     b.rgba[4] = 255;
     assert_eq!(ExactPixelRatio.compare(&a, &b), 0.5);
 }
 
 #[test]
 fn canonical_greyscale_collapses_palette() {
-    // Two frames with different palettes but the same shade structure normalize to the same thing.
     let yellow = solid(4, 4, [0xF2, 0xCE, 0x44]);
     let green = solid(4, 4, [0x88, 0xC0, 0x70]);
     let na = yellow.to_canonical_greyscale();
     let nb = green.to_canonical_greyscale();
-    // Both flat frames collapse to a single (matching) grey level.
     assert_eq!(na.rgba, nb.rgba);
 }
 
@@ -92,7 +80,6 @@ fn replay_produces_requested_frame_count_on_both_emulators() {
     assert_eq!(sf.len(), frames);
     assert_eq!(sf[0].rgba.len(), SCREEN_WIDTH * SCREEN_HEIGHT * 4);
 
-    // During the shared boot animation, the very first frame should be identical.
     let c0 = cf[0].to_canonical_greyscale();
     let s0 = sf[0].to_canonical_greyscale();
     assert_eq!(c0.rgba, s0.rgba, "first boot frame should match");

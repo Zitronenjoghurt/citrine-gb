@@ -12,6 +12,12 @@ The core functionality is available as a [standalone crate](lib/README.md).
 
 Read [FEATURES.md](FEATURES.md) for a list of current and planned features.
 
+# Accuracy
+
+Citrine is compared frame-by-frame against the [SameBoy](https://github.com/LIJI32/SameBoy) reference
+emulator by the harness in [lab/](lab/README.md). Result snapshots live in
+[experiments/](experiments/README.md).
+
 # Supported platforms
 
 - Windows

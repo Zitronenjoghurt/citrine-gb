@@ -21,9 +21,13 @@ SameBoy is a git submodule at `lab/SameBoy`, compiled by the `sameboy-sys` crate
 (via the `cc` crate, with hand-written FFI — no bindgen/libclang needed).
 
 ```sh
-git submodule update --init lab/SameBoy
+make lab-deps          # git submodule update --init lab/SameBoy
 cargo build -p citrine-gb-lab
 ```
+
+The lab is a workspace member but **not** a default one, so a bare `cargo build`/`cargo test` at the
+repo root skips it — it needs the submodule above and local ROMs under `roms/`, neither of which is
+in the repository. Build and test it explicitly with `-p citrine-gb-lab`, or run `make lab`.
 
 ## Running a comparison
 

@@ -42,3 +42,41 @@ experiments/runs/<YYYY-MM-DD>_<git-short-hash>/
 Interesting axes beyond the tolerance sweep (all supported by the lab CLI for one-off
 follow-ups): `--align emission` vs `cycle`, `--raw` RGB vs greyscale normalization, longer
 `--frames`, and additional input recordings.
+
+## Significance analysis
+
+`make significance` (= `cargo run --release -p citrine-gb-lab --bin analyze`) reads **every**
+committed run and writes `experiments/analysis/`:
+
+```
+per_run.csv          per run x tolerance: median match rate + SSIM with bootstrap 95% CI over ROMs
+mooneye_per_run.csv  per run: mooneye pass rate with Wilson 95% CI
+tolerance_effect.csv per run: paired Wilcoxon per tolerance step (does relaxing tolerance help?)
+pairwise.csv         consecutive runs: McNemar (mooneye) + Wilcoxon signed-rank (match rate)
+significance.md      human-readable summary + methodology notes
+```
+
+Statistical model — the emulator is **deterministic**, so a single run has no measurement noise;
+the only sampling variability is *which ROMs were chosen*. Hence:
+
+- The **ROM is the unit of analysis** (n ≈ 41 games; `+recording` replays are excluded by default so
+  each game counts once — `--include-recordings` to keep them).
+- Per-run figures are reported as **bootstrap confidence intervals for the median**, not a
+  significance test: precision of the estimate, not a hypothesis test. The metric is bounded and
+  bimodal (a cluster of CGB ROMs near 0), so the **median** is reported over the mean and tests are
+  **non-parametric**.
+- **Significance is comparative**: it only appears in `pairwise.csv`, testing whether accuracy
+  changed between two runs. McNemar tests the paired mooneye pass/fail flips; Wilcoxon tests the
+  per-ROM match-rate differences. Both run **per tolerance** — tolerance columns are re-scorings of
+  the same run and are never pooled as independent observations.
+- ROMs are hand-picked, so intervals/p-values describe the population of ROMs *like these*, not all
+  Game Boy software.
+
+```
+--runs-dir DIR        where the run folders live (default experiments/runs)
+--out DIR             output directory (default experiments/analysis)
+--bootstrap N         bootstrap resamples per CI (default 10000)
+--seed N              PRNG seed for reproducible intervals
+--alpha F             significance level (default 0.05)
+--include-recordings  count +recording replays as separate observations
+```

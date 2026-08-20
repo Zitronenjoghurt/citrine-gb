@@ -1,24 +1,18 @@
-//! Minimal hand-written FFI bindings for the SameBoy core.
-//!
-//! Only the subset of the C API needed by the Citrine lab is declared here. Signatures and
-//! constants are mirrored from `lab/SameBoy/Core/{gb,display,joypad,model}.h`. Keep them in sync
-//! if the submodule is updated.
+//! Hand-written FFI for the subset of the SameBoy core the lab needs, mirrored from
+//! `lab/SameBoy/Core/{gb,display,joypad,model}.h`. Keep in sync when the submodule moves.
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
 use std::ffi::{c_int, c_uint, c_void};
 
-/// Opaque SameBoy instance. We only ever hold a pointer to one (via `GB_alloc`).
 #[repr(C)]
 pub struct GB_gameboy_t {
     _private: [u8; 0],
 }
 
-/// `GB_model_t` (see `model.h`). The enum's underlying type is `int`.
 pub type GB_model_t = c_int;
 pub const GB_MODEL_DMG_B: GB_model_t = 0x002;
 pub const GB_MODEL_CGB_E: GB_model_t = 0x205;
 
-/// `GB_key_t` (see `joypad.h`).
 pub type GB_key_t = c_int;
 pub const GB_KEY_RIGHT: GB_key_t = 0;
 pub const GB_KEY_LEFT: GB_key_t = 1;
@@ -29,14 +23,11 @@ pub const GB_KEY_B: GB_key_t = 5;
 pub const GB_KEY_SELECT: GB_key_t = 6;
 pub const GB_KEY_START: GB_key_t = 7;
 
-/// `GB_vblank_type_t` (see `display.h`).
 pub type GB_vblank_type_t = c_int;
 
-/// `GB_color_correction_mode_t` (see `display.h`).
 pub type GB_color_correction_mode_t = c_int;
 pub const GB_COLOR_CORRECTION_DISABLED: GB_color_correction_mode_t = 0;
 
-/// `GB_palette_t` (see `display.h`): 5 colors of `{r, g, b}` bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GB_color_s {
@@ -51,8 +42,7 @@ pub struct GB_palette_t {
     pub colors: [GB_color_s; 5],
 }
 
-/// `GB_registers_t` (see `gb.h`). The C type is a union; its 16-bit view is laid out exactly as
-/// these fields, so a `#[repr(C)]` struct of six `u16`s aliases it correctly.
+/// The C type is a union; its 16-bit view is laid out exactly as these fields.
 #[repr(C)]
 pub struct GB_registers_t {
     pub af: u16,
@@ -78,9 +68,8 @@ unsafe extern "C" {
 
     pub fn GB_run(gb: *mut GB_gameboy_t) -> c_uint;
 
-    /// Disable SameBoy's real-time clock sync (`GB_timing_sync`), which otherwise `nanosleep`s to
-    /// pin the core to ~60 fps. `no_frame_skip = true` keeps every frame rendered. Essential for the
-    /// lab: without it a 10k-frame run sleeps for ~167 s of wall time.
+    /// Disables the real-time sync that otherwise `nanosleep`s the core to ~60 fps — without it a
+    /// 10k-frame run spends ~167 s asleep.
     pub fn GB_set_turbo_mode(gb: *mut GB_gameboy_t, on: bool, no_frame_skip: bool);
 
     pub fn GB_set_pixels_output(gb: *mut GB_gameboy_t, output: *mut u32);

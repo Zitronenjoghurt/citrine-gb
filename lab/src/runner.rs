@@ -1,22 +1,13 @@
-//! Replay driver and the comparison engine.
-
 use crate::emulator::{FRAME_BYTES, Frame, FrameEmulator, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::metric::{FrameMetric, Polarity};
 use crate::recording::{InputEvent, Recording};
 use std::sync::mpsc::{Receiver, SyncSender, channel, sync_channel};
 use std::thread;
 
-/// Generous per-frame step ceiling, guarding against an emulator that never reaches vblank.
 const MAX_STEPS_PER_FRAME: u64 = 1_000_000;
 
-/// How many produced-but-not-yet-compared frames each emulator thread may run ahead. Bounds the
-/// pipeline's live memory to a few frames per emulator instead of the whole run.
 const PIPELINE_DEPTH: usize = 4;
 
-/// Steps a single emulator forward one frame at a time, applying recorded input at the right cycle.
-///
-/// Shared by the eager [`replay`] (used in tests) and the streaming [`run_streaming`] engine so the
-/// frame-timing logic lives in exactly one place.
 struct FrameDriver<'a> {
     events: &'a [InputEvent],
     next_event: usize,
@@ -32,7 +23,6 @@ impl<'a> FrameDriver<'a> {
         }
     }
 
-    /// Drive `emu` until it completes one frame, applying any input events whose cycle has arrived.
     fn advance<E: FrameEmulator>(&mut self, emu: &mut E) -> anyhow::Result<()> {
         loop {
             let now = emu.total_cycles();
@@ -58,10 +48,7 @@ impl<'a> FrameDriver<'a> {
     }
 }
 
-/// Drive `emu` through `recording`, collecting up to `max_frames` completed frames eagerly.
-///
-/// Retains every frame in memory; prefer [`run_streaming`] for large runs. Kept for tests and
-/// callers that genuinely want the whole sequence.
+/// Eager replay: retains every frame in memory. Prefer [`run_streaming`] for large runs.
 pub fn replay<E: FrameEmulator>(
     emu: &mut E,
     rom: &[u8],
@@ -79,28 +66,23 @@ pub fn replay<E: FrameEmulator>(
     Ok(frames)
 }
 
-/// Per-frame metric scores, aligned positionally with [`ComparisonReport::metric_names`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FrameScores {
     pub index: usize,
     pub scores: Vec<f64>,
 }
 
-/// Aggregate statistics for one metric across all compared frames.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MetricSummary {
     pub name: String,
-    /// Unit of the score for display (e.g. `"dB"`); empty for dimensionless metrics.
     pub unit: String,
     pub polarity: Polarity,
     pub mean: f64,
-    /// Most-similar score observed (max if higher-is-better, else min).
+    /// Max if higher-is-better, else min.
     pub best: f64,
-    /// Least-similar score observed.
     pub worst: f64,
 }
 
-/// The full result of comparing a reference run against a candidate run.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComparisonReport {
     pub reference_name: String,
@@ -108,19 +90,14 @@ pub struct ComparisonReport {
     pub metric_names: Vec<String>,
     pub frames: Vec<FrameScores>,
     pub summaries: Vec<MetricSummary>,
-    /// Index of the first frame that is not byte-identical, if any.
     pub first_divergent_frame: Option<usize>,
-    /// Index of the last frame that is not byte-identical, if any.
     pub last_divergent_frame: Option<usize>,
-    /// Total number of compared frames that are not byte-identical.
     pub divergent_frame_count: usize,
     pub reference_frame_count: usize,
     pub candidate_frame_count: usize,
     pub compared_frame_count: usize,
 }
 
-/// Accumulates per-metric statistics incrementally so the streaming engine never has to retain a
-/// score column in memory.
 struct Aggregator {
     polarities: Vec<Polarity>,
     sums: Vec<f64>,
@@ -215,41 +192,24 @@ impl Aggregator {
     }
 }
 
-/// How the two frame sequences are paired for comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alignment {
-    /// Pair each reference frame with the candidate frame closest in emulated **cycle count**.
-    ///
-    /// Both emulators are fed identical input at identical cycles, so equal cycle counts mean equal
-    /// emulated time. This nulls out the constant ~1-frame phase offset that LCD on/off transitions
-    /// introduce during boot, so divergence reflects real rendering differences rather than which
-    /// emulator happened to emit its Nth frame first.
+    /// Pair by nearest emulated cycle, cancelling the phase offset LCD on/off transitions cause.
     Cycle,
-    /// Pair the reference's Nth emitted frame with the candidate's Nth emitted frame.
-    ///
-    /// Simpler, but sensitive to frame-emission phase: a single partial frame emitted by one side
-    /// (e.g. at an LCD toggle) shifts every subsequent pair by one, inflating divergence.
+    /// Pair the Nth emitted frame of each; one extra partial frame shifts every following pair.
     Emission,
 }
 
-/// Extra candidate frames to produce beyond `max_frames` in [`Alignment::Cycle`] mode, so the last
-/// few reference frames still have a candidate frame that reaches their cycle even when the
-/// candidate runs slightly behind. Comfortably larger than any observed boot phase offset.
+/// Candidate look-ahead, so the tail reference frames still have one that reaches their cycle.
 const ALIGN_SLACK: usize = 16;
 
-/// T-cycles per displayed frame on DMG/CGB (single speed). Used only to size the cycle-alignment
-/// tolerance window, so the exact value is non-critical.
 const FRAME_CYCLES: u64 = 70224;
 
-/// A rendered frame tagged with the emulator's total cycle count at the moment it completed.
 struct CycleFrame {
     cycle: u64,
     rgba: Vec<u8>,
 }
 
-/// Produce `count` successive frames from `emu` into `tx`, each tagged with its cycle count, while
-/// recycling buffers returned via `recycle` so the steady state allocates nothing. Runs on its own
-/// thread.
 fn produce<E: FrameEmulator>(
     mut emu: E,
     rom: &[u8],
@@ -267,7 +227,7 @@ fn produce<E: FrameEmulator>(
             .try_recv()
             .unwrap_or_else(|_| Vec::with_capacity(FRAME_BYTES));
         emu.render_into(&mut rgba);
-        // A send error means the consumer has gone away (early stop / error) — just bow out.
+        // The consumer went away (early stop / error).
         if tx
             .send(CycleFrame {
                 cycle: emu.total_cycles(),
@@ -281,25 +241,6 @@ fn produce<E: FrameEmulator>(
     Ok(())
 }
 
-/// Compare a reference emulator against a candidate, frame by frame, without ever holding more than
-/// a few frames in memory.
-///
-/// The two emulators run on their own threads (overlapping each other and the metric computation);
-/// this thread pairs their output per `alignment`, scores each pair, and hands every compared frame
-/// pair to `on_frame` (used for image dumps and progress reporting). `on_frame` receives the
-/// *comparison* frames — greyscale-normalized when `normalize` is set, raw otherwise — plus whether
-/// they diverge, indexed by the reference frame's emission position.
-///
-/// In [`Alignment::Cycle`], `tolerance` widens the match to a ±`tolerance`-frame window around the
-/// nearest-cycle candidate: each metric keeps its best score over the window, and a frame counts as
-/// divergent only if *no* candidate in the window is byte-identical. This absorbs the irreducible
-/// sub-frame sampling skew (two independent emulators latch their framebuffers a few hundred cycles
-/// apart, so a game update landing in that gap shows up one frame early/late). `tolerance` is
-/// ignored in [`Alignment::Emission`].
-/// Sum of absolute per-channel (RGB) differences between two frame buffers — a cheap proxy for
-/// "how different do these look". Used to pick the most visually similar candidate in the
-/// tolerance window for dumps, so a timing-shifted frame isn't shown as a diff when a near-match
-/// sits a few steps away. Mirrors the channels [`diff_rgba`] amplifies (RGB, skipping alpha).
 fn frame_distance(a: &[u8], b: &[u8]) -> u64 {
     let mut sum = 0u64;
     for i in (0..a.len()).step_by(4) {
@@ -310,6 +251,12 @@ fn frame_distance(a: &[u8], b: &[u8]) -> u64 {
     sum
 }
 
+/// Compare two emulators frame by frame, holding only a few frames in memory. Each runs on its own
+/// thread; this thread pairs their output per `alignment` and scores it.
+///
+/// In [`Alignment::Cycle`], `tolerance` widens the match to a ±`tolerance`-frame window: each metric
+/// keeps its best score over the window and a frame diverges only if no candidate in it is
+/// byte-identical, absorbing the sub-frame sampling skew between two independent emulators.
 pub fn run_streaming<R, C>(
     reference: R,
     candidate: C,
@@ -331,8 +278,6 @@ where
     let cand_name = candidate.name().to_string();
     let mut agg = Aggregator::new(metrics, max_frames);
 
-    // The candidate runs a little past the reference in cycle mode so the tail stays bracketed,
-    // plus the tolerance window's worth of look-ahead.
     let cand_count = match alignment {
         Alignment::Cycle => max_frames + ALIGN_SLACK + tolerance,
         Alignment::Emission => max_frames,
@@ -367,7 +312,6 @@ where
             )
         });
 
-        // Persistent scratch frames reused every iteration; nothing here is reallocated per frame.
         let empty = || Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT, Vec::new());
         let mut ref_raw = empty();
         let mut cand_raw = empty();
@@ -375,8 +319,6 @@ where
         let mut cand_norm = empty();
 
         let polarities: Vec<Polarity> = metrics.iter().map(|m| m.polarity()).collect();
-        // Update `best` (one score per metric) with a candidate's scores, keeping the most-similar
-        // value per metric according to its polarity.
         let keep_best = |best: &mut [f64], scores: &[f64]| {
             for (k, &s) in scores.iter().enumerate() {
                 if best[k].is_nan() {
@@ -393,8 +335,7 @@ where
         match alignment {
             Alignment::Emission => {
                 for i in 0..max_frames {
-                    // A closed channel means that producer stopped early (it errored); stop and let
-                    // the join below surface the real error.
+                    // Producer errored; let the join surface it.
                     let (Ok(r), Ok(c)) = (ref_rx.recv(), cand_rx.recv()) else {
                         break;
                     };
@@ -416,14 +357,9 @@ where
                 }
             }
             Alignment::Cycle => {
-                // Nearest-cycle alignment with a ±`tolerance`-frame window. Both cycle streams rise
-                // monotonically and reference cycles only grow, so we keep a sliding window of
-                // candidate frames spanning roughly [r.cycle - tol, r.cycle + tol] and, for each
-                // reference frame, take the best metric score over the window. A `tolerance` of 0
-                // collapses to "compare against the single nearest-cycle candidate".
+                // Both cycle streams rise monotonically, so a sliding window suffices. The extra
+                // half frame keeps the nearest candidate in range even at `tolerance == 0`.
                 use std::collections::VecDeque;
-                // Window half-width in cycles: `tolerance` whole frames plus half a frame so the
-                // nearest candidate (always within ±½ frame) is included even at `tolerance == 0`.
                 let tol_cycles = tolerance as u64 * FRAME_CYCLES + FRAME_CYCLES / 2;
 
                 let mut window: VecDeque<CycleFrame> = VecDeque::new();
@@ -433,7 +369,6 @@ where
                 for i in 0..max_frames {
                     let Ok(r) = ref_rx.recv() else { break };
 
-                    // Extend the window until it reaches `tol_cycles` past the reference cycle.
                     while !stream_done
                         && window
                             .back()
@@ -444,8 +379,6 @@ where
                             None => stream_done = true,
                         }
                     }
-                    // Retire candidates that fell more than `tol_cycles` behind (recycle them),
-                    // always keeping at least one so the window is never empty.
                     while window.len() > 1 && window.front().unwrap().cycle + tol_cycles < r.cycle {
                         let _ = cand_recycle_tx.send(window.pop_front().unwrap().rgba);
                     }
@@ -461,9 +394,6 @@ where
                         &ref_raw
                     };
 
-                    // Locate the nearest-cycle candidate (always exists), then score it together
-                    // with the ±`tolerance` candidates on either side by emission index, keeping the
-                    // best score per metric.
                     let mut nearest = 0usize;
                     let mut nearest_dist = u64::MAX;
                     for wi in 0..window.len() {
@@ -478,13 +408,8 @@ where
 
                     let mut best = vec![f64::NAN; metrics.len()];
                     let mut any_identical = false;
-                    // Representative candidate for image dumps. Preference order:
-                    //   1. an exact match anywhere in the window — then the frame merely arrived a
-                    //      few steps early/late and is not a real diff (it won't be dumped at all,
-                    //      since `diverged` below is `!any_identical`);
-                    //   2. otherwise the *most visually similar* candidate in the window — not the
-                    //      nearest in cycle, which is often the timing-shifted frame we want tolerance
-                    //      to look past. This makes the dumped diff the faintest one available.
+                    // Dumps show the most visually similar candidate, not the nearest in cycle —
+                    // that one is often the timing-shifted frame tolerance exists to look past.
                     let mut rep_idx = nearest;
                     let mut rep_identical = false;
                     let mut rep_dist = u64::MAX;
@@ -506,7 +431,6 @@ where
                                 rep_identical = true;
                             }
                         } else if !rep_identical {
-                            // No exact match yet: keep the closest-looking candidate as the fallback.
                             let dist = frame_distance(&rf.rgba, &cf.rgba);
                             if dist < rep_dist {
                                 rep_dist = dist;
@@ -516,7 +440,6 @@ where
                         std::mem::swap(&mut cand_raw.rgba, &mut window[wi].rgba);
                     }
 
-                    // Re-render the representative candidate for `on_frame` (dumps/progress).
                     std::mem::swap(&mut cand_raw.rgba, &mut window[rep_idx].rgba);
                     let cf: &Frame = if normalize {
                         cand_raw.normalize_into(&mut cand_norm);
@@ -539,8 +462,7 @@ where
             }
         }
 
-        // Drop receivers and recycle senders so any producer still blocked on `send` (it ran ahead
-        // of what we consumed) unblocks and exits — otherwise `join` would deadlock.
+        // Unblocks any producer parked in `send`; without this the joins below deadlock.
         drop(ref_rx);
         drop(cand_rx);
         drop(ref_recycle_tx);

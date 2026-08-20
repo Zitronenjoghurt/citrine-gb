@@ -1,5 +1,3 @@
-//! Concrete [`crate::emulator::FrameEmulator`] adapters.
-
 mod citrine;
 mod sameboy;
 

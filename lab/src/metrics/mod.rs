@@ -1,5 +1,3 @@
-//! Built-in frame metrics. Add a new file here and implement [`crate::metric::FrameMetric`].
-
 mod exact;
 mod mse;
 mod ssim;
@@ -10,7 +8,7 @@ pub use ssim::Ssim;
 
 use crate::metric::FrameMetric;
 
-/// Resolve a metric by its short name (as used on the CLI). Returns `None` for unknown names.
+/// Resolve a metric by the short name used on the CLI.
 pub fn by_name(name: &str) -> Option<Box<dyn FrameMetric>> {
     match name {
         "exact" => Some(Box::new(ExactFrame)),
