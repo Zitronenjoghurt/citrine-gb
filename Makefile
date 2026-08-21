@@ -63,3 +63,10 @@ logs:
 publish:
 	cargo test -p citrine-gb --release
 	cd lib && cargo publish
+
+release:
+	@if [ -z "$(v)" ]; then echo "Error: Version parameter is required. Use 'make release v=x.y.z'"; exit 1; fi
+	@grep -q '^version = "$(v)"$$' Cargo.toml || { echo "Error: workspace version in Cargo.toml does not match $(v)"; exit 1; }
+	$(MAKE) check
+	git tag v$(v)
+	git push origin v$(v)
