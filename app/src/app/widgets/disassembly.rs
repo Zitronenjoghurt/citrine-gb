@@ -117,7 +117,7 @@ impl<'a> DisassemblyView<'a> {
             ui.painter().circle_stroke(
                 bp_center,
                 4.0,
-                Stroke::new(1.0, ui.visuals().error_fg_color),
+                Stroke::new(1.0f32, ui.visuals().error_fg_color),
             );
         }
 
