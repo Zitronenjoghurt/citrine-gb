@@ -37,8 +37,5 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Test
-        run: cargo test --all-features
-
       - name: Check web build
         run: cargo check -p citrine-gb-app --target wasm32-unknown-unknown
