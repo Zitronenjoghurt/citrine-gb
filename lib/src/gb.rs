@@ -12,6 +12,7 @@ pub mod ic;
 pub mod joypad;
 mod memory;
 pub mod ppu;
+pub mod ram_init;
 pub mod timer;
 
 // ToDo: CGB specific registers like speed mode
@@ -33,10 +34,25 @@ pub struct GameBoy {
     pub joypad: joypad::Joypad,
     pub model: GbModel,
     pub cycle_counter: u32,
+    pub ram_init: ram_init::RamInit,
 }
 
 impl GameBoy {
     pub fn new(model: GbModel, boot_rom: Option<Vec<u8>>, rom_header_checksum: u8) -> Self {
+        Self::new_with_ram_init(
+            model,
+            boot_rom,
+            rom_header_checksum,
+            ram_init::RamInit::default(),
+        )
+    }
+
+    pub fn new_with_ram_init(
+        model: GbModel,
+        boot_rom: Option<Vec<u8>>,
+        rom_header_checksum: u8,
+        ram_init: ram_init::RamInit,
+    ) -> Self {
         let cpu = if boot_rom.is_some() {
             cpu::Cpu::new_with_boot_rom(model)
         } else {
@@ -63,18 +79,23 @@ impl GameBoy {
             debugger: crate::debug::Debugger::new(),
             dma: dma::DmaController::new(model),
             ic: ic::InterruptController::new(),
-            memory: memory::Memory::new(),
+            memory: memory::Memory::new(model, ram_init),
             timer: timer::Timer::new(),
             ppu: ppu::Ppu::new(model),
             apu: apu::Apu::new(),
             joypad: joypad::Joypad::new(),
             model,
             cycle_counter: 0,
+            ram_init,
         }
     }
 
     pub fn new_empty(model: GbModel) -> Self {
         Self::new(model, None, 0x00)
+    }
+
+    pub fn new_empty_with_ram_init(model: GbModel, ram_init: ram_init::RamInit) -> Self {
+        Self::new_with_ram_init(model, None, 0x00, ram_init)
     }
 
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
@@ -85,7 +106,12 @@ impl GameBoy {
             None
         };
 
-        *self = Self::new(self.model, boot_rom, rom.provided_header_checksum()?);
+        *self = Self::new_with_ram_init(
+            self.model,
+            boot_rom,
+            rom.provided_header_checksum()?,
+            self.ram_init,
+        );
         self.cartridge.load_rom(rom)?;
         self.apu.set_sample_rate(sample_rate);
         Ok(())
@@ -93,7 +119,7 @@ impl GameBoy {
 
     pub fn load_boot_rom(&mut self, rom: &[u8]) {
         let sample_rate = self.apu.output_sample_rate;
-        *self = Self::new(self.model, Some(rom.to_vec()), 0x00);
+        *self = Self::new_with_ram_init(self.model, Some(rom.to_vec()), 0x00, self.ram_init);
         self.apu.set_sample_rate(sample_rate);
     }
 
@@ -162,7 +188,7 @@ impl GameBoy {
         self.cartridge.soft_reset();
         self.dma.soft_reset();
         self.ic.soft_reset();
-        self.memory.soft_reset();
+        self.memory.soft_reset(self.model, self.ram_init);
         self.timer.soft_reset();
         self.ppu.soft_reset();
         self.cycle_counter = 0;
@@ -215,7 +241,7 @@ impl GameBoy {
     }
 
     #[cfg(feature = "persistence")]
-    pub fn from_dump(data: &[u8]) -> GbResult<Self> {
+    pub fn from_dump(data: &[u8], rom: &Rom) -> GbResult<Self> {
         let dump = {
             #[cfg(feature = "brotli")]
             {
@@ -228,6 +254,7 @@ impl GameBoy {
         };
 
         let mut gb = dump.gb;
+        gb.cartridge.restore_rom(rom)?;
         if let Some(sram) = dump.sram {
             gb.put_sram_dump(sram);
         }

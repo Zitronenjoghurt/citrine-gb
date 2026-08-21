@@ -1,5 +1,7 @@
 .idea/
 app/dist
+build
+experiments
 roms
 target
 tests

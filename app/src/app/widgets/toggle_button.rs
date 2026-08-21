@@ -7,6 +7,7 @@ pub struct ToggleButton<'a> {
     enabled: bool,
 }
 
+#[allow(dead_code)]
 impl<'a> ToggleButton<'a> {
     pub fn new(value: &'a mut bool, label: &'a str) -> Self {
         Self {

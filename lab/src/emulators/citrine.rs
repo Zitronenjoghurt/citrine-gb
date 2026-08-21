@@ -1,5 +1,6 @@
 use crate::emulator::{Button, FrameEmulator};
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
+use citrine_gb::gb::ram_init::RamInit;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::rom::Rom;
 
@@ -11,7 +12,7 @@ pub struct CitrineEmulator {
 impl CitrineEmulator {
     pub fn new() -> Self {
         Self {
-            gb: GameBoy::new_empty(GbModel::Dmg),
+            gb: GameBoy::new_empty_with_ram_init(GbModel::Dmg, RamInit::random()),
             model: GbModel::Dmg,
         }
     }
@@ -39,7 +40,7 @@ impl FrameEmulator for CitrineEmulator {
 
     fn load(&mut self, rom: &[u8], boot_rom: Option<&[u8]>, model: GbModel) -> anyhow::Result<()> {
         self.model = model;
-        self.gb = GameBoy::new_empty(model);
+        self.gb = GameBoy::new_empty_with_ram_init(model, RamInit::random());
         if let Some(boot) = boot_rom {
             self.gb.load_boot_rom(boot);
         }

@@ -18,6 +18,8 @@ pub struct Settings {
     pub ghosting_strength: f32,
     pub volume: f32,
     pub current_tab: SettingsTab,
+    pub quick_slot: usize,
+    pub randomized_ram: bool,
     pub dev_mode: bool,
     pub focus_mode: bool,
     pub track_pc: bool,
@@ -38,6 +40,8 @@ impl Default for Settings {
             ghosting_strength: Self::DEFAULT_GHOSTING_STRENGTH,
             volume: Self::DEFAULT_VOLUME,
             current_tab: SettingsTab::default(),
+            quick_slot: 0,
+            randomized_ram: false,
             dev_mode: false,
             focus_mode: false,
             track_pc: false,
@@ -73,6 +77,11 @@ impl Settings {
         ctx.set_pixels_per_point(self.ui_scale);
         self.ui_theme.apply(ctx);
         emulator.gb.ppu.dmg_theme = self.dmg_theme;
+        emulator.gb.ram_init = if self.randomized_ram {
+            citrine_gb::gb::ram_init::RamInit::random()
+        } else {
+            citrine_gb::gb::ram_init::RamInit::Zeroed
+        };
         emulator.enable_matrix = self.matrix;
         emulator.enable_ghosting = self.ghosting;
         emulator.matrix_edge_brightness = 1.0 - self.matrix_edge_darkness;

@@ -1,4 +1,3 @@
-use crate::app::file_picker::FileIntent;
 use crate::app::tabs::TabViewer;
 use egui::TextEdit;
 
@@ -20,8 +19,11 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
 
         ui.separator();
 
+        #[cfg(not(target_arch = "wasm32"))]
         if ui.button("Create & Export").clicked() {
-            viewer.file_picker.open(FileIntent::ExportE2E);
+            crate::utils::file_loader::FolderPicker::new()
+                .title("Export E2E test to folder")
+                .dispatch(viewer.files.folder_tx.clone());
         }
     });
 }

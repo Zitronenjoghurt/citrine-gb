@@ -3,6 +3,7 @@ use crate::app::tabs::Tab;
 pub enum AppEvent {
     LoadRomData { data: Vec<u8> },
     OpenTab { tab: Tab },
+    Notify { message: String, error: bool },
 }
 
 #[derive(Default)]
@@ -25,5 +26,19 @@ impl AppEventQueue {
 
     pub fn open_tab(&mut self, tab: Tab) {
         self.queue.push(AppEvent::OpenTab { tab });
+    }
+
+    pub fn notify(&mut self, message: impl Into<String>) {
+        self.queue.push(AppEvent::Notify {
+            message: message.into(),
+            error: false,
+        });
+    }
+
+    pub fn notify_error(&mut self, message: impl Into<String>) {
+        self.queue.push(AppEvent::Notify {
+            message: message.into(),
+            error: true,
+        });
     }
 }

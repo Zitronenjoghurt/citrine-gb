@@ -2,7 +2,8 @@ FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /citrine
 RUN apt-get update && apt-get install -y pkg-config libudev-dev libasound2-dev && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
-RUN cargo install trunk
+RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+RUN cargo binstall -y trunk
 
 FROM chef AS planner
 COPY . .

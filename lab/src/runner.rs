@@ -257,6 +257,8 @@ fn frame_distance(a: &[u8], b: &[u8]) -> u64 {
 /// In [`Alignment::Cycle`], `tolerance` widens the match to a ±`tolerance`-frame window: each metric
 /// keeps its best score over the window and a frame diverges only if no candidate in it is
 /// byte-identical, absorbing the sub-frame sampling skew between two independent emulators.
+// A parameter struct would read better; deferred so the call sites stay stable for now.
+#[allow(clippy::too_many_arguments)]
 pub fn run_streaming<R, C>(
     reference: R,
     candidate: C,
@@ -396,8 +398,8 @@ where
 
                     let mut nearest = 0usize;
                     let mut nearest_dist = u64::MAX;
-                    for wi in 0..window.len() {
-                        let dist = window[wi].cycle.abs_diff(r.cycle);
+                    for (wi, frame) in window.iter().enumerate() {
+                        let dist = frame.cycle.abs_diff(r.cycle);
                         if dist < nearest_dist {
                             nearest_dist = dist;
                             nearest = wi;
@@ -413,6 +415,8 @@ where
                     let mut rep_idx = nearest;
                     let mut rep_identical = false;
                     let mut rep_dist = u64::MAX;
+                    // Indexed rather than iterated: the body swaps buffers back into `window[wi]`.
+                    #[allow(clippy::needless_range_loop)]
                     for wi in lo..=hi {
                         std::mem::swap(&mut cand_raw.rgba, &mut window[wi].rgba);
                         let cf: &Frame = if normalize {

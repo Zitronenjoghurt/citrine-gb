@@ -1,20 +1,15 @@
-use crate::app::file_picker::FilePicker;
+use crate::utils::file_channels::FileChannels;
+use crate::utils::file_saver::FileSaver;
 use egui::Widget;
 
 pub struct DebugActions<'a> {
     emulator: &'a mut crate::emulator::Emulator,
-    file_picker: &'a mut FilePicker,
+    files: &'a mut FileChannels,
 }
 
 impl<'a> DebugActions<'a> {
-    pub fn new(
-        emulator: &'a mut crate::emulator::Emulator,
-        file_picker: &'a mut FilePicker,
-    ) -> Self {
-        Self {
-            emulator,
-            file_picker,
-        }
+    pub fn new(emulator: &'a mut crate::emulator::Emulator, files: &'a mut FileChannels) -> Self {
+        Self { emulator, files }
     }
 }
 
@@ -25,7 +20,9 @@ impl Widget for DebugActions<'_> {
         if response.clicked()
             && let Ok(json) = self.emulator.gb.dump_json()
         {
-            self.file_picker.save("citrine_dump.json", json.as_bytes());
+            FileSaver::new("citrine_dump.json")
+                .add_filter("JSON", &["json"])
+                .dispatch(json.into_bytes(), self.files.save_tx.clone());
         }
 
         ui.separator();
@@ -58,8 +55,9 @@ impl Widget for DebugActions<'_> {
                 if ui.button("Export Recording").clicked()
                     && let Some(json) = self.emulator.recorder.export_json()
                 {
-                    self.file_picker
-                        .save("citrine_recording.json", json.as_bytes());
+                    FileSaver::new("citrine_recording.json")
+                        .add_filter("JSON", &["json"])
+                        .dispatch(json.into_bytes(), self.files.save_tx.clone());
                 }
             }
         }

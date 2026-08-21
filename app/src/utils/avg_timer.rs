@@ -1,5 +1,4 @@
 use citrine_gb::utils::ema::EMA;
-use std::fmt::Display;
 
 pub struct AvgTimer {
     start: web_time::Instant,

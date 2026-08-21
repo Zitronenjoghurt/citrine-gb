@@ -416,7 +416,7 @@ fn discover_roms(root: &Path, only: Option<&str>) -> anyhow::Result<Vec<RomConfi
             recording: None,
         });
     }
-    configs.sort_by(|a, b| a.label().cmp(&b.label()));
+    configs.sort_by_key(|c| c.label());
 
     for (sha, (name, _)) in recordings {
         println!("WARNING: recording {name} matches no discovered ROM (sha256 {sha})");

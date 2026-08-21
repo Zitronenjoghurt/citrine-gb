@@ -6,14 +6,28 @@
 - Audio Debug and APU Waves tabs for inspecting the sound hardware while a game runs
 - Performance tab showing emulation and frame timings
 - Input recording (Debug Actions tab): captures button presses with cycle timestamps for replay
+- Snapshots: unlimited save-state slots per game with thumbnails
+- A Saves tab with `.sav` import and export
+- Recently played ROMs in the file menu (native only)
+- Optional randomized power-on RAM, matching how real hardware boots (Settings → Developer)
 - Full emulator state dump as JSON
 - MBC5 cartridge support
 - Frame-by-frame accuracy comparison against the SameBoy reference emulator (`lab/`), with committed
   result snapshots under `experiments/`
 - Per-ROM mooneye test suite runner (`make test-mooneye`)
 
+## Changed
+
+- Saves are now stored per game (identified by ROM contents) in Citrine's application data folder
+  instead of next to the ROM file. Existing `.sav` files are imported automatically the first time
+  you load their game, and the originals are left in place
+
 ## Fixed
 
+- Saves are now written when you close the emulator, so the last few seconds of play are no longer lost
+- Bundled homebrew games can now save
+- A `.gb` and a `.gbc` of the same game no longer share (and overwrite) one save file
+- Saving in the web version now works outside Chromium-based browsers
 - Inverted DMG post-boot `F` flags (half-carry/carry are set when the header checksum is non-zero)
 - Interrupt dispatch now reads the target vector from `IE` after pushing the return address, so a
   stack push onto `$FFFF` can redirect or cancel the interrupt

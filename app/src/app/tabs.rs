@@ -1,8 +1,8 @@
 use crate::app::events::AppEventQueue;
-use crate::app::file_picker::FilePicker;
 use crate::app::ui_state::UiState;
 use crate::audio::Audio;
 use crate::emulator::Emulator;
+use crate::utils::file_channels::FileChannels;
 use egui::{Ui, WidgetText};
 use strum_macros::EnumIter;
 
@@ -18,6 +18,7 @@ mod info;
 mod performance;
 mod registers;
 mod rom_info;
+pub mod saves;
 mod settings;
 mod time_control;
 
@@ -26,7 +27,7 @@ pub struct TabViewer<'a> {
     pub commonmark: &'a mut egui_commonmark::CommonMarkCache,
     pub emulator: &'a mut Emulator,
     pub events: &'a mut AppEventQueue,
-    pub file_picker: &'a mut FilePicker,
+    pub files: &'a mut FileChannels,
     pub ui: &'a mut UiState,
 }
 
@@ -41,6 +42,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
         match tab {
             Tab::GameBoy => game_boy::show(self, ui),
             Tab::Settings => settings::show(self, ui),
+            Tab::Saves => saves::show(self, ui),
             Tab::TimeControl => time_control::show(self, ui),
             Tab::Registers => registers::show(self, ui),
             Tab::RomInfo => rom_info::show(self, ui),
@@ -79,6 +81,7 @@ pub enum Tab {
     Performance,
     Registers,
     RomInfo,
+    Saves,
     Settings,
     TimeControl,
 }
@@ -88,6 +91,7 @@ impl Tab {
         match self {
             Tab::GameBoy => "Game Boy",
             Tab::Settings => "Settings",
+            Tab::Saves => "Saves",
             Tab::TimeControl => "Time Control",
             Tab::Registers => "Registers",
             Tab::RomInfo => "ROM Info",

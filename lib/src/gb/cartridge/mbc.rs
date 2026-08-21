@@ -26,6 +26,7 @@ pub enum Mbc {
     Mbc5(mbc5::Mbc5),
 }
 
+#[allow(dead_code)]
 impl Mbc {
     pub fn get_internal_data(&self) -> Option<&[u8]> {
         if let Self::Mbc2(mbc) = self {

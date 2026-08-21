@@ -141,5 +141,21 @@ impl SettingsContent<'_> {
             });
     }
 
-    pub fn developer(self, ui: &mut Ui) {}
+    pub fn developer(mut self, ui: &mut Ui) {
+        ui.heading("Developer");
+        ui.separator();
+
+        let s = &mut self.settings;
+
+        Grid::new("settings_developer_grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Randomized power-on RAM");
+                let response = ui.checkbox(&mut s.randomized_ram, "");
+                if response.changed() {
+                    s.dirty = true;
+                }
+                ui.end_row();
+            });
+    }
 }

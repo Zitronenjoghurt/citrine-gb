@@ -2,6 +2,7 @@ use crate::emulator::{Button, FrameEmulator, SCREEN_HEIGHT, SCREEN_WIDTH};
 use citrine_gb::gb::GbModel;
 use sameboy_sys as sys;
 use std::ffi::c_void;
+use std::sync::Mutex;
 
 struct Ctx {
     frame_ready: bool,
@@ -31,6 +32,9 @@ extern "C" fn vblank(gb: *mut sys::GB_gameboy_t, _ty: sys::GB_vblank_type_t) {
         }
     }
 }
+
+const RAM_SEED: u64 = 0x0C17_A17E;
+static RESET_LOCK: Mutex<()> = Mutex::new(());
 
 fn sys_model(model: GbModel) -> sys::GB_model_t {
     match model {
@@ -140,13 +144,19 @@ impl FrameEmulator for SameBoyEmulator {
             self.wire_callbacks();
         }
 
-        unsafe {
-            if let Some(boot) = boot_rom {
-                sys::GB_load_boot_rom_from_buffer(self.gb, boot.as_ptr(), boot.len());
+        {
+            let _guard = RESET_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            unsafe {
+                if let Some(boot) = boot_rom {
+                    sys::GB_load_boot_rom_from_buffer(self.gb, boot.as_ptr(), boot.len());
+                }
+                sys::GB_load_rom_from_buffer(self.gb, rom.as_ptr(), rom.len());
+                sys::GB_random_seed(RAM_SEED);
+                sys::GB_reset(self.gb);
+                self.resize_pixel_buffer();
             }
-            sys::GB_load_rom_from_buffer(self.gb, rom.as_ptr(), rom.len());
-            sys::GB_reset(self.gb);
-            self.resize_pixel_buffer();
         }
         if boot_rom.is_none() {
             self.set_post_boot_registers(rom);

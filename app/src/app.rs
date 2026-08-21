@@ -1,9 +1,12 @@
-use crate::app::file_picker::{FileIntent, FilePicker, FileResult, SaveResult};
 use crate::app::tabs::Tab;
 use crate::app::ui_state::UiState;
 use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
+use crate::utils::file_channels::FileChannels;
+use crate::utils::file_loader::FileLoader;
+use crate::utils::file_loader::PickedFile;
+use crate::utils::file_saver::SaveOutcome;
 use citrine_gb::rom::Rom;
 use eframe::{Frame, Storage};
 use egui::{CentralPanel, Color32, Context, FontDefinitions, TopBottomPanel};
@@ -11,11 +14,11 @@ use egui_commonmark::CommonMarkCache;
 use egui_dock::DockState;
 use egui_notify::{Toast, Toasts};
 use gilrs::Gilrs;
-use std::io::Write;
 use strum::IntoEnumIterator;
 
+const QUICK_LOAD_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
+
 mod events;
-mod file_picker;
 mod tabs;
 mod ui_state;
 mod widgets;
@@ -27,7 +30,7 @@ pub struct Citrine {
     #[serde(skip, default)]
     pub emulator: Emulator,
     #[serde(skip, default)]
-    pub file_picker: FilePicker,
+    pub files: FileChannels,
     #[serde(skip, default = "default_gilrs")]
     pub gil: Gilrs,
     #[serde(skip, default)]
@@ -38,6 +41,8 @@ pub struct Citrine {
     pub events: events::AppEventQueue,
     #[serde(skip, default)]
     pub commonmark: CommonMarkCache,
+    #[serde(skip, default)]
+    quick_load_hold: Option<web_time::Instant>,
 }
 
 impl Default for Citrine {
@@ -47,12 +52,13 @@ impl Default for Citrine {
             dock,
             ui: UiState::default(),
             emulator: Emulator::default(),
-            file_picker: FilePicker::default(),
+            files: FileChannels::default(),
             gil: default_gilrs(),
             toasts: Toasts::default(),
             audio: None,
             events: events::AppEventQueue::default(),
             commonmark: CommonMarkCache::default(),
+            quick_load_hold: None,
         };
         app.open_tab(Tab::Info);
         app
@@ -100,25 +106,10 @@ impl eframe::App for Citrine {
             self.toggle_focus_mode();
         }
 
-        if let Some(result) = self.file_picker.poll() {
-            match result.intent {
-                FileIntent::LoadRom => self.handle_load_rom(result),
-                FileIntent::LoadBootRom => self.handle_load_boot_rom(result),
-                FileIntent::ExportE2E => self.handle_export_e2e(result),
-            }
-        }
+        self.handle_snapshot_hotkeys(ctx);
+        self.quick_load_overlay(ctx);
 
-        if let Some(save_result) = self.file_picker.poll_save() {
-            match save_result {
-                SaveResult::Success(filename) => {
-                    self.toasts.success(format!("Saved to '{}'", filename));
-                }
-                SaveResult::Error(err) => {
-                    self.toasts.error(format!("Failed to save: {}", err));
-                }
-                SaveResult::Cancelled => {}
-            }
-        }
+        self.drain_file_channels();
 
         if let Err(err) = self.emulator.update(ctx, &mut self.gil) {
             self.toasts.error(format!("Emulation Error: {}", err));
@@ -135,6 +126,9 @@ impl eframe::App for Citrine {
     }
 
     fn save(&mut self, storage: &mut dyn Storage) {
+        if let Err(err) = self.emulator.flush_save() {
+            log::error!("failed to flush save: {err:?}");
+        }
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 }
@@ -158,7 +152,7 @@ impl Citrine {
                 commonmark: &mut self.commonmark,
                 emulator: &mut self.emulator,
                 events: &mut self.events,
-                file_picker: &mut self.file_picker,
+                files: &mut self.files,
                 ui: &mut self.ui,
             };
 
@@ -176,11 +170,44 @@ impl Citrine {
             ui.separator();
 
             ui.menu_button(icons::FOLDER, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ui.set_min_width(180.0);
+
                 if ui.button("Load ROM").clicked() {
-                    self.file_picker.open(FileIntent::LoadRom);
+                    FileLoader::new()
+                        .title("Load ROM")
+                        .add_filter("Game Boy ROMs", &["gb", "gbc"])
+                        .dispatch(self.files.rom_tx.clone());
                 }
                 if ui.button("Load Boot ROM").clicked() {
-                    self.file_picker.open(FileIntent::LoadBootRom);
+                    FileLoader::new()
+                        .title("Load Boot ROM")
+                        .add_filter("Game Boy Boot ROM", &["bin"])
+                        .dispatch(self.files.boot_rom_tx.clone());
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.separator();
+                    self.ui.recent.prune();
+                    if self.ui.recent.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("No recent ROMs"));
+                    } else {
+                        ui.label("Recent");
+                        let mut chosen = None;
+                        for entry in self.ui.recent.entries() {
+                            if ui
+                                .button(entry.display_name())
+                                .on_hover_text(entry.path.display().to_string())
+                                .clicked()
+                            {
+                                chosen = Some(entry.path.clone());
+                            }
+                        }
+                        if let Some(path) = chosen {
+                            self.load_recent(path);
+                        }
+                    }
                 }
             })
             .response
@@ -192,6 +219,14 @@ impl Citrine {
                 .clicked()
             {
                 self.open_tab(Tab::Homebrew);
+            }
+
+            if ui
+                .button(icons::FLOPPY_DISK)
+                .on_hover_text("Saves & Snapshots (F8 quick save / F9 quick load)")
+                .clicked()
+            {
+                self.open_tab(Tab::Saves);
             }
 
             if ui.button(icons::GEAR).on_hover_text("Settings").clicked() {
@@ -339,38 +374,182 @@ impl Citrine {
     }
 }
 
-// File handling
 impl Citrine {
-    fn handle_load_rom(&mut self, fr: FileResult) {
+    fn drain_file_channels(&mut self) {
+        while let Ok(file) = self.files.rom_rx.try_recv() {
+            self.handle_load_rom(file);
+        }
+        while let Ok(file) = self.files.boot_rom_rx.try_recv() {
+            self.handle_load_boot_rom(file);
+        }
+        while let Ok(file) = self.files.sav_rx.try_recv() {
+            self.handle_import_save(file);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        while let Ok(dir) = self.files.folder_rx.try_recv() {
+            self.handle_export_e2e(&dir);
+        }
+        while let Ok(outcome) = self.files.save_rx.try_recv() {
+            match outcome {
+                SaveOutcome::Saved(name) => self.toasts.success(format!("Saved to '{name}'")),
+                SaveOutcome::Failed(err) => self.toasts.error(format!("Failed to save: {err}")),
+                SaveOutcome::Cancelled => continue,
+            };
+        }
+    }
+
+    fn handle_snapshot_hotkeys(&mut self, ctx: &Context) {
+        if ctx.wants_keyboard_input() {
+            self.quick_load_hold = None;
+            return;
+        }
+
+        let (save, shift, load_held) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::F8),
+                i.modifiers.shift,
+                i.key_down(egui::Key::F9),
+            )
+        });
+
+        if self.emulator.rom_key().is_none() {
+            self.quick_load_hold = None;
+            if save || load_held {
+                self.toasts.error("No ROM loaded");
+            }
+            return;
+        }
+
+        if save {
+            let slot = if shift {
+                self.emulator
+                    .store
+                    .next_free_slot(self.emulator.rom_key().unwrap_or_default())
+            } else {
+                self.ui.settings.quick_slot
+            };
+            match self.emulator.save_snapshot(slot) {
+                Ok(()) => self
+                    .toasts
+                    .success(format!("Saved snapshot to slot {slot}")),
+                Err(err) => self.toasts.error(format!("Quick save failed: {err:?}")),
+            };
+            self.ui.snapshots.invalidate();
+        }
+
+        if load_held {
+            let started = *self
+                .quick_load_hold
+                .get_or_insert_with(web_time::Instant::now);
+            if started.elapsed() >= QUICK_LOAD_HOLD {
+                self.quick_load_hold = None;
+                let slot = self.ui.settings.quick_slot;
+                match self.emulator.load_snapshot(slot) {
+                    Ok(true) => self.toasts.success(format!("Loaded slot {slot}")),
+                    Ok(false) => self.toasts.info(format!("Slot {slot} is empty")),
+                    Err(err) => self.toasts.error(format!("Quick load failed: {err:?}")),
+                };
+                self.ui.snapshots.invalidate();
+            }
+        } else {
+            self.quick_load_hold = None;
+        }
+    }
+
+    fn quick_load_overlay(&self, ctx: &Context) {
+        let Some(started) = self.quick_load_hold else {
+            return;
+        };
+        let progress =
+            (started.elapsed().as_secs_f32() / QUICK_LOAD_HOLD.as_secs_f32()).clamp(0.0, 1.0);
+        let slot = self.ui.settings.quick_slot;
+
+        egui::Area::new("quick_load_hold".into())
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -48.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(220.0);
+                    ui.label(format!("Hold to load slot {slot}"));
+                    ui.add(egui::ProgressBar::new(progress).desired_height(6.0));
+                });
+            });
+    }
+
+    fn handle_load_rom(&mut self, file: PickedFile) {
         self.try_start_audio();
-        let rom = Rom::new(fr.data().unwrap());
+        let rom = Rom::new(&file.data);
         if let Err(err) = self.emulator.load_rom(
             &rom,
             #[cfg(not(target_arch = "wasm32"))]
-            Some(&fr.path),
+            file.path.as_deref(),
         ) {
             self.toasts.error(format!("Failed to load ROM: {}", err));
         } else {
-            self.toasts.success(format!("Loaded ROM '{}'", fr.name));
+            self.toasts.success(format!("Loaded ROM '{}'", file.name));
             self.ui.settings.dirty = true;
 
-            if self.emulator.save_loaded {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = file.path.as_deref() {
+                let title = self.emulator.gb.cartridge.header.title.clone();
+                self.ui.recent.record(path, &title);
+            }
+
+            if self.emulator.imported_legacy_save {
+                self.toasts
+                    .success("Imported the save file found next to the ROM");
+            } else if self.emulator.save_loaded {
                 self.toasts.success("Loaded save data");
             }
         }
     }
 
-    fn handle_load_boot_rom(&mut self, fr: FileResult) {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_recent(&mut self, path: std::path::PathBuf) {
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(err) => {
+                self.toasts
+                    .error(format!("Could not open {}: {err}", path.display()));
+                self.ui.recent.remove(&path);
+                return;
+            }
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.handle_load_rom(PickedFile {
+            name,
+            data,
+            path: Some(path),
+        });
+    }
+
+    fn handle_import_save(&mut self, file: PickedFile) {
+        match self.emulator.import_save_bytes(&file.data) {
+            Ok(true) => {
+                self.toasts
+                    .success(format!("Imported save from '{}'", file.name));
+            }
+            Ok(false) => {
+                self.toasts.error("Load a ROM before importing a save");
+            }
+            Err(err) => {
+                self.toasts.error(format!("Failed to import save: {err:?}"));
+            }
+        }
+    }
+
+    fn handle_load_boot_rom(&mut self, file: PickedFile) {
         self.try_start_audio();
-        self.emulator.gb.load_boot_rom(fr.data().unwrap());
+        self.emulator.gb.load_boot_rom(&file.data);
         self.ui.settings.dirty = true;
         self.toasts.success("Boot ROM loaded");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn handle_export_e2e(&mut self, fr: FileResult) {
-        let dir = fr.directory_path().unwrap();
-
+    fn handle_export_e2e(&mut self, dir: &std::path::Path) {
         if self.ui.e2e.title.is_empty() {
             self.toasts.error("Please enter a title for the E2E test");
             return;
@@ -388,9 +567,6 @@ impl Citrine {
                 .success(format!("Exported E2E to '{}'", dir.display()));
         }
     }
-
-    #[cfg(target_arch = "wasm32")]
-    fn handle_export_e2e(&mut self, _fr: FileResult) {}
 }
 
 // Events
@@ -403,6 +579,13 @@ impl Citrine {
 
     fn handle_event(&mut self, event: events::AppEvent) {
         match event {
+            events::AppEvent::Notify { message, error } => {
+                if error {
+                    self.toasts.error(message);
+                } else {
+                    self.toasts.success(message);
+                }
+            }
             events::AppEvent::LoadRomData { data } => {
                 self.handle_load_rom_data(data);
             }

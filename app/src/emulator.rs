@@ -1,4 +1,5 @@
 use crate::recorder::InputRecorder;
+use crate::storage::SaveStore;
 use crate::utils::avg_timer::AvgTimer;
 use citrine_gb::error::GbResult;
 use citrine_gb::gb::joypad::JoypadState;
@@ -11,6 +12,16 @@ use ringbuf::HeapProd;
 use ringbuf::producer::Producer;
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
+const SAVE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub struct SaveStatus {
+    pub battery_backed: bool,
+    pub stored: bool,
+    pub saved_at: Option<u64>,
+    pub location: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub legacy_path: Option<std::path::PathBuf>,
+}
 const GB_WIDTH: usize = 160;
 const GB_HEIGHT: usize = 144;
 
@@ -35,8 +46,12 @@ pub struct Emulator {
     pub frame_avg_timer: AvgTimer,
     pub total_frames: u128,
     last_frame: Vec<u8>,
+    /// SHA-256 of the loaded ROM
+    rom_key: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     rom_path: Option<std::path::PathBuf>,
+    pub imported_legacy_save: bool,
+    pub store: SaveStore,
     pub last_save: Option<web_time::Instant>,
     pub save_loaded: bool,
     pub recorder: InputRecorder,
@@ -62,8 +77,11 @@ impl Default for Emulator {
             frame_avg_timer: AvgTimer::default(),
             total_frames: 0,
             last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
+            rom_key: None,
             #[cfg(not(target_arch = "wasm32"))]
             rom_path: None,
+            imported_legacy_save: false,
+            store: SaveStore::default(),
             last_save: None,
             save_loaded: false,
             recorder: InputRecorder::default(),
@@ -139,19 +157,16 @@ impl Emulator {
         Ok(())
     }
 
-    /// Begin recording input from the current emulator state.
     pub fn start_recording(&mut self) {
         self.recorder.start(&self.gb);
     }
 
-    /// Press a button, also feeding the input recorder when it is active.
     pub fn press(&mut self, button: JoypadState) {
         let total_cycles = self.gb.debugger.total_cycles;
         self.gb.press_button(button);
         self.recorder.record(total_cycles, button, true);
     }
 
-    /// Release a button, also feeding the input recorder when it is active.
     pub fn release(&mut self, button: JoypadState) {
         let total_cycles = self.gb.debugger.total_cycles;
         self.gb.release_button(button);
@@ -276,112 +291,146 @@ impl Emulator {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_rom(&mut self, rom: &Rom, path: Option<&std::path::Path>) -> GbResult<()> {
-        self.rom_path = path.map(|p| p.to_owned());
-        let sdump = if let Some(path) = path
-            && let sav_path = path.with_extension("sav")
-            && sav_path.exists()
-        {
-            Some(SramDump::load(&sav_path)?)
-        } else {
-            None
-        };
-
+    pub fn load_rom(
+        &mut self,
+        rom: &Rom,
+        #[cfg(not(target_arch = "wasm32"))] path: Option<&std::path::Path>,
+    ) -> GbResult<()> {
         self.running = false;
-
+        self.save_loaded = false;
+        self.imported_legacy_save = false;
         self.gb.load_rom(rom)?;
 
-        if let Some(sdump) = sdump {
-            self.gb.put_sram_dump(sdump);
+        let key = self.gb.cartridge.header.sha256_hex_string();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.rom_path = path.map(|p| p.to_owned());
+            if let Some(path) = path {
+                self.imported_legacy_save = self.store.import_legacy_save_if_new(&key, path);
+            }
+        }
+
+        if let Some(data) = self.store.load_battery(&key) {
+            self.gb.put_sram_dump(SramDump::from_slice(&data));
             self.save_loaded = true;
         }
 
+        self.rom_key = Some(key);
+        self.last_save = None;
         self.running = true;
-
         Ok(())
     }
 
-    #[cfg(target_arch = "wasm32")]
-    pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
-        self.running = false;
-
-        self.gb.load_rom(rom)?;
-
-        let save_key = self.web_rom_save_key();
-
-        let sdump = if let Some(window) = web_sys::window()
-            && let Ok(Some(local_storage)) = window.local_storage()
-            && let Ok(Some(data)) = local_storage.get_item(&save_key)
-            && let Ok(sdump) = SramDump::from_base64(&data)
-        {
-            Some(sdump)
-        } else {
-            None
-        };
-
-        if let Some(sdump) = sdump {
-            self.gb.put_sram_dump(sdump);
-            self.save_loaded = true;
-        }
-
-        self.running = true;
-
-        Ok(())
-    }
-
-    #[cfg(target_arch = "wasm32")]
     pub fn handle_save(&mut self) -> GbResult<()> {
         if let Some(last_save) = self.last_save
-            && last_save.elapsed().as_secs() < 5
+            && last_save.elapsed() < SAVE_COOLDOWN
         {
             return Ok(());
         }
+        self.flush_save()
+    }
 
+    pub fn flush_save(&mut self) -> GbResult<()> {
+        let Some(key) = self.rom_key.clone() else {
+            return Ok(());
+        };
         let Some(sdump) = self.gb.poll_sram_dump(false) else {
             return Ok(());
         };
-
-        let save_key = self.web_rom_save_key();
-        let data = sdump.to_base64()?;
-        drop(sdump);
-
-        if let Some(window) = web_sys::window()
-            && let Ok(Some(local_storage)) = window.local_storage()
-        {
-            let _ = local_storage.set_item(&save_key, &data);
-            self.last_save = Some(web_time::Instant::now());
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn handle_save(&mut self) -> GbResult<()> {
-        if let Some(last_save) = self.last_save
-            && last_save.elapsed().as_secs() < 5
-        {
-            return Ok(());
-        }
-
-        let Some(rom_path) = self.rom_path.as_ref() else {
-            return Ok(());
-        };
-
-        let Some(sdump) = self.gb.poll_sram_dump(false) else {
-            return Ok(());
-        };
-
-        sdump.save(&rom_path.with_extension("sav"))?;
+        self.store.store_battery(&key, sdump.as_slice())?;
         self.last_save = Some(web_time::Instant::now());
-
         Ok(())
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn web_rom_save_key(&self) -> String {
-        let rom_hash = self.gb.cartridge.header.sha256_hex_string();
-        format!("sav-{}", rom_hash)
+    pub fn save_snapshot(&mut self, slot: usize) -> GbResult<()> {
+        let Some(key) = self.rom_key.clone() else {
+            return Ok(());
+        };
+        let state = self.gb.dump_full()?;
+        let frame = self.gb.frame().as_slice().to_vec();
+        self.store.store_snapshot(&key, slot, &state, &frame)?;
+        Ok(())
+    }
+
+    pub fn load_snapshot(&mut self, slot: usize) -> GbResult<bool> {
+        let Some(key) = self.rom_key.clone() else {
+            return Ok(false);
+        };
+        let Some(state) = self.store.load_snapshot(&key, slot) else {
+            return Ok(false);
+        };
+        let rom = Rom::new(&self.gb.cartridge.rom_bytes());
+        let restored = citrine_gb::gb::GameBoy::from_dump(&state, &rom)?;
+        let sample_rate = self.gb.apu.output_sample_rate;
+        self.gb = restored;
+        self.gb.apu.set_sample_rate(sample_rate);
+        self.running = true;
+        Ok(true)
+    }
+
+    pub fn delete_snapshot(&mut self, slot: usize) -> GbResult<()> {
+        if let Some(key) = self.rom_key.clone() {
+            self.store.delete_snapshot(&key, slot)?;
+        }
+        Ok(())
+    }
+
+    pub fn rom_key(&self) -> Option<&str> {
+        self.rom_key.as_deref()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn rom_path(&self) -> Option<&std::path::Path> {
+        self.rom_path.as_deref()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn reimport_legacy_save(&mut self) -> bool {
+        let (Some(key), Some(path)) = (self.rom_key.clone(), self.rom_path.clone()) else {
+            return false;
+        };
+        if !self.store.import_legacy_save(&key, &path) {
+            return false;
+        }
+        if let Some(data) = self.store.load_battery(&key) {
+            self.gb.put_sram_dump(SramDump::from_slice(&data));
+            self.save_loaded = true;
+            return true;
+        }
+        false
+    }
+
+    pub fn import_save_bytes(&mut self, data: &[u8]) -> GbResult<bool> {
+        let Some(key) = self.rom_key.clone() else {
+            return Ok(false);
+        };
+        self.store.store_battery(&key, data)?;
+        self.gb.put_sram_dump(SramDump::from_slice(data));
+        self.save_loaded = true;
+        self.last_save = Some(web_time::Instant::now());
+        Ok(true)
+    }
+
+    pub fn export_save_bytes(&mut self) -> Option<Vec<u8>> {
+        self.gb
+            .poll_sram_dump(true)
+            .map(|dump| dump.as_slice().to_vec())
+    }
+
+    pub fn save_status(&self) -> SaveStatus {
+        let key = self.rom_key.as_deref();
+        SaveStatus {
+            battery_backed: self.gb.cartridge.has_battery(),
+            stored: key.is_some_and(|k| self.store.has_battery(k)),
+            saved_at: key.and_then(|k| self.store.battery_saved_at(k)),
+            location: self.store.location(),
+            #[cfg(not(target_arch = "wasm32"))]
+            legacy_path: self
+                .rom_path
+                .as_deref()
+                .map(SaveStore::legacy_save_path)
+                .filter(|p| p.is_file()),
+        }
     }
 
     pub fn force_step(&mut self, ctx: &egui::Context, cycle_count: u32) {

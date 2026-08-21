@@ -40,16 +40,23 @@ While there is a certain level of stability, it is not guaranteed.
 ---
 
 # Saving
-The auto-save feature is a bit unstable at the moment. While it generally works quite well, there are some things to keep in mind:
-- It only works for cartridges that had batteries included (you can see if the cartridge supports battery saves in the ROM info panel).
-    - Some games constantly write to the cartridge's RAM, causing a save to happen every 5s (the defined save-cooldown).
-    - Some games only write to the cartridge's RAM if you save in-game (wait for at least 5s after saving in-game before you close the emulator).
-- Where the data is stored depends on your platform
-    - Native (Windows, MacOS)
-        - A save file with the same name as the ROM is created in the same folder as the ROM, it has the extension `.sav`.
-        - Because of this system, bundled homebrew ROMs have no save-support on native yet.
-    - Web
-        - The save data is stored in the browser's local storage.
+Games that support battery saves on real hardware save automatically, and again when you close the emulator.
+
+- Saves are stored per game, identified by the ROM's contents, so renaming or moving a ROM keeps its save.
+- Where the data lives depends on your platform
+    - Native (Windows, MacOS): in Citrine's application data folder
+    - Web: in the browser's local storage
+
+# Saves & Snapshots
+The **Saves** tab stores as many complete save states per game as you like, each with a thumbnail, so
+you can pick up exactly where you left off. It also shows where your in-game save is kept, and can
+import or export a `.sav` file to move saves between emulators.
+
+| Action | Keys |
+|--------|------|
+| Overwrite the quick slot | F8 |
+| Save to a new slot | Shift + F8 |
+| Load the quick slot | Hold F9 |
 
 ---
 

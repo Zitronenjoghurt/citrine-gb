@@ -3,6 +3,7 @@ mod audio;
 mod emulator;
 mod homebrew;
 mod recorder;
+mod storage;
 mod utils;
 
 pub use app::Citrine;

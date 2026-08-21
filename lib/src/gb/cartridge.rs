@@ -43,6 +43,37 @@ impl Cartridge {
         Self::default()
     }
 
+    pub fn has_battery(&self) -> bool {
+        self.has_battery
+    }
+
+    pub fn rom_bytes(&self) -> Vec<u8> {
+        self.rom.concat()
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn restore_rom(&mut self, rom: &Rom) -> GbResult<()> {
+        let header = rom.header()?;
+        let rom_banks = header.rom_banks.max(2);
+
+        self.rom = rom
+            .data
+            .chunks(ROM_BANK_SIZE)
+            .map(|chunk| {
+                let mut bank = [0u8; ROM_BANK_SIZE];
+                bank[..chunk.len()].copy_from_slice(chunk);
+                bank
+            })
+            .collect();
+
+        if self.rom.len() > rom_banks {
+            return Err(GbError::RomTooBig);
+        }
+        self.rom.resize(rom_banks, [0; ROM_BANK_SIZE]);
+        self.ram = vec![[0; RAM_BANK_SIZE]; header.ram_banks.max(1)];
+        Ok(())
+    }
+
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
         let header = rom.header()?;
         let rom_banks = header.rom_banks.max(2);

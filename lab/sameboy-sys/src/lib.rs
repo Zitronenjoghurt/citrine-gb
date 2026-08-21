@@ -88,4 +88,6 @@ unsafe extern "C" {
 
     pub fn GB_set_user_data(gb: *mut GB_gameboy_t, data: *mut c_void);
     pub fn GB_get_user_data(gb: *mut GB_gameboy_t) -> *mut c_void;
+
+    pub fn GB_random_seed(seed: u64);
 }

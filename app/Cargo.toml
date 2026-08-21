@@ -26,7 +26,7 @@ egui-phosphor = { version = "0.11.0", features = ["regular"] }
 egui_plot = "0.34.1"
 gilrs = "0.11.1"
 log = "0.4.29"
-poll-promise = { version = "0.3.0" }
+pollster = "0.4.0"
 rfd = "0.17.2"
 ringbuf = "0.4.8"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -35,16 +35,19 @@ strum_macros = "0.28.0"
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+directories = "6.0"
 eframe = { version = "0.33.0", default-features = false, features = ["persistence", "wayland", "wgpu", "x11"] }
 image = "0.25.9"
 wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+base64 = "0.22.1"
 cpal = { version = "0.17.3", features = ["wasm-bindgen"] }
 eframe = { version = "0.33.0", default-features = false, features = ["glow", "persistence"] }
 poll-promise = { version = "0.3.0", features = ["web"] }
 wasm-bindgen-futures = "0.4.50"
-web-sys = "0.3.70"
+js-sys = "0.3.70"
+web-sys = { version = "0.3.70", features = ["Blob", "HtmlAnchorElement", "Url"] }
 
 [build-dependencies]
 brotli = "8.0.2"

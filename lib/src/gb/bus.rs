@@ -28,6 +28,7 @@ pub struct CpuBus<'a> {
 }
 
 impl ReadMemory for CpuBus<'_> {
+    #[allow(clippy::match_overlapping_arm)]
     fn read_naive(&self, addr: u16) -> u8 {
         if self.boot_rom.mounted && addr < self.boot_rom.boundary_address() {
             return self.boot_rom.rom[addr as usize];

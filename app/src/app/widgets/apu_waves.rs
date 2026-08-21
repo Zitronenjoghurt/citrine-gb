@@ -38,11 +38,11 @@ impl Widget for ApuWaves<'_> {
                 let upper = midpoint + band;
 
                 let mut armed = false;
-                for i in 0..search_limit {
-                    if queue[i] < lower {
+                for (i, &sample) in queue.iter().take(search_limit).enumerate() {
+                    if sample < lower {
                         armed = true;
                     }
-                    if armed && queue[i] >= upper {
+                    if armed && sample >= upper {
                         start_idx = i;
                         break;
                     }
@@ -58,96 +58,78 @@ impl Widget for ApuWaves<'_> {
                 .collect()
         };
 
-        let response = ui
-            .vertical(|ui| {
-                let plot_height = ui.available_height() * 0.25;
+        ui.vertical(|ui| {
+            let plot_height = ui.available_height() * 0.25;
 
-                ui.vertical(|ui| {
-                    ui.set_height(plot_height);
-                    Plot::new("apu_ch1_plot")
-                        .allow_drag(false)
-                        .allow_zoom(false)
-                        .allow_scroll(false)
-                        .show_axes([false, false])
-                        .show(ui, |plot_ui| {
-                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                [0.0, 0.0],
-                                [512.0, 1.0],
-                            ));
-                            plot_ui.line(
-                                Line::new(
-                                    "CH1 (Square+Sweep)",
-                                    create_points(&debugger.ch1_samples, 512),
-                                )
-                                .color(Color32::LIGHT_RED),
-                            );
-                        });
-                });
+            ui.vertical(|ui| {
+                ui.set_height(plot_height);
+                Plot::new("apu_ch1_plot")
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .show_axes([false, false])
+                    .show(ui, |plot_ui| {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max([0.0, 0.0], [512.0, 1.0]));
+                        plot_ui.line(
+                            Line::new(
+                                "CH1 (Square+Sweep)",
+                                create_points(&debugger.ch1_samples, 512),
+                            )
+                            .color(Color32::LIGHT_RED),
+                        );
+                    });
+            });
 
-                ui.vertical(|ui| {
-                    ui.set_height(plot_height);
-                    Plot::new("apu_ch2_plot")
-                        .allow_drag(false)
-                        .allow_zoom(false)
-                        .allow_scroll(false)
-                        .show_axes([false, false])
-                        .show(ui, |plot_ui| {
-                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                [0.0, 0.0],
-                                [512.0, 1.0],
-                            ));
-                            plot_ui.line(
-                                Line::new(
-                                    "CH2 (Square)",
-                                    create_points(&debugger.ch2_samples, 512),
-                                )
+            ui.vertical(|ui| {
+                ui.set_height(plot_height);
+                Plot::new("apu_ch2_plot")
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .show_axes([false, false])
+                    .show(ui, |plot_ui| {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max([0.0, 0.0], [512.0, 1.0]));
+                        plot_ui.line(
+                            Line::new("CH2 (Square)", create_points(&debugger.ch2_samples, 512))
                                 .color(Color32::GOLD),
-                            );
-                        });
-                });
+                        );
+                    });
+            });
 
-                ui.vertical(|ui| {
-                    ui.set_height(plot_height);
-                    Plot::new("apu_ch3_plot")
-                        .height(plot_height)
-                        .allow_drag(false)
-                        .allow_zoom(false)
-                        .allow_scroll(false)
-                        .show_axes([false, false])
-                        .show(ui, |plot_ui| {
-                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                [0.0, 0.0],
-                                [512.0, 1.0],
-                            ));
-                            plot_ui.line(
-                                Line::new("CH3 (Wave)", create_points(&debugger.ch3_samples, 512))
-                                    .color(Color32::LIGHT_GREEN),
-                            );
-                        });
-                });
+            ui.vertical(|ui| {
+                ui.set_height(plot_height);
+                Plot::new("apu_ch3_plot")
+                    .height(plot_height)
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .show_axes([false, false])
+                    .show(ui, |plot_ui| {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max([0.0, 0.0], [512.0, 1.0]));
+                        plot_ui.line(
+                            Line::new("CH3 (Wave)", create_points(&debugger.ch3_samples, 512))
+                                .color(Color32::LIGHT_GREEN),
+                        );
+                    });
+            });
 
-                ui.vertical(|ui| {
-                    ui.set_height(plot_height);
-                    Plot::new("apu_ch4_plot")
-                        .height(plot_height)
-                        .allow_drag(false)
-                        .allow_zoom(false)
-                        .allow_scroll(false)
-                        .show_axes([false, false])
-                        .show(ui, |plot_ui| {
-                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                [0.0, 0.0],
-                                [512.0, 1.0],
-                            ));
-                            plot_ui.line(
-                                Line::new("CH4 (Noise)", create_points(&debugger.ch4_samples, 512))
-                                    .color(Color32::LIGHT_BLUE),
-                            );
-                        });
-                });
-            })
-            .response;
-
-        response
+            ui.vertical(|ui| {
+                ui.set_height(plot_height);
+                Plot::new("apu_ch4_plot")
+                    .height(plot_height)
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .show_axes([false, false])
+                    .show(ui, |plot_ui| {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max([0.0, 0.0], [512.0, 1.0]));
+                        plot_ui.line(
+                            Line::new("CH4 (Noise)", create_points(&debugger.ch4_samples, 512))
+                                .color(Color32::LIGHT_BLUE),
+                        );
+                    });
+            });
+        })
+        .response
     }
 }

@@ -1,3 +1,5 @@
+use crate::gb::GbModel;
+use crate::gb::ram_init::RamInit;
 use crate::{ReadMemory, WriteMemory};
 
 const WRAM_BANK_SIZE: usize = 0x1000; // 4KiB
@@ -16,18 +18,35 @@ pub struct Memory {
 }
 
 impl Memory {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(model: GbModel, ram_init: RamInit) -> Self {
+        let mut memory = Self {
             wram: vec![[0; WRAM_BANK_SIZE]; 2],
             hram: [0; HRAM_SIZE],
             io: [0; IO_SIZE],
-        }
+        };
+        memory.fill_power_on(model, ram_init);
+        memory
     }
 
-    pub fn soft_reset(&mut self) {
+    pub fn soft_reset(&mut self, model: GbModel, ram_init: RamInit) {
         self.wram = vec![[0; WRAM_BANK_SIZE]; 2];
         self.hram = [0; HRAM_SIZE];
         self.io = [0; IO_SIZE];
+        self.fill_power_on(model, ram_init);
+    }
+
+    fn fill_power_on(&mut self, model: GbModel, ram_init: RamInit) {
+        let Some(mut rng) = ram_init.rng() else {
+            return;
+        };
+        for (bank_index, bank) in self.wram.iter_mut().enumerate() {
+            for (offset, byte) in bank.iter_mut().enumerate() {
+                *byte = rng.wram_byte(bank_index * WRAM_BANK_SIZE + offset, model);
+            }
+        }
+        for (index, byte) in self.hram.iter_mut().enumerate() {
+            *byte = rng.hram_byte(index, model);
+        }
     }
 }
 

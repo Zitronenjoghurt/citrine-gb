@@ -147,7 +147,7 @@ impl Ppu {
     }
 
     // ToDo: Conflicts on oam dma? Check relevance and implementation
-    pub fn dot(&mut self, ic: &mut impl ICInterface, oam_dma: bool) {
+    pub fn dot(&mut self, ic: &mut impl ICInterface, _oam_dma: bool) {
         self.check_window_condition();
 
         match self.stat.ppu_mode {
@@ -238,7 +238,7 @@ impl Ppu {
         }
     }
 
-    pub fn cpu_conflicts(&self, addr: u16) -> bool {
+    pub fn cpu_conflicts(&self, _addr: u16) -> bool {
         false
 
         // ToDo: Improve accuracy, test viability?? => currently causing conflicts where it shouldn't
@@ -368,13 +368,7 @@ impl ReadMemory for Ppu {
                     0xFF
                 }
             }
-            0xFF6C => {
-                if self.model.is_cgb() {
-                    self.opri
-                } else {
-                    0xFF
-                }
-            }
+            0xFF6C if self.model.is_cgb() => self.opri,
             _ => 0xFF,
         }
     }

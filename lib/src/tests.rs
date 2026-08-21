@@ -5,6 +5,8 @@ use std::collections::HashMap;
 mod cpu;
 mod e2e;
 mod halt;
+#[cfg(feature = "persistence")]
+mod snapshot;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct TestBus {

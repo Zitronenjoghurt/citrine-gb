@@ -1,9 +1,12 @@
 use crate::app::widgets::info::InfoState;
 use crate::app::widgets::registers::RegistersState;
+use crate::app::widgets::snapshots::SnapshotsState;
 use crate::app::widgets::time_control::TimeControlState;
 use crate::utils::avg_timer::AvgTimer;
+use recent::RecentRoms;
 use settings::Settings;
 
+pub mod recent;
 pub mod settings;
 pub mod ui_theme;
 
@@ -11,8 +14,11 @@ pub mod ui_theme;
 pub struct UiState {
     pub e2e: E2E,
     pub info: InfoState,
+    pub recent: RecentRoms,
     pub registers: RegistersState,
     pub settings: Settings,
+    #[serde(skip, default)]
+    pub snapshots: SnapshotsState,
     pub time_ctrl: TimeControlState,
     #[serde(skip, default)]
     pub update_avg_timer: AvgTimer,

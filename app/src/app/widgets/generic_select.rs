@@ -15,6 +15,7 @@ where
     filter: Option<Box<dyn Fn(T) -> bool + 'a>>,
 }
 
+#[allow(dead_code)]
 impl<'a, T, V> GenericSelect<'a, T, V>
 where
     T: PartialEq + Copy + Display,
