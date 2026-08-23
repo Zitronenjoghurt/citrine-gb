@@ -20,6 +20,9 @@ emulator by the harness in [lab/](lab/README.md). Result snapshots live in
 
 # Supported platforms
 
-- Windows
-- MacOS
+- Windows (x86_64)
+- macOS (universal, Apple Silicon and Intel)
+- Linux (x86_64 and aarch64)
 - Web (via [Citrine Web](https://gb.lemon.industries))
+
+Download the latest build from [Releases](https://github.com/Zitronenjoghurt/citrine-gb/releases).

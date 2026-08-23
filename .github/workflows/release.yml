@@ -14,19 +14,27 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - name: linux-x86_64
+            targets: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: aarch64-apple-darwin
+          - name: linux-aarch64
+            targets: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - name: macos
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
             os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
+          - name: windows-x86_64
+            targets: x86_64-pc-windows-msvc
             os: windows-latest
 
     runs-on: ${{ matrix.os }}
@@ -38,11 +46,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.name }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -52,24 +60,58 @@ jobs:
             libx11-dev libxkbcommon-dev libwayland-dev
 
       - name: Build
-        run: cargo build --release -p citrine-gb-app --target ${{ matrix.target }}
+        shell: bash
+        env:
+          TARGETS: ${{ matrix.targets }}
+          # Matches LSMinimumSystemVersion in app/macos/Info.plist. Rust's
+          # aarch64-apple-darwin is pinned to 11.0 anyway. This makes the
+          # x86_64 slice of the universal binary agree with it.
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: |
+          for target in ${TARGETS//,/ }; do
+            cargo build --profile dist --locked -p citrine-gb-app --target "$target"
+          done
 
       - name: Package
         shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          VERSION="${{ inputs.tag || github.ref_name }}"
-          ARCHIVE="citrine-${VERSION}-${{ matrix.target }}"
-          mkdir "$ARCHIVE"
-          cp LICENSE README.md CHANGELOG.md "$ARCHIVE"/
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp "target/${{ matrix.target }}/release/citrine-gb-app.exe" "$ARCHIVE/citrine.exe"
-            7z a "$ARCHIVE.zip" "$ARCHIVE"
-            echo "ARCHIVE_FILE=$ARCHIVE.zip" >> "$GITHUB_ENV"
-          else
-            cp "target/${{ matrix.target }}/release/citrine-gb-app" "$ARCHIVE/citrine"
-            tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
-            echo "ARCHIVE_FILE=$ARCHIVE.tar.gz" >> "$GITHUB_ENV"
-          fi
+          set -euo pipefail
+          VERSION="${TAG#v}"
+
+          case "${{ matrix.name }}" in
+            macos)
+              # Universal .app in a drag-to-Applications disk image.
+              ./scripts/bundle-macos.sh "$VERSION"
+              ARCHIVE_FILE="citrine-${TAG}-macos.dmg"
+              mv "target/macos/citrine-v${VERSION}-macos.dmg" "$ARCHIVE_FILE"
+              ;;
+
+            windows-*)
+              ARCHIVE="citrine-${TAG}-${{ matrix.name }}"
+              mkdir "$ARCHIVE"
+              cp LICENSE CHANGELOG.md "$ARCHIVE"/
+              cp "target/${{ matrix.targets }}/dist/citrine-gb-app.exe" "$ARCHIVE/citrine.exe"
+              ARCHIVE_FILE="$ARCHIVE.zip"
+              7z a "$ARCHIVE_FILE" "$ARCHIVE"
+              ;;
+
+            linux-*)
+              ARCHIVE="citrine-${TAG}-${{ matrix.name }}"
+              mkdir "$ARCHIVE"
+              cp LICENSE CHANGELOG.md "$ARCHIVE"/
+              cp "target/${{ matrix.targets }}/dist/citrine-gb-app" "$ARCHIVE/citrine"
+              cp app/linux/citrine.desktop "$ARCHIVE"/
+              cp app/linux/install.sh "$ARCHIVE"/
+              cp app/assets/icon-256x256.png "$ARCHIVE/citrine.png"
+              chmod +x "$ARCHIVE/citrine" "$ARCHIVE/install.sh"
+              ARCHIVE_FILE="$ARCHIVE.tar.gz"
+              tar czf "$ARCHIVE_FILE" "$ARCHIVE"
+              ;;
+          esac
+
+          echo "ARCHIVE_FILE=$ARCHIVE_FILE" >> "$GITHUB_ENV"
 
       - uses: actions/attest-build-provenance@v4
         with:
@@ -77,7 +119,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}
+          name: ${{ matrix.name }}
           path: ${{ env.ARCHIVE_FILE }}
 
   release:
@@ -99,12 +141,13 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/*
           body: |
-            Download the archive for your platform, extract it, and run `citrine` (`citrine.exe` on Windows).
-
             The web version is at [gb.lemon.industries](https://gb.lemon.industries).
 
-            **macOS:** the binary is not code-signed, and browser downloads are quarantined by Gatekeeper. Run it once, then allow it under System Settings → Privacy & Security → "Open Anyway". Alternatively clear the flag after extracting (`xattr -d com.apple.quarantine citrine`) or download with `curl -LO <url>` in the first place.
+            **macOS** — download the `.dmg` and drag Citrine to Applications. One universal build covers both Apple Silicon and Intel.
+            Citrine is not signed with an Apple Developer ID, so the first launch is blocked. Open **System Settings → Privacy & Security**, scroll to the message about Citrine, and click **Open Anyway**. You only need to do this once.
 
-            **Windows:** SmartScreen may warn because the binary is not code-signed. Verify the checksum below, then choose "More info" → "Run anyway".
+            **Windows** — download the `.zip`, extract it, and run `citrine.exe`. SmartScreen may warn because the binary is not code-signed. Verify the checksum below, then choose "More info" → "Run anyway".
+
+            **Linux** — download the `.tar.gz` for your architecture and extract it. Run `./install.sh` to add Citrine to your applications menu, or just run `./citrine` directly.
 
             **Verify downloads:** `sha256sum -c SHA256SUMS.txt --ignore-missing`, or check any file's build provenance with `gh attestation verify <file> --repo ${{ github.repository }}`.

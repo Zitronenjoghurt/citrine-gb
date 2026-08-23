@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Citrine
+GenericName=Game Boy Emulator
+Comment=A cycle-accurate Game Boy and Game Boy Color emulator
+Exec=citrine
+Icon=citrine
+Terminal=false
+Categories=Game;Emulator;
+Keywords=gameboy;gbc;emulator;
+StartupWMClass=io.github.zitronenjoghurt.citrine

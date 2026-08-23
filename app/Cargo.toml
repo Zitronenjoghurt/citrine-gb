@@ -57,10 +57,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.0.3"
 winresource = "0.1"
 
-[package.metadata.bundle]
-name = "Citrine"
-identifier = "io.github.zitronenjoghurt.citrine"
-short_description = "A cycle-accurate Game Boy and Game Boy Color emulator."
-icon = ["assets/icon-512x512.icns"]
-
 [package.metadata.winresource]
+ProductName = "Citrine"
+FileDescription = "A cycle-accurate Game Boy and Game Boy Color emulator"
+LegalCopyright = "MIT licensed"
+CompanyName = "Zitronenjoghurt"
+OriginalFilename = "citrine.exe"

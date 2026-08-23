@@ -1,4 +1,4 @@
-.PHONY: version test test-mooneye build-tests lab lab-deps check fmt lint dev native up down build logs publish results significance
+.PHONY: version test test-mooneye build-tests lab lab-deps check fmt lint dev native up down build logs publish results significance release bundle-mac icons
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 
 version:
@@ -63,6 +63,15 @@ logs:
 publish:
 	cargo test -p citrine-gb --release
 	cd lib && cargo publish
+
+icons:
+	./scripts/gen-icns.sh
+
+bundle-mac:
+	rustup target add aarch64-apple-darwin x86_64-apple-darwin
+	MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --profile dist --locked -p citrine-gb-app --target aarch64-apple-darwin
+	MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --profile dist --locked -p citrine-gb-app --target x86_64-apple-darwin
+	./scripts/bundle-macos.sh $(VERSION)
 
 release:
 	@if [ -z "$(v)" ]; then echo "Error: Version parameter is required. Use 'make release v=x.y.z'"; exit 1; fi
