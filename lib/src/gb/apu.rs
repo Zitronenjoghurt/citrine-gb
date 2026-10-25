@@ -41,6 +41,13 @@ pub struct Apu {
     pub output_sample_rate: u32,
     pub charge_factor: f32,
     pub audio_buffer: Vec<f32>,
+    #[cfg_attr(feature = "serde", serde(skip, default = "yes"))]
+    output_dirty: bool,
+}
+
+#[cfg(feature = "serde")]
+fn yes() -> bool {
+    true
 }
 
 #[cfg(feature = "serde")]
@@ -75,6 +82,7 @@ impl Default for Apu {
             output_sample_rate: DEFAULT_SAMPLE_RATE,
             charge_factor: charge_factor(DEFAULT_SAMPLE_RATE),
             audio_buffer: vec![],
+            output_dirty: true,
         }
     }
 }
@@ -93,27 +101,36 @@ impl Apu {
         self.update_frame_sequencer(timer, double_speed);
         let ticks = if double_speed { 2 } else { 4 };
 
+        #[cfg(feature = "debug")]
+        let always_sample = debugger.wants_apu_channels();
+        #[cfg(not(feature = "debug"))]
+        let always_sample = false;
+
         for _ in 0..ticks {
-            self.tick();
+            let moved = self.tick();
 
-            let (out_l_f, out_r_f) = self.sample(
-                #[cfg(feature = "debug")]
-                debugger,
-            );
-            let current_l = (out_l_f * 1000.0) as i32;
-            let current_r = (out_r_f * 1000.0) as i32;
+            if moved || self.output_dirty || always_sample {
+                self.output_dirty = false;
 
-            let delta_l = current_l - self.prev_l;
-            let delta_r = current_r - self.prev_r;
+                let (out_l_f, out_r_f) = self.sample(
+                    #[cfg(feature = "debug")]
+                    debugger,
+                );
+                let current_l = (out_l_f * 1000.0) as i32;
+                let current_r = (out_r_f * 1000.0) as i32;
 
-            if delta_l != 0 {
-                self.blip_l.add_delta(self.time, delta_l);
-                self.prev_l = current_l;
-            }
+                let delta_l = current_l - self.prev_l;
+                let delta_r = current_r - self.prev_r;
 
-            if delta_r != 0 {
-                self.blip_r.add_delta(self.time, delta_r);
-                self.prev_r = current_r;
+                if delta_l != 0 {
+                    self.blip_l.add_delta(self.time, delta_l);
+                    self.prev_l = current_l;
+                }
+
+                if delta_r != 0 {
+                    self.blip_r.add_delta(self.time, delta_r);
+                    self.prev_r = current_r;
+                }
             }
 
             self.time += 1;
@@ -155,6 +172,8 @@ impl Apu {
         if set_prev && !set_now {
             self.div_apu = (self.div_apu + 1) & 0b111;
 
+            self.output_dirty = true;
+
             match self.div_apu {
                 0 => self.clock_length_counters(),
                 1 => {}
@@ -177,11 +196,12 @@ impl Apu {
         self.prev_div = timer.div;
     }
 
-    fn tick(&mut self) {
-        self.ch1.tick();
-        self.ch2.tick();
-        self.ch3.tick();
-        self.ch4.tick();
+    fn tick(&mut self) -> bool {
+        let ch1 = self.ch1.tick();
+        let ch2 = self.ch2.tick();
+        let ch3 = self.ch3.tick();
+        let ch4 = self.ch4.tick();
+        ch1 || ch2 || ch3 || ch4
     }
 
     fn clock_length_counters(&mut self) {
@@ -265,7 +285,7 @@ impl Apu {
         };
 
         #[cfg(feature = "debug")]
-        {
+        if debugger.wants_apu_channels() {
             debugger.record_apu_channels(
                 self.output_sample_rate,
                 ch1_sample,
@@ -354,6 +374,8 @@ impl ReadMemory for Apu {
 
 impl WriteMemory for Apu {
     fn write_naive(&mut self, addr: u16, value: u8) {
+        self.output_dirty = true;
+
         match addr {
             0xFF10..=0xFF14 => self.ch1.write_naive(addr, value),
             0xFF16..=0xFF19 => self.ch2.write_naive(addr, value),

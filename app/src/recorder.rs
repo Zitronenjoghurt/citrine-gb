@@ -2,7 +2,7 @@
 //!
 //! The recorder timestamps each event with the emulator's **absolute** T-cycle
 //! (`gb.debugger.total_cycles`, which resets to 0 on ROM load / soft reset). The lab replays from a
-//! fresh load (cycle 0), so absolute cycles line up with the reconstructed state — provided
+//! fresh load (cycle 0), so absolute cycles line up with the reconstructed state, provided
 //! recording starts right after a ROM load / soft reset.
 
 use citrine_gb::gb::GameBoy;

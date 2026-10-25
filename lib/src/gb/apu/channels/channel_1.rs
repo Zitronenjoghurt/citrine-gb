@@ -38,9 +38,11 @@ impl Channel1 {
         self.square_wave.sample() * self.volume_envelope.current_volume
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> bool {
         if self.enabled {
-            self.square_wave.tick(self.get_period());
+            self.square_wave.tick(self.get_period())
+        } else {
+            false
         }
     }
 

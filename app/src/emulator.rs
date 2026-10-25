@@ -1,3 +1,8 @@
+use crate::app::ui_state::keybinds::{
+    BindingCapture, BindingKind, Captured, GbButton, KeyBindings, PadButton,
+};
+use crate::app::ui_state::settings::ScalingMode;
+use crate::audio::{AudioLink, push_frames};
 use crate::recorder::InputRecorder;
 use crate::storage::SaveStore;
 use crate::utils::avg_timer::AvgTimer;
@@ -6,13 +11,19 @@ use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb::rom::Rom;
+use citrine_gb::utils::ema::EMA;
 use gilrs::Axis;
 use gilrs::EventType::{AxisChanged, ButtonPressed, ButtonReleased};
 use ringbuf::HeapProd;
-use ringbuf::producer::Producer;
+use ringbuf::traits::Observer;
+use strum::IntoEnumIterator;
 
 const FRAME_TIME: f64 = 1.0 / 59.7275;
 const SAVE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+
+const MAX_RATE_DRIFT: f32 = 0.01;
+const MAX_CATCHUP_FRAMES: f64 = 5.0;
+const RATE_STEP: u32 = 8;
 
 pub struct SaveStatus {
     pub battery_backed: bool,
@@ -30,6 +41,9 @@ pub struct Emulator {
     pub running: bool,
     pub audio_producer: Option<HeapProd<f32>>,
     pub audio_overrun_samples: u128,
+    audio_nominal_rate: u32,
+    audio_target_frames: usize,
+    audio_fill: EMA<f32>,
     pub enable_matrix: bool,
     /// 0.0 to 1.0 (e.g., 0.85 = 15% darker)
     pub matrix_edge_brightness: f32,
@@ -38,7 +52,10 @@ pub struct Emulator {
     pub enable_ghosting: bool,
     /// 0.0 (pure smear) to 1.0 (instant, no ghosting)
     pub ghosting_blend: f32,
+    pub scaling: ScalingMode,
+    held: JoypadState,
     texture: Option<egui::TextureHandle>,
+    upscale_buffer: Vec<u8>,
     last_update: Option<web_time::Instant>,
     time_accumulator: f64,
     pub render_scale: usize,
@@ -64,12 +81,18 @@ impl Default for Emulator {
             running: true,
             audio_producer: None,
             audio_overrun_samples: 0,
+            audio_nominal_rate: 44100,
+            audio_target_frames: 0,
+            audio_fill: EMA::default(),
             enable_matrix: true,
             matrix_edge_brightness: 0.85,
             matrix_corner_brightness: 0.75,
             enable_ghosting: true,
             ghosting_blend: 0.7,
+            scaling: ScalingMode::default(),
+            held: JoypadState::empty(),
             texture: None,
+            upscale_buffer: Vec::new(),
             last_update: None,
             time_accumulator: 0.0,
             render_scale: 3,
@@ -90,19 +113,26 @@ impl Default for Emulator {
 }
 
 impl Emulator {
-    pub fn update(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) -> GbResult<()> {
+    pub fn update(
+        &mut self,
+        ctx: &egui::Context,
+        gil: &mut gilrs::Gilrs,
+        bindings: &KeyBindings,
+        capture: &mut BindingCapture,
+    ) -> GbResult<()> {
         self.update_avg_timer.start();
 
         if self.texture.is_none() {
             self.update_texture(ctx);
         }
 
+        self.handle_input(ctx, gil, bindings, capture);
+
         if !self.running {
+            self.gb.apu.audio_buffer.clear();
             self.last_update = Some(web_time::Instant::now());
             return Ok(());
         }
-
-        self.handle_input(ctx, gil);
 
         let now = web_time::Instant::now();
         let dt = match self.last_update {
@@ -113,8 +143,8 @@ impl Emulator {
         self.last_update = Some(now);
         self.time_accumulator += dt;
 
-        if self.time_accumulator > FRAME_TIME * 5.0 {
-            self.time_accumulator = FRAME_TIME * 5.0;
+        if self.time_accumulator > FRAME_TIME * MAX_CATCHUP_FRAMES {
+            self.time_accumulator = FRAME_TIME * MAX_CATCHUP_FRAMES;
         }
 
         let mut ran_frame = false;
@@ -134,20 +164,8 @@ impl Emulator {
 
         if ran_frame {
             self.update_texture(ctx);
-
-            if let Some(producer) = &mut self.audio_producer {
-                let samples = &self.gb.apu.audio_buffer;
-
-                let pushed = producer.push_slice(samples);
-                if pushed < samples.len() {
-                    let dropped = samples.len() - pushed;
-                    self.audio_overrun_samples =
-                        self.audio_overrun_samples.wrapping_add(dropped as u128);
-                }
-
-                self.gb.apu.audio_buffer.clear();
-            }
-
+            self.drain_audio();
+            self.sync_audio_rate();
             self.total_frames = self.total_frames.wrapping_add(1);
         }
 
@@ -157,75 +175,168 @@ impl Emulator {
         Ok(())
     }
 
+    pub fn attach_audio(&mut self, link: AudioLink) {
+        self.gb.apu.set_sample_rate(link.sample_rate);
+        self.audio_nominal_rate = link.sample_rate;
+        self.audio_target_frames = link.target_frames;
+        self.audio_fill = EMA::default();
+        self.audio_producer = Some(link.producer);
+    }
+
+    fn drain_audio(&mut self) {
+        let mut samples = std::mem::take(&mut self.gb.apu.audio_buffer);
+        if let Some(producer) = &mut self.audio_producer {
+            let pushed = push_frames(producer, &samples);
+            if pushed < samples.len() {
+                let dropped = samples.len() - pushed;
+                self.audio_overrun_samples =
+                    self.audio_overrun_samples.wrapping_add(dropped as u128);
+            }
+        }
+        samples.clear();
+        self.gb.apu.audio_buffer = samples;
+    }
+
+    fn sync_audio_rate(&mut self) {
+        let Some(producer) = &self.audio_producer else {
+            return;
+        };
+        if self.audio_target_frames == 0 {
+            return;
+        }
+
+        let queued = (producer.occupied_len() / 2) as f32;
+        self.audio_fill.update(queued, 20);
+
+        let target = self.audio_target_frames as f32;
+        let error = ((self.audio_fill.value() - target) / target).clamp(-1.0, 1.0);
+        let rate = (self.audio_nominal_rate as f32 * (1.0 - MAX_RATE_DRIFT * error)) as u32;
+
+        if rate.abs_diff(self.gb.apu.output_sample_rate) >= RATE_STEP {
+            self.gb.apu.set_sample_rate(rate);
+        }
+    }
+
+    pub fn audio_queued_frames(&self) -> usize {
+        self.audio_producer
+            .as_ref()
+            .map(|p| p.occupied_len() / 2)
+            .unwrap_or(0)
+    }
+
+    pub fn audio_target_frames(&self) -> usize {
+        self.audio_target_frames
+    }
+
     pub fn start_recording(&mut self) {
         self.recorder.start(&self.gb);
     }
 
     pub fn press(&mut self, button: JoypadState) {
+        if self.held.contains(button) {
+            return;
+        }
+        self.held.insert(button);
         let total_cycles = self.gb.debugger.total_cycles;
         self.gb.press_button(button);
         self.recorder.record(total_cycles, button, true);
     }
 
     pub fn release(&mut self, button: JoypadState) {
+        if !self.held.contains(button) {
+            return;
+        }
+        self.held.remove(button);
         let total_cycles = self.gb.debugger.total_cycles;
         self.gb.release_button(button);
         self.recorder.record(total_cycles, button, false);
     }
 
-    pub fn handle_input(&mut self, ctx: &egui::Context, gil: &mut gilrs::Gilrs) {
+    pub fn set_held(&mut self, button: JoypadState, pressed: bool) {
+        if pressed {
+            self.press(button);
+        } else {
+            self.release(button);
+        }
+    }
+
+    pub fn is_held(&self, button: JoypadState) -> bool {
+        self.held.contains(button)
+    }
+
+    pub fn release_all(&mut self) {
+        for button in GbButton::iter() {
+            self.release(button.joypad());
+        }
+    }
+
+    pub fn handle_input(
+        &mut self,
+        ctx: &egui::Context,
+        gil: &mut gilrs::Gilrs,
+        bindings: &KeyBindings,
+        capture: &mut BindingCapture,
+    ) {
         while let Some(gilrs::Event { event, .. }) = gil.next_event() {
             match event {
                 ButtonPressed(btn, ..) => {
-                    if let Some(button) = gamepad_map(btn) {
-                        self.press(button);
+                    let Some(pad) = PadButton::from_gilrs(btn) else {
+                        continue;
+                    };
+                    if capture.wants(BindingKind::Gamepad) {
+                        capture.record(Captured::Pad(pad));
+                        continue;
+                    }
+                    if let Some(button) = bindings.button_for_pad(pad) {
+                        self.press(button.joypad());
                     }
                 }
                 ButtonReleased(btn, ..) => {
-                    if let Some(button) = gamepad_map(btn) {
-                        self.release(button);
+                    if let Some(button) =
+                        PadButton::from_gilrs(btn).and_then(|pad| bindings.button_for_pad(pad))
+                    {
+                        self.release(button.joypad());
                     }
                 }
-                AxisChanged(axis, value, ..) => match axis {
-                    Axis::DPadX => self.handle_x_axis(value),
-                    Axis::DPadY => self.handle_y_axis(value),
-                    Axis::LeftStickX => self.handle_x_axis(value),
-                    Axis::LeftStickY => self.handle_y_axis(value),
+                AxisChanged(axis, value, ..) if bindings.stick_as_dpad => match axis {
+                    Axis::DPadX | Axis::LeftStickX => self.handle_x_axis(value),
+                    Axis::DPadY | Axis::LeftStickY => self.handle_y_axis(value),
                     _ => {}
                 },
                 _ => {}
             }
         }
 
-        ctx.input(|i| {
-            for event in &i.events {
-                let egui::Event::Key { key, pressed, .. } = event else {
-                    continue;
-                };
+        if ctx.wants_keyboard_input() && !capture.wants(BindingKind::Keyboard) {
+            return;
+        }
 
-                let button = match key {
-                    egui::Key::W | egui::Key::ArrowUp => Some(JoypadState::UP),
-                    egui::Key::S | egui::Key::ArrowDown => Some(JoypadState::DOWN),
-                    egui::Key::A | egui::Key::ArrowLeft => Some(JoypadState::LEFT),
-                    egui::Key::D | egui::Key::ArrowRight => Some(JoypadState::RIGHT),
-                    egui::Key::Q | egui::Key::Z | egui::Key::Y | egui::Key::O => {
-                        Some(JoypadState::A)
-                    }
-                    egui::Key::E | egui::Key::X | egui::Key::P => Some(JoypadState::B),
-                    egui::Key::Enter | egui::Key::Space => Some(JoypadState::START),
-                    egui::Key::Backspace => Some(JoypadState::SELECT),
+        let events: Vec<(egui::Key, bool, egui::Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed,
+                        modifiers,
+                        ..
+                    } => Some((*key, *pressed, *modifiers)),
                     _ => None,
-                };
-
-                if let Some(button) = button {
-                    if *pressed {
-                        self.press(button);
-                    } else {
-                        self.release(button);
-                    }
-                }
-            }
+                })
+                .collect()
         });
+
+        for (key, pressed, modifiers) in events {
+            if capture.wants(BindingKind::Keyboard) {
+                if pressed && key != egui::Key::Escape {
+                    capture.record(Captured::Key(key, modifiers));
+                }
+                continue;
+            }
+            if let Some(button) = bindings.button_for_key(key) {
+                self.set_held(button.joypad(), pressed);
+            }
+        }
     }
 
     pub fn handle_x_axis(&mut self, value: f32) {
@@ -250,27 +361,33 @@ impl Emulator {
         }
     }
 
+    fn screen_layout(&self, available: egui::Vec2) -> (usize, egui::Vec2) {
+        let width = GB_WIDTH as f32;
+        let height = GB_HEIGHT as f32;
+        let fit = (available.x / width).min(available.y / height).max(1.0);
+
+        let mode = if self.enable_matrix {
+            ScalingMode::Integer
+        } else {
+            self.scaling
+        };
+
+        match mode {
+            ScalingMode::Integer => {
+                let scale = fit.floor().max(1.0);
+                (scale as usize, egui::vec2(width * scale, height * scale))
+            }
+            ScalingMode::Fit => (1, egui::vec2(width * fit, height * fit)),
+            ScalingMode::Stretch => (
+                1,
+                egui::vec2(available.x.max(width), available.y.max(height)),
+            ),
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_size();
-        let float_scale = (available.x / GB_WIDTH as f32)
-            .min(available.y / GB_HEIGHT as f32)
-            .max(1.0);
-
-        let (ideal_render_scale, display_size) = if self.enable_matrix {
-            let int_scale = float_scale.floor();
-            (
-                int_scale as usize,
-                egui::vec2(GB_WIDTH as f32 * int_scale, GB_HEIGHT as f32 * int_scale),
-            )
-        } else {
-            (
-                1_usize,
-                egui::vec2(
-                    GB_WIDTH as f32 * float_scale,
-                    GB_HEIGHT as f32 * float_scale,
-                ),
-            )
-        };
+        let (ideal_render_scale, display_size) = self.screen_layout(available);
 
         if self.render_scale != ideal_render_scale {
             self.render_scale = ideal_render_scale;
@@ -288,6 +405,43 @@ impl Emulator {
                 ui.add_space((leftover_x / 2.0).floor());
                 ui.image(egui::load::SizedTexture::new(tex.id(), display_size));
             });
+        }
+    }
+
+    pub fn ui_at(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let (ideal_render_scale, display_size) = self.screen_layout(rect.size());
+
+        if self.render_scale != ideal_render_scale {
+            self.render_scale = ideal_render_scale;
+            self.update_texture(ui.ctx());
+        }
+
+        let Some(tex) = &self.texture else {
+            return;
+        };
+
+        let centre = rect.center();
+        let top_left = egui::pos2(
+            (centre.x - display_size.x / 2.0).round(),
+            (centre.y - display_size.y / 2.0).round(),
+        );
+        let target = egui::Rect::from_min_size(top_left, display_size);
+
+        egui::Image::new(egui::load::SizedTexture::new(tex.id(), display_size))
+            .paint_at(ui, target);
+    }
+
+    pub fn screenshot(&self) -> (usize, usize, Vec<u8>) {
+        let scale = self.render_scale.max(1);
+        let expected = GB_WIDTH * scale * GB_HEIGHT * scale * 4;
+        if self.upscale_buffer.len() == expected {
+            (
+                GB_WIDTH * scale,
+                GB_HEIGHT * scale,
+                self.upscale_buffer.clone(),
+            )
+        } else {
+            (GB_WIDTH, GB_HEIGHT, self.gb.frame().as_slice().to_vec())
         }
     }
 
@@ -371,6 +525,13 @@ impl Emulator {
     pub fn delete_snapshot(&mut self, slot: usize) -> GbResult<()> {
         if let Some(key) = self.rom_key.clone() {
             self.store.delete_snapshot(&key, slot)?;
+        }
+        Ok(())
+    }
+
+    pub fn rename_snapshot(&mut self, slot: usize, name: &str) -> GbResult<()> {
+        if let Some(key) = self.rom_key.clone() {
+            self.store.set_snapshot_name(&key, slot, name)?;
         }
         Ok(())
     }
@@ -460,7 +621,9 @@ impl Emulator {
         let upscaled_height = GB_HEIGHT * scale;
 
         let current_raw = self.gb.frame().as_slice();
-        let mut upscaled_data = vec![0u8; upscaled_width * upscaled_height * 4];
+        let mut upscaled_data = std::mem::take(&mut self.upscale_buffer);
+        upscaled_data.clear();
+        upscaled_data.resize(upscaled_width * upscaled_height * 4, 0);
 
         let blend = if self.enable_ghosting {
             self.ghosting_blend
@@ -527,6 +690,7 @@ impl Emulator {
             [upscaled_width, upscaled_height],
             &upscaled_data,
         );
+        self.upscale_buffer = upscaled_data;
 
         match &mut self.texture {
             Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
@@ -535,19 +699,5 @@ impl Emulator {
                     Some(ctx.load_texture("gb_screen", image, egui::TextureOptions::NEAREST))
             }
         }
-    }
-}
-
-fn gamepad_map(btn: gilrs::Button) -> Option<JoypadState> {
-    match btn {
-        gilrs::Button::DPadUp => Some(JoypadState::UP),
-        gilrs::Button::DPadDown => Some(JoypadState::DOWN),
-        gilrs::Button::DPadLeft => Some(JoypadState::LEFT),
-        gilrs::Button::DPadRight => Some(JoypadState::RIGHT),
-        gilrs::Button::East | gilrs::Button::West => Some(JoypadState::A),
-        gilrs::Button::South | gilrs::Button::North => Some(JoypadState::B),
-        gilrs::Button::Start => Some(JoypadState::START),
-        gilrs::Button::Select => Some(JoypadState::SELECT),
-        _ => None,
     }
 }

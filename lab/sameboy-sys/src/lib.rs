@@ -68,7 +68,7 @@ unsafe extern "C" {
 
     pub fn GB_run(gb: *mut GB_gameboy_t) -> c_uint;
 
-    /// Disables the real-time sync that otherwise `nanosleep`s the core to ~60 fps — without it a
+    /// Disables the real-time sync that otherwise `nanosleep`s the core to ~60 fps. Without it, a
     /// 10k-frame run spends ~167 s asleep.
     pub fn GB_set_turbo_mode(gb: *mut GB_gameboy_t, on: bool, no_frame_skip: bool);
 

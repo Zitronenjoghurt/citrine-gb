@@ -14,7 +14,7 @@ impl SquareWave {
         [false, true, true, true, true, true, true, false],
     ];
 
-    pub fn tick(&mut self, period: u16) {
+    pub fn tick(&mut self, period: u16) -> bool {
         if self.frequency_timer > 0 {
             self.frequency_timer -= 1;
         }
@@ -22,7 +22,9 @@ impl SquareWave {
         if self.frequency_timer == 0 {
             self.set_frequency(period);
             self.duty_step = (self.duty_step + 1) & 0b111;
+            return true;
         }
+        false
     }
 
     pub fn set_duty(&mut self, wave_duty: u8) {

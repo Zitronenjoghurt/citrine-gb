@@ -6,11 +6,11 @@ pub struct Mbc1 {
     pub ram_enabled: bool,
     pub rom_bank_count: usize,
     pub ram_bank_count: usize,
-    // 5-bit register at 2000–3FFF
+    // 5-bit register at 2000-3FFF
     pub rom_bank_register: u8,
-    // 2-bit register at 4000–5FFF (RAM bank OR upper ROM bits)
+    // 2-bit register at 4000-5FFF (RAM bank OR upper ROM bits)
     pub secondary_register: u8,
-    // 1-bit register at 6000–7FFF: 0 = simple, 1 = advanced
+    // 1-bit register at 6000-7FFF: 0 = simple, 1 = advanced
     pub advanced_banking_mode: bool,
 }
 

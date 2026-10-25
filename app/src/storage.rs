@@ -20,10 +20,74 @@ fn snapshot_thumb(slot: usize) -> String {
     format!("slot{slot}.thumb")
 }
 
+fn snapshot_name(slot: usize) -> String {
+    format!("slot{slot}.name")
+}
+
+pub const MAX_SNAPSHOT_NAME: usize = 60;
+
 pub struct SnapshotInfo {
     pub slot: usize,
     pub saved_at: u64,
     pub thumbnail: Vec<u8>,
+    pub name: Option<String>,
+}
+
+impl SnapshotInfo {
+    pub fn display_name(&self) -> String {
+        match &self.name {
+            Some(name) => name.clone(),
+            None => default_slot_name(self.slot),
+        }
+    }
+}
+
+pub fn default_slot_name(slot: usize) -> String {
+    format!("Slot {slot}")
+}
+
+const SETTINGS_NAMESPACE: &str = "settings";
+const SETTINGS: &str = "settings.json";
+
+pub struct SettingsStore {
+    backend: Backend,
+}
+
+impl Default for SettingsStore {
+    fn default() -> Self {
+        Self {
+            backend: Backend::settings(),
+        }
+    }
+}
+
+impl SettingsStore {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn at(root: std::path::PathBuf) -> Self {
+        Self {
+            backend: Backend::at(root),
+        }
+    }
+
+    pub fn load<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+        let raw = self.backend.read(SETTINGS_NAMESPACE, SETTINGS)?;
+        match serde_json::from_slice(&raw) {
+            Ok(value) => Some(value),
+            Err(err) => {
+                log::error!("Ignoring unreadable settings: {err}");
+                None
+            }
+        }
+    }
+
+    pub fn store<T: serde::Serialize>(&self, value: &T) -> std::io::Result<()> {
+        let raw = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+        self.backend.write(SETTINGS_NAMESPACE, SETTINGS, &raw)
+    }
+
+    pub fn location(&self) -> String {
+        self.backend.location()
+    }
 }
 
 #[derive(Default)]
@@ -112,9 +176,27 @@ impl SaveStore {
     }
 
     pub fn delete_snapshot(&self, rom_key: &str, slot: usize) -> std::io::Result<()> {
+        self.backend.delete(rom_key, &snapshot_name(slot))?;
         self.backend.delete(rom_key, &snapshot_meta(slot))?;
         self.backend.delete(rom_key, &snapshot_thumb(slot))?;
         self.backend.delete(rom_key, &snapshot_blob(slot))
+    }
+
+    pub fn set_snapshot_name(&self, rom_key: &str, slot: usize, name: &str) -> std::io::Result<()> {
+        let name = name.trim();
+        if name.is_empty() || name == default_slot_name(slot) {
+            return self.backend.delete(rom_key, &snapshot_name(slot));
+        }
+        let trimmed: String = name.chars().take(MAX_SNAPSHOT_NAME).collect();
+        self.backend
+            .write(rom_key, &snapshot_name(slot), trimmed.as_bytes())
+    }
+
+    pub fn snapshot_name(&self, rom_key: &str, slot: usize) -> Option<String> {
+        let raw = self.backend.read(rom_key, &snapshot_name(slot))?;
+        let name = String::from_utf8(raw).ok()?;
+        let name = name.trim();
+        (!name.is_empty()).then(|| name.to_string())
     }
 
     pub fn snapshot_info(&self, rom_key: &str, slot: usize) -> Option<SnapshotInfo> {
@@ -137,6 +219,7 @@ impl SaveStore {
             slot,
             saved_at,
             thumbnail,
+            name: self.snapshot_name(rom_key, slot),
         })
     }
 
@@ -226,8 +309,35 @@ mod tests {
         (SaveStore::at(root.clone()), root)
     }
 
+    fn settings_store(name: &str) -> SettingsStore {
+        let root = std::env::temp_dir().join(format!(
+            "citrine-settings-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        SettingsStore::at(root)
+    }
+
     fn frame() -> Vec<u8> {
         (0..160 * 144 * 4).map(|i| (i % 256) as u8).collect()
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let store = settings_store("round-trip");
+        assert!(store.load::<Vec<String>>().is_none(), "nothing stored yet");
+
+        let value = vec!["a".to_string(), "b".to_string()];
+        store.store(&value).expect("store");
+        assert_eq!(store.load::<Vec<String>>().as_ref(), Some(&value));
+    }
+
+    #[test]
+    fn settings_that_cannot_be_read_fall_back_to_none() {
+        let store = settings_store("unreadable");
+        store.store(&"a string").expect("store");
+
+        assert!(store.load::<Vec<String>>().is_none());
     }
 
     #[test]
@@ -408,6 +518,141 @@ mod tests {
             .expect("snapshot");
         assert!(root.join(KEY).join("battery.sav").exists());
         assert!(root.join(KEY).join("slot0.snap").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_slot_with_no_name_reads_as_its_index() {
+        let (store, root) = store("unnamed");
+        store
+            .store_snapshot(KEY, 2, b"state", &frame())
+            .expect("store");
+
+        let info = store.snapshot_info(KEY, 2).expect("filled");
+        assert_eq!(info.name, None, "nothing was written for a fresh slot");
+        assert_eq!(
+            info.display_name(),
+            "Slot 2",
+            "snapshots from before naming keep their old label"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn naming_a_slot_sticks() {
+        let (store, root) = store("named");
+        store
+            .store_snapshot(KEY, 0, b"state", &frame())
+            .expect("store");
+
+        store
+            .set_snapshot_name(KEY, 0, "  Before the boss  ")
+            .expect("name");
+
+        let info = store.snapshot_info(KEY, 0).expect("filled");
+        assert_eq!(info.name.as_deref(), Some("Before the boss"), "trimmed");
+        assert_eq!(info.display_name(), "Before the boss");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn overwriting_a_slot_keeps_its_name() {
+        let (store, root) = store("named-overwrite");
+        store
+            .store_snapshot(KEY, 1, b"first", &frame())
+            .expect("store");
+        store.set_snapshot_name(KEY, 1, "Checkpoint").expect("name");
+
+        store
+            .store_snapshot(KEY, 1, b"second", &frame())
+            .expect("overwrite");
+
+        let info = store.snapshot_info(KEY, 1).expect("filled");
+        assert_eq!(info.display_name(), "Checkpoint");
+        assert_eq!(store.load_snapshot(KEY, 1).as_deref(), Some(&b"second"[..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_blank_name_goes_back_to_the_default() {
+        let (store, root) = store("name-cleared");
+        store
+            .store_snapshot(KEY, 0, b"state", &frame())
+            .expect("store");
+        store.set_snapshot_name(KEY, 0, "Temporary").expect("name");
+
+        store.set_snapshot_name(KEY, 0, "   ").expect("clear");
+
+        let info = store.snapshot_info(KEY, 0).expect("filled");
+        assert_eq!(info.name, None);
+        assert_eq!(info.display_name(), "Slot 0");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_name_matching_the_default_is_not_stored() {
+        let (store, root) = store("name-default");
+        store
+            .store_snapshot(KEY, 4, b"state", &frame())
+            .expect("store");
+
+        store.set_snapshot_name(KEY, 4, "Slot 4").expect("name");
+
+        assert_eq!(store.snapshot_name(KEY, 4), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn names_are_capped() {
+        let (store, root) = store("name-length");
+        store
+            .store_snapshot(KEY, 0, b"state", &frame())
+            .expect("store");
+
+        let long = "x".repeat(MAX_SNAPSHOT_NAME * 3);
+        store.set_snapshot_name(KEY, 0, &long).expect("name");
+
+        let stored = store.snapshot_name(KEY, 0).expect("named");
+        assert_eq!(stored.chars().count(), MAX_SNAPSHOT_NAME);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deleting_a_slot_takes_its_name_with_it() {
+        let (store, root) = store("name-delete");
+        store
+            .store_snapshot(KEY, 0, b"state", &frame())
+            .expect("store");
+        store.set_snapshot_name(KEY, 0, "Gone soon").expect("name");
+
+        store.delete_snapshot(KEY, 0).expect("delete");
+
+        assert_eq!(store.snapshot_name(KEY, 0), None, "no orphaned name file");
+        assert!(store.snapshot_info(KEY, 0).is_none());
+
+        store
+            .store_snapshot(KEY, 0, b"fresh", &frame())
+            .expect("store");
+        assert_eq!(
+            store.snapshot_info(KEY, 0).expect("filled").display_name(),
+            "Slot 0"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn names_do_not_look_like_snapshot_slots() {
+        let (store, root) = store("name-listing");
+        store
+            .store_snapshot(KEY, 7, b"state", &frame())
+            .expect("store");
+        store.set_snapshot_name(KEY, 7, "Named").expect("name");
+
+        assert_eq!(
+            store.used_slots(KEY),
+            vec![7],
+            "the name file must not register as another slot"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

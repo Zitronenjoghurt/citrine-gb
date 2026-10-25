@@ -18,7 +18,18 @@
   "lang": "en-US",
   "id": "/index.html",
   "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
-  "background_color": "white",
-  "theme_color": "white"
+  "display_override": [
+    "fullscreen",
+    "standalone"
+  ],
+  "orientation": "any",
+  "categories": [
+    "games",
+    "entertainment"
+  ],
+  "description": "A cycle-accurate Game Boy emulator that runs in your browser.",
+  "background_color": "#404040",
+  "theme_color": "#404040"
 }

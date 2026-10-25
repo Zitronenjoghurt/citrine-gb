@@ -14,7 +14,10 @@ pub struct Debugger {
     pub breakpoints: HashSet<RomLocation>,
     pub hit_breakpoint: bool,
     pub total_cycles: u128,
+    pub record_channels: bool,
     apu_channel_sample_counter: u32,
+    apu_channel_stride: u32,
+    apu_channel_stride_for: u32,
     pub ch1_samples: VecDeque<f32>,
     pub ch2_samples: VecDeque<f32>,
     pub ch3_samples: VecDeque<f32>,
@@ -34,19 +37,27 @@ impl Debugger {
         self.total_cycles = 0;
     }
 
-    fn should_sample_apu_channels(&self, sample_rate: u32) -> bool {
-        self.apu_channel_sample_counter >= (APU_CLOCK_RATE / sample_rate)
+    fn apu_channel_stride(&mut self, sample_rate: u32) -> u32 {
+        if self.apu_channel_stride_for != sample_rate {
+            self.apu_channel_stride_for = sample_rate;
+            self.apu_channel_stride = APU_CLOCK_RATE / sample_rate.max(1);
+        }
+        self.apu_channel_stride
     }
 }
 
 impl DebuggerInterface for Debugger {
+    fn wants_apu_channels(&self) -> bool {
+        self.record_channels
+    }
+
     fn record_apu_channels(&mut self, sample_rate: u32, ch1: f32, ch2: f32, ch3: f32, ch4: f32) {
-        if !self.should_sample_apu_channels(sample_rate) {
+        let stride = self.apu_channel_stride(sample_rate);
+        if self.apu_channel_sample_counter < stride {
             self.apu_channel_sample_counter += 1;
             return;
-        } else {
-            self.apu_channel_sample_counter -= APU_CLOCK_RATE / sample_rate;
-        };
+        }
+        self.apu_channel_sample_counter -= stride;
 
         if self.ch1_samples.len() >= MAX_PLOT_SAMPLES {
             self.ch1_samples.pop_front();
@@ -83,6 +94,10 @@ impl DebuggerInterface for Debugger {
 }
 
 pub trait DebuggerInterface {
+    fn wants_apu_channels(&self) -> bool {
+        false
+    }
+
     fn record_apu_channels(
         &mut self,
         _sample_rate: u32,

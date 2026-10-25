@@ -5,12 +5,23 @@ use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 pub struct SnapshotsState {
     loaded_key: Option<String>,
     slots: Vec<SlotView>,
+    renaming: Option<(usize, String)>,
 }
 
 pub struct SlotView {
     pub slot: usize,
     pub saved_at: u64,
     pub texture: TextureHandle,
+    pub name: Option<String>,
+}
+
+impl SlotView {
+    pub fn display_name(&self) -> String {
+        match &self.name {
+            Some(name) => name.clone(),
+            None => crate::storage::default_slot_name(self.slot),
+        }
+    }
 }
 
 impl SnapshotsState {
@@ -38,10 +49,12 @@ impl SnapshotsState {
                         image,
                         TextureOptions::NEAREST,
                     ),
+                    name: info.name,
                 }
             })
             .collect();
         self.loaded_key = Some(rom_key.to_string());
+        self.renaming = None;
     }
 
     pub fn invalidate(&mut self) {
@@ -54,6 +67,25 @@ impl SnapshotsState {
 
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
+    }
+
+    pub fn begin_rename(&mut self, slot: usize, current: String) {
+        self.renaming = Some((slot, current));
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.renaming = None;
+    }
+
+    pub fn rename_buffer(&mut self, slot: usize) -> Option<&mut String> {
+        match &mut self.renaming {
+            Some((editing, text)) if *editing == slot => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn take_rename(&mut self) -> Option<(usize, String)> {
+        self.renaming.take()
     }
 }
 

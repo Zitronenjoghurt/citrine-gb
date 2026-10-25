@@ -39,9 +39,9 @@ impl Channel3 {
         }
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
 
         if self.frequency_timer > 0 {
@@ -51,7 +51,9 @@ impl Channel3 {
         if self.frequency_timer == 0 {
             self.reset_frequency_timer();
             self.wave_step = (self.wave_step + 1) & 0b11111;
+            return true;
         }
+        false
     }
 
     pub fn trigger(&mut self) {

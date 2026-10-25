@@ -74,7 +74,7 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui) {
             if viewer.emulator.reimport_legacy_save() {
                 viewer
                     .events
-                    .notify("Imported the save file next stored to the ROM");
+                    .notify("Imported the save file stored next to the ROM");
             } else {
                 viewer
                     .events
@@ -127,24 +127,71 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     }
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for view in viewer.ui.snapshots.slots() {
-            let slot = view.slot;
+        let slots: Vec<(usize, u64, String, egui::TextureId)> = viewer
+            .ui
+            .snapshots
+            .slots()
+            .iter()
+            .map(|view| {
+                (
+                    view.slot,
+                    view.saved_at,
+                    view.display_name(),
+                    view.texture.id(),
+                )
+            })
+            .collect();
+
+        for (slot, saved_at, name, texture) in slots {
             ui.horizontal(|ui| {
                 ui.image(egui::load::SizedTexture::new(
-                    view.texture.id(),
+                    texture,
                     egui::vec2(THUMB_WIDTH as f32, THUMB_HEIGHT as f32),
                 ));
 
                 ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(format!("Slot {slot}"));
-                        if slot == quick_slot {
-                            ui.colored_label(ui.visuals().warn_fg_color, icons::STAR);
-                        }
-                    });
-                    ui.small(relative_time(view.saved_at));
+                    match viewer.ui.snapshots.rename_buffer(slot) {
+                        Some(buffer) => {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(buffer)
+                                    .desired_width(180.0)
+                                    .hint_text(&name)
+                                    .char_limit(crate::storage::MAX_SNAPSHOT_NAME),
+                            );
+                            response.request_focus();
 
-                    ui.horizontal(|ui| {
+                            let commit = response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+                            if cancel {
+                                viewer.ui.snapshots.cancel_rename();
+                            } else if commit
+                                && let Some((slot, text)) = viewer.ui.snapshots.take_rename()
+                            {
+                                action = Some(SlotAction::Rename(slot, text));
+                            }
+                        }
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.strong(&name);
+                                if slot == quick_slot {
+                                    ui.colored_label(ui.visuals().warn_fg_color, icons::STAR);
+                                }
+                                if ui
+                                    .small_button(icons::PENCIL_SIMPLE)
+                                    .on_hover_text("Rename this snapshot")
+                                    .clicked()
+                                {
+                                    viewer.ui.snapshots.begin_rename(slot, name.clone());
+                                }
+                            });
+                        }
+                    }
+
+                    ui.small(format!("Slot {slot} · {}", relative_time(saved_at)));
+
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("Load").clicked() {
                             action = Some(SlotAction::Load(slot));
                         }
@@ -181,6 +228,7 @@ enum SlotAction {
     Load(usize),
     Delete(usize),
     MakeQuick(usize),
+    Rename(usize, String),
 }
 
 fn apply(viewer: &mut TabViewer, rom_key: &str, action: SlotAction, ctx: &egui::Context) {
@@ -214,6 +262,16 @@ fn apply(viewer: &mut TabViewer, rom_key: &str, action: SlotAction, ctx: &egui::
             .emulator
             .delete_snapshot(slot)
             .map(|_| format!("Deleted slot {slot}")),
+        SlotAction::Rename(slot, name) => {
+            let trimmed = name.trim().to_string();
+            viewer.emulator.rename_snapshot(slot, &trimmed).map(|()| {
+                if trimmed.is_empty() {
+                    format!("Slot {slot} is back to its default name")
+                } else {
+                    format!("Renamed to '{trimmed}'")
+                }
+            })
+        }
         SlotAction::MakeQuick(_) => unreachable!("handled above"),
     };
 

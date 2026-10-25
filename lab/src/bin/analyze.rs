@@ -689,7 +689,7 @@ fn main() -> Result<()> {
         "signif".into(),
     ]];
     if runs.len() < 2 {
-        println!("\n(only one run — pairwise significance tests need at least two runs)");
+        println!("\n(only one run, and pairwise significance tests need at least two runs)");
     } else {
         println!("\n=== pairwise progression (consecutive runs) ===");
         for pair in runs.windows(2) {

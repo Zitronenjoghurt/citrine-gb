@@ -32,7 +32,7 @@ impl Frame {
     }
 
     pub fn normalize_into(&self, out: &mut Frame) {
-        // Evenly spaced ~85 apart, so the nearest level is the rounded quotient — no palette search.
+        // Evenly spaced ~85 apart, so the nearest level is the rounded quotient and needs no palette search.
         const LEVELS: [u8; 4] = [0x00, 0x55, 0xAA, 0xFF];
         out.width = self.width;
         out.height = self.height;
@@ -53,7 +53,7 @@ impl Frame {
 pub trait FrameEmulator {
     fn name(&self) -> &str;
 
-    /// `None` jumps straight to the post-boot state — SameBoy cannot run without a boot ROM.
+    /// `None` jumps straight to the post-boot state. SameBoy cannot run without a boot ROM.
     fn load(&mut self, rom: &[u8], boot_rom: Option<&[u8]>, model: GbModel) -> anyhow::Result<()>;
 
     fn set_button(&mut self, button: Button, pressed: bool);

@@ -1,5 +1,5 @@
-//! Captures the emulator's accuracy in one run — the mooneye suite plus a SameBoy frame diff over
-//! every local ROM — into `experiments/runs/<date>_<git-short-hash>/`. See `experiments/README.md`.
+//! Captures the emulator's accuracy in one run, the mooneye suite plus a SameBoy frame diff over
+//! every local ROM, into `experiments/runs/<date>_<git-short-hash>/`. See `experiments/README.md`.
 //!
 //! Usage: `make results`, or `cargo run --release -p citrine-gb-lab --bin collect -- [options]`.
 

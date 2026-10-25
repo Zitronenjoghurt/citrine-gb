@@ -35,9 +35,9 @@ impl Channel4 {
         }
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
 
         if self.frequency_timer > 0 {
@@ -57,8 +57,10 @@ impl Channel4 {
                     self.lfsr &= !(1 << 6);
                     self.lfsr |= xor_bit << 6;
                 }
+                return true;
             }
         }
+        false
     }
 
     pub fn trigger(&mut self) {

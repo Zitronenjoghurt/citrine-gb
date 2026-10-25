@@ -3,9 +3,9 @@
 One-shot snapshots of the emulator's accuracy, collected with `make results`
 (= `cargo run --release -p citrine-gb-lab --bin collect`). Each run captures:
 
-1. **Mooneye suite** — every DMG acceptance/emulator-only ROM, executed in-process with the
+1. **Mooneye suite.** Every DMG acceptance/emulator-only ROM, executed in-process with the
    same Fibonacci-register convention as `lib/tests/mooneye.rs`.
-2. **SameBoy frame diff** — every ROM in `roms/games/` and `roms/test/` (dmg-acid2 + blargg)
+2. **SameBoy frame diff.** Every ROM in `roms/games/` and `roms/test/` (dmg-acid2 + blargg)
    compared against SameBoy for 3600 frames (cycle-aligned, greyscale-normalized, no PNG
    dumps), swept over alignment tolerances 0, 1, 2, 5 and 10. ROMs with a matching input
    recording in `roms/*.json` (matched by SHA-256) get an additional replayed run.
@@ -56,18 +56,18 @@ pairwise.csv         consecutive runs: McNemar (mooneye) + Wilcoxon signed-rank 
 significance.md      human-readable summary + methodology notes
 ```
 
-Statistical model — the emulator is **deterministic**, so a single run has no measurement noise;
-the only sampling variability is *which ROMs were chosen*. Hence:
+The emulator is **deterministic**, so a single run has no measurement noise, and the only sampling
+variability is *which ROMs were chosen*. The statistical model follows from that:
 
 - The **ROM is the unit of analysis** (n ≈ 41 games; `+recording` replays are excluded by default so
-  each game counts once — `--include-recordings` to keep them).
+  each game counts once; pass `--include-recordings` to keep them).
 - Per-run figures are reported as **bootstrap confidence intervals for the median**, not a
   significance test: precision of the estimate, not a hypothesis test. The metric is bounded and
   bimodal (a cluster of CGB ROMs near 0), so the **median** is reported over the mean and tests are
   **non-parametric**.
 - **Significance is comparative**: it only appears in `pairwise.csv`, testing whether accuracy
   changed between two runs. McNemar tests the paired mooneye pass/fail flips; Wilcoxon tests the
-  per-ROM match-rate differences. Both run **per tolerance** — tolerance columns are re-scorings of
+  per-ROM match-rate differences. Both run **per tolerance**, because tolerance columns are re-scorings of
   the same run and are never pooled as independent observations.
 - ROMs are hand-picked, so intervals/p-values describe the population of ROMs *like these*, not all
   Game Boy software.

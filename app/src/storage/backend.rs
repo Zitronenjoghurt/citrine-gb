@@ -14,17 +14,26 @@ mod native {
         root: PathBuf,
     }
 
+    fn data_dir() -> PathBuf {
+        match ProjectDirs::from("", "", "citrine") {
+            Some(dirs) => dirs.data_dir().to_path_buf(),
+            None => PathBuf::from(FALLBACK_DIR),
+        }
+    }
+
     impl Default for Backend {
         fn default() -> Self {
-            let root = match ProjectDirs::from("", "", "citrine") {
-                Some(dirs) => dirs.data_dir().join("saves"),
-                None => PathBuf::from(FALLBACK_DIR).join("saves"),
-            };
-            Self { root }
+            Self {
+                root: data_dir().join("saves"),
+            }
         }
     }
 
     impl Backend {
+        pub fn settings() -> Self {
+            Self { root: data_dir() }
+        }
+
         #[cfg(test)]
         pub fn at(root: PathBuf) -> Self {
             Self { root }
@@ -91,6 +100,10 @@ mod web {
     }
 
     impl Backend {
+        pub fn settings() -> Self {
+            Self
+        }
+
         pub fn read(&self, namespace: &str, name: &str) -> Option<Vec<u8>> {
             let raw = storage()?.get_item(&key(namespace, name)).ok()??;
             base64::engine::general_purpose::STANDARD.decode(raw).ok()

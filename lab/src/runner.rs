@@ -410,8 +410,8 @@ where
 
                     let mut best = vec![f64::NAN; metrics.len()];
                     let mut any_identical = false;
-                    // Dumps show the most visually similar candidate, not the nearest in cycle —
-                    // that one is often the timing-shifted frame tolerance exists to look past.
+                    // Dumps show the most visually similar candidate, not the nearest in cycle,
+                    // because that one is often the timing-shifted frame tolerance exists to look past.
                     let mut rep_idx = nearest;
                     let mut rep_identical = false;
                     let mut rep_dist = u64::MAX;

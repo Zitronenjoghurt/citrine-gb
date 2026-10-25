@@ -14,3 +14,4 @@ pub mod settings;
 pub mod snapshots;
 pub mod time_control;
 pub mod toggle_button;
+pub mod touch_controls;

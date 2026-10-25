@@ -2,6 +2,7 @@ pub mod avg_timer;
 pub mod file_channels;
 pub mod file_loader;
 pub mod file_saver;
+pub mod screenshot;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn spawn(future: impl std::future::Future<Output = ()> + Send + 'static) {

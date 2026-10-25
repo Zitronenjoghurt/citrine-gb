@@ -36,7 +36,7 @@ impl Widget for DebugActions<'_> {
             ui.colored_label(
                 egui::Color32::from_rgb(0xE0, 0x40, 0x40),
                 format!(
-                    "● Recording — {} event(s)",
+                    "● Recording, {} event(s)",
                     self.emulator.recorder.event_count()
                 ),
             );

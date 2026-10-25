@@ -1,8 +1,11 @@
 use crate::app::tabs::Tab;
 use crate::app::ui_state::UiState;
+use crate::app::ui_state::hotkeys::HotkeyAction;
+use crate::app::ui_state::settings::{LayoutMode, Settings};
 use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
+use crate::storage::SettingsStore;
 use crate::utils::file_channels::FileChannels;
 use crate::utils::file_loader::FileLoader;
 use crate::utils::file_loader::PickedFile;
@@ -18,9 +21,17 @@ use strum::IntoEnumIterator;
 
 const QUICK_LOAD_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 
+const MOBILE_BREAKPOINT: f32 = 560.0;
+
+#[cfg(target_arch = "wasm32")]
+const AUDIO_STALL_SECS: f32 = 1.0;
+
+const SETTINGS_WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 mod events;
+mod mobile;
 mod tabs;
-mod ui_state;
+pub mod ui_state;
 mod widgets;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -43,6 +54,14 @@ pub struct Citrine {
     pub commonmark: CommonMarkCache,
     #[serde(skip, default)]
     quick_load_hold: Option<web_time::Instant>,
+    #[serde(skip, default)]
+    mobile: mobile::MobileState,
+    #[serde(skip, default)]
+    audio_stalled: bool,
+    #[serde(skip, default)]
+    settings_store: SettingsStore,
+    #[serde(skip, default)]
+    settings_saved_at: Option<web_time::Instant>,
 }
 
 impl Default for Citrine {
@@ -59,6 +78,10 @@ impl Default for Citrine {
             events: events::AppEventQueue::default(),
             commonmark: CommonMarkCache::default(),
             quick_load_hold: None,
+            mobile: mobile::MobileState::default(),
+            audio_stalled: false,
+            settings_store: SettingsStore::default(),
+            settings_saved_at: None,
         };
         app.open_tab(Tab::Info);
         app
@@ -79,9 +102,12 @@ impl Citrine {
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
             .unwrap_or_default();
 
-        let (audio, producer) = Audio::new();
-        app.audio = Some(audio);
-        app.emulator.audio_producer = Some(producer);
+        if let Some(settings) = app.settings_store.load::<Settings>() {
+            app.ui.settings = settings;
+        }
+
+        app.ui.settings.sanitize();
+        app.audio = Some(Audio::new());
         app.emulator.running = false;
 
         app
@@ -101,6 +127,13 @@ impl eframe::App for Citrine {
         // ToDo: Handle this more efficiently => e.g. pause emulator if not visible
         ctx.request_repaint();
 
+        #[cfg(target_arch = "wasm32")]
+        if ctx.input(|i| i.unstable_dt) > AUDIO_STALL_SECS {
+            self.audio_stalled = true;
+        }
+
+        self.emulator.gb.debugger.record_channels = self.dock.find_tab(&Tab::ApuWaves).is_some();
+
         self.render(ctx);
         if self.ui.settings.focus_mode && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.toggle_focus_mode();
@@ -110,17 +143,29 @@ impl eframe::App for Citrine {
         self.quick_load_overlay(ctx);
 
         self.drain_file_channels();
+        self.unlock_audio_on_interaction(ctx);
 
-        if let Err(err) = self.emulator.update(ctx, &mut self.gil) {
+        let Self {
+            emulator, gil, ui, ..
+        } = self;
+        let result = emulator.update(ctx, gil, &ui.settings.bindings, &mut ui.capture);
+        if let Err(err) = result {
             self.toasts.error(format!("Emulation Error: {}", err));
         }
 
         self.toasts.show(ctx);
 
         self.handle_event_queue();
-        self.ui
+        let mobile = self.is_mobile(ctx);
+        if let Some(err) = self
+            .ui
             .settings
-            .apply(ctx, &mut self.audio, &mut self.emulator);
+            .apply(ctx, &mut self.audio, &mut self.emulator, mobile)
+        {
+            self.toasts.error(err);
+        }
+
+        self.flush_settings(false);
 
         self.ui.update_avg_timer.stop();
     }
@@ -129,14 +174,33 @@ impl eframe::App for Citrine {
         if let Err(err) = self.emulator.flush_save() {
             log::error!("failed to flush save: {err:?}");
         }
+        self.flush_settings(true);
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 }
 
 // Rendering
 impl Citrine {
+    fn device_size(ctx: &Context) -> egui::Vec2 {
+        let physical = ctx.content_rect().size() * ctx.pixels_per_point();
+        physical / ctx.native_pixels_per_point().unwrap_or(1.0)
+    }
+
+    pub fn is_mobile(&self, ctx: &Context) -> bool {
+        match self.ui.settings.layout {
+            LayoutMode::Desktop => false,
+            LayoutMode::Mobile => true,
+            LayoutMode::Auto => {
+                let size = Self::device_size(ctx);
+                size.x.min(size.y) < MOBILE_BREAKPOINT
+            }
+        }
+    }
+
     fn render(&mut self, ctx: &Context) {
-        if self.ui.settings.focus_mode {
+        if self.is_mobile(ctx) {
+            self.render_mobile(ctx);
+        } else if self.ui.settings.focus_mode {
             self.render_focus_mode(ctx);
         } else {
             self.render_normal_mode(ctx);
@@ -212,6 +276,10 @@ impl Citrine {
             })
             .response
             .on_hover_text("File Menu");
+
+            ui.separator();
+            self.transport_buttons(ui);
+            ui.separator();
 
             if ui
                 .button(icons::JOYSTICK)
@@ -300,6 +368,77 @@ impl Citrine {
         });
     }
 
+    fn transport_buttons(&mut self, ui: &mut egui::Ui) {
+        let loaded = self.emulator.gb.cartridge.has_rom_loaded;
+        let running = self.emulator.running;
+
+        let play_icon = if running { icons::PAUSE } else { icons::PLAY };
+        let play_hint = if running { "Pause" } else { "Resume" };
+        if self
+            .shortcut_button(ui, play_icon, play_hint, HotkeyAction::TogglePause, loaded)
+            .clicked()
+        {
+            self.run_hotkey(HotkeyAction::TogglePause);
+        }
+
+        if self
+            .shortcut_button(
+                ui,
+                icons::ARROW_COUNTER_CLOCKWISE,
+                "Reset the game",
+                HotkeyAction::SoftReset,
+                loaded,
+            )
+            .clicked()
+        {
+            self.run_hotkey(HotkeyAction::SoftReset);
+        }
+
+        if self
+            .shortcut_button(
+                ui,
+                icons::CAMERA,
+                "Screenshot",
+                HotkeyAction::Screenshot,
+                loaded,
+            )
+            .clicked()
+        {
+            self.run_hotkey(HotkeyAction::Screenshot);
+        }
+
+        let muted = self.ui.settings.muted;
+        let mute_icon = if muted {
+            icons::SPEAKER_SLASH
+        } else {
+            icons::SPEAKER_HIGH
+        };
+        let mute_hint = if muted { "Unmute" } else { "Mute" };
+        if self
+            .shortcut_button(ui, mute_icon, mute_hint, HotkeyAction::ToggleMute, true)
+            .clicked()
+        {
+            self.run_hotkey(HotkeyAction::ToggleMute);
+        }
+    }
+
+    fn shortcut_button(
+        &self,
+        ui: &mut egui::Ui,
+        icon: &str,
+        hint: &str,
+        action: HotkeyAction,
+        enabled: bool,
+    ) -> egui::Response {
+        let keys = self.ui.settings.hotkeys.keys_for(action);
+        let hint = match keys.first() {
+            Some(hotkey) => format!("{hint} ({hotkey})"),
+            None => hint.to_string(),
+        };
+        ui.add_enabled(enabled, egui::Button::new(icon))
+            .on_hover_text(hint)
+    }
+
     fn toggle_focus_mode(&mut self) {
         self.ui.settings.focus_mode = !self.ui.settings.focus_mode;
         if self.ui.settings.focus_mode {
@@ -350,25 +489,92 @@ impl Citrine {
     }
 }
 
+impl Citrine {
+    fn flush_settings(&mut self, force: bool) {
+        if !self.ui.settings.unsaved {
+            return;
+        }
+
+        let now = web_time::Instant::now();
+        if !force
+            && let Some(last) = self.settings_saved_at
+            && now.duration_since(last) < SETTINGS_WRITE_INTERVAL
+        {
+            return;
+        }
+
+        match self.settings_store.store(&self.ui.settings) {
+            Ok(()) => {
+                self.ui.settings.unsaved = false;
+                self.settings_saved_at = Some(now);
+            }
+            Err(err) => log::error!("Failed to save settings: {err}"),
+        }
+    }
+}
+
 // Audio
 impl Citrine {
     pub fn try_start_audio(&mut self) {
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        if audio.is_running() {
+            return;
+        }
+        self.restart_audio(true);
+    }
+
+    fn unlock_audio_on_interaction(&mut self, ctx: &Context) {
+        let interacted = ctx.input(|i| {
+            i.pointer.any_pressed()
+                || i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { pressed: true, .. }
+                            | egui::Event::Touch {
+                                phase: egui::TouchPhase::Start,
+                                ..
+                            }
+                    )
+                })
+        });
+        if !interacted {
+            return;
+        }
+
+        let stalled = std::mem::take(&mut self.audio_stalled);
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+
+        audio.mark_user_activated();
+
+        if audio.is_running() && !stalled {
+            audio.resume();
+            return;
+        }
+
+        self.restart_audio(!stalled);
+    }
+
+    fn restart_audio(&mut self, announce: bool) {
         let Some(audio) = &mut self.audio else {
             return;
         };
 
-        if audio.stream.is_some() {
-            return;
-        };
-
-        match audio.try_start() {
-            Ok(sample_rate) => {
-                self.emulator.gb.apu.set_sample_rate(sample_rate);
-                self.toasts
-                    .success(format!("Audio started ({} Hz)", sample_rate));
+        let device = self.ui.settings.audio_device.clone();
+        match audio.start(device.as_deref(), self.ui.settings.audio_latency_ms) {
+            Ok(link) => {
+                let rate = link.sample_rate;
+                self.emulator.attach_audio(link);
+                self.ui.settings.dirty = true;
+                if announce {
+                    self.toasts.success(format!("Audio started ({rate} Hz)"));
+                }
             }
             Err(err) => {
-                self.toasts.error(format!("Failed to start audio: {}", err));
+                self.toasts.error(format!("Failed to start audio: {err}"));
             }
         }
     }
@@ -399,50 +605,84 @@ impl Citrine {
     }
 
     fn handle_snapshot_hotkeys(&mut self, ctx: &Context) {
-        if ctx.wants_keyboard_input() {
+        if ctx.wants_keyboard_input() || self.ui.capture.is_waiting() {
             self.quick_load_hold = None;
             return;
         }
 
-        let (save, shift, load_held) = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::F8),
-                i.modifiers.shift,
-                i.key_down(egui::Key::F9),
-            )
+        let (pressed, modifiers, held_keys) = ctx.input(|i| {
+            let pressed: Vec<egui::Key> = i
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } => Some(*key),
+                    _ => None,
+                })
+                .collect();
+            let held: Vec<egui::Key> = egui::Key::ALL
+                .iter()
+                .copied()
+                .filter(|key| i.key_down(*key))
+                .collect();
+            (pressed, i.modifiers, held)
         });
 
-        if self.emulator.rom_key().is_none() {
-            self.quick_load_hold = None;
-            if save || load_held {
-                self.toasts.error("No ROM loaded");
+        for key in pressed {
+            if let Some(action) = self.ui.settings.hotkeys.action_for(key, modifiers)
+                && !action.is_hold()
+            {
+                self.run_hotkey(action);
             }
+        }
+
+        let hold_active = held_keys.iter().any(|key| {
+            self.ui
+                .settings
+                .hotkeys
+                .action_for(*key, modifiers)
+                .is_some_and(|action| action.is_hold())
+        });
+
+        if !hold_active {
+            self.quick_load_hold = None;
             return;
         }
 
-        if save {
-            let slot = if shift {
-                self.emulator
-                    .store
-                    .next_free_slot(self.emulator.rom_key().unwrap_or_default())
-            } else {
-                self.ui.settings.quick_slot
-            };
-            match self.emulator.save_snapshot(slot) {
-                Ok(()) => self
-                    .toasts
-                    .success(format!("Saved snapshot to slot {slot}")),
-                Err(err) => self.toasts.error(format!("Quick save failed: {err:?}")),
-            };
-            self.ui.snapshots.invalidate();
+        let started = *self
+            .quick_load_hold
+            .get_or_insert_with(web_time::Instant::now);
+        if started.elapsed() >= QUICK_LOAD_HOLD {
+            self.quick_load_hold = None;
+            self.run_hotkey(HotkeyAction::QuickLoad);
+        }
+    }
+
+    pub fn run_hotkey(&mut self, action: HotkeyAction) {
+        let needs_rom = matches!(
+            action,
+            HotkeyAction::QuickSave
+                | HotkeyAction::QuickSaveNewSlot
+                | HotkeyAction::QuickLoad
+                | HotkeyAction::Screenshot
+                | HotkeyAction::SoftReset
+        );
+        if needs_rom && self.emulator.rom_key().is_none() {
+            self.toasts.error("No ROM loaded");
+            return;
         }
 
-        if load_held {
-            let started = *self
-                .quick_load_hold
-                .get_or_insert_with(web_time::Instant::now);
-            if started.elapsed() >= QUICK_LOAD_HOLD {
-                self.quick_load_hold = None;
+        match action {
+            HotkeyAction::QuickSave => self.save_to_slot(self.ui.settings.quick_slot),
+            HotkeyAction::QuickSaveNewSlot => {
+                let key = self.emulator.rom_key().unwrap_or_default().to_owned();
+                self.save_to_slot(self.emulator.store.next_free_slot(&key));
+            }
+            HotkeyAction::QuickLoad => {
                 let slot = self.ui.settings.quick_slot;
                 match self.emulator.load_snapshot(slot) {
                     Ok(true) => self.toasts.success(format!("Loaded slot {slot}")),
@@ -451,9 +691,39 @@ impl Citrine {
                 };
                 self.ui.snapshots.invalidate();
             }
-        } else {
-            self.quick_load_hold = None;
+            HotkeyAction::Screenshot => self.take_screenshot(),
+            HotkeyAction::TogglePause => {
+                self.emulator.running = !self.emulator.running;
+                if !self.emulator.running {
+                    self.emulator.release_all();
+                }
+            }
+            HotkeyAction::SoftReset => {
+                self.emulator.gb.soft_reset();
+                self.emulator.running = true;
+                self.toasts.success("Game reset");
+            }
+            HotkeyAction::ToggleMute => {
+                self.ui.settings.muted = !self.ui.settings.muted;
+                self.ui.settings.dirty = true;
+            }
+            HotkeyAction::ToggleFocusMode => self.toggle_focus_mode(),
+            HotkeyAction::ToggleTouchControls => {
+                let show = &mut self.ui.settings.touch.show_controls;
+                *show = !*show;
+                self.ui.settings.dirty = true;
+            }
         }
+    }
+
+    fn save_to_slot(&mut self, slot: usize) {
+        match self.emulator.save_snapshot(slot) {
+            Ok(()) => self
+                .toasts
+                .success(format!("Saved snapshot to slot {slot}")),
+            Err(err) => self.toasts.error(format!("Quick save failed: {err:?}")),
+        };
+        self.ui.snapshots.invalidate();
     }
 
     fn quick_load_overlay(&self, ctx: &Context) {
@@ -488,6 +758,7 @@ impl Citrine {
         } else {
             self.toasts.success(format!("Loaded ROM '{}'", file.name));
             self.ui.settings.dirty = true;
+            self.close_mobile_sheet();
 
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(path) = file.path.as_deref() {
@@ -593,13 +864,38 @@ impl Citrine {
         }
     }
 
+    fn take_screenshot(&mut self) {
+        if !self.emulator.gb.cartridge.has_rom_loaded {
+            self.toasts.error("Load a ROM before taking a screenshot");
+            return;
+        }
+
+        let (width, height, rgba) = self.emulator.screenshot();
+        let Some(png) = crate::utils::screenshot::encode_png(width, height, &rgba) else {
+            self.toasts.error("Could not encode the screenshot");
+            return;
+        };
+
+        let name = crate::utils::screenshot::file_name(&self.emulator.gb.cartridge.header.title);
+        crate::utils::file_saver::FileSaver::new(&name)
+            .add_filter("PNG image", &["png"])
+            .dispatch(png, self.files.save_tx.clone());
+    }
+
     fn handle_load_rom_data(&mut self, data: Vec<u8>) {
         self.try_start_audio();
         let rom = Rom::new(&data);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = self.emulator.load_rom(&rom, None);
+        let result = self.emulator.load_rom(&rom, None);
         #[cfg(target_arch = "wasm32")]
-        let _ = self.emulator.load_rom(&rom);
+        let result = self.emulator.load_rom(&rom);
+
+        match result {
+            Ok(()) => self.close_mobile_sheet(),
+            Err(err) => {
+                self.toasts.error(format!("Failed to load ROM: {err}"));
+            }
+        }
         self.ui.settings.dirty = true;
     }
 }

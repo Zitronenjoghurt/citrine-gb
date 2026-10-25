@@ -143,11 +143,11 @@ jobs:
           body: |
             The web version is at [gb.lemon.industries](https://gb.lemon.industries).
 
-            **macOS** — download the `.dmg` and drag Citrine to Applications. One universal build covers both Apple Silicon and Intel.
-            Citrine is not signed with an Apple Developer ID, so the first launch is blocked. Open **System Settings → Privacy & Security**, scroll to the message about Citrine, and click **Open Anyway**. You only need to do this once.
+            **macOS.** Download the `.dmg` and drag Citrine to Applications. One universal build covers Apple Silicon and Intel.
+            Citrine is not signed with an Apple Developer ID, so macOS blocks the first launch. Open **System Settings → Privacy & Security**, scroll to the message about Citrine, and click **Open Anyway**. You only need to do this once.
 
-            **Windows** — download the `.zip`, extract it, and run `citrine.exe`. SmartScreen may warn because the binary is not code-signed. Verify the checksum below, then choose "More info" → "Run anyway".
+            **Windows.** Download the `.zip`, extract it, and run `citrine.exe`. SmartScreen may warn because the binary is not code-signed. Verify the checksum below, then choose "More info" → "Run anyway".
 
-            **Linux** — download the `.tar.gz` for your architecture and extract it. Run `./install.sh` to add Citrine to your applications menu, or just run `./citrine` directly.
+            **Linux.** Download the `.tar.gz` for your architecture and extract it. Run `./install.sh` to add Citrine to your applications menu, or run `./citrine` directly.
 
-            **Verify downloads:** `sha256sum -c SHA256SUMS.txt --ignore-missing`, or check any file's build provenance with `gh attestation verify <file> --repo ${{ github.repository }}`.
+            **Verify downloads.** Run `sha256sum -c SHA256SUMS.txt --ignore-missing`, or check any file's build provenance with `gh attestation verify <file> --repo ${{ github.repository }}`.
