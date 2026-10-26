@@ -16,13 +16,36 @@ impl LengthCounter {
         false
     }
 
-    pub fn trigger(&mut self, length: u16) {
-        if self.counter == 0 {
-            self.counter = length;
-        }
+    pub fn load(&mut self, max: u16, value: u16) {
+        self.counter = max - value;
     }
 
-    pub fn reload(&mut self, length: u16) {
-        self.counter = length;
+    pub fn write_control(
+        &mut self,
+        enable: bool,
+        trigger: bool,
+        max: u16,
+        frame_clocked_length: bool,
+    ) -> bool {
+        let mut was_enabled = self.enabled;
+        if trigger && self.counter == 0 {
+            self.counter = max;
+            was_enabled = false;
+        }
+
+        let mut expired = false;
+        if enable && !was_enabled && frame_clocked_length && self.counter > 0 {
+            self.counter -= 1;
+            if self.counter == 0 {
+                if trigger {
+                    self.counter = max - 1;
+                } else {
+                    expired = true;
+                }
+            }
+        }
+
+        self.enabled = enable;
+        expired
     }
 }

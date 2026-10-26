@@ -74,7 +74,7 @@ fn main() {
         games.push((path, stem, meta));
     }
 
-    games.sort_by(|a, b| a.2.title.cmp(&b.2.title));
+    games.sort_by_cached_key(|game| (sort_key(&game.2.title), game.2.title.clone()));
 
     for (path, stem, meta) in games {
         let raw_data = fs::read(&path).unwrap();
@@ -157,4 +157,18 @@ fn main() {
     };
 
     fs::write(dest_path, final_code.to_string()).unwrap();
+}
+
+fn sort_key(title: &str) -> String {
+    title
+        .chars()
+        .map(|c| {
+            if matches!(c, '\u{b5}' | '\u{3bc}') {
+                'm'
+            } else {
+                c
+            }
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
 }

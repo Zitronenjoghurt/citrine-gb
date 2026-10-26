@@ -22,7 +22,7 @@ pub fn show(_viewer: &mut TabViewer, ui: &mut egui::Ui) {
             ui.separator();
 
             #[cfg(not(target_arch = "wasm32"))]
-            if ui.button("Create & Export").clicked() {
+            if ui.button("Create & export").clicked() {
                 crate::utils::file_loader::FolderPicker::new()
                     .title("Export E2E test to folder")
                     .dispatch(_viewer.files.folder_tx.clone());

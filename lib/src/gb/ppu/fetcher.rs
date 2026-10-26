@@ -1,45 +1,75 @@
-use crate::ReadMemory;
 use crate::gb::ppu::Ppu;
 use crate::gb::ppu::fifo::FifoPixel;
-use crate::gb::ppu::types::sprite::Sprite;
+use crate::gb::ppu::types::attributes::BgAttributes;
+use crate::gb::ppu::types::sprite::SpriteFlags;
 use crate::gb::ppu::types::tile::TileLine;
 
 /// Responsible for loading data into the pixel FIFO
 /// Continuously active throughout mode 3 (Drawing)
 #[derive(Debug, Default, Copy, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PixelFetcher {
     pub state: PixelFetcherState,
-    pub x: u8,
+    pub tile_map_address: u16,
     pub tile_id: u8,
+    pub tile_attributes: BgAttributes,
     pub tile_line: TileLine,
-    /// If in sprite mode this will be the sprite to fetch pixels for
-    pub sprite_mode: Option<Sprite>,
+    pub tile_y: u8,
+    pub tile_data_bank: u8,
+    pub tile_data_address: u16,
     pub window_mode: bool,
     /// Whether WY condition has been met this frame
     pub wy_triggered: bool,
     /// Window line
     pub wl: u8,
+    pub window_x: u8,
+    pub object: ObjectFetch,
+    pub last_tileset: bool,
+    pub sel_glitch_data: u8,
+}
+
+#[derive(Debug, Default, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ObjectFetch {
+    pub step: ObjectStep,
+    pub oam_index: u8,
+    pub y: u8,
+    pub tile_id: u8,
+    pub flags: u8,
+    pub tile_line: TileLine,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ObjectStep {
+    #[default]
+    Idle,
+    WaitForBackground,
+    ReadAttributes,
+    ReadAttributesWait,
+    ReadLow,
+    ReadLowWait,
+    ReadHigh,
+    Overlay,
 }
 
 impl PixelFetcher {
     pub fn reset_scanline(&mut self) {
         self.state = PixelFetcherState::GetTile1;
-        self.x = 0;
-        self.tile_id = 0;
-        self.tile_line = TileLine::default();
         self.window_mode = false;
+        self.object = ObjectFetch::default();
     }
 
     pub fn reset_frame(&mut self) {
         self.reset_scanline();
         self.wy_triggered = false;
-        self.wl = 0;
+        self.wl = 0xFF;
     }
 }
 
 /// What the pixel fetcher's task is during the next dot
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PixelFetcherState {
     #[default]
@@ -53,180 +83,267 @@ pub enum PixelFetcherState {
 }
 
 impl Ppu {
-    pub fn dot_fetcher(&mut self) {
-        if !self.fetcher.window_mode
-            && self.lcdc.do_render_window()
-            && self.fetcher.wy_triggered
-            && self.fifo.lcd_x >= self.wx.saturating_sub(7)
-        {
-            self.fifo.reset_bg();
-            self.fifo.scx_discard = 0;
-            self.fetcher.reset_scanline();
-            self.fetcher.window_mode = true;
-            return;
-        }
-
-        if self.fetcher.sprite_mode.is_none()
-            && self.lcdc.do_render_obj()
-            && let Some(sprite) = self.scanner.pop_sprite_for_x(self.fifo.lcd_x)
-        {
-            self.fetcher.state = PixelFetcherState::GetTile1;
-            self.fetcher.sprite_mode = Some(sprite);
-            return;
-        }
-
+    pub fn advance_fetcher(&mut self) {
         match self.fetcher.state {
             PixelFetcherState::GetTile1 => {
-                self.fetcher.state = PixelFetcherState::GetTile2;
-            }
-            PixelFetcherState::GetTile2 => {
-                if let Some(sprite) = &self.fetcher.sprite_mode {
-                    if self.lcdc.obj_size {
-                        let y_offset = self.fetcher_y();
-                        if y_offset >= 8 {
-                            self.fetcher.tile_id = sprite.tile_id | 0x01;
-                        } else {
-                            self.fetcher.tile_id = sprite.tile_id & 0xFE;
-                        }
-                    } else {
-                        self.fetcher.tile_id = sprite.tile_id;
-                    }
-                } else {
-                    let window_mode = self.fetcher.window_mode;
-
-                    let tilemap_addr = if (self.lcdc.bg_tilemap && !window_mode)
-                        || (self.lcdc.window_tilemap && window_mode)
-                    {
+                if !self.lcdc.window_enable {
+                    self.fetcher.window_mode = false;
+                }
+                let window = self.fetcher.window_mode;
+                let map =
+                    if (window && self.lcdc.window_tilemap) || (!window && self.lcdc.bg_tilemap) {
                         0x9C00
                     } else {
                         0x9800
                     };
-
-                    let (tile_x, tile_y) = if window_mode {
-                        let tx = (self.fetcher.x / 8) & 0x1F;
-                        let ty = (self.fetcher.wl / 8) & 0x1F;
-                        (tx, ty)
-                    } else {
-                        let tx = ((self.scx / 8).wrapping_add(self.fetcher.x / 8)) & 0x1F;
-                        let ty = self.ly.wrapping_add(self.scy);
-                        (tx, (ty / 8) & 0x1F)
-                    };
-
-                    let index = tile_x as u16 + (tile_y as u16 * 32);
-                    let addr = tilemap_addr + index;
-                    self.fetcher.tile_id = self.blocked_read(addr);
-                }
-
+                let y = self.bg_fetcher_y();
+                let x = if window {
+                    self.fetcher.window_x
+                } else if self.fifo.position.wrapping_add(16) < 8 {
+                    self.scx >> 3
+                } else {
+                    let cgb_shift = (self.model.is_cgb() && !self.fetching_object()) as u8;
+                    (self
+                        .scx
+                        .wrapping_add(self.fifo.position)
+                        .wrapping_add(8)
+                        .wrapping_sub(cgb_shift)
+                        >> 3)
+                        & 0x1F
+                };
+                self.fetcher.tile_y = y;
+                self.fetcher.tile_map_address = map + x as u16 + (y as u16 / 8) * 32;
+                self.fetcher.state = PixelFetcherState::GetTile2;
+            }
+            PixelFetcherState::GetTile2 => {
+                let addr = self.fetcher.tile_map_address;
+                self.fetcher.tile_id = self.vram_read(0, addr);
+                self.fetcher.tile_attributes = if self.cgb_mode {
+                    self.vram_read(1, addr).into()
+                } else {
+                    BgAttributes::default()
+                };
                 self.fetcher.state = PixelFetcherState::GetTileDataLow1;
             }
             PixelFetcherState::GetTileDataLow1 => {
+                self.latch_bg_tile_line_address(0);
                 self.fetcher.state = PixelFetcherState::GetTileDataLow2;
             }
             PixelFetcherState::GetTileDataLow2 => {
-                let addr = if self.fetcher.sprite_mode.is_some() {
-                    self.lcdc
-                        .obj_tile_line_address(self.fetcher.tile_id, self.fetcher_y())
-                } else {
-                    self.lcdc
-                        .bg_win_tile_line_address(self.fetcher.tile_id, self.fetcher_y())
-                };
-                self.fetcher.tile_line.low = self.blocked_read(addr);
+                self.fetcher.tile_line.low = self.read_tile_data(false);
                 self.fetcher.state = PixelFetcherState::GetTileDataHigh1;
             }
             PixelFetcherState::GetTileDataHigh1 => {
+                self.latch_bg_tile_line_address(1);
                 self.fetcher.state = PixelFetcherState::GetTileDataHigh2;
             }
             PixelFetcherState::GetTileDataHigh2 => {
-                let addr = if self.fetcher.sprite_mode.is_some() {
-                    self.lcdc
-                        .obj_tile_line_address(self.fetcher.tile_id, self.fetcher_y())
-                } else {
-                    self.lcdc
-                        .bg_win_tile_line_address(self.fetcher.tile_id, self.fetcher_y())
-                };
-                self.fetcher.tile_line.high = self.blocked_read(addr + 1);
-
-                // ToDo: Check where exactly the push happens
-                //self.try_push_to_fifo();
-                self.fetcher.state = PixelFetcherState::Push;
-            }
-            PixelFetcherState::Push => {
-                let was_sprite = self.fetcher.sprite_mode.is_some();
-
-                if self.try_push_to_fifo() {
-                    if !was_sprite {
-                        self.fetcher.x += 8;
-                    }
-
-                    self.fetcher.state = PixelFetcherState::GetTile1;
-                    self.fetcher.sprite_mode = None;
-
-                    // Re-enter sprite mode if there are 2 sprites at the same x position
-                    if was_sprite
-                        && self.lcdc.do_render_obj()
-                        && let Some(sprite) = self.scanner.pop_sprite_for_x(self.fifo.lcd_x)
-                    {
-                        self.fetcher.sprite_mode = Some(sprite);
-                    }
+                self.fetcher.tile_line.high = self.read_tile_data(true);
+                if self.fetcher.window_mode {
+                    self.fetcher.window_x = (self.fetcher.window_x + 1) & 0x1F;
                 }
+                self.push_bg_row();
             }
+            PixelFetcherState::Push => self.push_bg_row(),
         }
     }
 
-    // ToDo: Blocked PPU read => https://gbdev.io/pandocs/pixel_fifo.html#vram-access
-    fn blocked_read(&self, addr: u16) -> u8 {
-        self.read_naive(addr)
+    fn push_bg_row(&mut self) {
+        self.fetcher.state = PixelFetcherState::Push;
+        if !self.fifo.bg.is_empty() {
+            return;
+        }
+        if self.window_pixel_glitch() {
+            self.fifo.bg.fill_one(FifoPixel::default());
+            return;
+        }
+        let attributes = self.fetcher.tile_attributes;
+        let line = self.fetcher.tile_line;
+        self.fifo.bg.fill(std::array::from_fn(|i| {
+            let i = if attributes.x_flip { 7 - i } else { i };
+            FifoPixel {
+                color_index: line.color_index(i as u8),
+                palette: attributes.palette,
+                sprite_priority: 0,
+                obj_bg_priority: attributes.bg_priority,
+            }
+        }));
+        self.fetcher.state = PixelFetcherState::GetTile1;
     }
 
-    fn fetcher_y(&self) -> u8 {
-        if let Some(sprite) = &self.fetcher.sprite_mode {
-            let mut sprite_line = self.ly.wrapping_add(16).wrapping_sub(sprite.y);
-            if sprite.flags.y_flip {
-                let height = self.lcdc.sprite_height();
-                sprite_line = height.saturating_sub(1).wrapping_sub(sprite_line);
-            }
-            sprite_line
-        } else if self.fetcher.window_mode {
+    fn window_pixel_glitch(&self) -> bool {
+        if !self.fetcher.wy_triggered
+            || self.lcdc.window_enable
+            || self.model.is_cgb()
+            || self.fifo.window_glitch_disabled
+        {
+            return false;
+        }
+        let position = self.fifo.position.wrapping_add(7);
+        self.wx == if position > 167 { 0 } else { position }
+    }
+
+    fn bg_fetcher_y(&self) -> u8 {
+        if self.fetcher.window_mode {
             self.fetcher.wl
         } else {
-            self.ly.wrapping_add(self.scy)
+            self.line.wrapping_add(self.scy)
         }
     }
 
-    fn try_push_to_fifo(&mut self) -> bool {
-        if let Some(sprite) = &self.fetcher.sprite_mode {
-            let pixels = std::array::from_fn(|i| {
-                let i = if sprite.flags.x_flip { 7 - i } else { i };
-                FifoPixel {
-                    color_index: self.fetcher.tile_line.color_index(i as u8),
-                    palette: if self.model.is_dmg() {
-                        sprite.flags.dmg_palette as u8
-                    } else {
-                        sprite.flags.cgb_palette
-                    },
-                    sprite_priority: sprite.oam_index,
-                    obj_bg_priority: sprite.flags.obj_bg_priority,
-                }
-            });
-
-            // Important for when the sprite is halfway offscreen to the left
-            let offset = 8u8.saturating_sub(sprite.x);
-            self.fifo.push_sprite(pixels, offset);
+    fn latch_bg_tile_line_address(&mut self, offset: u16) {
+        let y = if self.model.is_cgb() {
+            self.fetcher.tile_y
         } else {
-            if !self.fifo.bg_empty() {
-                return false;
-            };
+            self.bg_fetcher_y()
+        };
+        let attributes = self.fetcher.tile_attributes;
+        let y = if attributes.y_flip {
+            7 - (y & 7)
+        } else {
+            y & 7
+        };
+        self.fetcher.last_tileset = self.lcdc.bg_window_tiles;
+        self.fetcher.tile_data_bank = attributes.bank as u8;
+        self.fetcher.tile_data_address =
+            self.lcdc.bg_win_tile_line_address(self.fetcher.tile_id, y) + offset;
+    }
 
-            // ToDo: CGB palette from attribute byte in VRAM bank 1
-            let pixels = std::array::from_fn(|i| FifoPixel {
-                color_index: self.fetcher.tile_line.color_index(i as u8),
-                palette: 0,
-                sprite_priority: 0,
-                obj_bg_priority: false,
-            });
-            self.fifo.push_bg(pixels);
+    fn read_tile_data(&mut self, high: bool) -> u8 {
+        let bank = self.fetcher.tile_data_bank;
+        let addr = self.fetcher.tile_data_address;
+        if !self.tile_sel_glitch {
+            let value = self.vram_read(bank, addr);
+            if high {
+                self.fetcher.sel_glitch_data = value;
+            }
+            return value;
         }
+        if !self.fetcher.last_tileset {
+            return self.fetcher.sel_glitch_data;
+        }
+        let value = if self.fetcher.tile_id & 0x80 == 0 {
+            self.fetcher.tile_id
+        } else {
+            self.vram_read(bank, addr)
+        };
+        self.fetcher.sel_glitch_data = self.vram_read(bank, addr);
+        value
+    }
 
+    fn vram_read(&self, bank: u8, addr: u16) -> u8 {
+        self.vram[(bank & 1) as usize][(addr & 0x1FFF) as usize]
+    }
+
+    pub fn fetching_object(&self) -> bool {
+        self.fetcher.object.step != ObjectStep::Idle
+    }
+
+    pub fn start_object_fetch(&mut self) -> bool {
+        while let Some(object) = self.scanner.peek() {
+            if object.x < self.fifo.object_match_x() {
+                self.scanner.advance();
+            } else {
+                break;
+            }
+        }
+        let Some(&object) = self.scanner.peek() else {
+            return false;
+        };
+        if !self.objects_fetchable() || object.x != self.fifo.object_match_x() {
+            return false;
+        }
+        self.scanner.advance();
+        self.fetcher.object = ObjectFetch {
+            step: ObjectStep::WaitForBackground,
+            oam_index: object.oam_index,
+            y: object.y,
+            ..ObjectFetch::default()
+        };
         true
+    }
+
+    pub fn abort_object_fetch(&mut self) {
+        let step = self.fetcher.object.step;
+        if step != ObjectStep::Idle && step < ObjectStep::ReadHigh {
+            self.fetcher.object.step = ObjectStep::Idle;
+            self.scanner.retreat();
+        }
+    }
+
+    pub fn advance_object_fetch(&mut self) {
+        match self.fetcher.object.step {
+            ObjectStep::Idle => {}
+            ObjectStep::WaitForBackground => {
+                let waiting = self.fetcher.state < PixelFetcherState::GetTileDataHigh2
+                    || self.fifo.bg.is_empty();
+                self.advance_fetcher();
+                if !waiting {
+                    self.fetcher.object.step = ObjectStep::ReadAttributes;
+                }
+            }
+            ObjectStep::ReadAttributes => {
+                self.advance_fetcher();
+                let i = self.fetcher.object.oam_index as usize * 4;
+                self.fetcher.object.tile_id = self.oam[i + 2];
+                self.fetcher.object.flags = self.oam[i + 3];
+                self.fetcher.object.step = ObjectStep::ReadAttributesWait;
+            }
+            ObjectStep::ReadAttributesWait => self.fetcher.object.step = ObjectStep::ReadLow,
+            ObjectStep::ReadLow => {
+                let (bank, addr) = self.object_line_address();
+                self.fetcher.object.tile_line.low = self.vram_read(bank, addr);
+                self.fetcher.object.step = ObjectStep::ReadLowWait;
+            }
+            ObjectStep::ReadLowWait => self.fetcher.object.step = ObjectStep::ReadHigh,
+            ObjectStep::ReadHigh => {
+                let (bank, addr) = self.object_line_address();
+                self.fetcher.object.tile_line.high = self.vram_read(bank, addr + 1);
+                self.fetcher.sel_glitch_data = self.fetcher.object.tile_line.high;
+                self.fetcher.object.step = ObjectStep::Overlay;
+            }
+            ObjectStep::Overlay => {}
+        }
+    }
+
+    pub fn overlay_object(&mut self) {
+        let object = self.fetcher.object;
+        let flags = SpriteFlags::from(object.flags);
+        let palette = if self.cgb_mode {
+            flags.cgb_palette
+        } else {
+            flags.dmg_palette as u8
+        };
+        let pixels = std::array::from_fn(|i| {
+            let i = if flags.x_flip { 7 - i } else { i };
+            FifoPixel {
+                color_index: object.tile_line.color_index(i as u8),
+                palette,
+                sprite_priority: object.oam_index,
+                obj_bg_priority: flags.obj_bg_priority,
+            }
+        });
+        let oam_priority = self.model.is_cgb() && self.opri & 1 == 0;
+        self.fifo.sprite.overlay(pixels, oam_priority);
+        self.fetcher.object.step = ObjectStep::Idle;
+    }
+
+    fn object_line_address(&self) -> (u8, u16) {
+        let object = &self.fetcher.object;
+        let flags = SpriteFlags::from(object.flags);
+        let height = self.lcdc.sprite_height();
+        let mut row = self.line.wrapping_add(16).wrapping_sub(object.y) & (height - 1);
+        if flags.y_flip {
+            row = height - 1 - row;
+        }
+        let tile_id = if height == 16 {
+            (object.tile_id & 0xFE) | (row >> 3)
+        } else {
+            object.tile_id
+        };
+        (
+            (self.cgb_mode && flags.bank) as u8,
+            self.lcdc.obj_tile_line_address(tile_id, row & 7),
+        )
     }
 }

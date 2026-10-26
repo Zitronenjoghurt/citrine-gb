@@ -15,24 +15,48 @@ pub struct Memory {
     #[cfg_attr(feature = "serde", serde(with = "serde_io"))]
     // ToDo: Put in IO components (e.g. Timer, Serial, Joypad)
     io: [u8; IO_SIZE],
+    #[cfg_attr(feature = "serde", serde(default))]
+    svbk: u8,
 }
 
 impl Memory {
     pub fn new(model: GbModel, ram_init: RamInit) -> Self {
         let mut memory = Self {
-            wram: vec![[0; WRAM_BANK_SIZE]; 2],
+            wram: vec![[0; WRAM_BANK_SIZE]; wram_banks(model)],
             hram: [0; HRAM_SIZE],
             io: [0; IO_SIZE],
+            svbk: 0,
         };
         memory.fill_power_on(model, ram_init);
         memory
     }
 
     pub fn soft_reset(&mut self, model: GbModel, ram_init: RamInit) {
-        self.wram = vec![[0; WRAM_BANK_SIZE]; 2];
+        self.wram = vec![[0; WRAM_BANK_SIZE]; wram_banks(model)];
         self.hram = [0; HRAM_SIZE];
         self.io = [0; IO_SIZE];
+        self.svbk = 0;
         self.fill_power_on(model, ram_init);
+    }
+
+    pub fn ensure_wram_banks(&mut self, model: GbModel) {
+        let banks = wram_banks(model);
+        if self.wram.len() < banks {
+            self.wram.resize(banks, [0; WRAM_BANK_SIZE]);
+        }
+    }
+
+    pub fn svbk(&self) -> u8 {
+        self.svbk | 0xF8
+    }
+
+    pub fn set_svbk(&mut self, value: u8) {
+        self.svbk = value & 0x07;
+    }
+
+    fn switchable_bank(&self) -> usize {
+        let bank = (self.svbk as usize).max(1);
+        if bank < self.wram.len() { bank } else { 1 }
     }
 
     fn fill_power_on(&mut self, model: GbModel, ram_init: RamInit) {
@@ -50,11 +74,18 @@ impl Memory {
     }
 }
 
+fn wram_banks(model: GbModel) -> usize {
+    match model {
+        GbModel::Dmg => 2,
+        GbModel::Cgb => 8,
+    }
+}
+
 impl ReadMemory for Memory {
     fn read_naive(&self, addr: u16) -> u8 {
         match addr {
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize],
-            0xD000..=0xDFFF => self.wram[1][(addr - 0xD000) as usize],
+            0xD000..=0xDFFF => self.wram[self.switchable_bank()][(addr - 0xD000) as usize],
             0xE000..=0xFDFF => self.read_naive(addr - 0x2000), // echo RAM
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
@@ -68,7 +99,10 @@ impl WriteMemory for Memory {
     fn write_naive(&mut self, addr: u16, value: u8) {
         match addr {
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize] = value,
-            0xD000..=0xDFFF => self.wram[1][(addr - 0xD000) as usize] = value,
+            0xD000..=0xDFFF => {
+                let bank = self.switchable_bank();
+                self.wram[bank][(addr - 0xD000) as usize] = value
+            }
             0xE000..=0xFDFF => self.write_naive(addr - 0x2000, value), // echo RAM
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,

@@ -1,4 +1,4 @@
-use crate::icons;
+use crate::app::widgets::reset_slider::{RESET_GAP, reset_button, reset_width};
 use egui::{Ui, Widget};
 use std::fmt::Display;
 
@@ -66,32 +66,41 @@ where
         let old_value = *self.value;
 
         ui.horizontal(|ui| {
-            let mut response = egui::ComboBox::new(self.id, self.label.unwrap_or_default())
-                .selected_text(self.value.to_string())
-                .show_ui(ui, |ui| {
-                    for variant in self.variants {
-                        if let Some(ref filter_fn) = self.filter
-                            && !filter_fn(variant)
-                        {
-                            continue;
-                        }
-                        ui.selectable_value(self.value, variant, variant.to_string());
-                    }
-                })
-                .response;
+            ui.spacing_mut().item_spacing.x = RESET_GAP;
+            let mut width = ui.available_width();
+            if self.default_value.is_some() {
+                width -= reset_width(ui) + RESET_GAP;
+            }
 
-            if let Some(default_value) = self.default_value {
-                let is_default = self.value == &default_value;
-                if ui
-                    .add_enabled(
-                        !is_default,
-                        egui::Button::new(icons::ARROW_COUNTER_CLOCKWISE).small(),
-                    )
-                    .on_hover_text(format!("Reset to {}", default_value))
-                    .clicked()
-                {
-                    *self.value = default_value;
-                }
+            let combo = match self.label {
+                Some(label) => egui::ComboBox::new(self.id, label),
+                None => egui::ComboBox::from_id_salt(self.id),
+            };
+            let height = ui.spacing().interact_size.y;
+            let mut response = ui
+                .allocate_ui(egui::vec2(width, height), |ui| {
+                    combo
+                        .width(width)
+                        .truncate()
+                        .selected_text(self.value.to_string())
+                        .show_ui(ui, |ui| {
+                            for variant in self.variants {
+                                if let Some(ref filter_fn) = self.filter
+                                    && !filter_fn(variant)
+                                {
+                                    continue;
+                                }
+                                ui.selectable_value(self.value, variant, variant.to_string());
+                            }
+                        })
+                        .response
+                })
+                .inner;
+
+            if let Some(default_value) = self.default_value
+                && reset_button(ui, self.value != &default_value, default_value).clicked()
+            {
+                *self.value = default_value;
             }
 
             if *self.value != old_value {

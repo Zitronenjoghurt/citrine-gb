@@ -1,11 +1,18 @@
 use crate::gb::GbModel;
 use crate::gb::cpu::Cpu;
-use crate::tests::TestBus;
+use crate::tests::{TestBus, skip};
 use std::path::PathBuf;
 
 #[test]
 pub fn run() {
-    let tests_dir = PathBuf::from("../tests/cpu-adtennant/v2");
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/cpu-adtennant/v2");
+    if !tests_dir.is_dir() {
+        skip(
+            "tests::cpu::adtennant",
+            "tests/cpu-adtennant is missing, get it with `git submodule update --init tests/cpu-adtennant` (2.2 GB)",
+        );
+        return;
+    }
     let whitelist: &[&str] = &[];
     let mut total = 0;
     let mut total_failed = 0;
@@ -129,9 +136,9 @@ impl From<&TestState> for Cpu {
             ime: false,
             ime_next: false,
             halted: false,
-            halt_bug: false,
             model: GbModel::Dmg,
             invalid_opcode: false,
+            speed_switch_halt: 0,
         }
     }
 }

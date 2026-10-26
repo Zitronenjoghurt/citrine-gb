@@ -1,5 +1,6 @@
 use crate::error::GbResult;
 use crate::gb::cartridge::RAM_BANK_SIZE;
+#[cfg(feature = "brotli")]
 use std::io::Write;
 use std::path::Path;
 

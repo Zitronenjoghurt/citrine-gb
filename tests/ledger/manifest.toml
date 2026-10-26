@@ -1,0 +1,357 @@
+[sources.mooneye]
+url = "https://gekkio.fi/files/mooneye-test-suite/mts-20240926-1737-443f6e1/mts-20240926-1737-443f6e1.zip"
+sha256 = "5cf50314cd3d42ec8f423b0a71b9ab6dbfad2386d8d88f03687af1b5b5baba71"
+license = "MIT"
+
+[sources."c-sp"]
+url = "https://github.com/c-sp/game-boy-test-roms/releases/download/v7.0/game-boy-test-roms-v7.0.zip"
+sha256 = "b9a9d7a1075aa35a3d07c07c34974048672d8520dca9e07a50178f5860c3832c"
+license = "MIT, except blargg's ROMs, which carry no licence"
+
+[suites.mooneye]
+source = "mooneye"
+root = "mts-20240926-1737-443f6e1"
+rule = "fibonacci"
+cycles = 30_000_000
+roms = [
+    { path = "acceptance/add_sp_e_timing.gb", sha256 = "bf736cb8fc06949ba2b16d68ab831e9e6a726a8521ff25ea4257d7cb3499839e", models = ["dmg", "cgb"] },
+    { path = "acceptance/bits/mem_oam.gb", sha256 = "eba5d165aaa55e7d4a1d1d910ea312a55c78157923c29fbbc34031709390f1de", models = ["dmg", "cgb"] },
+    { path = "acceptance/bits/reg_f.gb", sha256 = "4b193e887ee3ac82b38b796729e1503e9a78da3e1140f8bd5600d0884f2e2627", models = ["dmg", "cgb"] },
+    { path = "acceptance/bits/unused_hwio-GS.gb", sha256 = "1588928b71c596e41c58c9f414a18a0f906c0bf82a1dfde9d4cefc624a2d193d", models = ["dmg"] },
+    { path = "acceptance/boot_div-dmgABCmgb.gb", sha256 = "ef2cd0ac53dd2f656461e9b29e95aaef44a843379a2337c168f1832c488242d3", models = ["dmg"] },
+    { path = "acceptance/boot_hwio-dmgABCmgb.gb", sha256 = "39f29e27e803bab7ae789bd7dfd556a9df9bc65a825206745aca3f30e4887456", models = ["dmg"] },
+    { path = "acceptance/boot_regs-dmgABC.gb", sha256 = "50b4869bfdf6f69e14f82ac4d673c1983b29439157cf84bb422268069766c3c5", models = ["dmg"] },
+    { path = "acceptance/call_cc_timing.gb", sha256 = "2ef47505ed501128071b490174dccb6904ee6037f88723ed98a23382eee7b4d1", models = ["dmg", "cgb"] },
+    { path = "acceptance/call_cc_timing2.gb", sha256 = "67d84fc4d97c64399118ef3483a455fe7269d6fdf7f9840f6a00a9596d838a8c", models = ["dmg", "cgb"] },
+    { path = "acceptance/call_timing.gb", sha256 = "249f524368b8b9bbaa7e05b36f29a5210137d61d59889b596ea505d42e6b749b", models = ["dmg", "cgb"] },
+    { path = "acceptance/call_timing2.gb", sha256 = "d7ee4ceae48ef630c43a8e960c923b951f492250d9f5e28c1795705692051b47", models = ["dmg", "cgb"] },
+    { path = "acceptance/di_timing-GS.gb", sha256 = "618dd8f765c71c0f299cd124d8596d12da9ef987e800a45ac5c4b98fd240c54d", models = ["dmg"] },
+    { path = "acceptance/div_timing.gb", sha256 = "382a9cd42a60ef0a3f03ef834d476a32907f1b3a42b40de5bd3d9705ae9a9734", models = ["dmg", "cgb"] },
+    { path = "acceptance/ei_sequence.gb", sha256 = "dcd7f37e8fe7d8eb38cab6732a5826e0bb0278fd1e1d9e297c28d205da1b69e1", models = ["dmg", "cgb"] },
+    { path = "acceptance/ei_timing.gb", sha256 = "e5fa88f83727e79912f2c69b91b8e3c1351c0b50ac26203a60c7a6c21e825dbc", models = ["dmg", "cgb"] },
+    { path = "acceptance/halt_ime0_ei.gb", sha256 = "0768fd3e698047f5ec2631b5a830558f0ac14bd9cb0ef0ebcc409b00d69adb4d", models = ["dmg", "cgb"] },
+    { path = "acceptance/halt_ime0_nointr_timing.gb", sha256 = "40a1e614d77a881672b7c20420aed6b121ad9d3977d71a08fd9bb92ee8f010cf", models = ["dmg", "cgb"] },
+    { path = "acceptance/halt_ime1_timing.gb", sha256 = "09d9be4ebdd7645a6b208f18b1354f4b75420ae567dcf27ac404ed6f934d2efa", models = ["dmg", "cgb"] },
+    { path = "acceptance/halt_ime1_timing2-GS.gb", sha256 = "10f0f35025d9d648831eaa7b1bfc42251fe26cf130ee483e6baac88d20c01581", models = ["dmg"] },
+    { path = "acceptance/if_ie_registers.gb", sha256 = "d055b2b4c44902cf827296a06b17cea4f2c84f6b7d540c777cb1d1049ef35e61", models = ["dmg", "cgb"] },
+    { path = "acceptance/instr/daa.gb", sha256 = "1498d92d70592a07a2493ef764609916616f0b023b21408189e277201e6c14c1", models = ["dmg", "cgb"] },
+    { path = "acceptance/interrupts/ie_push.gb", sha256 = "f80df1b48ca2f81d4ec43b9c66be5f0b30f0d409603d256cc5c7cfc6241c0120", models = ["dmg", "cgb"] },
+    { path = "acceptance/intr_timing.gb", sha256 = "a795a190830104a4a231935d3bd16e64a1088bb79084f80bf7d9946ca93d873d", models = ["dmg", "cgb"] },
+    { path = "acceptance/jp_cc_timing.gb", sha256 = "8747fa6f969c8ac153a79b37abd2abac5ea98dbe142d5e77e074adec6e9fd481", models = ["dmg", "cgb"] },
+    { path = "acceptance/jp_timing.gb", sha256 = "514ba4b96355f5074b63feb159a06af85f4fbea412a2d49599c19ea3781712e0", models = ["dmg", "cgb"] },
+    { path = "acceptance/ld_hl_sp_e_timing.gb", sha256 = "fe22571b9aee1681b81b31055b3773574ba11eb838550fd86e0e773cb0f4240e", models = ["dmg", "cgb"] },
+    { path = "acceptance/oam_dma/basic.gb", sha256 = "326b747cac8cc96b62d6ee508e73b87eda24bfe29553d3d32e719f3b6d76c97c", models = ["dmg", "cgb"] },
+    { path = "acceptance/oam_dma/reg_read.gb", sha256 = "006516fcb302867a2848b47529208ef530669c6445e41d4f3d2dbd33995154a3", models = ["dmg", "cgb"] },
+    { path = "acceptance/oam_dma/sources-GS.gb", sha256 = "35a38c640047c38b63da0b929f9d744914ee53555e7ccc6853bcc0e82185f11e", models = ["dmg"] },
+    { path = "acceptance/oam_dma_restart.gb", sha256 = "5234eaaa78fcf722a4c8d32bb4f108c65c24e327d062315c6b61f60e535e25de", models = ["dmg", "cgb"] },
+    { path = "acceptance/oam_dma_start.gb", sha256 = "7c39f8f6f8043fe0ea289d8015b3e72c125ac302a22159b49514dd4e78d89dd3", models = ["dmg", "cgb"] },
+    { path = "acceptance/oam_dma_timing.gb", sha256 = "e8477c5da80e4fb7999da08abf01ad2438d65fb308a8f0c36b0c7e464c0ad0e0", models = ["dmg", "cgb"] },
+    { path = "acceptance/pop_timing.gb", sha256 = "4b658ab238b46319f24fa890faf9f337f03ce8769c05be6540742c9aaaf5773a", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/hblank_ly_scx_timing-GS.gb", sha256 = "3adec9174d16b7a4cece42e5525e4363ff956c19070600aa9344de68b0885449", models = ["dmg"] },
+    { path = "acceptance/ppu/intr_1_2_timing-GS.gb", sha256 = "3bac47fc79ce514fd7f6bbe0d87f1160b91a5292be27fee7bc3bcea6bc171ee9", models = ["dmg"] },
+    { path = "acceptance/ppu/intr_2_0_timing.gb", sha256 = "6ea58d6940ad2dde6d20ef1fc63f1da83bdff842672d757a7a2377a3d0cfb7ff", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/intr_2_mode0_timing.gb", sha256 = "be1555d577506073ba1ec4717060aa24075c02b9c787b874623a98bf2ac2da6e", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/intr_2_mode0_timing_sprites.gb", sha256 = "52b10bb0d3073ec35d6bc4f0129fcabb788e4d11ea765163a49d519121d5169e", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/intr_2_mode3_timing.gb", sha256 = "b5cb7d22162e3ed6fa2dafeaa487cf1d1c042b5e8a3a9877823c33b578b9c31e", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/intr_2_oam_ok_timing.gb", sha256 = "38d7acfddce357c8b084f9bb647d6ffc99d1fb85d7a312c2db2c348ba888f7ff", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/lcdon_timing-GS.gb", sha256 = "2a9d46b61935ae1a2332abd419bd6d63c2c48697b96ad547c859c207cf531e2f", models = ["dmg"] },
+    { path = "acceptance/ppu/lcdon_write_timing-GS.gb", sha256 = "e28b34cef8b5d58bf19e058be2206309129a5896568e918b6b11b6c61dce2a51", models = ["dmg"] },
+    { path = "acceptance/ppu/stat_irq_blocking.gb", sha256 = "604436aeb6a37badd71be0fafa526307345f1de6af757193f11fc77e09a01fc7", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/stat_lyc_onoff.gb", sha256 = "29f04aaf6b26085bca1dccfab648fb44fbf57d4aa923bca75a30167e45d8670e", models = ["dmg", "cgb"] },
+    { path = "acceptance/ppu/vblank_stat_intr-GS.gb", sha256 = "f7de9a3ef1399f73ad16ef23dccf05d38cbd62373215608ee5da53a35850436e", models = ["dmg"] },
+    { path = "acceptance/push_timing.gb", sha256 = "f764ee5053f4d1f84896ec3ff8761e30beded493d204566e3e5b20af736179f9", models = ["dmg", "cgb"] },
+    { path = "acceptance/rapid_di_ei.gb", sha256 = "4bcfbee2dcdca7895afff7947742ec942166aeb4899f07995863149ef360f7f0", models = ["dmg", "cgb"] },
+    { path = "acceptance/ret_cc_timing.gb", sha256 = "eb95fe488131f625c656631b0188484f3126d80944584128dc514aaf95111fb6", models = ["dmg", "cgb"] },
+    { path = "acceptance/ret_timing.gb", sha256 = "cfb13c7aa11ff299402530c021fe93bd6f51769433757fd32e46985eb1296206", models = ["dmg", "cgb"] },
+    { path = "acceptance/reti_intr_timing.gb", sha256 = "a98440bfb0e4f29ef762515e4b842e2777bc35445a30903ed86799cf18dc5c55", models = ["dmg", "cgb"] },
+    { path = "acceptance/reti_timing.gb", sha256 = "bb90e11fdb8e40f8d69c94aff300c65ea28e74fd212316a477edbb2325a61eb0", models = ["dmg", "cgb"] },
+    { path = "acceptance/rst_timing.gb", sha256 = "8ba26360bad21b451f36551863e60831f98e3de1308ae6bf2aee7a73973c99c2", models = ["dmg", "cgb"] },
+    { path = "acceptance/serial/boot_sclk_align-dmgABCmgb.gb", sha256 = "14c48977ddf9c734d53c23ad435a21d2db7fbd90411f99d2c7713b2335e55778", models = ["dmg"] },
+    { path = "acceptance/timer/div_write.gb", sha256 = "2be1e4da6fa24b9123d2a8bae47dd0d6f5e97e1855186c0c0f49e6d213eebfff", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/rapid_toggle.gb", sha256 = "59fe311058895c39475f74bcffb7d4f29272edb74e75d2cfe860c1a9d033b68a", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim00.gb", sha256 = "2193036c1628efd9ba86e5729292ef716d6ff3178cfa2abb9797709cd40252e8", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim00_div_trigger.gb", sha256 = "5cafdf474dfa7507b0db596118ad7bc65a6d5d652ee4232263dd028e7f2462b7", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim01.gb", sha256 = "b6f5043eae7fd2b2c3dc098ff16f664c8eb5699523616d84274669cf90c17fe7", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim01_div_trigger.gb", sha256 = "73c1e2677a2a122a285aa052e232153b133873c68cbcbf1cf41aa3d0a1b80a96", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim10.gb", sha256 = "fe3b0b292341d5ff26c9db3f6c9f3ba8a3d6e8b63977c61767a457962bd1faed", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim10_div_trigger.gb", sha256 = "d83c7acf20a0315486ed77db4f873db40fff6099564f8e250df66274a304b1b9", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim11.gb", sha256 = "624fd3ad3ede2790095162cfa212e488825072a0ecc287ff0e88da6c5d7040f1", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tim11_div_trigger.gb", sha256 = "3f60bc3d2ba63bd9209706332dd6d0ef59ad09ada8dede0caa9e2e5132ed102e", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tima_reload.gb", sha256 = "1ca70c725bd1e027b07d3058839bd140eccddd9f4ca41305c4f8ab3acaff8a98", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tima_write_reloading.gb", sha256 = "7d9a6d5ada792596621f8bfdf257112887b2dd01d98e0f91a253afd6e05d0540", models = ["dmg", "cgb"] },
+    { path = "acceptance/timer/tma_write_reloading.gb", sha256 = "e48ff98d4f363b92e92bdabe86253fcf63f648964e3a61e73d52aedcba3e5ab2", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/bits_bank1.gb", sha256 = "77c698cb537d22ab00bef3907499853b415d6f03f2572c1e8f199dee9936f74b", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/bits_bank2.gb", sha256 = "52cde75b4ec3c597ad112af1e24bc686e8354c9ed63f3df2cb571afa49f7ff38", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/bits_mode.gb", sha256 = "68417ce068e9b94ab14b2dfbd3953d57c3110bc9c9e50dac69f3bdda665b68be", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/bits_ramg.gb", sha256 = "14815d18d1ddb23c6a1e46c70ab3bbf273bf1c3aec580036362e576de0783675", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/multicart_rom_8Mb.gb", sha256 = "71147f75818877994cca6a0c4c3f9fedacdd50466e1134b743e9d79844995192", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/ram_256kb.gb", sha256 = "c6fdd46418adb4b23356740a8e2bc849c65e4a19605d290f07c49e73048a8037", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/ram_64kb.gb", sha256 = "df747907b4639a91cf4b61a3d342f0c7728b6e618e66ea569c6311d312f86e36", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/rom_16Mb.gb", sha256 = "1e6caad540828cf79a9928ed49b8709a56ba4d7436f7fded6fcf005dbfd71a2a", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/rom_1Mb.gb", sha256 = "22e19e9222b7c531480ab0b569c0a3d9c478cd4128d5a4dc579d39a7cc2d7384", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/rom_2Mb.gb", sha256 = "1bebe8536ed6179854230239d0b1f67c7d8e5d7aa59877487465bc0154ced5c6", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/rom_4Mb.gb", sha256 = "6ba3f62b876becde96dfd130ba050962d7ac5b526d0beb3add738693d1c3526b", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/rom_512kb.gb", sha256 = "9848621544e7acfade18694bbf430b713a552ce95dd1d59d04c0c49852b78d4b", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc1/rom_8Mb.gb", sha256 = "318a9849f2c1a135fa6dbfd8916dda671c58d65fc305d101a5a15e3227fe61cf", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc2/bits_ramg.gb", sha256 = "6b112253bf92c83da4fedc7dc29ee6457ea88ee9ed15de71fddc9714440129c9", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc2/bits_romb.gb", sha256 = "7d7684f05ce489be7485dfe0b2e789f8c85b317e981637afb2813047002b8e7c", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc2/bits_unused.gb", sha256 = "14813cb3305e52ecfd84887797ed606b6b804db68196397bb6a7cd0d824d57b3", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc2/ram.gb", sha256 = "dc039f0796c35bc749d564610aee7cace339560555298256e4824e915a38c141", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc2/rom_1Mb.gb", sha256 = "d1f772ae92234265bc54a023924ac98d4efcb1b59b3c8c2f388afbaca19969d7", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc2/rom_2Mb.gb", sha256 = "0463c1a364b717d10680e58b2e95854dadcacbdfabe9f7d39f17eb826ef42e69", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc2/rom_512kb.gb", sha256 = "4748aeda444bee6520e1bd2268870b53c080a61adc4039c8f32eb101a03df635", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_16Mb.gb", sha256 = "315ac9d9d7a3adda80f5fa8dee5826912bd99961e9539bd39ca8b440464ae794", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_1Mb.gb", sha256 = "5170771b8183f7e5e10c2f40d7b3e18d170657b5906305caf111776e2277b425", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_2Mb.gb", sha256 = "e93c53a71292b0066cba749a46fde2119b8733580b403189d3987e922588f0ca", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_32Mb.gb", sha256 = "665b18d5e876f527e2c05579f7166641539fe895522711906c468f75bd00ec90", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_4Mb.gb", sha256 = "188410388f84a5569c2a9f9d6c6e9e269f40d831ea4b718c0ae251d518ecf8c3", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_512kb.gb", sha256 = "6aad3b6b80f5b7308e79ef1acda4a045febe1eddf5021cecc3873d63c3e734ff", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_64Mb.gb", sha256 = "e02ff0175932f76e01421a11b202a3840eb4dad70d735819b7dca45aedefe3c5", models = ["dmg", "cgb"] },
+    { path = "emulator-only/mbc5/rom_8Mb.gb", sha256 = "81e32dc0cfe3940f3be759b1206ac5c46ca42acc64b7848e7de586ec1aa1973e", models = ["dmg", "cgb"] },
+    { path = "misc/bits/unused_hwio-C.gb", sha256 = "0d66303d0035fcf9dd3cbb9698952a668f50fb2f3d3e290598712a3a2ae35a5b", models = ["cgb"] },
+    { path = "misc/boot_div-cgbABCDE.gb", sha256 = "b5b2f6762cc1cbb423b561498a6ad7db88daa81161924bed86b37182438623df", models = ["cgb"] },
+    { path = "misc/boot_hwio-C.gb", sha256 = "dcc7b577b5dee89111c17654e6fb31241692ff380fb11ae6038326be7a9408cc", models = ["cgb"] },
+    { path = "misc/boot_regs-cgb.gb", sha256 = "9b466c875eec05e7d31e643ae3c5d7bb411f3e1f0bf14d15352c355db2ef348a", models = ["cgb"] },
+    { path = "misc/ppu/vblank_stat_intr-C.gb", sha256 = "20c6925c49226416d7f06941ff734664120e1d20e1e674bba230aa202ed350be", models = ["cgb"] },
+]
+
+[suites.blargg]
+source = "c-sp"
+root = "blargg"
+rule = "blargg"
+cycles = 30_000_000
+roms = [
+    { path = "cgb_sound/rom_singles/01-registers.gb", sha256 = "8415d6c69f7954e9365a586bac235f5ce39270ece32c09cb8ebbbff043b9852c", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/02-len ctr.gb", sha256 = "a1ccf47375a2bede3077ac85a4903cb037dd8a4c7c85fc5d0c176af52915271f", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/03-trigger.gb", sha256 = "70173be396d14ac955c47aededcee90ba994206cc403273d0bb49ba163ae23ef", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/04-sweep.gb", sha256 = "abfd1f6fa9e6701e46135ac9f5bb5b10a46cde22d0fc34922636aa09a5647483", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/05-sweep details.gb", sha256 = "f51a80c5538fe4b3afbc5c9af0e689a67869b1e2bbb73d4c60a8874826d056cb", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/06-overflow on trigger.gb", sha256 = "5701414d13ba55d25b59d13076e2e9cb59a9da6890595b41464f957605e317c0", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/07-len sweep period sync.gb", sha256 = "47d57ba87c3a93050ee340cf49b9d276e62e9573542b92b1de5fa2f17e3716c1", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/08-len ctr during power.gb", sha256 = "be7948c70946e0b81c178b8778ef1907231e734650062f8fa8cdb1ceb5ac8c65", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/09-wave read while on.gb", sha256 = "9b101c68b2de1930df74c19aaf22cce74d37dd5aade93855c805ecb2e1e83fd3", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/10-wave trigger while on.gb", sha256 = "cbea1771a5384f4d8f8a249056224a750ad5ee4671297836e4ba87e689af2a23", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/11-regs after power.gb", sha256 = "d347dd195a78c2d0f665b94da493a857218f032b014654b84ddb01f7b8e9befc", models = ["cgb"] },
+    { path = "cgb_sound/rom_singles/12-wave.gb", sha256 = "7bbd2e78e159de4297f567fec7851f9b90c3076d18d1043af5f30e14bd66cd0a", models = ["cgb"] },
+    { path = "cpu_instrs/individual/01-special.gb", sha256 = "fe61349cbaee10cc384b50f356e541c90d1bc380185716706b5d8c465a03cf89", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/02-interrupts.gb", sha256 = "fb90b0d2b9501910c49709abda1d8e70f757dc12020ebf8409a7779bbfd12229", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/03-op sp,hl.gb", sha256 = "ca553e606d9b9c86fbd318f1b916c6f0b9df0cf1774825d4361a3fdff2e5a136", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/04-op r,imm.gb", sha256 = "7686aa7a39ef3d2520ec1037371b5f94dc283fbbfd0f5051d1f64d987bdd6671", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/05-op rp.gb", sha256 = "d504adfa0a4c4793436a154f14492f044d38b3c6db9efc44138f3c9ad138b775", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/06-ld r,r.gb", sha256 = "17ada54b0b9c1a33cd5429fce5b765e42392189ca36da96312222ffe309e7ed1", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/07-jr,jp,call,ret,rst.gb", sha256 = "ab31d3daaaa3a98bdbd9395b64f48c1bdaa889aba5b19dd5aaff4ec2a7d228a3", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/08-misc instrs.gb", sha256 = "974a71fe4c67f70f5cc6e98d4dc8c096057ff8a028b7bfa9f7a4330038cf8b7e", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/09-op r,r.gb", sha256 = "b28e1be5cd95f22bd1ecacdd33c6f03e607d68870e31a47b15a0229033d5ba2a", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/10-bit ops.gb", sha256 = "7f5b8e488c6988b5aaba8c2a74529b7c180c55a58449d5ee89d606a07c53514a", models = ["dmg", "cgb"] },
+    { path = "cpu_instrs/individual/11-op a,(hl).gb", sha256 = "0ec0cf9fda3f00becaefa476df6fb526c434abd9d4a4beac237c2c2692dac5d3", models = ["dmg", "cgb"] },
+    { path = "dmg_sound/rom_singles/01-registers.gb", sha256 = "c6b9fa4b9d9d26919b33ebe78a6ef19ad2df854186cf741ca2746179cc9fc3f1", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/02-len ctr.gb", sha256 = "745544125a5065729cab22494a79f65c3836e4426f89e4cc43d330afe711b413", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/03-trigger.gb", sha256 = "bb11e7266a7143bafb8aa2a73ca70957c6011f36cd4e0b6aaf0678378294e75c", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/04-sweep.gb", sha256 = "58bc14541d91bb020c7761b423825b3432cfde7ee2fa4d1116126e4cb9573c7e", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/05-sweep details.gb", sha256 = "f582ca3a0b2544b9510797d7d4dd56a17f53e000511b0ae88a6353200dcd9167", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/06-overflow on trigger.gb", sha256 = "1a511e95e84ed6fe6077cabf451a98b4e01fdef59cadae3efbc178113eb064b1", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/07-len sweep period sync.gb", sha256 = "56bf5b0c18b996929c9b052ba5a02b450cb619bb6c24cc1d34ea20951c977bf7", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/08-len ctr during power.gb", sha256 = "31cb41f7be106a708ec0bc94f2a9d0b506d247cd591e9d0a2a6a960dc3bf6595", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/09-wave read while on.gb", sha256 = "378b86f6a25daa16855260d7ef0c24e48146ba05df434a0b5413983a1447e875", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/10-wave trigger while on.gb", sha256 = "fa63c8ed7473411e54285d318e33bf23ff6d637ed2caa7555ddeaf80578e3279", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/11-regs after power.gb", sha256 = "d27dab46e8b881028723f1975328572d38e25d295289b974cd698916a0be5dab", models = ["dmg"] },
+    { path = "dmg_sound/rom_singles/12-wave write while on.gb", sha256 = "2efbecd2c6d40928d44f45da4f634626bcd2790165b3949aedfe377c73913774", models = ["dmg"] },
+    { path = "halt_bug.gb", sha256 = "ddebfb81f992132954a5580e16cfb97346a4e061c762634d7701328e23fea7c6", models = ["dmg", "cgb"] },
+    { path = "instr_timing/instr_timing.gb", sha256 = "646067b3d6c79fda810e9c3f1cb7c0efd5abb0a7ac06437c54e65720c15d9925", models = ["dmg", "cgb"] },
+    { path = "interrupt_time/interrupt_time.gb", sha256 = "1a8f8f3bc609a92a5838214c00906c81e7cc77b3b9a63be5a1ec6d513f234929", models = ["cgb"] },
+    { path = "mem_timing-2/rom_singles/01-read_timing.gb", sha256 = "d9c6e86b7008fdaec2d4345c59192af4cea98b812e9b7b07239d16ad6770b576", models = ["dmg", "cgb"] },
+    { path = "mem_timing-2/rom_singles/02-write_timing.gb", sha256 = "9188e5d9cf9dfc9e25f7b7c5d67e5c8e36e1b25e5ef4be0089dad1ddb526706a", models = ["dmg", "cgb"] },
+    { path = "mem_timing-2/rom_singles/03-modify_timing.gb", sha256 = "818256ab477bb8fbb0709d28e3ec932a55c0ecd044292e760838efbb2b7fc09b", models = ["dmg", "cgb"] },
+    { path = "mem_timing/individual/01-read_timing.gb", sha256 = "52724532c5709e38e947eb429337c124c38bc68f373874435a7460548098b617", models = ["dmg", "cgb"] },
+    { path = "mem_timing/individual/02-write_timing.gb", sha256 = "eea92d3f4e95aab5910e0f7080916a3c42a2b8deae1ee5d45d1e3751d648f3f6", models = ["dmg", "cgb"] },
+    { path = "mem_timing/individual/03-modify_timing.gb", sha256 = "2e9067c670ff8b45916bf321677ad04a6896d06a057dbcb82ae9f208a1ae9c34", models = ["dmg", "cgb"] },
+    { path = "oam_bug/oam_bug.gb", sha256 = "21f0e7af73e525d14ca242ba28f97d4d381a40a61b3466dd6b4cae3e502e1ea1", models = ["dmg"], cycles = 40_000_000 },
+    { path = "oam_bug/rom_singles/1-lcd_sync.gb", sha256 = "abc303a2c644528cbcf36e83f8020cad17fdb6abdf42940533c4f6c8830c530a", models = ["dmg"] },
+    { path = "oam_bug/rom_singles/2-causes.gb", sha256 = "3f9c0db75222aae7c47382fe814b3806735b9ef76c791c6c26985b55c82235b9", models = ["dmg"] },
+    { path = "oam_bug/rom_singles/3-non_causes.gb", sha256 = "33e474075def3c025ff7990af82f1effb31e83617fb88aa1ee401976c35b8978", models = ["dmg"] },
+    { path = "oam_bug/rom_singles/4-scanline_timing.gb", sha256 = "5527c97665c3ad5474e5bda53a7e8e629bb1d0cb8ec54e6a1b42946dc9835ec7", models = ["dmg"] },
+    { path = "oam_bug/rom_singles/5-timing_bug.gb", sha256 = "ca3500d92e77883a09e5bc560046ed3471ab362eca550689cd38a944dc558e4f", models = ["dmg"] },
+    { path = "oam_bug/rom_singles/6-timing_no_bug.gb", sha256 = "e5ea594ddc7ad9a0e3063c3d6b050a2a10239cd43a23012551d4985c3712ea70", models = ["dmg"] },
+    { path = "oam_bug/rom_singles/7-timing_effect.gb", sha256 = "b4bb86462a5701155d92ea7dafe826cbffae6faec2c48c10feef0a5f78154d6c", models = ["dmg"] },
+    { path = "oam_bug/rom_singles/8-instr_effect.gb", sha256 = "11b372a91f65dd3bd2570aafc6f26e201fc0f05955ba3bb57f4c17cd642f7b2d", models = ["dmg"] },
+]
+
+[suites."same-suite"]
+source = "c-sp"
+root = "same-suite"
+rule = "fibonacci"
+cycles = 30_000_000
+roms = [
+    { path = "apu/channel_1/channel_1_align.gb", sha256 = "1ca49fcd1113e49872c784a54d367e2fb892867d6bce05e77fc192e1956e41eb", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_align_cpu.gb", sha256 = "2bcb12b10e3634589a680827f832c58b25c96d08ab027a53e4365e0214bfd199", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_delay.gb", sha256 = "85ec9c999ae0983bfe3acc49876b55d586c445db98170d71cbe123e5a728ebc0", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_duty.gb", sha256 = "b0eb7bc4fc01d17d96d28362e6e3eab6002a2d93fb5a3e19dbf1ddc2148ca650", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_duty_delay.gb", sha256 = "4745e1fd06d9633b88fcd3c1d466409138d661fa9055575e41ca242fd5535cb2", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_freq_change.gb", sha256 = "144da4f576e67157f140a5d371c9d4db70298cd2e9a75dff29f60626b0eb93ce", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_freq_change_timing-cgbDE.gb", sha256 = "2e33d96be99729bcb29ef16c340ae2b29b01a8cdc126ae33e755eaabae07c8ce", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_nrx2_glitch.gb", sha256 = "45f8ab450948fe8f63d089c938d82cad51099f9b1da2334afb12d08da5fa4601", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_nrx2_speed_change.gb", sha256 = "317f727c841ffaf935f55859942fc1944ff11ffbf11cb6e3df2d107901cc6eeb", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_restart.gb", sha256 = "5be8768834657ddce7286f653068ac2680e2857bd23fd4c1e9f07f6e5577265c", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_restart_nrx2_glitch.gb", sha256 = "d31b01e46355ea076d773856e5d442c93765b0e0043586ae26c7332fc515333c", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_stop_div.gb", sha256 = "423e31b01e9968b035c762261e6792d673084b76385d95ed5341c23e5221adc6", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_stop_restart.gb", sha256 = "0b2b73b930dfa0457c52e2937b6329c95810fee3f2cd923481da9385a3fb553d", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_sweep.gb", sha256 = "eae5bbb953e814dc0ce6e9568ee0fc731287b6e1356f9695e2063fba8e742ec4", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_sweep_restart.gb", sha256 = "5c9b41cedecbb45280039664f9bad7b671101c7fea20d686de6f456dec78b496", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_sweep_restart_2.gb", sha256 = "d49b383a5d6a479e510f5cd6603a878f6e9e46cceddd6152fa2a87dda7e2ffe6", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_volume.gb", sha256 = "f8dd4bd75c401dcc4cd67bd610694c210112cfc096baac06a5d124884e7bc592", models = ["cgb"] },
+    { path = "apu/channel_1/channel_1_volume_div.gb", sha256 = "82725bff6c14675a96c668fe85e5d0ca681dcea27248e49ccea2cb988e997fee", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_align.gb", sha256 = "ba59787e41d57378d9ec64ab6348e933775e4c212c48a9222e37052d1da61c26", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_align_cpu.gb", sha256 = "f4305776a87faf2b7c7a14a21594faa9dafc5d4bca110751787c0580f100b942", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_delay.gb", sha256 = "d28b23d6421bffd6b5fe89f1b3c38bf48415faca57c3f867e6f5757a54bd8409", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_duty.gb", sha256 = "a0d866352f61f2f5739e8ada6e6a85eae41ad295a7673fb6bde72cf391a7dc46", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_duty_delay.gb", sha256 = "d833c03053f6a90457bfaca5fdffcdfa2e358ea6229b29fc52634b8ad99dbd87", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_freq_change.gb", sha256 = "0cfe17b0afebaaf43a69d3acce1c2a20567719fc647e020b109be53644fc4868", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_nrx2_glitch.gb", sha256 = "24aac2bff0fa15aa146f48e6fd719472b119cb2e77a8499a5137f8f8182a982a", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_nrx2_speed_change.gb", sha256 = "9372b59dfa4bba522b69fbf4022531143ce5d56f0d1668b74ac86a1de6e9c0d5", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_restart.gb", sha256 = "664b8107c7c5e2ce657704dada29ca74c8eac4c59041a7a15d2abb4ac3e85bf4", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_restart_nrx2_glitch.gb", sha256 = "9b02f43d6915322a14b4b531ba31e187a0b14bd6ebe39f41d55faa3bb0d05726", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_stop_div.gb", sha256 = "c1bf9fb0cd8d4fef5ab0052747af52e3da8a14950b6dc118db5ecf308439efcc", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_stop_restart.gb", sha256 = "2847535c6bef5c8580444111761b5afcb45b3aef0b91e0e96e26ee71dfa0eb02", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_volume.gb", sha256 = "457588c00ef49f54f4f73dcf4471ee83cf22b2e48ba18b021297335ab14513ad", models = ["cgb"] },
+    { path = "apu/channel_2/channel_2_volume_div.gb", sha256 = "ba0583bfcdd4bdc66feb53e081508376fef91fea530d828d806b26c7957f5c05", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_and_glitch.gb", sha256 = "4ef5c152c03abc525cbf2e7360489ea0c6e174f64d36e6618e890f2cb06ecdc0", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_delay.gb", sha256 = "811a481191376ea81750835e7d7b7ba1c739264a46a5a76a978c9f0ab64227ca", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_first_sample.gb", sha256 = "180c0c7c67c41d28080939649d232c378c34792a3606018a0e7337eefa142807", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_freq_change_delay.gb", sha256 = "7c7f6ba21eb3fbda1ff8ef122bc8e7bcc7d5a441333b9476e641888f59246b80", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_restart_delay.gb", sha256 = "f01bb28f9d8993108efe1e15d66b0331c95b7843ddb9c04c975f29b1b258c675", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_restart_during_delay.gb", sha256 = "676d547959e60f636ae6af4d2e323b24522ab78e61fbd4467ae631cbe1965ab6", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_restart_stop_delay.gb", sha256 = "ee7fe7682191491450704121f88bbd92298cfe8aeeac980bf5c3187c110a54a4", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_shift_delay.gb", sha256 = "512fb6fc4551156090a81415b941e1c684ba35f1f7793f4455eec53926748fa5", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_shift_skip_delay.gb", sha256 = "1d361236b7dc945ae4d7e5a71bfd4f42c96280bcdf72f8d9c1c72e59af2f8fa1", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_stop_delay.gb", sha256 = "3819b732b20919700aab263643c34e99a19fc2a7cda7162dbf564afa492dc94e", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_stop_div.gb", sha256 = "5e7aed963797926e9c81cda40db1fc2f465dbf72c3eb75c4a00e6087d70dca04", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_wave_ram_dac_on_rw.gb", sha256 = "2a22b2669b4a0a540f177846fa88d33e9d3f4c2448d60e375fd719c01525c9b3", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_wave_ram_locked_write.gb", sha256 = "44f805b342dcb2f209d4deef603dca0d078c274467493d81f12099c10fc16d31", models = ["cgb"] },
+    { path = "apu/channel_3/channel_3_wave_ram_sync.gb", sha256 = "bc67b3de28609995ac3dae786484f723a33b8c2b3c321216ee85f8621084139e", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_align.gb", sha256 = "1230e7c4b3e2e7e60722cda039f3798c43218a71239cdde9be8bd570067c67a6", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_delay.gb", sha256 = "f694ea8f238365be19b121dd346759deda801bab47fb4e1f277b4a4e9e56e23a", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_equivalent_frequencies.gb", sha256 = "2f518867a4426b590b4b650c2f4180b90d1d4206e3cfbf42e3fa23d7a5c4e7fd", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_freq_change.gb", sha256 = "37f141efca6505ec37a3b1a131153867339eac0d4deeaf4e446152f75815eb2e", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_frequency_alignment.gb", sha256 = "eb3781e7686ad31b486f2af703c405705ce02bba66879b7d77e4d845b143567a", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_lfsr.gb", sha256 = "dd46439f07bdcfff8db0ac0fa49bcda4f9fccb8f722a9aa673325aa45196d98b", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_lfsr15.gb", sha256 = "e210a115c06e6bcd5507abfceac5926dbb99eaca3cf10cf8d69d1bf0f3dbae4d", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_lfsr_15_7.gb", sha256 = "20d6e72c9166d1b4fc94ae70ca1530cebc5ae810df1834db62da404c73a8be9d", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_lfsr_7_15.gb", sha256 = "734d8be70f25828fb968c1852cf7cc33185fed3222b2b8a8b650a9720e98a557", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_lfsr_restart.gb", sha256 = "49d9e6c09ebde591ddb178ebd1b0bacefa70c7e7fd80311b9f91944cdd59581a", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_lfsr_restart_fast.gb", sha256 = "b7838d49ad08436cdcece65b35e786838298848bef523af9a7aa83347e2dc983", models = ["cgb"] },
+    { path = "apu/channel_4/channel_4_volume_div.gb", sha256 = "ff8145597adf36b08dc0b32fa30cb855b230d70e082e77b33ee54279e1b9f642", models = ["cgb"] },
+    { path = "apu/div_trigger_volume_10.gb", sha256 = "3a310a45b7f3345960d2a8ff6df8293d3f8489c04763ff9fa40ebe98fa91797f", models = ["cgb"] },
+    { path = "apu/div_write_trigger.gb", sha256 = "437ed80ab7fdbcd6713b3b0633096ac4ba0181b2e1c099944cbfbb5f7dab8e84", models = ["dmg", "cgb"] },
+    { path = "apu/div_write_trigger_10.gb", sha256 = "4294c71882a375d8395c9aa7c1c20127bd285ffa3961521703a1ac69a80a373c", models = ["dmg", "cgb"] },
+    { path = "apu/div_write_trigger_volume.gb", sha256 = "c947767c6128afd21754c920eb5329e22e0a4ace0fb7185397e25a9e6f199da5", models = ["cgb"] },
+    { path = "apu/div_write_trigger_volume_10.gb", sha256 = "96096cd8829ab37c5337bfde07ddddf00444e390abea34ead294df299b3552d4", models = ["cgb"] },
+    { path = "dma/gbc_dma_cont.gb", sha256 = "d67cbce95838335a9946af1254a751f4a8532756b2e4851ee8a54fb73af4763f", models = ["cgb"] },
+    { path = "dma/gdma_addr_mask.gb", sha256 = "63c855b24300ac477ae783c17444ead5ec97be45a9e699b3dddd1a622955fbbf", models = ["cgb"] },
+    { path = "dma/hdma_lcd_off.gb", sha256 = "d6c3dde21fe7104129bc8ef0dde7f5d5f050b4de5498fc8f2f06e0d37bdfd0db", models = ["cgb"] },
+    { path = "dma/hdma_mode0.gb", sha256 = "e5ded5dc154004bdaafc443df6e63459ec7eb7d636687a4a578f91820557e0b2", models = ["cgb"] },
+    { path = "interrupt/ei_delay_halt.gb", sha256 = "69cdd4ab9e8b4d16364f3efcba4db90b050e09eed9db8412f395e11c9484d92c", models = ["cgb"] },
+    { path = "ppu/blocking_bgpi_increase.gb", sha256 = "3bb5ac17d140d54135c9d993f626de682d5160025a7dd702c733df273f3ff502", models = ["cgb"] },
+]
+
+[suites.age]
+source = "c-sp"
+root = "age-test-roms"
+rule = "fibonacci"
+cycles = 30_000_000
+roms = [
+    { path = "halt/ei-halt-dmgC-cgbBCE.gb", sha256 = "5501692dc81bbe33ba55bb204ed453de864d280a5daa43b1209794fca651f6dd", models = ["dmg", "cgb"] },
+    { path = "halt/halt-m0-interrupt-dmgC-cgbBCE.gb", sha256 = "89dbc351352be50ab1e099561decb643d0b6aae5785f6623414240ce7bab8413", models = ["dmg", "cgb"] },
+    { path = "halt/halt-prefetch-dmgC-cgbBCE.gb", sha256 = "57a3e5d533857621e0d57b3eaccf2a4c2158ff6f121025e9b8d149a8f3a47153", models = ["dmg", "cgb"] },
+    { path = "lcd-align-ly/lcd-align-ly-cgbE.gb", sha256 = "9ef735c0226c9cda701211ab4d483000a62a3a6baaac9492dbc49b5914b68fcd", models = ["cgb"] },
+    { path = "ly/ly-cgbE.gb", sha256 = "9050cb6f66d3a65c0b3bda6ed9c057f4313b8f7cfa21ec66c39522aa8c3c513c", models = ["cgb"] },
+    { path = "ly/ly-dmgC-cgbBC.gb", sha256 = "f090f28fa8e632ad3661b953bccfa4e05bcff8c37186a613d2e68546cfc31480", models = ["dmg"] },
+    { path = "ly/ly-ncmE.gb", sha256 = "ca311cc0de6ddcc7792e12393722c323b5c3c335e045f0dcdf374b56a5f7282f", models = ["cgb"] },
+    { path = "oam/oam-read-cgbE.gb", sha256 = "ae9fa83973e572d0484d47601a2232c5675c0c485f8db99389277ea9ea0559f7", models = ["cgb"] },
+    { path = "oam/oam-read-dmgC-cgbBC.gb", sha256 = "62010c08c09cb677789e1f8f61c538c790269d29796e0783ad45c5c1977ae234", models = ["dmg"] },
+    { path = "oam/oam-read-ncmE.gb", sha256 = "53755e8cc5661a9def7180dc88d872fcb8f2d970f73090c06d3a6f6647226721", models = ["cgb"] },
+    { path = "oam/oam-write-cgbBCE.gb", sha256 = "e8954fdc816a91273a24e993c09d55668f16d4e9f4bc8008933819419f981c37", models = ["cgb"] },
+    { path = "oam/oam-write-dmgC.gb", sha256 = "9acc90ea81caa18ecaf369817c90079a4d57bbcfc2ed5c6bbf26223452b82183", models = ["dmg"] },
+    { path = "oam/oam-write-ncmBCE.gb", sha256 = "8e623367556f02aa10894abd33ad1bb69ee914ed83c8769a15fe9e8bd474fcdf", models = ["cgb"] },
+    { path = "speed-switch/caution/spsw-interrupts-cgbE.gb", sha256 = "5bae65daffa5e36421221d971d602cb307febe71f221b46b4556b3c7bca22dc4", models = ["cgb"] },
+    { path = "speed-switch/spsw-ch2-lc-delay-cgbBCE.gb", sha256 = "76920fa2f63f5a5b9b8b907b98a78e06410d88fb09491826f3930dedf96cff19", models = ["cgb"] },
+    { path = "speed-switch/spsw-div-cgbBCE.gb", sha256 = "2c836288b58651f72a335417f11ba346863145dd9996048979ad8e5b9cd0aa7b", models = ["cgb"] },
+    { path = "speed-switch/spsw-mode0-cgbBCE.gb", sha256 = "07eefc27d8bdd98569510ebef662aba388715bbe5ddf9993763fbf1aab290f2e", models = ["cgb"] },
+    { path = "speed-switch/spsw-stop-prefetch-cgbBCE.gb", sha256 = "df782c73f08c6778c7b926c6a4ebbd0816c58b53faf4b6abf5b2b812766eab4f", models = ["cgb"] },
+    { path = "speed-switch/spsw-tima-cgbE.gb", sha256 = "3cb0918fb194d2704bb57f2afd5af3be21b5e97e269fde5224c34914d5f5936e", models = ["cgb"] },
+    { path = "stat-interrupt/stat-int-dmgC-cgbBCE.gb", sha256 = "f567a5b6d5855ebecf667b8439f8caf0288829d90b8a3db323f50e1a5469491a", models = ["dmg", "cgb"] },
+    { path = "stat-interrupt/stat-int-ncmBCE.gb", sha256 = "21b7ff38cc04d220e7117d1b37571c3af0cc2ec8e67a885c5ded5bf3cbde8640", models = ["cgb"] },
+    { path = "stat-mode-sprites/stat-mode-sprites-dmgC-cgbBCE.gb", sha256 = "173ff267a4ecbd2e5bb3bd209f7b08c971900d54382bd6281969c7a3a98507c1", models = ["dmg", "cgb"] },
+    { path = "stat-mode-sprites/stat-mode-sprites-ds-cgbBCE.gb", sha256 = "3ee5bb3fc7fa724a832a082dd8c4979af5abb3f837dbc489a2f04cdf2332a64d", models = ["cgb"] },
+    { path = "stat-mode-window/stat-mode-window-cgbBCE.gb", sha256 = "69fb62868aa256ff79e77cabb88caab9db43dbe302eb6f4628550d99b7ef12da", models = ["cgb"] },
+    { path = "stat-mode-window/stat-mode-window-dmgC.gb", sha256 = "b54c7680990263bfa0f22fa4390c9c190ad12fc35c9f8c2a0c0ab7a9832b2b73", models = ["dmg"] },
+    { path = "stat-mode-window/stat-mode-window-ds-cgbBCE.gb", sha256 = "055c641aaf9464b637f6206126a165fa23433fbced0d5fbafa0d3cdb813aaa41", models = ["cgb"] },
+    { path = "stat-mode-window/stat-mode-window-ncmBCE.gb", sha256 = "e14672c02de58a046e094b622d8624fb0d77584a3e7f484077193239d5683112", models = ["cgb"] },
+    { path = "stat-mode/stat-mode-cgbE.gb", sha256 = "b2789ba04e79c25aba7a947e0d4b7938171457960264702dbaa4826acfdb2fc3", models = ["cgb"] },
+    { path = "stat-mode/stat-mode-dmgC-cgbBC.gb", sha256 = "9343972976dd4555cbd8cbcd6752c7256715de28b2114fe2a6c0fb18bd39bd9b", models = ["dmg"] },
+    { path = "stat-mode/stat-mode-ds-cgbBCE.gb", sha256 = "c371664f71cb95b6de9cf9a1ecd4ff80147b5603b08deacea7c9495eb45d1cf0", models = ["cgb"] },
+    { path = "stat-mode/stat-mode-ncmE.gb", sha256 = "9e5e25fd7967c2bdb3880cf23c4e43a35a5d8f65d9bbac0d069a8eb88f04b2fa", models = ["cgb"] },
+    { path = "vram/vram-read-cgbBCE.gb", sha256 = "2ca94115cc94b7bbcbe5c18a156666c81484685a207cd23efb7f9f65b31352d9", models = ["cgb"] },
+    { path = "vram/vram-read-dmgC.gb", sha256 = "25b8fe51ed436b037d56742317614aa565d4f6ce5f04e319ea3a4d8e11ea6b6c", models = ["dmg"] },
+    { path = "vram/vram-read-ncmBCE.gb", sha256 = "ff3af666dd360dc807986f7c2fb4b744b42c4b200f61d871b8934c4015266e36", models = ["cgb"] },
+]
+
+[suites."dmg-acid2"]
+source = "c-sp"
+root = "dmg-acid2"
+rule = "screenshot"
+cycles = 5_000_000
+roms = [
+    { path = "dmg-acid2.gb", sha256 = "464e14b7d42e7feea0b7ede42be7071dc88913f75b9ffa444299424b63d1dff1", models = ["dmg", "cgb"], images = { dmg = "dmg-acid2-dmg.png", cgb = "dmg-acid2-cgb.png" } },
+]
+
+[suites."cgb-acid2"]
+source = "c-sp"
+root = "cgb-acid2"
+rule = "screenshot"
+cycles = 5_000_000
+roms = [
+    { path = "cgb-acid2.gbc", sha256 = "197fb0bcec544f0400527fc707e0a94f55435974986e6986b424ace5de81720e", models = ["cgb"], images = { cgb = "cgb-acid2.png" } },
+]
+
+[suites.rtc3test]
+source = "c-sp"
+root = "rtc3test"
+rule = "timed"
+cycles = 22_500_000
+roms = [
+    { path = "rtc3test.gb", name = "basic-tests", sha256 = "a271013fb37ea1d927b854798401320b220d57abb3ca77f3d318ceb8a9def30d", models = ["dmg", "cgb"], press = ["a"], images = { dmg = "rtc3test-basic-tests-dmg.png", cgb = "rtc3test-basic-tests-cgb.png" } },
+    { path = "rtc3test.gb", name = "range-tests", sha256 = "a271013fb37ea1d927b854798401320b220d57abb3ca77f3d318ceb8a9def30d", models = ["dmg", "cgb"], press = ["down", "a"], cycles = 17_500_000, images = { dmg = "rtc3test-range-tests-dmg.png", cgb = "rtc3test-range-tests-cgb.png" } },
+    { path = "rtc3test.gb", name = "sub-second-writes", sha256 = "a271013fb37ea1d927b854798401320b220d57abb3ca77f3d318ceb8a9def30d", models = ["dmg", "cgb"], press = ["down", "down", "a"], cycles = 38_500_000, images = { dmg = "rtc3test-sub-second-writes-dmg.png", cgb = "rtc3test-sub-second-writes-cgb.png" } },
+]
+
+[suites.mealybug]
+source = "c-sp"
+root = "mealybug-tearoom-tests"
+rule = "screenshot"
+cycles = 10_000_000
+roms = [
+    { path = "ppu/m2_win_en_toggle.gb", sha256 = "5ab52823dc9e25184e884d73a19bfe0b048a9d2526ca779a0925ca891a9ba7f5", models = ["dmg", "cgb"], images = { dmg = "ppu/m2_win_en_toggle_dmg_blob.png", cgb = "ppu/m2_win_en_toggle_cgb_d.png" } },
+    { path = "ppu/m3_bgp_change.gb", sha256 = "52151476d16b04654123e64bd2c22702571c529761d9c9bc2f485ca2538fc035", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_bgp_change_dmg_blob.png", cgb = "ppu/m3_bgp_change_cgb_d.png" } },
+    { path = "ppu/m3_bgp_change_sprites.gb", sha256 = "41de816a11690c86c6d1b03c1fb9f2ec367dcd288f1cf8f2b52560a3e2b9a917", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_bgp_change_sprites_dmg_blob.png", cgb = "ppu/m3_bgp_change_sprites_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_bg_en_change.gb", sha256 = "4bb4ea8076950c1ecaeb8c704ca0568e05bc09d35e114f0cbe77b3b173e3d13b", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_bg_en_change_dmg_blob.png", cgb = "ppu/m3_lcdc_bg_en_change_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_bg_map_change.gb", sha256 = "dcb8d7e2c750453d76f47bae25092c9eb79ace1f8c0c3e8e1959ebb8d177d716", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_bg_map_change_dmg_blob.png", cgb = "ppu/m3_lcdc_bg_map_change_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_obj_en_change.gb", sha256 = "943be0ef4a104bc71139f21de2321ad4510e32dc756739be0d97fc56ff59e18c", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_obj_en_change_dmg_blob.png", cgb = "ppu/m3_lcdc_obj_en_change_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_obj_en_change_variant.gb", sha256 = "5beb278323b75201150aadc5abc00d6f12817759f2a4e7206cdd2cd2504a77f3", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_obj_en_change_variant_dmg_blob.png", cgb = "ppu/m3_lcdc_obj_en_change_variant_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_obj_size_change.gb", sha256 = "1060fbf592ccf28b19c5e8af310f4441c74ca2310faf7f6b024a62a1888d6d2e", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_obj_size_change_dmg_blob.png", cgb = "ppu/m3_lcdc_obj_size_change_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_obj_size_change_scx.gb", sha256 = "f0ae9a6c51d1ae490a3b492e732ba4080ad92def08a806b4e3953277aaa7291a", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_obj_size_change_scx_dmg_blob.png", cgb = "ppu/m3_lcdc_obj_size_change_scx_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_tile_sel_change.gb", sha256 = "aef34202485974960b01b80bd5c57686d09e436fb90efb9b7e19686b910998b4", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_tile_sel_change_dmg_blob.png", cgb = "ppu/m3_lcdc_tile_sel_change_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_tile_sel_win_change.gb", sha256 = "5d442f4cfcd8f9415697ce748b2f2daf587db3f205831ed2849ad3f80f925f21", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_tile_sel_win_change_dmg_blob.png", cgb = "ppu/m3_lcdc_tile_sel_win_change_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_win_en_change_multiple.gb", sha256 = "6d759374790c6a4b98682e438d2f25e0481533828e2c2a50fda88fdde3256870", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_win_en_change_multiple_dmg_blob.png", cgb = "ppu/m3_lcdc_win_en_change_multiple_cgb_d.png" } },
+    { path = "ppu/m3_lcdc_win_en_change_multiple_wx.gb", sha256 = "0fed492b76695157a794b05cda1217be6cbe81ef4769102c4c5508d89a6fbb23", models = ["dmg"], images = { dmg = "ppu/m3_lcdc_win_en_change_multiple_wx_dmg_blob.png" } },
+    { path = "ppu/m3_lcdc_win_map_change.gb", sha256 = "a4d4a28cb665b55faa256163110ea3f6729d33112aa0a05dfd876eae8f446c05", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_lcdc_win_map_change_dmg_blob.png", cgb = "ppu/m3_lcdc_win_map_change_cgb_d.png" } },
+    { path = "ppu/m3_obp0_change.gb", sha256 = "2160b69123091f9b997debef8b314b4277f4a9027eb25a1b8418ea06f87ba6af", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_obp0_change_dmg_blob.png", cgb = "ppu/m3_obp0_change_cgb_d.png" } },
+    { path = "ppu/m3_scx_high_5_bits.gb", sha256 = "423db91af0f87547ae46690044ef760481f7005033ffc61bd69875b7df96139b", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_scx_high_5_bits_dmg_blob.png", cgb = "ppu/m3_scx_high_5_bits_cgb_d.png" } },
+    { path = "ppu/m3_scx_low_3_bits.gb", sha256 = "433e59a9eb9a27c962cd613c24c2f8d728ac9e498233667959eb07995f0fef5f", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_scx_low_3_bits_dmg_blob.png", cgb = "ppu/m3_scx_low_3_bits_cgb_d.png" } },
+    { path = "ppu/m3_scy_change.gb", sha256 = "0fedb0c33fd400d5f88a35704177e437b7d88f18c81bd5b30c3165b633734c8a", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_scy_change_dmg_blob.png", cgb = "ppu/m3_scy_change_cgb_d.png" } },
+    { path = "ppu/m3_window_timing.gb", sha256 = "c8c8b26d5c9659f30e037a1a9f8d8f9d8f57db0a97730bbab536fb95e11da9df", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_window_timing_dmg_blob.png", cgb = "ppu/m3_window_timing_cgb_d.png" } },
+    { path = "ppu/m3_window_timing_wx_0.gb", sha256 = "984496c486032606aede6428e1087c6038403b27d7bcfed844188742123b91a4", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_window_timing_wx_0_dmg_blob.png", cgb = "ppu/m3_window_timing_wx_0_cgb_d.png" } },
+    { path = "ppu/m3_wx_4_change.gb", sha256 = "eadfe4369b85994b4401e7e5119272626c6339ecec282848013decf0cb5ea81c", models = ["dmg"], images = { dmg = "ppu/m3_wx_4_change_dmg_blob.png" } },
+    { path = "ppu/m3_wx_4_change_sprites.gb", sha256 = "da10819cb8af5fb8fb31f6f50729e9afe221161a7b5743351a54ca05e9c94fec", models = ["dmg", "cgb"], images = { dmg = "ppu/m3_wx_4_change_sprites_dmg_blob.png", cgb = "ppu/m3_wx_4_change_sprites_cgb_d.png" } },
+    { path = "ppu/m3_wx_5_change.gb", sha256 = "53a0c14c896cdef68b92ea90e952fe053dcf1d2155251e2e4ed8b48ef22a6d62", models = ["dmg"], images = { dmg = "ppu/m3_wx_5_change_dmg_blob.png" } },
+    { path = "ppu/m3_wx_6_change.gb", sha256 = "efa65cf7a570add7cfcb6d25d7c314359f2a0e6eadcde2e44d53f81d6ba44b0d", models = ["dmg"], images = { dmg = "ppu/m3_wx_6_change_dmg_blob.png" } },
+]

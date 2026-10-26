@@ -184,7 +184,7 @@ fn dmg_suite_match(rel: &str) -> bool {
         None => true,
         Some(i) => {
             let variant = &name[i + 1..];
-            variant.contains('G') || variant.contains("dmg")
+            variant.contains('G') || variant.contains("dmgA")
         }
     }
 }

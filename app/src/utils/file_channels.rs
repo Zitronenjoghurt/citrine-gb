@@ -7,8 +7,8 @@ pub struct FileChannels {
     pub rom_rx: Receiver<PickedFile>,
     pub boot_rom_tx: Sender<PickedFile>,
     pub boot_rom_rx: Receiver<PickedFile>,
-    pub sav_tx: Sender<PickedFile>,
-    pub sav_rx: Receiver<PickedFile>,
+    pub sav_tx: Sender<Vec<PickedFile>>,
+    pub sav_rx: Receiver<Vec<PickedFile>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub folder_tx: Sender<std::path::PathBuf>,
     #[cfg(not(target_arch = "wasm32"))]

@@ -3,7 +3,7 @@ use crate::rom::header::{RomCartridgeType, RomHeader};
 
 mod mbc1;
 mod mbc2;
-mod mbc3;
+pub mod mbc3;
 mod mbc5;
 
 pub trait MbcInterface {
@@ -28,6 +28,12 @@ pub enum Mbc {
 
 #[allow(dead_code)]
 impl Mbc {
+    pub fn set_multicart(&mut self, multicart: bool) {
+        if let Self::Mbc1(mbc) = self {
+            mbc.multicart = multicart;
+        }
+    }
+
     pub fn get_internal_data(&self) -> Option<&[u8]> {
         if let Self::Mbc2(mbc) = self {
             Some(mbc.ram.as_slice())
@@ -38,10 +44,31 @@ impl Mbc {
 
     pub fn put_internal_data(&mut self, data: &[u8]) -> bool {
         if let Self::Mbc2(mbc) = self {
-            mbc.ram.copy_from_slice(data);
+            let len = data.len().min(mbc.ram.len());
+            mbc.ram[..len].copy_from_slice(&data[..len]);
             true
         } else {
             false
+        }
+    }
+
+    pub fn cycle(&mut self) {
+        if let Self::Mbc3(mbc) = self {
+            mbc.cycle();
+        }
+    }
+
+    pub fn rtc(&self) -> Option<&mbc3::Rtc> {
+        match self {
+            Self::Mbc3(mbc) if mbc.has_rtc => Some(&mbc.rtc),
+            _ => None,
+        }
+    }
+
+    pub fn rtc_mut(&mut self) -> Option<&mut mbc3::Rtc> {
+        match self {
+            Self::Mbc3(mbc) if mbc.has_rtc => Some(&mut mbc.rtc),
+            _ => None,
         }
     }
 }

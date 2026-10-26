@@ -1,6 +1,5 @@
 use crate::emulator::Emulator;
 use crate::icons;
-use citrine_gb::gb::GbModel;
 use egui::{Response, Slider, Ui, Widget};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -57,12 +56,8 @@ impl Widget for TimeControl<'_> {
                             self.emulator.force_step(ui.ctx(), self.state.step_cycles);
                         }
 
-                        if ui.button("DMG").clicked() {
-                            self.state.step_cycles = GbModel::Dmg.frame_cycles();
-                        }
-
-                        if ui.button("CGB").clicked() {
-                            self.state.step_cycles = GbModel::Cgb.frame_cycles();
+                        if ui.button("Frame").clicked() {
+                            self.state.step_cycles = self.emulator.gb.frame_cycles();
                         }
 
                         if ui.button("100").clicked() {

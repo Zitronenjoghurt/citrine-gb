@@ -1,3 +1,4 @@
+use citrine_gb::gb::ppu::compat::CompatPalette;
 use citrine_gb::gb::ppu::types::color::RGBA;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 
@@ -75,6 +76,7 @@ fn parse_hex(text: &str) -> Option<[u8; 3]> {
 pub enum PaletteChoice {
     Builtin(DmgTheme),
     Custom(String),
+    Gbc(CompatPalette),
 }
 
 #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]

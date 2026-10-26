@@ -12,8 +12,10 @@ fn mean_squared_error(reference: &Frame, candidate: &Frame) -> f64 {
     let mut count = 0u64;
     for (a, b) in reference
         .rgba
-        .chunks_exact(4)
-        .zip(candidate.rgba.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(candidate.rgba.as_chunks::<4>().0)
     {
         for c in 0..3 {
             let diff = a[c] as f64 - b[c] as f64;

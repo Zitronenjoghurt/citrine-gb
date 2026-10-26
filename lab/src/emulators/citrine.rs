@@ -6,14 +6,12 @@ use citrine_gb::rom::Rom;
 
 pub struct CitrineEmulator {
     gb: GameBoy,
-    model: GbModel,
 }
 
 impl CitrineEmulator {
     pub fn new() -> Self {
         Self {
             gb: GameBoy::new_empty_with_ram_init(GbModel::Dmg, RamInit::random()),
-            model: GbModel::Dmg,
         }
     }
 }
@@ -25,10 +23,7 @@ impl Default for CitrineEmulator {
 }
 
 impl CitrineEmulator {
-    /// Mirrors `GameBoy::run_frame`. Without the flush `blip_buf`'s clock overflows after a few
-    /// hundred frames, and the unread samples grow unbounded.
     fn finish_frame(&mut self) {
-        self.gb.apu.flush_audio();
         self.gb.apu.audio_buffer.clear();
     }
 }
@@ -39,7 +34,6 @@ impl FrameEmulator for CitrineEmulator {
     }
 
     fn load(&mut self, rom: &[u8], boot_rom: Option<&[u8]>, model: GbModel) -> anyhow::Result<()> {
-        self.model = model;
         self.gb = GameBoy::new_empty_with_ram_init(model, RamInit::random());
         if let Some(boot) = boot_rom {
             self.gb.load_boot_rom(boot);
@@ -69,7 +63,7 @@ impl FrameEmulator for CitrineEmulator {
 
     fn step(&mut self) -> bool {
         self.gb.step();
-        let frame_cycles = self.model.frame_cycles();
+        let frame_cycles = self.gb.frame_cycles();
 
         if self.gb.ppu.frame_ready {
             self.gb.ppu.frame_ready = false;

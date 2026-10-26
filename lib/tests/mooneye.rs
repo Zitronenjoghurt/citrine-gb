@@ -8,7 +8,7 @@ const PASS_REGS: [u8; 6] = [3, 5, 8, 13, 21, 34];
 const FAIL_REGS: [u8; 6] = [0x42; 6];
 
 const DMG_SUITE: &str =
-    r"^(?:acceptance|emulator-only)/(?:.*/)?(?:[^/-]+|[^/]*-[^/-]*(?:G|dmg)[^/-]*)\.gb$";
+    r"^(?:acceptance|emulator-only)/(?:.*/)?(?:[^/-]+|[^/]*-[^/-]*(?:G|dmgA)[^/-]*)\.gb$";
 
 fn build_root() -> String {
     let build = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/mooneye/build");

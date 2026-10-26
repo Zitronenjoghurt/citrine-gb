@@ -1,3 +1,4 @@
+use crate::gb::GbModel;
 use crate::gb::apu::channels::channel_1::Channel1;
 use crate::gb::apu::channels::channel_2::Channel2;
 use crate::gb::apu::channels::channel_3::Channel3;
@@ -13,15 +14,35 @@ mod channels;
 mod components;
 mod registers;
 
+#[derive(Debug, Clone, Copy)]
+pub struct WriteContext {
+    pub frame_clocked_length: bool,
+    pub lf_div: u16,
+    pub cgb: bool,
+    pub double_speed: bool,
+}
+
+const SKIP_DIV_EVENT: u8 = 2;
+const SKIPPED_DIV_EVENT: u8 = 1;
 pub const APU_CLOCK_RATE: u32 = 4_194_304;
 pub const MAX_AUDIO_BUFFER_SIZE: u32 = 8192;
 const DEFAULT_SAMPLE_RATE: u32 = 44_100;
+const MAX_FRAME_SAMPLES: u64 = 2048;
+const BLIP_SCALE: f32 = 16_000.0;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Apu {
+    cgb: bool,
     /// Increments at a frequency of 512 Hz
     div_apu: u8,
+    skip_div_event: u8,
     prev_div: u16,
+    lagged_div: u16,
+    ds_delay: bool,
+    div_bit: u8,
+    apu_phase: u8,
+    pending_envelope_tick: bool,
     pub nr50: MasterVolumeVin,
     pub nr51: SoundPanning,
     pub nr52: AudioMasterControl,
@@ -36,6 +57,8 @@ pub struct Apu {
     #[cfg_attr(feature = "serde", serde(skip, default = "default_blip_buf"))]
     pub blip_r: BlipBuf,
     time: u32,
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_max_frame_time"))]
+    max_frame_time: u32,
     prev_l: i32,
     prev_r: i32,
     pub output_sample_rate: u32,
@@ -51,6 +74,10 @@ fn yes() -> bool {
 }
 
 #[cfg(feature = "serde")]
+fn default_max_frame_time() -> u32 {
+    max_frame_time(DEFAULT_SAMPLE_RATE)
+}
+
 fn default_blip_buf() -> BlipBuf {
     BlipBuf::new(MAX_AUDIO_BUFFER_SIZE)
 }
@@ -63,8 +90,15 @@ impl Default for Apu {
         blip_r.set_rates(APU_CLOCK_RATE as f64, DEFAULT_SAMPLE_RATE as f64);
 
         Self {
+            cgb: false,
             div_apu: 0,
+            skip_div_event: 0,
             prev_div: 0,
+            lagged_div: 0,
+            ds_delay: false,
+            div_bit: 12,
+            apu_phase: 0,
+            pending_envelope_tick: false,
             nr50: Default::default(),
             nr51: Default::default(),
             nr52: Default::default(),
@@ -77,6 +111,7 @@ impl Default for Apu {
             blip_l,
             blip_r,
             time: 0,
+            max_frame_time: max_frame_time(DEFAULT_SAMPLE_RATE),
             prev_l: 0,
             prev_r: 0,
             output_sample_rate: DEFAULT_SAMPLE_RATE,
@@ -88,8 +123,27 @@ impl Default for Apu {
 }
 
 impl Apu {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(model: GbModel) -> Self {
+        Self {
+            cgb: model == GbModel::Cgb,
+            ..Self::default()
+        }
+    }
+
+    pub fn restore(&mut self, model: GbModel) {
+        self.cgb = model == GbModel::Cgb;
+        if self.ch4.enabled {
+            self.ch4.counter_active = true;
+        }
+    }
+
+    pub fn apply_post_boot(&mut self) {
+        self.write_naive(0xFF26, 0x80);
+        self.write_naive(0xFF11, 0x80);
+        self.write_naive(0xFF12, 0xF3);
+        self.write_naive(0xFF24, 0x77);
+        self.write_naive(0xFF25, 0xF3);
+        self.ch1.enabled = true;
     }
 
     pub fn cycle(
@@ -98,6 +152,9 @@ impl Apu {
         double_speed: bool,
         #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
     ) {
+        if self.time >= self.max_frame_time {
+            self.flush_audio();
+        }
         self.update_frame_sequencer(timer, double_speed);
         let ticks = if double_speed { 2 } else { 4 };
 
@@ -105,6 +162,20 @@ impl Apu {
         let always_sample = debugger.wants_apu_channels();
         #[cfg(not(feature = "debug"))]
         let always_sample = false;
+
+        if self.ch1.sweep_busy() {
+            for step in 1..=ticks / 2 {
+                let lf_div = 1 ^ (self.apu_phase.wrapping_add(step) & 1) as u16;
+                self.ch1.sweep_tick(lf_div);
+            }
+        }
+        self.apu_phase = self.apu_phase.wrapping_add(ticks / 2);
+
+        if !self.output_dirty && !always_sample && self.quiet(ticks as u16) {
+            self.skip(ticks as u16);
+            self.time += ticks as u32;
+            return;
+        }
 
         for _ in 0..ticks {
             let moved = self.tick();
@@ -116,8 +187,8 @@ impl Apu {
                     #[cfg(feature = "debug")]
                     debugger,
                 );
-                let current_l = (out_l_f * 1000.0) as i32;
-                let current_r = (out_r_f * 1000.0) as i32;
+                let current_l = (out_l_f * BLIP_SCALE) as i32;
+                let current_r = (out_r_f * BLIP_SCALE) as i32;
 
                 let delta_l = current_l - self.prev_l;
                 let delta_r = current_r - self.prev_r;
@@ -150,8 +221,8 @@ impl Apu {
         self.blip_r.read_samples(&mut out_r, false);
 
         for i in 0..available_samples {
-            let raw_l = out_l[i] as f32 / 1000.0;
-            let raw_r = out_r[i] as f32 / 1000.0;
+            let raw_l = out_l[i] as f32 / BLIP_SCALE;
+            let raw_r = out_r[i] as f32 / BLIP_SCALE;
 
             let filtered_l = raw_l - self.hpf_capacitor_l;
             let filtered_r = raw_r - self.hpf_capacitor_r;
@@ -162,38 +233,169 @@ impl Apu {
             self.audio_buffer.push(filtered_l);
             self.audio_buffer.push(filtered_r);
         }
+
+        let max_len = self.output_sample_rate as usize * 2;
+        if self.audio_buffer.len() > max_len {
+            let excess = self.audio_buffer.len() - max_len;
+            self.audio_buffer.drain(..excess);
+        }
+    }
+
+    pub fn speed_switched(&mut self, div: u16, double_speed: bool) {
+        let bit = |value: u16| (value >> self.div_bit) & 1 == 1;
+        let step = bit(self.prev_div) || bit(div);
+        self.prev_div = 0;
+        self.lagged_div = 0;
+        self.div_bit = if double_speed { 13 } else { 12 };
+        if !self.nr52.audio_enabled {
+            return;
+        }
+        if step {
+            self.div_event(!double_speed);
+        }
+        if double_speed {
+            self.ds_delay = !self.ds_delay;
+        }
     }
 
     fn update_frame_sequencer(&mut self, timer: &Timer, double_speed: bool) {
-        let bit = if double_speed { 13 } else { 12 };
-        let set_prev = ((self.prev_div >> bit) & 1) == 1;
-        let set_now = ((timer.div >> bit) & 1) == 1;
+        self.div_bit = if double_speed { 13 } else { 12 };
+        let div = if self.ds_delay && double_speed {
+            self.lagged_div
+        } else {
+            timer.div
+        };
+        self.lagged_div = timer.div;
+        let set_prev = ((self.prev_div >> self.div_bit) & 1) == 1;
+        let set_now = ((div >> self.div_bit) & 1) == 1;
+        self.prev_div = div;
 
-        if set_prev && !set_now {
-            self.div_apu = (self.div_apu + 1) & 0b111;
-
-            self.output_dirty = true;
-
-            match self.div_apu {
-                0 => self.clock_length_counters(),
-                1 => {}
-                2 => {
-                    self.clock_length_counters();
-                    self.clock_sweep();
-                }
-                3 => {}
-                4 => self.clock_length_counters(),
-                5 => {}
-                6 => {
-                    self.clock_length_counters();
-                    self.clock_sweep();
-                }
-                7 => self.clock_volume_envelopes(),
-                _ => unreachable!(),
-            }
+        if !self.nr52.audio_enabled {
+            self.pending_envelope_tick = false;
+            return;
         }
 
-        self.prev_div = timer.div;
+        if self.pending_envelope_tick {
+            self.pending_envelope_tick = false;
+            self.output_dirty = true;
+            self.tick_envelopes();
+        }
+
+        if !set_prev && set_now {
+            self.ch1.envelope_secondary_div_event();
+            self.ch2.envelope_secondary_div_event();
+            self.ch4.envelope_secondary_div_event();
+            return;
+        }
+
+        if set_prev && !set_now {
+            self.div_event(double_speed);
+        }
+    }
+
+    fn div_event(&mut self, double_speed: bool) {
+        match self.skip_div_event {
+            SKIP_DIV_EVENT => {
+                self.skip_div_event = SKIPPED_DIV_EVENT;
+                return;
+            }
+            SKIPPED_DIV_EVENT => self.skip_div_event = 0,
+            _ => self.div_apu = (self.div_apu + 1) & 0b111,
+        }
+
+        self.output_dirty = true;
+
+        if self.div_apu & 1 == 1 {
+            self.clock_length_counters();
+        }
+        if self.div_apu & 3 == 3 {
+            self.clock_sweep();
+        }
+        self.ch1.envelope_div_event(self.div_apu);
+        self.ch2.envelope_div_event(self.div_apu);
+        self.ch4.envelope_div_event(self.div_apu);
+        if self.cgb && double_speed {
+            self.pending_envelope_tick = true;
+        } else {
+            self.tick_envelopes();
+        }
+    }
+
+    fn write_context(&self) -> WriteContext {
+        WriteContext {
+            frame_clocked_length: self.div_apu & 1 == 1,
+            lf_div: 1 ^ (self.apu_phase & 1) as u16,
+            cgb: self.cgb,
+            double_speed: self.div_bit == 13,
+        }
+    }
+
+    fn write_nr52(&mut self, value: u8) {
+        let on = (value & 0x80) != 0;
+        if on && !self.nr52.audio_enabled {
+            self.nr52.audio_enabled = true;
+            self.apu_phase = 0;
+            self.div_apu = 0;
+            self.skip_div_event = 0;
+            if (self.prev_div >> self.div_bit) & 1 == 1 {
+                self.div_apu = 1;
+                self.skip_div_event = SKIP_DIV_EVENT;
+            }
+        } else if !on && self.nr52.audio_enabled {
+            self.power_off();
+        }
+    }
+
+    fn power_off(&mut self) {
+        let lengths = [
+            self.ch1.length_counter.counter,
+            self.ch2.length_counter.counter,
+            self.ch3.length_counter.counter,
+            self.ch4.length_counter.counter,
+        ];
+        let wave_ram = self.ch3.wave_ram;
+
+        self.ds_delay = false;
+        self.nr52.audio_enabled = false;
+        self.nr50 = Default::default();
+        self.nr51 = Default::default();
+        self.ch1 = Default::default();
+        self.ch2 = Default::default();
+        self.ch3 = Default::default();
+        self.ch4 = Default::default();
+        self.ch3.wave_ram = wave_ram;
+
+        if !self.cgb {
+            self.ch1.length_counter.counter = lengths[0];
+            self.ch2.length_counter.counter = lengths[1];
+            self.ch3.length_counter.counter = lengths[2];
+            self.ch4.length_counter.counter = lengths[3];
+        }
+    }
+
+    fn read_nr52(&self) -> u8 {
+        AudioMasterControl {
+            channel_1_enabled: self.ch1.enabled,
+            channel_2_enabled: self.ch2.enabled,
+            channel_3_enabled: self.ch3.enabled,
+            channel_4_enabled: self.ch4.enabled,
+            audio_enabled: self.nr52.audio_enabled,
+        }
+        .into()
+    }
+
+    fn quiet(&self, ticks: u16) -> bool {
+        self.ch1.quiet(ticks)
+            && self.ch2.quiet(ticks)
+            && self.ch3.quiet(ticks)
+            && self.ch4.quiet(ticks)
+    }
+
+    fn skip(&mut self, ticks: u16) {
+        self.ch1.skip(ticks);
+        self.ch2.skip(ticks);
+        self.ch3.skip(ticks);
+        self.ch4.skip(ticks);
     }
 
     fn tick(&mut self) -> bool {
@@ -211,14 +413,15 @@ impl Apu {
         self.ch4.clock_length();
     }
 
-    fn clock_volume_envelopes(&mut self) {
-        self.ch1.clock_volume_envelope();
-        self.ch2.clock_volume_envelope();
-        self.ch4.clock_volume_envelope();
+    fn tick_envelopes(&mut self) {
+        self.ch1.envelope_tick();
+        self.ch2.envelope_tick();
+        self.ch4.envelope_tick();
     }
 
     fn clock_sweep(&mut self) {
-        self.ch1.clock_sweep();
+        let lf_div = self.write_context().lf_div;
+        self.ch1.clock_sweep(lf_div);
     }
 }
 
@@ -331,9 +534,9 @@ impl Apu {
         };
 
         left *= (self.nr50.volume_left + 1) as f32;
-        left /= 32.0;
+        left /= 64.0;
         right *= (self.nr50.volume_right + 1) as f32;
-        right /= 32.0;
+        right /= 64.0;
 
         let any_dac_enabled = self.ch1.dac_enabled()
             || self.ch2.dac_enabled()
@@ -354,6 +557,7 @@ impl Apu {
         self.blip_r
             .set_rates(APU_CLOCK_RATE as f64, sample_rate as f64);
         self.charge_factor = charge_factor(sample_rate);
+        self.max_frame_time = max_frame_time(sample_rate);
     }
 }
 
@@ -362,11 +566,14 @@ impl ReadMemory for Apu {
         match addr {
             0xFF10..=0xFF14 => self.ch1.read_naive(addr),
             0xFF16..=0xFF19 => self.ch2.read_naive(addr),
-            0xFF1A..=0xFF1E | 0xFF30..=0xFF3F => self.ch3.read_naive(addr),
+            0xFF1A..=0xFF1E => self.ch3.read_naive(addr),
+            0xFF30..=0xFF3F => self.ch3.read_wave(addr, self.cgb),
             0xFF20..=0xFF23 => self.ch4.read_naive(addr),
             0xFF24 => self.nr50.into(),
             0xFF25 => self.nr51.into(),
-            0xFF26 => self.nr52.into(),
+            0xFF26 => self.read_nr52(),
+            0xFF76 => self.ch1.sample() | (self.ch2.sample() << 4),
+            0xFF77 => self.ch3.sample() | (self.ch4.sample() << 4),
             _ => 0xFF,
         }
     }
@@ -376,14 +583,27 @@ impl WriteMemory for Apu {
     fn write_naive(&mut self, addr: u16, value: u8) {
         self.output_dirty = true;
 
+        let ctx = self.write_context();
         match addr {
-            0xFF10..=0xFF14 => self.ch1.write_naive(addr, value),
-            0xFF16..=0xFF19 => self.ch2.write_naive(addr, value),
-            0xFF1A..=0xFF1E | 0xFF30..=0xFF3F => self.ch3.write_naive(addr, value),
-            0xFF20..=0xFF23 => self.ch4.write_naive(addr, value),
+            0xFF26 => self.write_nr52(value),
+            0xFF30..=0xFF3F => self.ch3.write_wave(addr, value, self.cgb),
+            _ if !self.nr52.audio_enabled => {
+                if !self.cgb {
+                    match addr {
+                        0xFF11 => self.ch1.write_length(value),
+                        0xFF16 => self.ch2.write_length(value),
+                        0xFF1B => self.ch3.write_length(value),
+                        0xFF20 => self.ch4.write_length(value),
+                        _ => {}
+                    }
+                }
+            }
+            0xFF10..=0xFF14 => self.ch1.write(addr, value, ctx),
+            0xFF16..=0xFF19 => self.ch2.write(addr, value, ctx),
+            0xFF1A..=0xFF1E => self.ch3.write(addr, value, ctx),
+            0xFF20..=0xFF23 => self.ch4.write(addr, value, ctx),
             0xFF24 => self.nr50 = value.into(),
             0xFF25 => self.nr51 = value.into(),
-            0xFF26 => self.nr52 = value.into(),
             _ => {}
         }
     }
@@ -391,4 +611,9 @@ impl WriteMemory for Apu {
 
 pub fn charge_factor(sample_rate: u32) -> f32 {
     0.999958_f64.powf(APU_CLOCK_RATE as f64 / sample_rate as f64) as f32
+}
+
+fn max_frame_time(sample_rate: u32) -> u32 {
+    (APU_CLOCK_RATE as u64 * MAX_FRAME_SAMPLES / sample_rate.max(1) as u64).min(u32::MAX as u64)
+        as u32
 }

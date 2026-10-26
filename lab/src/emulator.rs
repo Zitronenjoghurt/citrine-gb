@@ -37,7 +37,13 @@ impl Frame {
         out.width = self.width;
         out.height = self.height;
         out.rgba.resize(self.rgba.len(), 0);
-        for (px, o) in self.rgba.chunks_exact(4).zip(out.rgba.chunks_exact_mut(4)) {
+        for (px, o) in self
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(out.rgba.as_chunks_mut::<4>().0)
+        {
             let luma = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
             let idx = ((luma / 85.0).round() as usize).min(3);
             let level = LEVELS[idx];

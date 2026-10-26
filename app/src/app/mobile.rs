@@ -1,5 +1,5 @@
 use crate::app::Citrine;
-use crate::app::tabs::{Tab, TabViewer};
+use crate::app::tabs::{CONTENT_MARGIN, Tab, TabViewer};
 use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::app::ui_state::touch::TouchSettings;
 use crate::app::widgets::touch_controls::{self as touch, TouchInput, TouchLayout};
@@ -8,11 +8,13 @@ use citrine_gb::gb::joypad::JoypadState;
 use egui::{Context, Rect, Ui, vec2};
 use egui_dock::TabViewer as _;
 
+mod history;
+
 const OVERLAY_COLUMN: f32 = 0.28;
 
 const CONTROL_BREATHING_ROOM: f32 = 1.15;
 
-const TOP_BUTTON: f32 = 38.0;
+pub const TOUCH_TARGET_PX: f32 = 44.0;
 
 fn bar_icon(icon: &str) -> egui::RichText {
     egui::RichText::new(icon).size(18.0)
@@ -27,7 +29,96 @@ pub enum Sheet {
 #[derive(Default)]
 pub struct MobileState {
     pub sheet: Option<Sheet>,
+    came_from: Option<Sheet>,
     touch: TouchInput,
+    layer_was_open: bool,
+    history: history::BrowserHistory,
+}
+
+impl MobileState {
+    pub fn open(&mut self, sheet: Sheet) {
+        self.came_from = self.sheet.filter(|current| *current != sheet);
+        self.sheet = Some(sheet);
+    }
+
+    pub fn back(&mut self) {
+        self.sheet = self.came_from.take();
+    }
+
+    pub fn close(&mut self) {
+        self.sheet = None;
+        self.came_from = None;
+    }
+
+    pub fn listen_for_back(&self) {
+        self.history.listen();
+    }
+
+    pub fn escape(&mut self, layer_open: bool) -> bool {
+        if layer_open || self.sheet.is_none() {
+            return false;
+        }
+        self.back();
+        true
+    }
+
+    fn depth(&self) -> usize {
+        match (self.sheet, self.came_from) {
+            (None, _) => 0,
+            (Some(_), None) => 1,
+            (Some(_), Some(_)) => 2,
+        }
+    }
+}
+
+pub fn touch_spacing(ctx: &Context, touch: bool) {
+    let wanted = if touch {
+        TOUCH_TARGET_PX * ctx.native_pixels_per_point().unwrap_or(1.0) / ctx.pixels_per_point()
+    } else {
+        egui::style::Spacing::default().interact_size.y
+    };
+    if (ctx.style().spacing.interact_size.y - wanted).abs() > 0.01 {
+        ctx.style_mut(|style| style.spacing.interact_size.y = wanted);
+    }
+}
+
+pub fn touch_square(ui: &Ui) -> f32 {
+    let height = ui.spacing().interact_size.y;
+    if height > egui::style::Spacing::default().interact_size.y {
+        height
+    } else {
+        0.0
+    }
+}
+
+pub fn row_hint(ui: &mut Ui, text: impl Into<String>) -> egui::Response {
+    let side = touch_square(ui);
+    if side > 0.0 {
+        let text_height = ui.text_style_height(&egui::TextStyle::Body);
+        ui.add_space(-((side - text_height) / 2.0).max(0.0));
+    }
+    ui.add(egui::Label::new(egui::RichText::new(text.into()).small()).wrap())
+}
+
+pub fn compact<'a>(ui: &Ui, button: egui::Button<'a>) -> egui::Button<'a> {
+    let side = touch_square(ui);
+    if side > 0.0 {
+        button.min_size(vec2(side, side))
+    } else {
+        button.small()
+    }
+}
+
+pub fn compact_button(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let button = compact(ui, egui::Button::new(text));
+    ui.add(button)
+}
+
+fn layer_open(ctx: &Context) -> bool {
+    egui::Popup::is_any_open(ctx)
+        || ctx.memory(|m| m.top_modal_layer().is_some())
+        || ctx.wants_keyboard_input()
+        || crate::app::widgets::confirm::is_open(ctx)
 }
 
 impl Citrine {
@@ -35,6 +126,7 @@ impl Citrine {
         egui::TopBottomPanel::top("mobile_bar")
             .show_separator_line(false)
             .show(ctx, |ui| self.mobile_bar(ui));
+        self.toast_strip(ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
@@ -45,7 +137,8 @@ impl Citrine {
     }
 
     fn mobile_bar(&mut self, ui: &mut Ui) {
-        let size = egui::vec2(TOP_BUTTON, TOP_BUTTON);
+        let side = ui.spacing().interact_size.y;
+        let size = egui::vec2(side, side);
         ui.add_space(3.0);
 
         ui.horizontal(|ui| {
@@ -55,12 +148,18 @@ impl Citrine {
                 .add_sized(size, egui::Button::new(bar_icon(menu_icon)))
                 .clicked()
             {
-                self.mobile.sheet = if open { None } else { Some(Sheet::Menu) };
+                if open {
+                    self.mobile.back();
+                } else {
+                    self.mobile.open(Sheet::Menu);
+                }
                 self.release_touch();
             }
 
-            let title = self.emulator.gb.cartridge.header.title.trim();
-            ui.label(if title.is_empty() { "Citrine" } else { title });
+            ui.label(header_text(
+                self.mobile.sheet,
+                self.emulator.gb.cartridge.header.title.trim(),
+            ));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let controls = self.ui.settings.touch.show_controls;
@@ -97,6 +196,12 @@ impl Citrine {
                 {
                     toggle_fullscreen();
                 }
+
+                if self.emulator.screen_recorder.is_recording()
+                    && self.recording_button(ui, Some(size)).clicked()
+                {
+                    self.run_hotkey(HotkeyAction::ToggleRecording);
+                }
             });
         });
         ui.add_space(3.0);
@@ -115,18 +220,24 @@ impl Citrine {
         let area = ui.available_rect_before_wrap();
         let settings = &self.ui.settings;
 
-        let (screen, layout) = if !settings.touch.show_controls {
-            (area, None)
+        let (screen, layout, free) = if !settings.touch.show_controls {
+            (area, None, area)
         } else if area.width() >= area.height() {
             let (screen, left, right) = landscape_split(area, settings.touch.landscape);
             (
                 screen,
                 Some(TouchLayout::columns(left, right, &settings.touch)),
+                Rect::from_min_max(egui::pos2(left.right(), area.top()), right.left_bottom()),
             )
         } else {
             let (screen, controls) = portrait_split(area, &settings.touch);
-            (screen, Some(TouchLayout::bar(controls, &settings.touch)))
+            (
+                screen,
+                Some(TouchLayout::bar(controls, &settings.touch)),
+                screen,
+            )
         };
+        self.ui.toast_area = Some(free);
 
         self.paint_screen(ui, screen);
 
@@ -170,7 +281,10 @@ impl Citrine {
                 .layout(egui::Layout::top_down(egui::Align::Center)),
         );
 
-        let button = vec2(area.width().min(260.0) * 0.85, 42.0);
+        let button = vec2(
+            area.width().min(260.0) * 0.85,
+            child.spacing().interact_size.y,
+        );
 
         child.add_space(area.height() * 0.2);
         child.heading("Citrine");
@@ -199,35 +313,47 @@ impl Citrine {
             )
             .clicked()
         {
-            self.mobile.sheet = Some(Sheet::Panel(Tab::Homebrew));
+            self.mobile.open(Sheet::Panel(Tab::Homebrew));
         }
     }
 
     fn mobile_sheet(&mut self, ui: &mut Ui, sheet: Sheet) {
-        egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| match sheet {
-                Sheet::Menu => self.mobile_menu(ui),
-                Sheet::Panel(tab) => {
-                    let mut viewer = TabViewer {
-                        audio: &mut self.audio,
-                        commonmark: &mut self.commonmark,
-                        emulator: &mut self.emulator,
-                        events: &mut self.events,
-                        files: &mut self.files,
-                        ui: &mut self.ui,
-                    };
-                    let mut tab = tab;
+        match sheet {
+            Sheet::Menu => {
+                egui::Frame::new()
+                    .inner_margin(CONTENT_MARGIN)
+                    .show(ui, |ui| self.mobile_menu(ui));
+            }
+            Sheet::Panel(mut tab) => {
+                let mut viewer = TabViewer {
+                    audio: &mut self.audio,
+                    commonmark: &mut self.commonmark,
+                    emulator: &mut self.emulator,
+                    events: &mut self.events,
+                    files: &mut self.files,
+                    media: &mut self.media,
+                    ui: &mut self.ui,
+                };
+                if tab.scrolls_itself() {
                     viewer.ui(ui, &mut tab);
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("sheet_scroll", tab))
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            ui.style_mut().interaction.selectable_labels = false;
+                            viewer.ui(ui, &mut tab);
+                        });
                 }
-            });
+            }
+        }
     }
 
     fn mobile_menu(&mut self, ui: &mut Ui) {
         let width = ui.available_width();
         let entry = |ui: &mut Ui, icon: &str, label: &str| {
             ui.add_sized(
-                vec2(width, 40.0),
+                vec2(width, ui.spacing().interact_size.y),
                 egui::Button::new(format!("{icon}  {label}")),
             )
             .clicked()
@@ -235,28 +361,52 @@ impl Citrine {
 
         if entry(ui, icons::FOLDER, "Load ROM") {
             self.pick_rom();
-            self.mobile.sheet = None;
+            self.mobile.close();
         }
         ui.add_space(6.0);
-        if entry(ui, icons::JOYSTICK, "Homebrew games") {
-            self.mobile.sheet = Some(Sheet::Panel(Tab::Homebrew));
+        if entry(ui, icons::JOYSTICK, Tab::Homebrew.label()) {
+            self.mobile.open(Sheet::Panel(Tab::Homebrew));
         }
         ui.add_space(6.0);
-        if entry(ui, icons::FLOPPY_DISK, "Saves & snapshots") {
-            self.mobile.sheet = Some(Sheet::Panel(Tab::Saves));
+        if entry(ui, icons::FLOPPY_DISK, Tab::Saves.label()) {
+            self.mobile.open(Sheet::Panel(Tab::Saves));
         }
         ui.add_space(6.0);
-        if entry(ui, icons::GEAR, "Settings") {
-            self.mobile.sheet = Some(Sheet::Panel(Tab::Settings));
+        if entry(ui, icons::IMAGES, Tab::Media.label()) {
+            self.mobile.open(Sheet::Panel(Tab::Media));
+        }
+        ui.add_space(6.0);
+        if entry(ui, icons::GEAR, Tab::Settings.label()) {
+            self.mobile.open(Sheet::Panel(Tab::Settings));
         }
         ui.add_space(6.0);
         if entry(ui, icons::CAMERA, "Screenshot") {
             self.run_hotkey(HotkeyAction::Screenshot);
-            self.mobile.sheet = None;
+            self.mobile.close();
         }
         ui.add_space(6.0);
-        if entry(ui, icons::INFO, "About & controls") {
-            self.mobile.sheet = Some(Sheet::Panel(Tab::Info));
+        let recording = self.emulator.screen_recorder.is_recording();
+        let (icon, label) = if recording {
+            (icons::STOP, "Stop recording")
+        } else {
+            (icons::RECORD, "Record video")
+        };
+        if entry(ui, icon, label) {
+            self.run_hotkey(HotkeyAction::ToggleRecording);
+            self.mobile.close();
+        }
+        ui.add_space(6.0);
+        if entry(
+            ui,
+            icons::ARROW_COUNTER_CLOCKWISE,
+            HotkeyAction::SoftReset.label(),
+        ) {
+            self.mobile.close();
+            self.run_hotkey(HotkeyAction::SoftReset);
+        }
+        ui.add_space(6.0);
+        if entry(ui, icons::INFO, Tab::Info.label()) {
+            self.mobile.open(Sheet::Panel(Tab::Info));
         }
 
         ui.add_space(14.0);
@@ -267,11 +417,35 @@ impl Citrine {
         settings.dirty |= ui
             .checkbox(&mut settings.touch.show_controls, "On-screen buttons")
             .changed();
-        ui.small("Turn these off to play with a paired controller.");
+        row_hint(ui, "Turn these off to play with a paired controller.");
+    }
+
+    pub(super) fn mobile_escape(&mut self, ctx: &Context) {
+        let touch = self.is_mobile(ctx);
+        let escape = touch && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if escape && self.mobile.escape(self.mobile.layer_was_open) {
+            self.release_touch();
+        }
+        self.mobile.layer_was_open = layer_open(ctx) || self.ui.capture.is_waiting();
+        let depth = if touch { self.mobile.depth() } else { 0 };
+        self.mobile.history.sync(depth);
+    }
+
+    pub(super) fn browser_backs(&mut self) -> usize {
+        self.mobile.history.take_backs()
+    }
+
+    pub(super) fn show_tab(&mut self, tab: Tab, touch: bool) {
+        if touch {
+            self.mobile.open(Sheet::Panel(tab));
+            self.release_touch();
+        } else {
+            self.open_tab(tab);
+        }
     }
 
     pub(super) fn close_mobile_sheet(&mut self) {
-        self.mobile.sheet = None;
+        self.mobile.close();
         self.release_touch();
     }
 
@@ -294,6 +468,14 @@ const ALL_BUTTONS: [JoypadState; 8] = [
     JoypadState::START,
     JoypadState::SELECT,
 ];
+
+fn header_text(sheet: Option<Sheet>, game_title: &str) -> &str {
+    match sheet {
+        Some(Sheet::Panel(tab)) => tab.label(),
+        _ if game_title.is_empty() => "Citrine",
+        _ => game_title,
+    }
+}
 
 fn portrait_split(area: Rect, settings: &TouchSettings) -> (Rect, Rect) {
     let needed = TouchLayout::bar_height(area.width(), settings);
@@ -354,6 +536,63 @@ mod tests {
     use super::*;
     use crate::app::ui_state::touch::LandscapeControls;
     use egui::pos2;
+
+    #[test]
+    fn back_from_a_sheet_opened_in_the_menu_returns_to_the_menu() {
+        let mut state = MobileState::default();
+        state.open(Sheet::Menu);
+        state.open(Sheet::Panel(Tab::Saves));
+        state.back();
+        assert_eq!(state.sheet, Some(Sheet::Menu));
+        state.back();
+        assert_eq!(state.sheet, None);
+    }
+
+    #[test]
+    fn back_from_a_sheet_opened_elsewhere_returns_to_the_game() {
+        let mut state = MobileState::default();
+        state.open(Sheet::Panel(Tab::Homebrew));
+        state.back();
+        assert_eq!(state.sheet, None);
+    }
+
+    #[test]
+    fn escape_steps_back_through_the_sheets() {
+        let mut state = MobileState::default();
+        state.open(Sheet::Menu);
+        state.open(Sheet::Panel(Tab::Settings));
+        assert!(state.escape(false));
+        assert_eq!(
+            state.sheet,
+            Some(Sheet::Menu),
+            "back to the menu it came from"
+        );
+        assert!(state.escape(false));
+        assert_eq!(state.sheet, None);
+        assert!(!state.escape(false), "the game screen stays");
+    }
+
+    #[test]
+    fn escape_closes_the_top_layer_before_the_sheet() {
+        let mut state = MobileState::default();
+        state.open(Sheet::Panel(Tab::Saves));
+        assert!(!state.escape(true));
+        assert_eq!(state.sheet, Some(Sheet::Panel(Tab::Saves)));
+    }
+
+    #[test]
+    fn a_panel_sheet_shows_its_own_name() {
+        assert_eq!(
+            header_text(Some(Sheet::Panel(Tab::Saves)), "POKEMON"),
+            "Saves & snapshots"
+        );
+        assert_eq!(
+            header_text(Some(Sheet::Panel(Tab::Media)), "POKEMON"),
+            "Media"
+        );
+        assert_eq!(header_text(Some(Sheet::Menu), "POKEMON"), "POKEMON");
+        assert_eq!(header_text(None, ""), "Citrine");
+    }
 
     #[test]
     fn portrait_bands_cover_the_area_exactly() {

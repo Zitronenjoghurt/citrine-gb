@@ -2,6 +2,7 @@ pub mod avg_timer;
 pub mod file_channels;
 pub mod file_loader;
 pub mod file_saver;
+pub mod save_files;
 pub mod screenshot;
 
 #[cfg(not(target_arch = "wasm32"))]

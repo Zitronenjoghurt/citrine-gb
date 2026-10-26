@@ -4,7 +4,7 @@ default-members = ["app", "lib", "server"]
 resolver = "3"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://gb.lemon.industries"
@@ -14,6 +14,12 @@ repository = "https://github.com/Zitronenjoghurt/citrine-gb"
 citrine-gb = { path = "lib" }
 
 [profile.dev.package.sameboy-sys]
+opt-level = 3
+
+[profile.dev.package.openh264-sys2]
+opt-level = 3
+
+[profile.dev.package.rusty_aac]
 opt-level = 3
 
 [profile.dist]

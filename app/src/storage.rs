@@ -1,12 +1,15 @@
 mod backend;
 
 use backend::Backend;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::data_dir;
 
 pub const THUMB_WIDTH: usize = 80;
 pub const THUMB_HEIGHT: usize = 72;
 
 const BATTERY: &str = "battery.sav";
 const BATTERY_META: &str = "battery.meta";
+const BATTERY_NAME: &str = "battery.name";
 
 fn snapshot_blob(slot: usize) -> String {
     format!("slot{slot}.snap")
@@ -24,7 +27,19 @@ fn snapshot_name(slot: usize) -> String {
     format!("slot{slot}.name")
 }
 
-pub const MAX_SNAPSHOT_NAME: usize = 60;
+fn autosave_blob(id: usize) -> String {
+    format!("auto{id}.snap")
+}
+
+fn autosave_meta(id: usize) -> String {
+    format!("auto{id}.meta")
+}
+
+fn autosave_thumb(id: usize) -> String {
+    format!("auto{id}.thumb")
+}
+
+pub const MAX_SAVE_NAME: usize = 60;
 
 pub struct SnapshotInfo {
     pub slot: usize,
@@ -43,7 +58,7 @@ impl SnapshotInfo {
 }
 
 pub fn default_slot_name(slot: usize) -> String {
-    format!("Slot {slot}")
+    format!("Slot {}", slot + 1)
 }
 
 const SETTINGS_NAMESPACE: &str = "settings";
@@ -63,7 +78,7 @@ impl Default for SettingsStore {
 
 impl SettingsStore {
     #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn at(root: std::path::PathBuf) -> Self {
+    pub(crate) fn at(root: std::path::PathBuf) -> Self {
         Self {
             backend: Backend::at(root),
         }
@@ -90,14 +105,14 @@ impl SettingsStore {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SaveStore {
     backend: Backend,
 }
 
 impl SaveStore {
     #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn at(root: std::path::PathBuf) -> Self {
+    pub(crate) fn at(root: std::path::PathBuf) -> Self {
         Self {
             backend: Backend::at(root),
         }
@@ -183,35 +198,85 @@ impl SaveStore {
     }
 
     pub fn set_snapshot_name(&self, rom_key: &str, slot: usize, name: &str) -> std::io::Result<()> {
-        let name = name.trim();
-        if name.is_empty() || name == default_slot_name(slot) {
-            return self.backend.delete(rom_key, &snapshot_name(slot));
-        }
-        let trimmed: String = name.chars().take(MAX_SNAPSHOT_NAME).collect();
-        self.backend
-            .write(rom_key, &snapshot_name(slot), trimmed.as_bytes())
+        self.write_name(
+            rom_key,
+            &snapshot_name(slot),
+            name,
+            &default_slot_name(slot),
+        )
     }
 
     pub fn snapshot_name(&self, rom_key: &str, slot: usize) -> Option<String> {
-        let raw = self.backend.read(rom_key, &snapshot_name(slot))?;
+        self.read_name(rom_key, &snapshot_name(slot))
+    }
+
+    pub fn set_battery_name(
+        &self,
+        rom_key: &str,
+        name: &str,
+        default_name: &str,
+    ) -> std::io::Result<()> {
+        self.write_name(rom_key, BATTERY_NAME, name, default_name)
+    }
+
+    pub fn battery_name(&self, rom_key: &str) -> Option<String> {
+        self.read_name(rom_key, BATTERY_NAME)
+    }
+
+    fn write_name(
+        &self,
+        rom_key: &str,
+        file: &str,
+        name: &str,
+        default_name: &str,
+    ) -> std::io::Result<()> {
+        let name = name.trim();
+        if name.is_empty() || name == default_name {
+            return self.backend.delete(rom_key, file);
+        }
+        let trimmed: String = name.chars().take(MAX_SAVE_NAME).collect();
+        self.backend.write(rom_key, file, trimmed.as_bytes())
+    }
+
+    fn read_name(&self, rom_key: &str, file: &str) -> Option<String> {
+        let raw = self.backend.read(rom_key, file)?;
         let name = String::from_utf8(raw).ok()?;
         let name = name.trim();
         (!name.is_empty()).then(|| name.to_string())
     }
 
     pub fn snapshot_info(&self, rom_key: &str, slot: usize) -> Option<SnapshotInfo> {
-        if !self.backend.exists(rom_key, &snapshot_blob(slot)) {
+        let mut info = self.read_info(
+            rom_key,
+            slot,
+            &snapshot_blob(slot),
+            &snapshot_meta(slot),
+            &snapshot_thumb(slot),
+        )?;
+        info.name = self.snapshot_name(rom_key, slot);
+        Some(info)
+    }
+
+    fn read_info(
+        &self,
+        rom_key: &str,
+        slot: usize,
+        blob: &str,
+        meta: &str,
+        thumb: &str,
+    ) -> Option<SnapshotInfo> {
+        if !self.backend.exists(rom_key, blob) {
             return None;
         }
         let saved_at = self
             .backend
-            .read(rom_key, &snapshot_meta(slot))
+            .read(rom_key, meta)
             .and_then(|b| b.try_into().ok())
             .map(u64::from_le_bytes)
             .unwrap_or(0);
         let thumbnail = self
             .backend
-            .read(rom_key, &snapshot_thumb(slot))
+            .read(rom_key, thumb)
             .and_then(|t| decompress(&t))
             .filter(|t| t.len() == THUMB_WIDTH * THUMB_HEIGHT * 4)
             .unwrap_or_else(|| vec![0; THUMB_WIDTH * THUMB_HEIGHT * 4]);
@@ -219,23 +284,27 @@ impl SaveStore {
             slot,
             saved_at,
             thumbnail,
-            name: self.snapshot_name(rom_key, slot),
+            name: None,
         })
     }
 
     pub fn used_slots(&self, rom_key: &str) -> Vec<usize> {
-        let mut slots: Vec<usize> = self
+        self.numbered(rom_key, "slot")
+    }
+
+    fn numbered(&self, rom_key: &str, prefix: &str) -> Vec<usize> {
+        let mut ids: Vec<usize> = self
             .backend
             .list(rom_key)
             .iter()
             .filter_map(|name| {
-                name.strip_prefix("slot")
+                name.strip_prefix(prefix)
                     .and_then(|rest| rest.strip_suffix(".snap"))
                     .and_then(|n| n.parse().ok())
             })
             .collect();
-        slots.sort_unstable();
-        slots
+        ids.sort_unstable();
+        ids
     }
 
     pub fn snapshot_infos(&self, rom_key: &str) -> Vec<SnapshotInfo> {
@@ -249,9 +318,96 @@ impl SaveStore {
         let used = self.used_slots(rom_key);
         (0..).find(|slot| !used.contains(slot)).unwrap_or(0)
     }
+
+    pub fn store_autosave(
+        &self,
+        rom_key: &str,
+        state: &[u8],
+        frame_rgba: &[u8],
+        keep: usize,
+    ) -> std::io::Result<usize> {
+        let id = self.autosave_ids(rom_key).last().map_or(0, |last| last + 1);
+        let thumb = compress(&downscale(frame_rgba));
+        let written = self.write_autosave(rom_key, id, state, &thumb);
+        let written = match written {
+            Err(_) if self.drop_oldest_autosave(rom_key, id)? => {
+                self.write_autosave(rom_key, id, state, &thumb)
+            }
+            other => other,
+        };
+        if let Err(err) = written {
+            self.delete_autosave(rom_key, id)?;
+            return Err(err);
+        }
+        self.prune_autosaves(rom_key, keep)?;
+        Ok(id)
+    }
+
+    fn write_autosave(
+        &self,
+        rom_key: &str,
+        id: usize,
+        state: &[u8],
+        thumb: &[u8],
+    ) -> std::io::Result<()> {
+        self.backend.write(rom_key, &autosave_blob(id), state)?;
+        self.backend.write(rom_key, &autosave_thumb(id), thumb)?;
+        self.backend
+            .write(rom_key, &autosave_meta(id), &now_unix().to_le_bytes())
+    }
+
+    fn drop_oldest_autosave(&self, rom_key: &str, writing: usize) -> std::io::Result<bool> {
+        match self
+            .autosave_ids(rom_key)
+            .into_iter()
+            .find(|id| *id != writing)
+        {
+            Some(oldest) => self.delete_autosave(rom_key, oldest).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    pub fn prune_autosaves(&self, rom_key: &str, keep: usize) -> std::io::Result<()> {
+        let ids = self.autosave_ids(rom_key);
+        let extra = ids.len().saturating_sub(keep.max(1));
+        for id in &ids[..extra] {
+            self.delete_autosave(rom_key, *id)?;
+        }
+        Ok(())
+    }
+
+    pub fn autosave_ids(&self, rom_key: &str) -> Vec<usize> {
+        self.numbered(rom_key, "auto")
+    }
+
+    pub fn autosave_infos(&self, rom_key: &str) -> Vec<SnapshotInfo> {
+        self.autosave_ids(rom_key)
+            .into_iter()
+            .rev()
+            .filter_map(|id| {
+                self.read_info(
+                    rom_key,
+                    id,
+                    &autosave_blob(id),
+                    &autosave_meta(id),
+                    &autosave_thumb(id),
+                )
+            })
+            .collect()
+    }
+
+    pub fn load_autosave(&self, rom_key: &str, id: usize) -> Option<Vec<u8>> {
+        self.backend.read(rom_key, &autosave_blob(id))
+    }
+
+    pub fn delete_autosave(&self, rom_key: &str, id: usize) -> std::io::Result<()> {
+        self.backend.delete(rom_key, &autosave_meta(id))?;
+        self.backend.delete(rom_key, &autosave_thumb(id))?;
+        self.backend.delete(rom_key, &autosave_blob(id))
+    }
 }
 
-fn compress(data: &[u8]) -> Vec<u8> {
+pub(crate) fn compress(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut writer = brotli::CompressorWriter::new(&mut out, 4096, 6, 22);
     if std::io::Write::write_all(&mut writer, data).is_err() {
@@ -269,7 +425,7 @@ fn decompress(data: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn now_unix() -> u64 {
+pub fn now_unix() -> u64 {
     web_time::SystemTime::now()
         .duration_since(web_time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -522,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_with_no_name_reads_as_its_index() {
+    fn a_slot_with_no_name_counts_from_one() {
         let (store, root) = store("unnamed");
         store
             .store_snapshot(KEY, 2, b"state", &frame())
@@ -532,8 +688,36 @@ mod tests {
         assert_eq!(info.name, None, "nothing was written for a fresh slot");
         assert_eq!(
             info.display_name(),
-            "Slot 2",
-            "snapshots from before naming keep their old label"
+            "Slot 3",
+            "the third slot reads as Slot 3"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_save_from_before_one_based_names_still_loads() {
+        let (store, root) = store("old-layout");
+        let dir = root.join(KEY);
+        std::fs::create_dir_all(&dir).expect("dir");
+        store
+            .store_snapshot(KEY, 0, b"old state", &frame())
+            .expect("store");
+        std::fs::write(dir.join("slot1.name"), "Slot 0").expect("old name");
+        store
+            .store_snapshot(KEY, 1, b"named", &frame())
+            .expect("store");
+
+        assert_eq!(store.used_slots(KEY), vec![0, 1]);
+        assert_eq!(
+            store.load_snapshot(KEY, 0).as_deref(),
+            Some(&b"old state"[..])
+        );
+        let infos = store.snapshot_infos(KEY);
+        assert_eq!(infos[0].display_name(), "Slot 1");
+        assert_eq!(
+            infos[1].display_name(),
+            "Slot 0",
+            "a stored name is kept as written"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -585,7 +769,7 @@ mod tests {
 
         let info = store.snapshot_info(KEY, 0).expect("filled");
         assert_eq!(info.name, None);
-        assert_eq!(info.display_name(), "Slot 0");
+        assert_eq!(info.display_name(), "Slot 1");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -596,7 +780,7 @@ mod tests {
             .store_snapshot(KEY, 4, b"state", &frame())
             .expect("store");
 
-        store.set_snapshot_name(KEY, 4, "Slot 4").expect("name");
+        store.set_snapshot_name(KEY, 4, "Slot 5").expect("name");
 
         assert_eq!(store.snapshot_name(KEY, 4), None);
         let _ = std::fs::remove_dir_all(root);
@@ -609,11 +793,11 @@ mod tests {
             .store_snapshot(KEY, 0, b"state", &frame())
             .expect("store");
 
-        let long = "x".repeat(MAX_SNAPSHOT_NAME * 3);
+        let long = "x".repeat(MAX_SAVE_NAME * 3);
         store.set_snapshot_name(KEY, 0, &long).expect("name");
 
         let stored = store.snapshot_name(KEY, 0).expect("named");
-        assert_eq!(stored.chars().count(), MAX_SNAPSHOT_NAME);
+        assert_eq!(stored.chars().count(), MAX_SAVE_NAME);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -635,7 +819,7 @@ mod tests {
             .expect("store");
         assert_eq!(
             store.snapshot_info(KEY, 0).expect("filled").display_name(),
-            "Slot 0"
+            "Slot 1"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -657,6 +841,61 @@ mod tests {
     }
 
     #[test]
+    fn a_battery_save_has_no_name_until_one_is_given() {
+        let (store, root) = store("battery-unnamed");
+        store.store_battery(KEY, b"sram").expect("battery");
+        assert_eq!(store.battery_name(KEY), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renaming_the_battery_save_sticks_across_writes() {
+        let (store, root) = store("battery-named");
+        store.store_battery(KEY, b"first").expect("battery");
+
+        store
+            .set_battery_name(KEY, "  Main run  ", "POKEMON_SLV")
+            .expect("name");
+        store.store_battery(KEY, b"second").expect("overwrite");
+
+        assert_eq!(store.battery_name(KEY).as_deref(), Some("Main run"));
+        assert_eq!(store.load_battery(KEY).as_deref(), Some(&b"second"[..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_blank_or_default_battery_name_is_not_stored() {
+        let (store, root) = store("battery-name-default");
+        store
+            .set_battery_name(KEY, "Nuzlocke", "TETRIS")
+            .expect("name");
+
+        store.set_battery_name(KEY, "   ", "TETRIS").expect("clear");
+        assert_eq!(store.battery_name(KEY), None);
+
+        store
+            .set_battery_name(KEY, "TETRIS", "TETRIS")
+            .expect("default");
+        assert_eq!(store.battery_name(KEY), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn battery_names_are_capped_and_do_not_look_like_slots() {
+        let (store, root) = store("battery-name-cap");
+        let long = "y".repeat(MAX_SAVE_NAME * 2);
+        store.set_battery_name(KEY, &long, "TETRIS").expect("name");
+
+        assert_eq!(
+            store.battery_name(KEY).map(|n| n.chars().count()),
+            Some(MAX_SAVE_NAME)
+        );
+        assert!(store.used_slots(KEY).is_empty());
+        assert!(!store.has_battery(KEY), "a name alone is not a save");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn thumbnail_averages_each_2x2_block() {
         let mut frame = vec![0u8; 160 * 144 * 4];
         for (i, dx) in [(0usize, 0usize), (1, 4), (160, 8), (161, 12)] {
@@ -665,5 +904,60 @@ mod tests {
         let thumb = downscale(&frame);
         assert_eq!(thumb.len(), THUMB_WIDTH * THUMB_HEIGHT * 4);
         assert_eq!(thumb[0], 6);
+    }
+
+    #[test]
+    fn autosaves_keep_only_the_newest() {
+        let (store, root) = store("auto-keep");
+        for n in 0..5u8 {
+            store
+                .store_autosave(KEY, &[n], &frame(), 3)
+                .expect("autosave");
+        }
+
+        assert_eq!(store.autosave_ids(KEY), vec![2, 3, 4]);
+        let newest_first: Vec<usize> = store.autosave_infos(KEY).iter().map(|i| i.slot).collect();
+        assert_eq!(newest_first, vec![4, 3, 2]);
+        assert_eq!(store.load_autosave(KEY, 4).as_deref(), Some(&[4u8][..]));
+        assert_eq!(store.load_autosave(KEY, 1), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_lower_limit_drops_the_oldest_at_once() {
+        let (store, root) = store("auto-shrink");
+        for _ in 0..4 {
+            store
+                .store_autosave(KEY, b"state", &frame(), 10)
+                .expect("autosave");
+        }
+        store.prune_autosaves(KEY, 1).expect("prune");
+        assert_eq!(store.autosave_ids(KEY), vec![3]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autosaves_never_touch_manual_snapshots() {
+        let (store, root) = store("auto-apart");
+        store
+            .store_snapshot(KEY, 0, b"mine", &frame())
+            .expect("snapshot");
+        store.set_snapshot_name(KEY, 0, "Boss fight").expect("name");
+
+        for _ in 0..3 {
+            store
+                .store_autosave(KEY, b"auto", &frame(), 1)
+                .expect("autosave");
+        }
+
+        assert_eq!(store.used_slots(KEY), vec![0]);
+        assert_eq!(store.next_free_slot(KEY), 1);
+        assert_eq!(store.load_snapshot(KEY, 0).as_deref(), Some(&b"mine"[..]));
+        assert_eq!(store.snapshot_name(KEY, 0).as_deref(), Some("Boss fight"));
+        assert_eq!(store.autosave_ids(KEY).len(), 1);
+
+        store.delete_snapshot(KEY, 0).expect("delete");
+        assert_eq!(store.autosave_ids(KEY).len(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

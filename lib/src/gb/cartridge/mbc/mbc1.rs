@@ -12,6 +12,8 @@ pub struct Mbc1 {
     pub secondary_register: u8,
     // 1-bit register at 6000-7FFF: 0 = simple, 1 = advanced
     pub advanced_banking_mode: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub multicart: bool,
 }
 
 impl Mbc1 {
@@ -23,6 +25,7 @@ impl Mbc1 {
             rom_bank_register: 0,
             secondary_register: 0,
             advanced_banking_mode: false,
+            multicart: false,
         }
     }
 
@@ -40,6 +43,10 @@ impl Mbc1 {
 
     fn write_advanced_banking_mode(&mut self, value: u8) {
         self.advanced_banking_mode = value & 1 == 1;
+    }
+
+    fn secondary_shift(&self) -> usize {
+        if self.multicart { 4 } else { 5 }
     }
 }
 
@@ -64,7 +71,10 @@ impl MbcInterface for Mbc1 {
         if !self.advanced_banking_mode {
             0
         } else {
-            mask_bank_number((self.secondary_register as usize) << 5, self.rom_bank_count)
+            mask_bank_number(
+                (self.secondary_register as usize) << self.secondary_shift(),
+                self.rom_bank_count,
+            )
         }
     }
 
@@ -72,9 +82,9 @@ impl MbcInterface for Mbc1 {
         let rom_reg = if self.rom_bank_register == 0 {
             1
         } else {
-            self.rom_bank_register as usize
+            self.rom_bank_register as usize & ((1 << self.secondary_shift()) - 1)
         };
-        let bank = (self.secondary_register as usize) << 5 | rom_reg;
+        let bank = (self.secondary_register as usize) << self.secondary_shift() | rom_reg;
         mask_bank_number(bank, self.rom_bank_count)
     }
 
@@ -93,6 +103,9 @@ impl MbcInterface for Mbc1 {
     }
 
     fn soft_reset(&mut self) {
-        *self = Self::new(self.rom_bank_count, self.ram_bank_count);
+        *self = Self {
+            multicart: self.multicart,
+            ..Self::new(self.rom_bank_count, self.ram_bank_count)
+        };
     }
 }

@@ -27,9 +27,9 @@ fn restored_snapshot_can_read_rom() {
         gb.step();
     }
 
-    let dump = gb.dump_full().expect("dump");
+    let dump = gb.dump_full(0).expect("dump");
     let rom_data = test_rom();
-    let restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data)).expect("restore");
+    let restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data), 0).expect("restore");
 
     assert_eq!(restored.cartridge.read_naive(0x0100), 0xAB);
     assert_eq!(restored.cartridge.read_naive(0x3FFF), 0xCD);
@@ -43,9 +43,9 @@ fn restored_snapshot_keeps_cpu_state() {
     }
     let (pc, sp, a) = (gb.cpu.pc, gb.cpu.sp, gb.cpu.a);
 
-    let dump = gb.dump_full().expect("dump");
+    let dump = gb.dump_full(0).expect("dump");
     let rom_data = test_rom();
-    let restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data)).expect("restore");
+    let restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data), 0).expect("restore");
 
     assert_eq!(restored.cpu.pc, pc);
     assert_eq!(restored.cpu.sp, sp);
@@ -60,9 +60,9 @@ fn restored_snapshot_keeps_cartridge_ram() {
         gb.cartridge.write_naive(addr, 0x40 + i as u8);
     }
 
-    let dump = gb.dump_full().expect("dump");
+    let dump = gb.dump_full(0).expect("dump");
     let rom_data = test_rom();
-    let mut restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data)).expect("restore");
+    let mut restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data), 0).expect("restore");
 
     restored.cartridge.write_naive(0x0000, 0x0A);
     for (i, addr) in (0xA000..0xA010u16).enumerate() {
@@ -80,9 +80,9 @@ fn a_restored_machine_keeps_running() {
     for _ in 0..1000 {
         gb.step();
     }
-    let dump = gb.dump_full().expect("dump");
+    let dump = gb.dump_full(0).expect("dump");
     let rom_data = test_rom();
-    let mut restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data)).expect("restore");
+    let mut restored = GameBoy::from_dump(&dump, &Rom::new(&rom_data), 0).expect("restore");
 
     for _ in 0..1000 {
         restored.step();

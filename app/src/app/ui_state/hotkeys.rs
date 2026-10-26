@@ -83,6 +83,7 @@ pub enum HotkeyAction {
     QuickSaveNewSlot,
     QuickLoad,
     Screenshot,
+    ToggleRecording,
     TogglePause,
     SoftReset,
     ToggleMute,
@@ -97,6 +98,7 @@ impl HotkeyAction {
             Self::QuickSaveNewSlot => "Save to a new slot",
             Self::QuickLoad => "Quick load",
             Self::Screenshot => "Screenshot",
+            Self::ToggleRecording => "Record video",
             Self::TogglePause => "Pause / resume",
             Self::SoftReset => "Reset the game",
             Self::ToggleMute => "Mute",
@@ -110,7 +112,8 @@ impl HotkeyAction {
             Self::QuickSave => "Overwrite the starred snapshot slot",
             Self::QuickSaveNewSlot => "Take a snapshot in the next free slot",
             Self::QuickLoad => "Hold to restore the starred slot",
-            Self::Screenshot => "Save the screen as a PNG",
+            Self::Screenshot => "Save the screen to Media",
+            Self::ToggleRecording => "Start or stop recording the screen and sound",
             Self::TogglePause => "Stop and start emulation",
             Self::SoftReset => "Reset as if the console was power cycled",
             Self::ToggleMute => "Silence the sound without changing the volume",
@@ -130,6 +133,7 @@ impl HotkeyAction {
             Self::QuickSaveNewSlot => Hotkey::shift(Key::F8),
             Self::QuickLoad => Hotkey::plain(Key::F9),
             Self::Screenshot => Hotkey::plain(Key::F12),
+            Self::ToggleRecording => Hotkey::shift(Key::F12),
             Self::TogglePause => Hotkey::plain(Key::F5),
             Self::SoftReset => Hotkey::ctrl(Key::R),
             Self::ToggleMute => Hotkey::plain(Key::F10),
@@ -149,6 +153,8 @@ impl Display for HotkeyAction {
 #[serde(default)]
 pub struct Hotkeys {
     bindings: Vec<(Hotkey, HotkeyAction)>,
+    #[serde(default = "Vec::new")]
+    offered: Vec<HotkeyAction>,
 }
 
 impl Default for Hotkeys {
@@ -157,6 +163,7 @@ impl Default for Hotkeys {
             bindings: HotkeyAction::iter()
                 .filter_map(|action| action.default_binding().map(|key| (key, action)))
                 .collect(),
+            offered: HotkeyAction::iter().collect(),
         }
     }
 }
@@ -177,6 +184,18 @@ impl Hotkeys {
             .collect()
     }
 
+    pub fn key_name(&self, action: HotkeyAction) -> Option<String> {
+        self.keys_for(action).first().map(Hotkey::to_string)
+    }
+
+    pub fn quick_keys(&self) -> Option<String> {
+        let keys: Vec<String> = [HotkeyAction::QuickSave, HotkeyAction::QuickLoad]
+            .into_iter()
+            .filter_map(|action| self.key_name(action))
+            .collect();
+        (!keys.is_empty()).then(|| keys.join(" / "))
+    }
+
     pub fn bind(&mut self, hotkey: Hotkey, action: HotkeyAction) {
         self.bindings.retain(|(bound, _)| *bound != hotkey);
         self.bindings.push((hotkey, action));
@@ -189,12 +208,51 @@ impl Hotkeys {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
+
+    pub fn bind_new_defaults(&mut self) {
+        if self.offered.is_empty() {
+            self.offered = HotkeyAction::iter()
+                .filter(|action| *action != HotkeyAction::ToggleRecording)
+                .collect();
+        }
+        for action in HotkeyAction::iter() {
+            if self.offered.contains(&action) {
+                continue;
+            }
+            self.offered.push(action);
+            if let Some(key) = action.default_binding()
+                && !self.bindings.iter().any(|(bound, _)| *bound == key)
+            {
+                self.bindings.push((key, action));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui::{Key, Modifiers};
+
+    #[test]
+    fn settings_from_before_recording_gain_its_hotkey_and_keep_the_rest() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("offered");
+        old["bindings"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|b| b[1] != "ToggleRecording" && b[1] != "QuickSave");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        hotkeys.bind_new_defaults();
+        assert_eq!(
+            hotkeys.action_for(Key::F12, Modifiers::SHIFT),
+            Some(HotkeyAction::ToggleRecording)
+        );
+        assert!(hotkeys.keys_for(HotkeyAction::QuickSave).is_empty());
+        hotkeys.unbind(Hotkey::shift(Key::F12));
+        hotkeys.bind_new_defaults();
+        assert!(hotkeys.keys_for(HotkeyAction::ToggleRecording).is_empty());
+    }
 
     #[test]
     fn the_documented_defaults_are_bound() {

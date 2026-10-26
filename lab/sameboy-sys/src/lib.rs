@@ -90,4 +90,8 @@ unsafe extern "C" {
     pub fn GB_get_user_data(gb: *mut GB_gameboy_t) -> *mut c_void;
 
     pub fn GB_random_seed(seed: u64);
+
+    pub fn GB_save_battery_size(gb: *mut GB_gameboy_t) -> c_int;
+    pub fn GB_save_battery_to_buffer(gb: *mut GB_gameboy_t, buffer: *mut u8, size: usize) -> c_int;
+    pub fn GB_load_battery_from_buffer(gb: *mut GB_gameboy_t, buffer: *const u8, size: usize);
 }

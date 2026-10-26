@@ -17,6 +17,9 @@ pub trait Bus: CpuBusInterface + ICInterface + crate::debug::DebuggerInterface {
 #[cfg(feature = "debug")]
 impl<T: CpuBusInterface + ICInterface + crate::debug::DebuggerInterface> Bus for T {}
 
+const SPEED_SWITCH_HALT_CYCLES: u32 = 0x20000 / 4;
+const HALT_SAMPLE_DOT: u8 = 2;
+
 #[derive(Debug, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cpu {
@@ -34,9 +37,10 @@ pub struct Cpu {
     pub ime: bool,
     pub ime_next: bool,
     pub halted: bool,
-    pub halt_bug: bool,
     pub model: GbModel,
     pub invalid_opcode: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub speed_switch_halt: u32,
 }
 
 impl Cpu {
@@ -74,9 +78,9 @@ impl Cpu {
             ime: false,
             ime_next: false,
             halted: false,
-            halt_bug: false,
             model: GbModel::Dmg,
             invalid_opcode: false,
+            speed_switch_halt: 0,
         }
     }
 
@@ -101,9 +105,9 @@ impl Cpu {
             ime: false,
             ime_next: false,
             halted: false,
-            halt_bug: false,
             model: GbModel::Cgb,
             invalid_opcode: false,
+            speed_switch_halt: 0,
         }
     }
 
@@ -121,10 +125,25 @@ impl Cpu {
         }
 
         if self.halted {
-            bus.cycle();
-            if bus.has_pending_interrupt() {
+            let pending = bus
+                .cycle_halted(HALT_SAMPLE_DOT)
+                .unwrap_or_else(|| bus.has_pending_interrupt());
+            if self.speed_switch_halt > 0 {
+                self.speed_switch_halt -= 1;
+                if self.speed_switch_halt == 0 {
+                    self.halted = false;
+                }
+            }
+            if pending {
                 // ToDo: Halt bug => https://gbdev.io/pandocs/halt.html#halt-bug
+                if self.speed_switch_halt > 0 {
+                    bus.cycle_halted(HALT_SAMPLE_DOT);
+                }
                 self.halted = false;
+                self.speed_switch_halt = 0;
+            }
+            if !self.halted {
+                bus.halt_ended();
             }
             return;
         }
@@ -153,13 +172,16 @@ impl Cpu {
             Instruction::CCF => self.ccf(),
             Instruction::JR_n => self.jr_n(bus),
             Instruction::JR_c_n(cond) => self.jr_c_n(bus, cond),
-            Instruction::STOP => {}
+            Instruction::STOP => self.stop(bus),
             Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => {
-                if !self.ime && bus.has_pending_interrupt() {
-                    self.halt_bug = true;
+                self.fetch(bus);
+                if bus.has_pending_interrupt() {
+                    self.pc = self.pc.wrapping_sub(1);
                 } else {
                     self.halted = true;
                 }
+                bus.service_hdma();
+                return;
             }
             Instruction::LD_r_r(dest, src) => self.ld_r_r(bus, dest, src),
             Instruction::ADD_r(r8) => self.add_r(bus, r8),
@@ -218,18 +240,46 @@ impl Cpu {
         }
 
         self.fetch(bus);
+        bus.service_hdma();
+    }
+
+    fn stop(&mut self, bus: &mut impl Bus) {
+        if !bus.speed_switch(self.ime) || bus.has_pending_interrupt() {
+            return;
+        }
+        self.read_program(bus);
+        self.halted = true;
+        self.speed_switch_halt = SPEED_SWITCH_HALT_CYCLES;
+    }
+
+    pub fn enter_dmg_compatibility(&mut self, header: &[u8]) {
+        let byte = |addr: usize| header.get(addr).copied().unwrap_or(0);
+        let nintendo = byte(0x14B) == 0x01
+            || (byte(0x14B) == 0x33 && byte(0x144) == b'0' && byte(0x145) == b'1');
+        let b = if nintendo {
+            (0x134..=0x143).fold(0u8, |sum, addr| sum.wrapping_add(byte(addr)))
+        } else {
+            0x00
+        };
+        let hl = if b == 0x43 || b == 0x58 {
+            0x991A
+        } else {
+            0x007C
+        };
+
+        self.b = b;
+        self.c = 0x00;
+        self.d = 0x00;
+        self.e = 0x08;
+        self.h = hi(hl);
+        self.l = lo(hl);
     }
 
     pub fn fetch(&mut self, bus: &mut impl Bus) {
         #[cfg(feature = "debug")]
         bus.on_fetch(self.pc);
 
-        if self.halt_bug {
-            self.halt_bug = false;
-            self.ir = bus.read(self.pc);
-        } else {
-            self.ir = self.read_program(bus);
-        }
+        self.ir = self.read_program(bus);
     }
 
     pub fn decode(&mut self, bus: &mut impl Bus) -> Instruction {
@@ -247,7 +297,7 @@ impl Cpu {
             self.ime_next = false;
 
             bus.cycle();
-            bus.cycle();
+            bus.cycle_with_address(self.sp);
 
             let return_address = self.pc.wrapping_sub(1);
             self.push(bus, hi(return_address));
@@ -300,7 +350,9 @@ impl Cpu {
     }
 
     pub fn pop_word(&mut self, bus: &mut impl Bus) -> u16 {
-        word(self.pop(bus), self.pop(bus))
+        let low = bus.read_increment(self.sp);
+        self.sp = self.sp.wrapping_add(1);
+        word(low, self.pop(bus))
     }
 
     pub fn push(&mut self, bus: &mut impl Bus, value: u8) {
@@ -328,7 +380,10 @@ impl Cpu {
 
     pub fn ld_a_rr(&mut self, bus: &mut impl Bus, r16_mem: R16Mem) {
         let address = self.get_r16mem(r16_mem);
-        self.a = bus.read(address);
+        self.a = match r16_mem {
+            R16Mem::HLinc | R16Mem::HLdec => bus.read_increment(address),
+            _ => bus.read(address),
+        };
     }
 
     pub fn ld_nn_sp(&mut self, bus: &mut impl Bus) {
@@ -337,13 +392,13 @@ impl Cpu {
     }
 
     pub fn inc_rr(&mut self, bus: &mut impl Bus, r16: R16) {
-        bus.cycle();
+        bus.cycle_with_address(self.get_r16_nn(r16));
 
         self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_add(1));
     }
 
     pub fn dec_rr(&mut self, bus: &mut impl Bus, r16: R16) {
-        bus.cycle();
+        bus.cycle_with_address(self.get_r16_nn(r16));
 
         self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_sub(1));
     }
@@ -573,7 +628,7 @@ impl Cpu {
 
     pub fn push_rr(&mut self, bus: &mut impl Bus, r16stk: R16Stk) {
         // Internal cycle: CPU computes decremented SP before first write
-        bus.cycle();
+        bus.cycle_with_address(self.sp);
 
         let value = self.get_r16stk(r16stk);
         self.push_word(bus, value);
@@ -623,7 +678,7 @@ impl Cpu {
     pub fn call_nn(&mut self, bus: &mut impl Bus) {
         let address = self.read_program_nn(bus);
 
-        bus.cycle();
+        bus.cycle_with_address(self.sp);
         self.push_word(bus, self.pc);
 
         self.pc = address;
@@ -633,14 +688,14 @@ impl Cpu {
         let address = self.read_program_nn(bus);
 
         if self.f.cond_true(cond) {
-            bus.cycle();
+            bus.cycle_with_address(self.sp);
             self.push_word(bus, self.pc);
             self.pc = address;
         }
     }
 
     pub fn rst(&mut self, bus: &mut impl Bus, address_lsb: u8) {
-        bus.cycle();
+        bus.cycle_with_address(self.sp);
         self.push_word(bus, self.pc);
         self.pc = word(address_lsb, 0x00);
     }
@@ -703,7 +758,7 @@ impl Cpu {
     }
 
     pub fn ld_sp_hl(&mut self, bus: &mut impl Bus) {
-        bus.cycle();
+        bus.cycle_with_address(self.get_r16_nn(R16::HL));
         self.sp = self.get_r16_nn(R16::HL);
     }
 

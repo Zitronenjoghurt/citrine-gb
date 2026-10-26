@@ -66,7 +66,11 @@ impl RomHeader {
         }
         let bytes = &data[0x134..=0x143];
         let end = bytes.iter().position(|&b| b == 0x00).unwrap_or(bytes.len());
-        Ok(String::from_utf8_lossy(&bytes[..end]).to_string())
+        Ok(bytes[..end]
+            .iter()
+            .filter(|b| b.is_ascii_graphic() || **b == b' ')
+            .map(|&b| b as char)
+            .collect())
     }
 
     pub fn parse_valid_nintendo_logo(data: &[u8]) -> GbResult<bool> {
@@ -81,8 +85,8 @@ impl RomHeader {
             return Err(GbError::RomTooSmall);
         }
         Ok(match data[0x143] {
-            0x80 => RomCgbMode::CgbAndGb,
             0xC0 => RomCgbMode::CgbOnly,
+            flag if flag & 0x80 != 0 => RomCgbMode::CgbAndGb,
             _ => RomCgbMode::None,
         })
     }
@@ -502,8 +506,14 @@ impl RomHeader {
 pub enum RomCgbMode {
     #[default]
     None = 0x00,
-    CgbOnly = 0x80,
-    CgbAndGb = 0xC0,
+    CgbAndGb = 0x80,
+    CgbOnly = 0xC0,
+}
+
+impl RomCgbMode {
+    pub fn is_cgb(&self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 impl Display for RomCgbMode {
@@ -837,8 +847,11 @@ impl RomCartridgeType {
             self,
             Self::Mbc1RamBattery
                 | Self::Mbc2Battery
+                | Self::Mbc3TimerBattery
+                | Self::Mbc3TimerRamBattery
                 | Self::Mbc3RamBattery
                 | Self::Mbc5RamBattery
+                | Self::Mbc5RumbleRamBattery
                 | Self::Mbc7SensorRumbleRamBattery
                 | Self::HuC1RamBattery
         )
@@ -877,5 +890,28 @@ impl std::fmt::Display for RomCartridgeType {
             Self::HuC3 => write!(f, "HuC3"),
             Self::HuC1RamBattery => write!(f, "HuC1 + RAM + Battery"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rom_with_title(title: &[u8]) -> Vec<u8> {
+        let mut data = vec![0; 0x150];
+        data[0x134..0x134 + title.len()].copy_from_slice(title);
+        data
+    }
+
+    #[test]
+    fn title_drops_the_cgb_flag() {
+        let data = rom_with_title(b"MBC3RTCTESTRTC3\x80");
+        assert_eq!(RomHeader::parse_title(&data).unwrap(), "MBC3RTCTESTRTC3");
+    }
+
+    #[test]
+    fn title_keeps_only_printable_characters() {
+        let data = rom_with_title(b"POKEMON\x01 RED\xff\0J");
+        assert_eq!(RomHeader::parse_title(&data).unwrap(), "POKEMON RED");
     }
 }

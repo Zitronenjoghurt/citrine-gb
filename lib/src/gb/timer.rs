@@ -79,6 +79,21 @@ impl Timer {
         }
     }
 
+    pub fn speed_switch_reset(&mut self, lookahead: bool) {
+        let lookahead = if lookahead && self.tac & 0b11 == 0b01 {
+            4
+        } else {
+            0
+        };
+        let bit_set =
+            self.timer_enabled() && (self.div.wrapping_add(lookahead) & self.tima_bit()) != 0;
+        self.div = 0;
+        self.prev_and = false;
+        if bit_set {
+            self.increment_tima();
+        }
+    }
+
     pub fn soft_reset(&mut self) {
         *self = Self::default();
     }

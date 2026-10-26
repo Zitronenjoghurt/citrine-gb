@@ -4,9 +4,17 @@ use crate::app::ui_state::palette::{PaletteChoice, PaletteLibrary};
 use crate::app::ui_state::touch::TouchSettings;
 use crate::app::ui_state::ui_theme::UiTheme;
 use crate::audio::{Audio, DEFAULT_LATENCY_MS};
+use crate::autosave::{self, AutosaveInterval};
 use crate::emulator::Emulator;
 use crate::icons;
+use crate::media::recording;
+use citrine_gb::ReadMemory;
+use citrine_gb::gb::GameBoy;
+use citrine_gb::gb::GbModel;
+use citrine_gb::gb::ppu::compat::CompatPalette;
+use citrine_gb::gb::ppu::types::color::{ColorCorrection, DmgColors};
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
+use citrine_gb::rom::Rom;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use strum::IntoEnumIterator;
@@ -38,6 +46,41 @@ pub const MOBILE_DESIGN_POINTS: f32 = 400.0;
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter,
 )]
+pub enum ConsoleChoice {
+    #[default]
+    Auto,
+    GameBoy,
+    GameBoyColor,
+}
+
+impl ConsoleChoice {
+    pub fn model_for(&self, rom: &Rom) -> GbModel {
+        self.resolve(GbModel::for_rom(rom).unwrap_or_default())
+    }
+
+    pub fn resolve(&self, game_model: GbModel) -> GbModel {
+        match self {
+            Self::Auto => game_model,
+            Self::GameBoy => GbModel::Dmg,
+            Self::GameBoyColor => GbModel::Cgb,
+        }
+    }
+}
+
+impl Display for ConsoleChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Auto => "Automatic",
+            Self::GameBoy => "Game Boy",
+            Self::GameBoyColor => "Game Boy Color",
+        };
+        f.write_str(name)
+    }
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter,
+)]
 pub enum ScalingMode {
     #[default]
     Integer,
@@ -62,11 +105,14 @@ pub struct Settings {
     pub ui_scale: f32,
     pub ui_theme: UiTheme,
     pub layout: LayoutMode,
+    pub console: ConsoleChoice,
 
     pub dmg_theme: DmgTheme,
     pub custom_palette: Option<String>,
+    pub gbc_palette: Option<CompatPalette>,
     pub palettes: PaletteLibrary,
     pub game_palettes: BTreeMap<String, PaletteChoice>,
+    pub color_correction: ColorCorrection,
     pub scaling: ScalingMode,
     pub matrix: bool,
     pub ghosting: bool,
@@ -76,7 +122,7 @@ pub struct Settings {
 
     pub volume: f32,
     pub muted: bool,
-    pub audio_latency_ms: u32,
+    pub audio_queue_ms: u32,
     pub audio_device: Option<String>,
     pub channels: [bool; 4],
 
@@ -86,6 +132,10 @@ pub struct Settings {
 
     pub current_tab: SettingsTab,
     pub quick_slot: usize,
+    pub autosave_interval: AutosaveInterval,
+    pub autosave_keep: usize,
+    pub screenshot_scale: usize,
+    pub recording_scale: usize,
     pub randomized_ram: bool,
     pub dev_mode: bool,
     pub focus_mode: bool,
@@ -104,11 +154,14 @@ impl Default for Settings {
             ui_scale: Self::DEFAULT_UI_SCALE,
             ui_theme: UiTheme::default(),
             layout: LayoutMode::default(),
+            console: ConsoleChoice::default(),
 
             dmg_theme: DmgTheme::default(),
             custom_palette: None,
+            gbc_palette: None,
             palettes: PaletteLibrary::default(),
             game_palettes: BTreeMap::new(),
+            color_correction: ColorCorrection::Screen,
             scaling: ScalingMode::default(),
             matrix: false,
             ghosting: false,
@@ -118,7 +171,7 @@ impl Default for Settings {
 
             volume: Self::DEFAULT_VOLUME,
             muted: false,
-            audio_latency_ms: DEFAULT_LATENCY_MS,
+            audio_queue_ms: DEFAULT_LATENCY_MS,
             audio_device: None,
             channels: [true; 4],
 
@@ -128,6 +181,10 @@ impl Default for Settings {
 
             current_tab: SettingsTab::default(),
             quick_slot: 0,
+            autosave_interval: AutosaveInterval::default(),
+            autosave_keep: autosave::DEFAULT_KEEP,
+            screenshot_scale: recording::DEFAULT_SCALE,
+            recording_scale: recording::DEFAULT_SCALE,
             randomized_ram: false,
             dev_mode: false,
             focus_mode: false,
@@ -137,6 +194,12 @@ impl Default for Settings {
             scale_drag: false,
         }
     }
+}
+
+pub fn rom_header(gb: &GameBoy) -> Vec<u8> {
+    (0..0x150)
+        .map(|addr| gb.cartridge.read_naive(addr))
+        .collect()
 }
 
 fn default_dirty() -> bool {
@@ -161,6 +224,35 @@ impl Settings {
             .unwrap_or(self.dmg_theme)
     }
 
+    pub fn global_choice(&self) -> PaletteChoice {
+        if let Some(palette) = self.gbc_palette {
+            return PaletteChoice::Gbc(palette);
+        }
+        match &self.custom_palette {
+            Some(name) => PaletteChoice::Custom(name.clone()),
+            None => PaletteChoice::Builtin(self.dmg_theme),
+        }
+    }
+
+    pub fn set_global_choice(&mut self, choice: PaletteChoice) {
+        self.gbc_palette = None;
+        match choice {
+            PaletteChoice::Builtin(theme) => {
+                self.dmg_theme = theme;
+                self.custom_palette = None;
+            }
+            PaletteChoice::Custom(name) => self.custom_palette = Some(name),
+            PaletteChoice::Gbc(palette) => self.gbc_palette = Some(palette),
+        }
+        self.dirty = true;
+    }
+
+    pub fn choice_for(&self, rom_key: Option<&str>) -> PaletteChoice {
+        self.game_palette(rom_key)
+            .cloned()
+            .unwrap_or_else(|| self.global_choice())
+    }
+
     pub fn theme_for(&self, rom_key: Option<&str>) -> DmgTheme {
         let Some(choice) = self.game_palette(rom_key) else {
             return self.effective_theme();
@@ -172,6 +264,18 @@ impl Settings {
                 .get(name)
                 .map(|palette| palette.to_theme())
                 .unwrap_or_else(|| self.effective_theme()),
+            PaletteChoice::Gbc(_) => self.effective_theme(),
+        }
+    }
+
+    fn apply_colors(&self, gb: &mut GameBoy, rom_key: Option<&str>) {
+        gb.ppu.color_correction = self.color_correction;
+        match self.choice_for(rom_key) {
+            PaletteChoice::Gbc(palette) => gb.ppu.set_compat_palette(palette, &rom_header(gb)),
+            _ => {
+                gb.ppu.dmg_theme = self.theme_for(rom_key);
+                gb.ppu.dmg_colors = DmgColors::Theme;
+            }
         }
     }
 
@@ -211,6 +315,7 @@ impl Settings {
     }
 
     pub fn sanitize(&mut self) {
+        self.hotkeys.bind_new_defaults();
         if self
             .custom_palette
             .as_deref()
@@ -223,9 +328,12 @@ impl Settings {
         }
         self.ui_scale = self.ui_scale.clamp(0.5, 5.0);
         self.volume = self.volume.clamp(0.0, 1.0);
-        self.audio_latency_ms = self
-            .audio_latency_ms
+        self.audio_queue_ms = self
+            .audio_queue_ms
             .clamp(crate::audio::MIN_LATENCY_MS, crate::audio::MAX_LATENCY_MS);
+        self.autosave_keep = self.autosave_keep.clamp(1, autosave::MAX_KEEP);
+        self.screenshot_scale = self.screenshot_scale.clamp(1, recording::MAX_SCALE);
+        self.recording_scale = recording::even_scale(self.recording_scale);
         self.dirty = true;
     }
 
@@ -280,7 +388,8 @@ impl Settings {
 
         self.ui_theme.apply(ctx);
 
-        emulator.gb.ppu.dmg_theme = self.theme_for(emulator.rom_key());
+        let rom_key = emulator.rom_key().map(str::to_owned);
+        self.apply_colors(&mut emulator.gb, rom_key.as_deref());
         emulator.gb.ram_init = if self.randomized_ram {
             citrine_gb::gb::ram_init::RamInit::random()
         } else {
@@ -291,6 +400,9 @@ impl Settings {
         emulator.matrix_edge_brightness = 1.0 - self.matrix_edge_darkness;
         emulator.matrix_corner_brightness = 1.0 - self.matrix_corner_darkness;
         emulator.ghosting_blend = 1.0 - self.ghosting_strength;
+        emulator.console = self.console;
+        emulator.autosave_interval = self.autosave_interval;
+        emulator.autosave_keep = self.autosave_keep;
 
         emulator.gb.debugger.ch1_disabled = !self.channels[0];
         emulator.gb.debugger.ch2_disabled = !self.channels[1];
@@ -302,11 +414,11 @@ impl Settings {
         audio.set_muted(self.muted);
 
         let reopen = audio.is_running()
-            && (audio.latency_ms() != self.audio_latency_ms
+            && (audio.latency_ms() != self.audio_queue_ms
                 || audio.requested_device() != self.audio_device.as_deref());
 
         if reopen {
-            match audio.start(self.audio_device.as_deref(), self.audio_latency_ms) {
+            match audio.start(self.audio_device.as_deref(), self.audio_queue_ms) {
                 Ok(link) => emulator.attach_audio(link),
                 Err(err) => return Some(format!("Could not reopen the audio device: {err}")),
             }
@@ -334,7 +446,7 @@ impl SettingsTab {
             Self::General => "General",
             Self::Sound => "Sound",
             Self::Controls => "Controls",
-            Self::Style => "GB Style",
+            Self::Style => "GB style",
             Self::Developer => "Developer",
         }
     }
@@ -411,15 +523,20 @@ mod tests {
         let mut settings = Settings {
             ui_scale: 99.0,
             volume: -3.0,
-            audio_latency_ms: 5000,
+            audio_queue_ms: 5000,
+            autosave_keep: 0,
             ..Default::default()
         };
 
         settings.sanitize();
+        assert_eq!(settings.autosave_keep, 1);
+        settings.autosave_keep = 900;
+        settings.sanitize();
+        assert_eq!(settings.autosave_keep, autosave::MAX_KEEP);
 
         assert_eq!(settings.ui_scale, 5.0);
         assert_eq!(settings.volume, 0.0);
-        assert_eq!(settings.audio_latency_ms, crate::audio::MAX_LATENCY_MS);
+        assert_eq!(settings.audio_queue_ms, crate::audio::MAX_LATENCY_MS);
     }
 
     #[test]
@@ -498,9 +615,31 @@ mod tests {
         assert_eq!(settings.dmg_theme, DmgTheme::Pocket);
         assert_eq!(settings.quick_slot, 3);
         assert!(settings.dev_mode);
-        assert_eq!(settings.audio_latency_ms, DEFAULT_LATENCY_MS);
+        assert_eq!(settings.audio_queue_ms, DEFAULT_LATENCY_MS);
         assert_eq!(settings.channels, [true; 4]);
         assert_eq!(settings.layout, LayoutMode::Auto);
         assert!(settings.bindings.is_default());
+        assert_eq!(settings.autosave_interval, AutosaveInterval::FiveMinutes);
+        assert_eq!(settings.autosave_keep, autosave::DEFAULT_KEEP);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn autosave_choices_persist() {
+        let root =
+            std::env::temp_dir().join(format!("citrine-autosave-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = crate::storage::SettingsStore::at(root.clone());
+        let settings = Settings {
+            autosave_interval: AutosaveInterval::FifteenMinutes,
+            autosave_keep: 25,
+            ..Default::default()
+        };
+        store.store(&settings).expect("store");
+
+        let back: Settings = store.load().expect("load");
+        assert_eq!(back.autosave_interval, AutosaveInterval::FifteenMinutes);
+        assert_eq!(back.autosave_keep, 25);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

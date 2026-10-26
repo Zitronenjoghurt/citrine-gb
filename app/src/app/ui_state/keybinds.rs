@@ -114,10 +114,10 @@ impl PadButton {
             Self::Mode => "Home",
             Self::LeftThumb => "L3",
             Self::RightThumb => "R3",
-            Self::DPadUp => "Pad Up",
-            Self::DPadDown => "Pad Down",
-            Self::DPadLeft => "Pad Left",
-            Self::DPadRight => "Pad Right",
+            Self::DPadUp => "Pad up",
+            Self::DPadDown => "Pad down",
+            Self::DPadLeft => "Pad left",
+            Self::DPadRight => "Pad right",
         }
     }
 }
@@ -136,12 +136,12 @@ impl Display for PadButton {
             Self::Select => "Select",
             Self::Start => "Start",
             Self::Mode => "Mode / Home",
-            Self::LeftThumb => "Left Stick Press",
-            Self::RightThumb => "Right Stick Press",
-            Self::DPadUp => "D-Pad Up",
-            Self::DPadDown => "D-Pad Down",
-            Self::DPadLeft => "D-Pad Left",
-            Self::DPadRight => "D-Pad Right",
+            Self::LeftThumb => "Left stick press",
+            Self::RightThumb => "Right stick press",
+            Self::DPadUp => "D-pad up",
+            Self::DPadDown => "D-pad down",
+            Self::DPadLeft => "D-pad left",
+            Self::DPadRight => "D-pad right",
         };
         f.write_str(name)
     }

@@ -41,8 +41,10 @@ impl FrameMetric for ExactPixelRatio {
         }
         let matching = reference
             .rgba
-            .chunks_exact(4)
-            .zip(candidate.rgba.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(candidate.rgba.as_chunks::<4>().0)
             .filter(|(a, b)| a == b)
             .count();
         matching as f64 / total as f64

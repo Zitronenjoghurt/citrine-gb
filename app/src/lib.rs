@@ -1,7 +1,9 @@
 mod app;
 mod audio;
+mod autosave;
 mod emulator;
 mod homebrew;
+mod media;
 mod recorder;
 mod storage;
 mod utils;

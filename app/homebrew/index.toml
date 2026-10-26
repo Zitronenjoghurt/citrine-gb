@@ -52,3 +52,66 @@ links = [
     { url = "https://github.com/SimonLarsen/tobutobugirl", kind = "github" }
 ]
 tags = ["Platformer"]
+[tobu_deluxe]
+title = "Tobu Tobu Girl Deluxe"
+author = "Tangram Games"
+description = "Tobu Tobu Girl in full colour for the Game Boy Color, with Super Game Boy support. Dash and flap up through the sky after your runaway cat, bouncing off enemies to refill your energy."
+license = "MIT License (code), Creative Commons Attribution v4.0 International (assets)"
+links = [
+    { url = "https://tangramgames.itch.io/tobu-tobu-girl-deluxe", kind = "itch" },
+    { url = "https://github.com/SimonLarsen/tobutobugirl-dx", kind = "github" }
+]
+tags = ["Platformer"]
+
+[ucity]
+title = "µCity"
+author = "Antonio Niño Díaz"
+description = "An open-source city builder for the Game Boy Color. Zone land, lay roads and power lines, set taxes and save up to 16 cities."
+license = "GPLv3+ (code), CC BY-SA 4.0 (graphics and music)"
+links = [
+    { url = "https://github.com/AntonioND/ucity", kind = "github" }
+]
+tags = ["Simulation"]
+
+[libbet]
+title = "Libbet and the Magic Floor"
+author = "Damian Yerrick"
+description = "Libbet, a boulder girl, rolls across a patterned floor in her basement, leaving tracks as she moves from shade to shade. Cover enough of the floor, then reach the exit, in this port of Martin Korth's Magic Floor."
+license = "zlib License"
+links = [
+    { url = "https://github.com/pinobatch/libbet", kind = "github" }
+]
+tags = ["Puzzle"]
+
+[dawn_will_come]
+title = "Dawn Will Come"
+author = "eishiya, H0lyhandgrenade and Kezia Salmon"
+description = "Keep your survivors alive in endless darkness by setting each one to rest, guard or search every day until dawn comes. Contains death, gore and flashing lights."
+license = "MIT License (code), CC BY 4.0 (artwork and music)"
+links = [
+    { url = "https://eishiya.itch.io/dawn-will-come", kind = "itch" },
+    { url = "https://github.com/eishiya/DawnWillCome", kind = "github" }
+]
+tags = ["Adventure"]
+
+[petris]
+title = "Petris"
+author = "bbbbbr"
+description = "A falling-piece puzzle game of shapely pets. Build pets of different lengths from the pieces across five play types and five difficulties, from Easy to Beast."
+license = "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License"
+links = [
+    { url = "https://bbbbbr.itch.io/petris", kind = "itch" },
+    { url = "https://github.com/bbbbbr/Petris", kind = "github" }
+]
+tags = ["Puzzle"]
+
+[postie]
+title = "Postie"
+author = "invertedHat"
+description = "A Celeste-inspired platformer made in seven days. Wall-jump and throw your ball up the tallest tower at the Castle of Ribe to become postie of the year."
+license = "MIT License (code), Creative Commons Attribution v4.0 International (assets)"
+links = [
+    { url = "https://invertedhat.itch.io/postie", kind = "itch" },
+    { url = "https://github.com/inverted-hat/postie", kind = "github" }
+]
+tags = ["Platformer"]

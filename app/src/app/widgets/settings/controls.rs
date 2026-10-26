@@ -6,6 +6,7 @@ use crate::app::ui_state::settings::{ScalingMode, Settings};
 use crate::app::ui_state::touch::{LandscapeControls, TouchSettings};
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::reset_slider::ResetSlider;
+use crate::app::widgets::settings::form::Form;
 use crate::icons;
 use egui::{Response, RichText, Ui, Widget};
 use strum::IntoEnumIterator;
@@ -99,7 +100,7 @@ fn capture_banner(ui: &mut Ui, capture: &mut BindingCapture) {
                 ui.strong("Press a key or button…");
                 ui.label(RichText::new("Esc to cancel").weak().small());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Cancel").clicked() {
+                    if crate::app::mobile::compact_button(ui, "Cancel").clicked() {
                         capture.cancel();
                     }
                 });
@@ -112,7 +113,7 @@ fn capture_banner(ui: &mut Ui, capture: &mut BindingCapture) {
     ui.add_space(8.0);
 }
 
-fn section(ui: &mut Ui, icon: &str, title: &str, body: impl FnOnce(&mut Ui)) {
+pub(super) fn section(ui: &mut Ui, icon: &str, title: &str, body: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new(icon).size(15.0));
@@ -329,71 +330,70 @@ fn touch_grid(ui: &mut Ui, settings: &mut Settings) -> Response {
     let mut dirty = false;
     let mut ui_scale_response = None;
 
-    let response = egui::Grid::new("touch_settings_grid")
-        .num_columns(2)
-        .spacing([16.0, 8.0])
-        .min_col_width(140.0)
-        .show(ui, |ui| {
-            ui.label("Show buttons");
-            dirty |= ui.checkbox(&mut s.show_controls, "").changed();
-            ui.end_row();
+    let response = ui
+        .scope(|ui| {
+            Form::show(ui, "controls", |form| {
+                form.row("Show buttons", |ui| {
+                    dirty |= ui.checkbox(&mut s.show_controls, "").changed();
+                });
 
-            ui.label("Button size");
-            dirty |= ResetSlider::new(
-                &mut s.scale,
-                TouchSettings::MIN_SCALE..=TouchSettings::MAX_SCALE,
-            )
-            .step_by(0.05)
-            .default_value(1.0)
-            .ui(ui)
-            .changed();
-            ui.end_row();
+                form.row("Button size", |ui| {
+                    dirty |= ResetSlider::new(
+                        &mut s.scale,
+                        TouchSettings::MIN_SCALE..=TouchSettings::MAX_SCALE,
+                    )
+                    .step_by(0.05)
+                    .default_value(1.0)
+                    .ui(ui)
+                    .changed();
+                });
 
-            ui.label("Opacity");
-            dirty |= ResetSlider::new(&mut s.opacity, TouchSettings::MIN_OPACITY..=1.0)
-                .step_by(0.05)
-                .default_value(TouchSettings::DEFAULT_OPACITY)
-                .ui(ui)
-                .changed();
-            ui.end_row();
+                form.row("Opacity", |ui| {
+                    dirty |= ResetSlider::new(&mut s.opacity, TouchSettings::MIN_OPACITY..=1.0)
+                        .step_by(0.05)
+                        .default_value(TouchSettings::DEFAULT_OPACITY)
+                        .ui(ui)
+                        .changed();
+                });
 
-            ui.label("UI size");
-            ui_scale_response = Some(
-                ResetSlider::new(
-                    &mut s.ui_scale,
-                    TouchSettings::MIN_UI_SCALE..=TouchSettings::MAX_UI_SCALE,
-                )
-                .step_by(0.05)
-                .default_value(1.0)
-                .ui(ui),
-            );
-            ui.end_row();
+                form.row("UI size", |ui| {
+                    ui_scale_response = Some(
+                        ResetSlider::new(
+                            &mut s.ui_scale,
+                            TouchSettings::MIN_UI_SCALE..=TouchSettings::MAX_UI_SCALE,
+                        )
+                        .step_by(0.05)
+                        .default_value(1.0)
+                        .ui(ui),
+                    );
+                });
 
-            ui.label("Screen scaling");
-            dirty |= GenericSelect::from_enum(&mut s.scaling, "touch_scaling_select")
-                .default_value(ScalingMode::Fit)
-                .ui(ui)
-                .on_hover_text("Separate from the desktop setting")
-                .changed();
-            ui.end_row();
+                form.row("Screen scaling", |ui| {
+                    dirty |= GenericSelect::from_enum(&mut s.scaling, "touch_scaling_select")
+                        .default_value(ScalingMode::Fit)
+                        .ui(ui)
+                        .on_hover_text("Separate from the desktop setting")
+                        .changed();
+                });
 
-            ui.label("In landscape");
-            dirty |= GenericSelect::from_enum(&mut s.landscape, "touch_landscape_select")
-                .default_value(LandscapeControls::default())
-                .ui(ui)
-                .changed();
-            ui.end_row();
+                form.row("In landscape", |ui| {
+                    dirty |= GenericSelect::from_enum(&mut s.landscape, "touch_landscape_select")
+                        .default_value(LandscapeControls::default())
+                        .ui(ui)
+                        .changed();
+                });
 
-            ui.label("Left-handed");
-            dirty |= ui
-                .checkbox(&mut s.mirrored, "")
-                .on_hover_text("Put the d-pad on the right")
-                .changed();
-            ui.end_row();
+                form.row("Left-handed", |ui| {
+                    dirty |= ui
+                        .checkbox(&mut s.mirrored, "")
+                        .on_hover_text("Put the d-pad on the right")
+                        .changed();
+                });
 
-            ui.label("Vibrate on press");
-            dirty |= ui.checkbox(&mut s.haptics, "").changed();
-            ui.end_row();
+                form.row("Vibrate on press", |ui| {
+                    dirty |= ui.checkbox(&mut s.haptics, "").changed();
+                });
+            })
         })
         .response;
 

@@ -7,6 +7,10 @@ pub struct DmaController {
     pub source: u8,
     pub progress: u8,
     pub model: GbModel,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub delay: u8,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub bus_value: u8,
 }
 
 impl DmaController {
@@ -16,24 +20,36 @@ impl DmaController {
             source: if model == GbModel::Cgb { 0x00 } else { 0xFF },
             progress: 0,
             model,
+            delay: 0,
+            bus_value: 0xFF,
         }
     }
 
     pub fn start(&mut self, source: u8) {
-        self.active = true;
+        self.active = self.active && self.progress < 160;
+        self.delay = 2;
         self.source = source;
         self.progress = 0;
     }
 
     /// Returns a byte copy source and target address if a DMA transfer is ongoing, otherwise None.
     pub fn cycle(&mut self) -> Option<(u16, u16)> {
-        if self.progress >= 160 {
-            self.active = false;
+        if self.delay > 0 {
+            self.delay -= 1;
+            if self.delay > 0 {
+                return None;
+            }
+            self.active = true;
         }
 
         if !self.active {
             return None;
         };
+
+        if self.progress >= 160 {
+            self.active = false;
+            return None;
+        }
 
         let source = (self.source as u16) << 8 | self.progress as u16;
         let target = 0xFE00 | self.progress as u16;
@@ -43,35 +59,44 @@ impl DmaController {
         Some((source, target))
     }
 
+    pub fn source_address(&self, source: u16) -> u16 {
+        if source >= 0xE000 && self.model.is_dmg() {
+            source & !0x2000
+        } else {
+            source
+        }
+    }
+
     pub fn cpu_conflicts(&self, addr: u16) -> bool {
-        if !self.active {
+        if !self.active || addr >= 0xFF00 {
             return false;
         }
 
-        // HRAM
-        if (0xFF80..=0xFFFE).contains(&addr) {
-            return false;
-        };
-
-        // OAM
-        if (0xFE00..=0xFE9F).contains(&addr) {
+        if addr >= 0xFE00 {
             return true;
-        };
+        }
+
+        if self.delay > 0 {
+            return false;
+        }
+
+        let src = self.source;
+        let source_on_vram = (0x80..=0x9F).contains(&src);
+        let addr_on_vram = (0x8000..=0x9FFF).contains(&addr);
 
         if self.model.is_dmg() {
-            return true;
+            return source_on_vram == addr_on_vram;
         };
 
-        // CGB: only the bus that DMA is reading from is blocked
-        // ToDo: check if this is correctly conflicting on CGB
-        let src = self.source;
         let source_on_cartridge = src <= 0x7F || (0xA0..=0xBF).contains(&src);
         let source_on_wram = (0xC0..=0xDF).contains(&src);
 
         let addr_on_cartridge = addr <= 0x7FFF || (0xA000..=0xBFFF).contains(&addr);
         let addr_on_wram = (0xC000..=0xDFFF).contains(&addr);
 
-        (source_on_cartridge && addr_on_cartridge) || (source_on_wram && addr_on_wram)
+        (source_on_vram && addr_on_vram)
+            || (source_on_cartridge && addr_on_cartridge)
+            || (source_on_wram && addr_on_wram)
     }
 
     pub fn soft_reset(&mut self) {

@@ -41,6 +41,24 @@ impl FileLoader {
             }
         });
     }
+
+    pub fn dispatch_many(self, tx: Sender<Vec<PickedFile>>) {
+        crate::utils::spawn(async move {
+            let Some(handles) = self.dialog.pick_files().await else {
+                return;
+            };
+            let mut files = Vec::with_capacity(handles.len());
+            for handle in handles {
+                files.push(PickedFile {
+                    name: handle.file_name(),
+                    data: handle.read().await,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    path: Some(handle.path().to_path_buf()),
+                });
+            }
+            let _ = tx.send(files);
+        });
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

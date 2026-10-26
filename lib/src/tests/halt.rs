@@ -62,7 +62,6 @@ fn halt_bug_executes_following_opcode_twice() {
     let cpu = run(true);
     assert_eq!(cpu.a, 0x02, "INC A after HALT should execute twice");
     assert!(!cpu.halted);
-    assert!(!cpu.halt_bug);
 }
 
 #[test]

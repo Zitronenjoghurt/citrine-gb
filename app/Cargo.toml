@@ -7,6 +7,9 @@ homepage.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+openh264-source = ["openh264/source"]
+
 [package.metadata.docs.rs]
 all-features = true
 targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
@@ -21,10 +24,10 @@ eframe = { version = "0.33.0", default-features = false, features = ["persistenc
 egui = "0.33.0"
 egui_commonmark = "0.22.0"
 egui_dock = { version = "0.18.0", features = ["serde"] }
-egui-notify = "0.21.0"
 egui-phosphor = { version = "0.11.0", features = ["regular"] }
 egui_plot = "0.34.1"
 gilrs = "0.11.1"
+jiff = "0.2.20"
 log = "0.4.29"
 png = "0.18.1"
 pollster = "0.4.0"
@@ -37,29 +40,65 @@ strum_macros = "0.28.0"
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bzip2 = "0.6"
 directories = "6.0"
 eframe = { version = "0.33.0", default-features = false, features = ["persistence", "wayland", "wgpu", "x11"] }
 image = "0.25.9"
+openh264 = { version = "0.9.9", default-features = false, features = ["libloading"] }
+rusty_aac = "2.0.1"
+sha2 = "0.10.8"
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 base64 = "0.22.1"
 cpal = { version = "0.17.3", features = ["wasm-bindgen"] }
 eframe = { version = "0.33.0", default-features = false, features = ["glow", "persistence"] }
+jiff = { version = "0.2.20", features = ["js"] }
 poll-promise = { version = "0.3.0", features = ["web"] }
 wasm-bindgen-futures = "0.4.50"
 js-sys = "0.3.70"
+wasm-bindgen = "0.2.100"
 web-sys = { version = "0.3.70", features = [
     "AudioContext",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioBuffer",
+    "AudioParam",
+    "AudioProcessingEvent",
+    "AudioWorklet",
+    "AudioWorkletNode",
+    "AudioWorkletNodeOptions",
+    "BaseAudioContext",
     "Blob",
+    "BlobPropertyBag",
     "Document",
+    "DomException",
+    "DomStringList",
     "Element",
+    "GainNode",
+    "History",
     "HtmlAnchorElement",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbObjectStore",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "MessageEvent",
+    "MessagePort",
     "Navigator",
+    "ScriptProcessorNode",
     "Storage",
     "Url",
     "Window",
+    "Worklet",
 ] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mp4 = "0.14.0"
+openh264 = { version = "0.9.9", features = ["source"] }
 
 [build-dependencies]
 brotli = "8.0.2"

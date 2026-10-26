@@ -5,6 +5,7 @@ use citrine_lab::metric::FrameMetric;
 use citrine_lab::metrics::{ExactFrame, ExactPixelRatio, Mse, Nmse, Psnr, Ssim};
 use citrine_lab::recording::Recording;
 use citrine_lab::runner::replay;
+use std::io::Write;
 use std::path::PathBuf;
 
 fn solid(width: usize, height: usize, rgb: [u8; 3]) -> Frame {
@@ -64,8 +65,16 @@ fn roms_dir() -> PathBuf {
 
 #[test]
 fn replay_produces_requested_frame_count_on_both_emulators() {
-    let rom = std::fs::read(roms_dir().join("test/dmg-acid2.gb")).expect("test ROM present");
-    let boot = std::fs::read(roms_dir().join("boot/dmg_boot.bin")).expect("boot ROM present");
+    let (Ok(rom), Ok(boot)) = (
+        std::fs::read(roms_dir().join("test/dmg-acid2.gb")),
+        std::fs::read(roms_dir().join("boot/dmg_boot.bin")),
+    ) else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "\nskipped replay_produces_requested_frame_count_on_both_emulators: it needs roms/test/dmg-acid2.gb and your own DMG boot ROM at roms/boot/dmg_boot.bin"
+        );
+        return;
+    };
     let recording = Recording::new("", GbModel::Dmg);
     let frames = 30;
 

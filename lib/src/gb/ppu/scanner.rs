@@ -1,70 +1,80 @@
 use crate::gb::ppu::Ppu;
-use crate::gb::ppu::types::sprite::Sprite;
+
+#[derive(Debug, Default, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ScannedObject {
+    pub x: u8,
+    pub y: u8,
+    pub oam_index: u8,
+}
 
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct OamScanner {
-    // Takes 2 dots to scan 1 entry in oam => 80 dots total
-    dot_progress: u8,
-    // Always equal or less than 10 entries
-    buffer: Vec<Sprite>,
+    buffer: [ScannedObject; 10],
+    len: u8,
+    next: u8,
 }
 
 impl OamScanner {
     pub fn reset(&mut self) {
-        self.dot_progress = 0;
-        self.buffer.clear();
+        self.len = 0;
+        self.next = 0;
     }
 
-    pub fn pop_sprite_for_x(&mut self, x: u8) -> Option<Sprite> {
-        let index = self
-            .buffer
+    pub fn peek(&self) -> Option<&ScannedObject> {
+        if self.next < self.len {
+            Some(&self.buffer[self.next as usize])
+        } else {
+            None
+        }
+    }
+
+    pub fn advance(&mut self) {
+        self.next += 1;
+    }
+
+    pub fn retreat(&mut self) {
+        self.next = self.next.saturating_sub(1);
+    }
+
+    fn insert(&mut self, object: ScannedObject) {
+        let len = self.len as usize;
+        let at = self.buffer[..len]
             .iter()
-            // ToDo: Check trigger
-            .position(|sprite| x == sprite.x.saturating_sub(8))?;
-        Some(self.buffer.remove(index))
+            .position(|o| o.x > object.x)
+            .unwrap_or(len);
+        self.buffer.copy_within(at..len, at + 1);
+        self.buffer[at] = object;
+        self.len += 1;
     }
 }
 
 impl Ppu {
-    // ToDo: Handle sprite y_flip?
-    // ToDo: candidate for off-by-one errors
-    /// Returns true when done
-    pub fn dot_oam_scan(&mut self) -> bool {
-        if self.scanner.dot_progress >= 80 {
-            self.scanner.reset();
-        };
-
-        self.scanner.dot_progress += 1;
-
-        // Don't fetch sprite on odd dot
-        if (self.scanner.dot_progress & 1) != 0 {
-            return false;
-        };
-
-        // Don't ever fetch more than 10 sprites
-        if self.scanner.buffer.len() >= 10 {
-            return self.scanner.dot_progress >= 80;
+    pub fn scan_oam_entry(&mut self, index: u8) {
+        if self.scanner.len >= 10 {
+            return;
         }
-
-        let index = (self.scanner.dot_progress - 1) / 2;
-        let sprite = self.fetch_sprite(index);
-
-        if sprite.x > 0
-            && self.ly + 16 >= sprite.y
-            && self.ly + 16 < sprite.y + self.lcdc.sprite_height()
-        {
-            self.scanner.buffer.push(sprite);
+        let i = index as usize * 4;
+        let y = self.oam[i];
+        let x = self.oam[i + 1];
+        let top = y as i16 - 16;
+        let line = self.line as i16;
+        if top <= line && line < top + self.lcdc.sprite_height() as i16 {
+            self.scanner.insert(ScannedObject {
+                x,
+                y,
+                oam_index: index,
+            });
         }
-
-        self.scanner.dot_progress == 80
     }
 
-    fn fetch_sprite(&self, index: u8) -> Sprite {
-        let i = (index % 40) as usize * 4;
-        let bytes: [u8; 4] = self.oam[i..i + 4].try_into().unwrap();
-        let mut sprite: Sprite = bytes.into();
-        sprite.oam_index = index;
-        sprite
+    pub fn object_at_x0_pending(&self) -> bool {
+        self.objects_fetchable() && self.scanner.peek().is_some_and(|o| o.x == 0)
+    }
+
+    pub fn objects_fetchable(&self) -> bool {
+        self.lcdc.obj_enable || self.model.is_cgb()
     }
 }

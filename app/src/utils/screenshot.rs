@@ -14,20 +14,6 @@ pub fn encode_png(width: usize, height: usize, rgba: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-pub fn file_name(title: &str) -> String {
-    let title = title.trim();
-    let stem = if title.is_empty() { "citrine" } else { title };
-    let stem: String = stem
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let stamp = web_time::SystemTime::now()
-        .duration_since(web_time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{}-{stamp}.png", stem.trim_matches('-'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,19 +28,5 @@ mod tests {
     fn a_mismatched_buffer_is_refused() {
         assert!(encode_png(4, 4, &[0u8; 16]).is_none());
         assert!(encode_png(0, 0, &[]).is_none());
-    }
-
-    #[test]
-    fn file_names_are_safe_and_stay_recognisable() {
-        let name = file_name("POKEMON RED/BLUE");
-        assert!(name.starts_with("POKEMON-RED-BLUE-"), "got {name}");
-        assert!(name.ends_with(".png"));
-        assert!(!name.contains('/'));
-    }
-
-    #[test]
-    fn an_untitled_rom_still_gets_a_name() {
-        let name = file_name("   ");
-        assert!(name.starts_with("citrine-"), "got {name}");
     }
 }

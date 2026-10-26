@@ -4,7 +4,7 @@ use crate::gb::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 const FB_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
 const FB_SIZE: usize = FB_PIXELS * 4;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Framebuffer(Box<[u8; FB_SIZE]>);
 
 impl Default for Framebuffer {
@@ -67,8 +67,20 @@ impl Framebuffer {
         self.set(y * 160 + x, color);
     }
 
+    pub fn get_xy(&self, x: usize, y: usize) -> RGBA {
+        let i = (y * 160 + x) * 4;
+        RGBA::new(self.0[i], self.0[i + 1], self.0[i + 2], self.0[i + 3])
+    }
+
     pub fn clear(&mut self) {
         self.0.fill(0);
+    }
+
+    pub fn fill(&mut self, color: RGBA) {
+        self.0
+            .as_chunks_mut::<4>()
+            .0
+            .fill([color.r(), color.g(), color.b(), color.a()]);
     }
 
     pub fn as_slice(&self) -> &[u8] {

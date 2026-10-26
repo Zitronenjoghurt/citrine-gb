@@ -1,72 +1,178 @@
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct FrequencySweep {
-    pub timer: u8,
-    pub enabled: bool,
+    pub countdown: u8,
+    pub calculate_countdown: u8,
+    pub reload_timer: u8,
+    pub instant_calculation_done: bool,
+    pub unshifted: bool,
     pub shadow_period: u16,
+    pub addend: u16,
+    pub completed_addend: u16,
+    pub restart_hold: u8,
 }
 
 impl FrequencySweep {
-    /// Called when the channel is triggered via NR14
-    /// Returns true if the channel should be immediately disabled due to overflow.
-    pub fn trigger(&mut self, current_period: u16, pace: u8, shift: u8, decrease: bool) -> bool {
-        self.shadow_period = current_period;
-        self.timer = if pace == 0 { 8 } else { pace };
-        self.enabled = pace > 0 || shift > 0;
+    pub fn trigger(&mut self, period: u16, nr10: u8, was_enabled: bool, lf_div: u16, cgb: bool) {
+        let shift = nr10 & 0b111;
+        self.instant_calculation_done = false;
+        self.shadow_period = 0;
+        self.completed_addend = 0;
+        if shift != 0 {
+            self.calculate_countdown = shift;
+            self.reload_timer = if !cgb && lf_div == 0 { 3 } else { 2 };
+            self.unshifted = false;
+            if !was_enabled {
+                self.reload_timer += 1;
+            }
+            self.addend = period >> shift;
+        } else {
+            self.addend = 0;
+        }
+        self.restart_hold = (2 - lf_div as u8) + if cgb { 2 } else { 0 };
+        self.countdown = ((nr10 >> 4) & 0b111) ^ 0b111;
+    }
 
-        if shift > 0 {
-            let (_, overflow) = self.calculate(self.shadow_period, shift, decrease);
-            if overflow {
-                return true;
+    pub fn busy(&self) -> bool {
+        self.calculate_countdown != 0
+            || self.reload_timer != 0
+            || self.restart_hold != 0
+            || self.instant_calculation_done
+    }
+
+    pub fn div_event(&mut self, period: &mut u16, nr10: u8, lf_div: u16) {
+        self.countdown = (self.countdown + 1) & 0b111;
+        self.start_calculation(period, nr10, lf_div);
+    }
+
+    pub fn start_calculation(&mut self, period: &mut u16, nr10: u8, lf_div: u16) {
+        if nr10 & 0x70 == 0 || self.countdown != 0b111 {
+            return;
+        }
+        let shift = nr10 & 0b111;
+        let negate = (nr10 >> 3) as u16 & 1;
+        if shift != 0 {
+            *period = (self.addend + self.shadow_period + negate) & 0x7FF;
+        }
+        if self.restart_hold == 0 {
+            self.addend = *period >> shift;
+        }
+        self.calculate_countdown = shift;
+        self.reload_timer = 1 + lf_div as u8;
+        self.unshifted = shift == 0;
+        self.countdown = ((nr10 >> 4) & 0b111) ^ 0b111;
+        if self.calculate_countdown == 0 {
+            self.instant_calculation_done = true;
+        }
+    }
+
+    pub fn tick(&mut self, period: u16, nr10: u8, lf_div: u16) -> bool {
+        let mut disable = false;
+        let mut sweep_cycles = (lf_div == 0) as u8;
+
+        if self.reload_timer > sweep_cycles {
+            self.reload_timer -= sweep_cycles;
+            sweep_cycles = 0;
+        } else {
+            if self.reload_timer != 0
+                && self.calculate_countdown == 0
+                && self.instant_calculation_done
+            {
+                disable |= self.calculation_done(period, nr10);
+            }
+            self.instant_calculation_done = false;
+            sweep_cycles -= self.reload_timer;
+            self.reload_timer = 0;
+        }
+
+        if self.calculate_countdown != 0 && (nr10 & 0b111 != 0 || self.unshifted) {
+            if self.calculate_countdown > sweep_cycles {
+                self.calculate_countdown -= sweep_cycles;
+            } else {
+                self.calculate_countdown = 0;
+                disable |= self.calculation_done(period, nr10);
             }
         }
 
-        false
+        self.restart_hold = self.restart_hold.saturating_sub(1);
+        disable
     }
 
-    pub fn clock(&mut self, pace: u8, shift: u8, decrease: bool) -> (bool, Option<u16>) {
-        let mut disable = false;
-        let mut new_period_out = None;
-
-        if self.timer > 0 {
-            self.timer -= 1;
+    fn calculation_done(&mut self, period: u16, nr10: u8) -> bool {
+        if self.restart_hold == 0 {
+            self.shadow_period = period;
         }
+        let negate = nr10 & 0b1000 != 0;
+        if negate {
+            self.addend ^= 0x7FF;
+        }
+        let disable = self.shadow_period + self.addend > 0x7FF && !negate;
+        self.completed_addend = self.addend;
+        disable
+    }
 
-        if self.timer == 0 {
-            self.timer = if pace == 0 { 8 } else { pace };
+    pub fn write_nr10(
+        &mut self,
+        period: u16,
+        old: u8,
+        value: u8,
+        lf_div: u16,
+        cgb: bool,
+        double_speed: bool,
+    ) -> bool {
+        let mut disable = false;
+        if self.calculate_countdown != 0 || self.reload_timer != 0 {
+            disable |= self.write_glitch(period, old, value, lf_div, cgb, double_speed);
+        }
+        let old_negate = if cgb { (old >> 3) as u16 & 1 } else { 1 };
+        if self.shadow_period + self.completed_addend + old_negate > 0x7FF && value & 0b1000 == 0 {
+            disable = true;
+        }
+        disable
+    }
 
-            if self.enabled && pace > 0 {
-                let (new_period, overflow) = self.calculate(self.shadow_period, shift, decrease);
-
-                if overflow {
-                    disable = true;
-                } else if shift > 0 {
-                    self.shadow_period = new_period;
-                    new_period_out = Some(new_period);
-
-                    // Hardware quirk: do a second calculation & overflow check BUT but do NOT save the new frequency
-                    let (_, overflow2) = self.calculate(self.shadow_period, shift, decrease);
-                    if overflow2 {
-                        disable = true;
-                    }
+    fn write_glitch(
+        &mut self,
+        period: u16,
+        old: u8,
+        value: u8,
+        lf_div: u16,
+        cgb: bool,
+        double_speed: bool,
+    ) -> bool {
+        if cgb {
+            if self.reload_timer == 2 {
+                self.calculate_countdown = value & 0b111;
+                if self.calculate_countdown == 0 {
+                    self.reload_timer = 0;
                 }
             }
+            if value & 0b111 != 0 && old & 0b111 == 0 && lf_div == 0 && self.calculate_countdown > 1
+            {
+                self.calculate_countdown -= 1;
+            }
+            return false;
         }
 
-        (disable, new_period_out)
-    }
-
-    fn calculate(&self, target_period: u16, shift: u8, decrease: bool) -> (u16, bool) {
-        let offset = target_period >> shift;
-
-        let new_period = if decrease {
-            target_period.saturating_sub(offset)
+        if (self.reload_timer == 1 && lf_div == 0)
+            || self.reload_timer > 1
+            || self.calculate_countdown == 0
+        {
+            return false;
+        }
+        let zombie_step = if old & 0b111 == 0 {
+            (lf_div == 1) != double_speed
         } else {
-            target_period + offset
+            double_speed && self.calculate_countdown == 1
         };
-
-        let overflow = new_period > 2047;
-
-        (new_period, overflow)
+        if zombie_step {
+            self.calculate_countdown -= 1;
+            if self.calculate_countdown <= 1 {
+                self.calculate_countdown = 0;
+                return self.calculation_done(period, old);
+            }
+        }
+        false
     }
 }

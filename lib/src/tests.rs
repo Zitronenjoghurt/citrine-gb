@@ -1,10 +1,17 @@
 use crate::gb::bus::CpuBusInterface;
 use crate::gb::ic::{ICInterface, Interrupt};
 use std::collections::HashMap;
+use std::io::Write;
 
+mod audio;
+mod boot_rom;
+mod cgb;
 mod cpu;
 mod e2e;
 mod halt;
+mod lcd_on;
+#[cfg(feature = "persistence")]
+mod rtc;
 #[cfg(feature = "persistence")]
 mod snapshot;
 
@@ -39,3 +46,7 @@ impl ICInterface for TestBus {
 
 #[cfg(feature = "debug")]
 impl crate::debug::DebuggerInterface for TestBus {}
+
+pub fn skip(test: &str, reason: &str) {
+    let _ = writeln!(std::io::stderr(), "\nskipped {test}: {reason}");
+}

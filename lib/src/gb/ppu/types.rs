@@ -1,3 +1,4 @@
+pub mod attributes;
 pub mod color;
 pub mod framebuffer;
 pub mod lcdc;

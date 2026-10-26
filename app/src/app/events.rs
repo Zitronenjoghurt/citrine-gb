@@ -1,9 +1,12 @@
 use crate::app::tabs::Tab;
+use crate::media::MediaId;
 
 pub enum AppEvent {
     LoadRomData { data: Vec<u8> },
     OpenTab { tab: Tab },
     Notify { message: String, error: bool },
+    MediaSaved { id: MediaId },
+    ShowMedia { id: MediaId },
 }
 
 #[derive(Default)]

@@ -8,6 +8,8 @@ use std::fmt::{Display, Formatter};
 
 mod mbc;
 
+pub use mbc::mbc3::{RTC_CYCLES_PER_SECOND, Rtc, RtcRegisters};
+
 pub const ROM_BANK_SIZE: usize = 0x4000; // 16KiB
 pub const RAM_BANK_SIZE: usize = 0x2000; // 8KiB
 
@@ -94,6 +96,8 @@ impl Cartridge {
             return Err(GbError::RomTooBig);
         }
 
+        self.mbc.set_multicart(is_mbc1_multicart(&self.rom));
+
         self.has_battery = header
             .cartridge_type
             .map(|ct| ct.has_battery())
@@ -108,47 +112,109 @@ impl Cartridge {
 
     pub fn soft_reset(&mut self) {
         self.mbc.soft_reset();
-        self.ram.iter_mut().for_each(|bank| bank.fill(0));
+        if !self.has_battery {
+            self.ram.iter_mut().for_each(|bank| bank.fill(0));
+        }
+    }
+
+    pub fn cycle(&mut self) {
+        self.mbc.cycle();
+    }
+
+    pub fn rtc(&self) -> Option<&Rtc> {
+        self.mbc.rtc()
+    }
+
+    pub fn rtc_mut(&mut self) -> Option<&mut Rtc> {
+        self.mbc.rtc_mut()
     }
 
     #[cfg(feature = "persistence")]
     pub fn poll_sram_dump(
         &mut self,
         force: bool,
+        now: u64,
     ) -> Option<crate::persistence::sram_dump::SramDump> {
         if !self.has_battery || (!self.sram_dirty && !force) {
             return None;
         };
 
         let dump = if let Some(data) = self.mbc.get_internal_data() {
-            Some(crate::persistence::sram_dump::SramDump::from_slice(data))
+            crate::persistence::sram_dump::SramDump::from_slice(data)
+        } else if let Some(footer) = self.rtc_footer(now) {
+            let mut data = self.battery_ram();
+            data.extend_from_slice(&footer.encode());
+            crate::persistence::sram_dump::SramDump::from_slice(&data)
         } else {
-            Some(crate::persistence::sram_dump::SramDump::from_banks(
-                self.ram.as_slice(),
-            ))
+            crate::persistence::sram_dump::SramDump::from_banks(self.ram.as_slice())
         };
 
-        self.sram_dirty = false;
+        if !force {
+            self.sram_dirty = false;
+        }
 
-        dump
+        Some(dump)
     }
 
     #[cfg(feature = "persistence")]
-    pub fn put_sram_dump(&mut self, dump: crate::persistence::sram_dump::SramDump) {
+    pub fn put_sram_dump(&mut self, dump: crate::persistence::sram_dump::SramDump, now: u64) {
         if !self.has_battery {
             return;
         };
 
-        let data = dump.as_slice();
+        let mut data = dump.as_slice();
 
         let internal = self.mbc.put_internal_data(data);
         if internal {
             return;
         };
 
+        let ram_len = self.header.ram_banks * RAM_BANK_SIZE;
+        if self.mbc.rtc().is_some() && data.len() > ram_len {
+            let (ram, footer) = data.split_at(ram_len);
+            if let Some(footer) = crate::persistence::rtc_footer::RtcFooter::decode(footer) {
+                self.put_rtc_footer(footer, now);
+            }
+            data = ram;
+        }
+
         for (bank, chunk) in self.ram.iter_mut().zip(data.chunks(RAM_BANK_SIZE)) {
             bank[..chunk.len()].copy_from_slice(chunk);
         }
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn battery_ram(&self) -> Vec<u8> {
+        let mut data = self.ram.concat();
+        data.truncate(self.header.ram_banks * RAM_BANK_SIZE);
+        data
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn rtc_footer(&self, now: u64) -> Option<crate::persistence::rtc_footer::RtcFooter> {
+        self.mbc
+            .rtc()
+            .map(|rtc| crate::persistence::rtc_footer::RtcFooter {
+                real: rtc.real,
+                latched: rtc.real,
+                timestamp: now,
+            })
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn put_rtc_footer(
+        &mut self,
+        footer: crate::persistence::rtc_footer::RtcFooter,
+        now: u64,
+    ) -> bool {
+        let Some(rtc) = self.mbc.rtc_mut() else {
+            return false;
+        };
+        rtc.real = footer.real;
+        rtc.latched = footer.latched;
+        rtc.sub_second_cycles = 0;
+        rtc.advance_seconds(footer.seconds_until(now));
+        true
     }
 
     pub fn supports_sram_saves(&self) -> bool {
@@ -251,4 +317,8 @@ impl DisassemblySource for Cartridge {
             .map(|bank| bank.get(loc.offset as usize).copied().unwrap_or(0xFF))
             .unwrap_or(0xFF)
     }
+}
+
+fn is_mbc1_multicart(rom: &[[u8; ROM_BANK_SIZE]]) -> bool {
+    rom.len() == 64 && rom[0x10][0x104..0x134] == crate::rom::header::NINTENDO_LOGO
 }

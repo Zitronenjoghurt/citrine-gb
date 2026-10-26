@@ -25,6 +25,8 @@ pub struct UiState {
     pub settings: Settings,
     #[serde(skip, default)]
     pub snapshots: SnapshotsState,
+    #[serde(skip, default)]
+    pub media: crate::app::tabs::media::MediaTabState,
     pub time_ctrl: TimeControlState,
     #[serde(skip, default)]
     pub update_avg_timer: AvgTimer,
@@ -34,6 +36,10 @@ pub struct UiState {
     pub palette_editor: crate::app::widgets::settings::palette::PaletteEditorState,
     #[serde(skip, default)]
     pub audio_debug: crate::app::widgets::audio_debug::AudioDebugState,
+    #[serde(skip, default)]
+    pub toast_area: Option<egui::Rect>,
+    #[serde(skip, default)]
+    pub tab_fit: crate::app::tabs::TabFit,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]

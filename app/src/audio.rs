@@ -1,62 +1,63 @@
-use anyhow::Context;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ringbuf::consumer::Consumer;
-use ringbuf::producer::Producer;
-use ringbuf::traits::{Observer, Split};
-use ringbuf::{HeapCons, HeapProd, HeapRb};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-
+pub mod pacer;
+pub mod queue;
+pub mod resampler;
 #[cfg(target_arch = "wasm32")]
-pub const MIN_LATENCY_MS: u32 = 40;
-#[cfg(not(target_arch = "wasm32"))]
-pub const MIN_LATENCY_MS: u32 = 20;
+pub mod web;
 
+use pacer::AudioFeed;
+use queue::{QueueConfig, QueueStats, latency_frames};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
+#[cfg(not(target_arch = "wasm32"))]
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+pub const MIN_LATENCY_MS: u32 = 40;
 pub const MAX_LATENCY_MS: u32 = 250;
 
 #[cfg(target_arch = "wasm32")]
-pub const DEFAULT_LATENCY_MS: u32 = 90;
+pub const DEFAULT_LATENCY_MS: u32 = 100;
 #[cfg(not(target_arch = "wasm32"))]
-pub const DEFAULT_LATENCY_MS: u32 = 40;
+pub const DEFAULT_LATENCY_MS: u32 = 80;
 
-#[cfg(target_arch = "wasm32")]
-const MIN_CALLBACK_FRAMES: usize = 2048;
-
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_UNKNOWN_CALLBACK_FRAMES: usize = 1024;
+#[cfg(not(target_arch = "wasm32"))]
+const CALLBACK_SECS: f64 = 0.01;
 
-fn default_callback_frames(target_frames: usize) -> usize {
-    #[cfg(target_arch = "wasm32")]
-    {
-        (target_frames / 2).max(MIN_CALLBACK_FRAMES)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        (target_frames / 4).max(64)
-    }
-}
-
-const BUFFER_CAP_QUARTERS: usize = 6;
-
-const UNDERRUN_DECAY: f32 = 0.995;
+#[cfg(not(target_arch = "wasm32"))]
+type Output = cpal::Stream;
+#[cfg(target_arch = "wasm32")]
+type Output = web::WebOutput;
 
 #[derive(Default)]
 struct Shared {
     volume: AtomicFloat,
     muted: AtomicBool,
-    underrun_samples: AtomicU64,
-    min_sample: AtomicFloat,
-    max_sample: AtomicFloat,
+}
+
+impl Shared {
+    fn gain(&self) -> f32 {
+        if self.muted.load(Ordering::Relaxed) {
+            0.0
+        } else {
+            let volume = self.volume.load();
+            volume * volume
+        }
+    }
 }
 
 pub struct AudioLink {
     pub sample_rate: u32,
-    pub target_frames: usize,
-    pub producer: HeapProd<f32>,
+    pub feed: AudioFeed,
 }
 
 pub struct Audio {
-    stream: Option<cpal::Stream>,
+    stream: Option<Output>,
     shared: Arc<Shared>,
+    stats: Arc<QueueStats>,
     sample_rate: u32,
     channel_count: usize,
     supported_buffer_size: (u32, u32),
@@ -80,12 +81,11 @@ impl Audio {
     pub fn new() -> Self {
         let shared = Shared::default();
         shared.volume.store(1.0);
-        shared.min_sample.store(f32::INFINITY);
-        shared.max_sample.store(f32::NEG_INFINITY);
 
         Self {
             stream: None,
             shared: Arc::new(shared),
+            stats: Arc::default(),
             sample_rate: 44100,
             channel_count: 0,
             supported_buffer_size: (0, 0),
@@ -114,7 +114,21 @@ impl Audio {
         latency_ms: u32,
     ) -> anyhow::Result<AudioLink> {
         self.stream = None;
+        let latency_ms = latency_ms.clamp(MIN_LATENCY_MS, MAX_LATENCY_MS);
+        let play_now = !cfg!(target_arch = "wasm32") || self.user_activated;
+        let link = self.open(device_name, latency_ms, play_now)?;
+        self.requested_device = device_name.map(str::to_owned);
+        self.latency_ms = latency_ms;
+        Ok(link)
+    }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open(
+        &mut self,
+        device_name: Option<&str>,
+        latency_ms: u32,
+        play_now: bool,
+    ) -> anyhow::Result<AudioLink> {
         let host = cpal::default_host();
         let device = match device_name {
             Some(wanted) => host
@@ -133,18 +147,9 @@ impl Audio {
         let supported_config = device.default_output_config()?;
         let channel_count = supported_config.channels() as usize;
         let mut config = supported_config.config();
-
-        #[cfg(target_arch = "wasm32")]
-        if let Some(rate) = hardware_sample_rate() {
-            config.sample_rate = rate;
-        }
-
         let sample_rate = config.sample_rate;
 
-        let latency_ms = latency_ms.clamp(MIN_LATENCY_MS, MAX_LATENCY_MS);
-        let target_frames = (sample_rate as usize * latency_ms as usize / 1000).max(1);
-
-        let mut callback_frames = default_callback_frames(target_frames);
+        let mut callback_frames = callback_frames(sample_rate);
         match supported_config.buffer_size() {
             cpal::SupportedBufferSize::Range { min, max } => {
                 self.supported_buffer_size = (*min, *max);
@@ -157,27 +162,17 @@ impl Audio {
             }
         }
 
-        let queue_target = target_frames.max(callback_frames);
-        let ring_frames = (queue_target * BUFFER_CAP_QUARTERS / 4).max(callback_frames * 3);
-
-        let ring = HeapRb::<f32>::new(ring_frames * 2);
-        let (producer, mut consumer) = ring.split();
-
+        let target_frames = latency_frames(sample_rate, latency_ms).max(callback_frames);
+        let (writer, mut reader) = queue::audio_queue(QueueConfig::new(sample_rate, target_frames));
+        let stats = writer.stats().clone();
         let shared = self.shared.clone();
-        shared.underrun_samples.store(0, Ordering::Relaxed);
-
-        let mut held = [0.0f32; 2];
 
         let stream = device.build_output_stream(
             &config,
-            move |data: &mut [f32], _| {
-                write_samples(data, channel_count, &mut consumer, &shared, &mut held)
-            },
+            move |data: &mut [f32], _| reader.read(data, channel_count, shared.gain()),
             |err| log::error!("Audio stream error: {err}"),
             None,
         )?;
-
-        let play_now = !cfg!(target_arch = "wasm32") || self.user_activated;
         if play_now {
             stream.play()?;
         }
@@ -188,15 +183,48 @@ impl Audio {
         self.channel_count = channel_count;
         self.device_name = device_label(&device);
         self.device_description = device.description().ok();
-        self.requested_device = device_name.map(str::to_owned);
-        self.latency_ms = latency_ms;
-        self.target_frames = queue_target;
+        self.target_frames = target_frames;
         self.callback_frames = callback_frames;
+        self.stats = stats;
 
         Ok(AudioLink {
             sample_rate,
-            target_frames: queue_target,
-            producer,
+            feed: AudioFeed::new(writer, sample_rate, target_frames),
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn open(
+        &mut self,
+        _device_name: Option<&str>,
+        latency_ms: u32,
+        play_now: bool,
+    ) -> anyhow::Result<AudioLink> {
+        let output = web::WebOutput::open().map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let sample_rate = output.sample_rate();
+        let target_frames = latency_frames(sample_rate, latency_ms);
+        let writer = output.connect(QueueConfig::new(sample_rate, target_frames));
+        let stats = writer.stats().clone();
+        output.set_gain(self.shared.gain());
+
+        if play_now {
+            output.resume().map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        }
+
+        self.callback_frames = output.callback_frames();
+        self.stream = Some(output);
+        self.resumed = play_now;
+        self.sample_rate = sample_rate;
+        self.channel_count = 2;
+        self.supported_buffer_size = (0, 0);
+        self.device_name = None;
+        self.device_description = None;
+        self.target_frames = target_frames;
+        self.stats = stats;
+
+        Ok(AudioLink {
+            sample_rate,
+            feed: AudioFeed::new(writer, sample_rate, target_frames),
         })
     }
 
@@ -207,7 +235,11 @@ impl Audio {
         let Some(stream) = &self.stream else {
             return;
         };
-        match stream.play() {
+        #[cfg(not(target_arch = "wasm32"))]
+        let result = stream.play().map_err(|err| err.to_string());
+        #[cfg(target_arch = "wasm32")]
+        let result = stream.resume().map_err(|err| format!("{err:?}"));
+        match result {
             Ok(()) => self.resumed = true,
             Err(err) => log::warn!("Failed to resume audio: {err}"),
         }
@@ -222,6 +254,10 @@ impl Audio {
     }
 
     pub fn callback_frames(&self) -> usize {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(output) = &self.stream {
+            return output.callback_frames();
+        }
         self.callback_frames
     }
 
@@ -233,6 +269,7 @@ impl Audio {
         self.requested_device.as_deref()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn output_devices() -> Vec<String> {
         let Ok(devices) = cpal::default_host().output_devices() else {
             return Vec::new();
@@ -249,6 +286,7 @@ impl Audio {
 
     pub fn set_volume(&self, volume: f32) {
         self.shared.volume.store(volume.clamp(0.0, 1.0));
+        self.apply_gain();
     }
 
     pub fn is_muted(&self) -> bool {
@@ -257,6 +295,14 @@ impl Audio {
 
     pub fn set_muted(&self, muted: bool) {
         self.shared.muted.store(muted, Ordering::Relaxed);
+        self.apply_gain();
+    }
+
+    fn apply_gain(&self) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(output) = &self.stream {
+            output.set_gain(self.shared.gain());
+        }
     }
 
     pub fn get_sample_rate(&self) -> u32 {
@@ -271,16 +317,8 @@ impl Audio {
         self.supported_buffer_size
     }
 
-    pub fn get_underrun_samples(&self) -> u64 {
-        self.shared.underrun_samples.load(Ordering::Relaxed)
-    }
-
-    pub fn get_min_sample(&self) -> f32 {
-        self.shared.min_sample.load()
-    }
-
-    pub fn get_max_sample(&self) -> f32 {
-        self.shared.max_sample.load()
+    pub fn stats(&self) -> &QueueStats {
+        &self.stats
     }
 
     pub fn get_device_description(&self) -> &Option<cpal::DeviceDescription> {
@@ -288,98 +326,25 @@ impl Audio {
     }
 
     pub fn reset_stats(&self) {
-        self.shared.underrun_samples.store(0, Ordering::Relaxed);
-        self.shared.min_sample.store(f32::INFINITY);
-        self.shared.max_sample.store(f32::NEG_INFINITY);
+        self.stats.reset();
+        #[cfg(target_arch = "wasm32")]
+        if let Some(output) = &self.stream {
+            output.reset_stats();
+        }
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn hardware_sample_rate() -> Option<u32> {
-    use std::sync::OnceLock;
-    static RATE: OnceLock<Option<u32>> = OnceLock::new();
-
-    *RATE.get_or_init(|| {
-        let ctx = web_sys::AudioContext::new().ok()?;
-        let rate = ctx.sample_rate();
-        let _ = ctx.close();
-
-        (rate.is_finite() && (8_000.0..=96_000.0).contains(&rate)).then_some(rate as u32)
-    })
+#[cfg(not(target_arch = "wasm32"))]
+fn callback_frames(sample_rate: u32) -> usize {
+    ((sample_rate as f64 * CALLBACK_SECS) as usize).max(64)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn device_label(device: &cpal::Device) -> Option<String> {
     device
         .description()
         .ok()
         .map(|desc| desc.name().to_string())
-}
-
-fn write_samples(
-    data: &mut [f32],
-    channels: usize,
-    consumer: &mut HeapCons<f32>,
-    shared: &Shared,
-    held: &mut [f32; 2],
-) {
-    let gain = if shared.muted.load(Ordering::Relaxed) {
-        0.0
-    } else {
-        let volume = shared.volume.load();
-        volume * volume
-    };
-
-    let mut underruns = 0u64;
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-
-    if channels == 0 {
-        return;
-    }
-
-    for out in data.chunks_mut(channels) {
-        let mut frame = [0.0f32; 2];
-        if consumer.pop_slice(&mut frame) == 2 {
-            *held = frame;
-        } else {
-            held[0] *= UNDERRUN_DECAY;
-            held[1] *= UNDERRUN_DECAY;
-            frame = *held;
-            underruns += 1;
-        }
-
-        min = min.min(frame[0]).min(frame[1]);
-        max = max.max(frame[0]).max(frame[1]);
-
-        match channels {
-            1 => out[0] = (frame[0] + frame[1]) * 0.5 * gain,
-            _ => {
-                out[0] = frame[0] * gain;
-                out[1] = frame[1] * gain;
-                for extra in &mut out[2..] {
-                    *extra = 0.0;
-                }
-            }
-        }
-    }
-
-    if underruns > 0 {
-        shared
-            .underrun_samples
-            .fetch_add(underruns, Ordering::Relaxed);
-    }
-    if min < shared.min_sample.load() {
-        shared.min_sample.store(min);
-    }
-    if max > shared.max_sample.load() {
-        shared.max_sample.store(max);
-    }
-}
-
-pub fn push_frames(producer: &mut HeapProd<f32>, samples: &[f32]) -> usize {
-    let room = producer.vacant_len() & !1;
-    let take = room.min(samples.len() & !1);
-    producer.push_slice(&samples[..take])
 }
 
 #[derive(Default)]

@@ -1,12 +1,18 @@
+use crate::ReadMemory;
+use crate::gb::apu::WriteContext;
 use crate::gb::apu::components::length_counter::LengthCounter;
 use crate::gb::apu::registers::ch123_control::Channel123Control;
-use crate::{ReadMemory, WriteMemory};
+
+const TRIGGER_DELAY: u16 = 6;
 
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Channel3 {
     pub enabled: bool,
     pub wave_step: u8,
+    pub sample_buffer: u8,
+    pub just_read: bool,
     pub frequency_timer: u16,
     pub length_counter: LengthCounter,
     /// NR30 (0xFF1A) => Most significant bit
@@ -39,31 +45,58 @@ impl Channel3 {
         }
     }
 
+    pub fn quiet(&self, ticks: u16) -> bool {
+        !self.enabled || self.frequency_timer > ticks
+    }
+
+    pub fn skip(&mut self, ticks: u16) {
+        self.just_read = false;
+        if self.enabled {
+            self.frequency_timer -= ticks;
+        }
+    }
+
     pub fn tick(&mut self) -> bool {
+        self.just_read = false;
         if !self.enabled {
             return false;
         }
 
-        if self.frequency_timer > 0 {
-            self.frequency_timer -= 1;
-        }
-
+        self.frequency_timer = self.frequency_timer.saturating_sub(1);
         if self.frequency_timer == 0 {
             self.reset_frequency_timer();
             self.wave_step = (self.wave_step + 1) & 0b11111;
+            self.sample_buffer = self.wave_ram[self.wave_step as usize / 2];
+            self.just_read = true;
             return true;
         }
         false
     }
 
-    pub fn trigger(&mut self) {
+    fn about_to_read(&self) -> bool {
+        self.enabled && self.frequency_timer == 2
+    }
+
+    pub fn trigger(&mut self, cgb: bool) {
+        if self.about_to_read() {
+            if !cgb {
+                let offset = ((self.wave_step as usize + 1) >> 1) & 0xF;
+                if offset < 4 {
+                    self.wave_ram[0] = self.wave_ram[offset];
+                } else {
+                    let start = offset & !3;
+                    self.wave_ram.copy_within(start..start + 4, 0);
+                }
+            }
+            self.sample_buffer = self.wave_ram[0];
+        }
+
         if self.dac_enabled {
             self.enabled = true;
         }
 
         self.wave_step = 0;
-        self.reset_frequency_timer();
-        self.length_counter.trigger(256);
+        self.frequency_timer = (2048 - self.get_period()) * 2 + TRIGGER_DELAY;
     }
 
     pub fn clock_length(&mut self) {
@@ -77,11 +110,10 @@ impl Channel3 {
     }
 
     pub fn get_wave_value(&self) -> u8 {
-        let byte = self.wave_ram[self.wave_step as usize / 2];
         if self.wave_step.is_multiple_of(2) {
-            (byte >> 4) & 0b1111
+            (self.sample_buffer >> 4) & 0b1111
         } else {
-            byte & 0b1111
+            self.sample_buffer & 0b1111
         }
     }
 
@@ -92,6 +124,64 @@ impl Channel3 {
     pub fn dac_enabled(&self) -> bool {
         self.dac_enabled
     }
+
+    fn wave_index(&self, addr: u16, cgb: bool) -> Option<usize> {
+        if !self.enabled {
+            Some(addr as usize - 0xFF30)
+        } else if cgb || self.just_read {
+            Some(self.wave_step as usize / 2)
+        } else {
+            None
+        }
+    }
+
+    pub fn read_wave(&self, addr: u16, cgb: bool) -> u8 {
+        match self.wave_index(addr, cgb) {
+            Some(index) => self.wave_ram[index],
+            None => 0xFF,
+        }
+    }
+
+    pub fn write_wave(&mut self, addr: u16, value: u8, cgb: bool) {
+        if let Some(index) = self.wave_index(addr, cgb) {
+            self.wave_ram[index] = value;
+        }
+    }
+
+    pub fn write_length(&mut self, value: u8) {
+        self.initial_length_timer = value;
+        self.length_counter.load(256, value as u16);
+    }
+
+    pub fn write(&mut self, addr: u16, value: u8, ctx: WriteContext) {
+        match addr {
+            0xFF1A => {
+                self.dac_enabled = (value & 0b1000_0000) != 0;
+                if !self.dac_enabled {
+                    self.enabled = false;
+                }
+            }
+            0xFF1B => self.write_length(value),
+            0xFF1C => self.output_level = (value >> 5) & 0b11,
+            0xFF1D => self.period_low = value,
+            0xFF1E => {
+                self.control = value.into();
+                let expired = self.length_counter.write_control(
+                    self.control.length_enable,
+                    self.control.trigger,
+                    256,
+                    ctx.frame_clocked_length,
+                );
+                if expired {
+                    self.enabled = false;
+                }
+                if self.control.trigger {
+                    self.trigger(ctx.cgb);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl ReadMemory for Channel3 {
@@ -100,39 +190,7 @@ impl ReadMemory for Channel3 {
             0xFF1A => 0x7F | ((self.dac_enabled as u8) << 7),
             0xFF1C => 0x9F | ((self.output_level & 0b11) << 5),
             0xFF1E => self.control.into(),
-            // ToDo: Wave RAM read quirks => https://gbdev.io/pandocs/Audio_Registers.html#ff30ff3f--wave-pattern-ram
-            0xFF30..=0xFF3F => self.wave_ram[addr as usize - 0xFF30],
             _ => 0xFF,
-        }
-    }
-}
-
-impl WriteMemory for Channel3 {
-    fn write_naive(&mut self, addr: u16, value: u8) {
-        match addr {
-            0xFF1A => {
-                self.dac_enabled = (value & 0b1000_0000) != 0;
-                if !self.dac_enabled {
-                    self.enabled = false;
-                }
-            }
-            0xFF1B => {
-                self.initial_length_timer = value;
-                self.length_counter
-                    .reload(256u16.saturating_sub(self.initial_length_timer as u16));
-            }
-            0xFF1C => self.output_level = (value >> 5) & 0b11,
-            0xFF1D => self.period_low = value,
-            0xFF1E => {
-                self.control = value.into();
-                self.length_counter.enabled = self.control.length_enable;
-                if self.control.trigger {
-                    self.trigger();
-                }
-            }
-            // ToDo: Wave RAM write quirks => https://gbdev.io/pandocs/Audio_Registers.html#ff30ff3f--wave-pattern-ram
-            0xFF30..=0xFF3F => self.wave_ram[addr as usize - 0xFF30] = value,
-            _ => {}
         }
     }
 }

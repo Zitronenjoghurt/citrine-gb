@@ -1,5 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::Backend;
+pub use native::{Backend, data_dir};
 #[cfg(target_arch = "wasm32")]
 pub use web::Backend;
 
@@ -10,11 +10,12 @@ mod native {
 
     const FALLBACK_DIR: &str = "citrine-data";
 
+    #[derive(Clone)]
     pub struct Backend {
         root: PathBuf,
     }
 
-    fn data_dir() -> PathBuf {
+    pub fn data_dir() -> PathBuf {
         match ProjectDirs::from("", "", "citrine") {
             Some(dirs) => dirs.data_dir().to_path_buf(),
             None => PathBuf::from(FALLBACK_DIR),
@@ -88,7 +89,7 @@ mod native {
 mod web {
     use base64::Engine;
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     pub struct Backend;
 
     fn storage() -> Option<web_sys::Storage> {

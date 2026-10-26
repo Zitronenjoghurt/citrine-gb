@@ -1,21 +1,20 @@
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::settings::SettingsTab;
+use crate::app::ui_state::settings::rom_header;
 use crate::app::widgets::settings::bar::SettingsBar;
 use crate::app::widgets::settings::content::{LoadedGame, SettingsContent};
+use crate::app::widgets::tab_bar::tab_bar;
+use citrine_gb::gb::GbModel;
 use egui::Widget;
 
 const SIDEBAR_MIN_WIDTH: f32 = 420.0;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            if ui.available_width() < SIDEBAR_MIN_WIDTH {
-                stacked(viewer, ui);
-            } else {
-                side_by_side(viewer, ui);
-            }
-        });
+    if ui.available_width() < SIDEBAR_MIN_WIDTH {
+        stacked(viewer, ui);
+    } else {
+        side_by_side(viewer, ui);
+    }
 }
 
 fn side_by_side(viewer: &mut TabViewer, ui: &mut egui::Ui) {
@@ -42,23 +41,28 @@ fn stacked(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     let settings = &mut viewer.ui.settings;
     let dev_mode = settings.dev_mode;
 
-    ui.horizontal_wrapped(|ui| {
-        for tab in SettingsTab::iter_with_dev_mode(dev_mode) {
-            ui.selectable_value(
-                &mut settings.current_tab,
-                tab,
-                format!("{} {}", tab.icon(), tab.title()),
-            );
-        }
-    });
+    let tabs: Vec<(SettingsTab, String)> = SettingsTab::iter_with_dev_mode(dev_mode)
+        .map(|tab| (tab, format!("{} {}", tab.icon(), tab.title())))
+        .collect();
+    tab_bar(ui, &mut settings.current_tab, &tabs);
     ui.separator();
     content(viewer, ui);
 }
 
 fn content(viewer: &mut TabViewer, ui: &mut egui::Ui) {
+    let gb = &viewer.emulator.gb;
+    let header = rom_header(gb);
     let game = viewer.emulator.rom_key().map(|rom_key| LoadedGame {
         rom_key,
-        title: viewer.emulator.gb.cartridge.header.title.trim(),
+        title: gb.cartridge.header.title.trim(),
+        model: gb.model,
+        game_model: if gb.cartridge.header.cgb_mode.is_cgb() {
+            GbModel::Cgb
+        } else {
+            GbModel::Dmg
+        },
+        header: &header,
+        own_colors: gb.ppu.cgb_mode(),
     });
 
     SettingsContent::new(

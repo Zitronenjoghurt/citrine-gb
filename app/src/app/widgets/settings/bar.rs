@@ -23,10 +23,6 @@ impl<'a> SettingsBar<'a> {
 impl Widget for SettingsBar<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         ui.vertical(|ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Categories");
-            });
-            ui.separator();
             ScrollArea::vertical().show(ui, |ui| {
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                     for tab in SettingsTab::iter_with_dev_mode(self.settings.dev_mode) {

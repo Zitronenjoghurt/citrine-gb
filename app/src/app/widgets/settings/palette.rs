@@ -1,9 +1,12 @@
 use crate::app::ui_state::palette::{CustomPalette, PaletteChoice};
 use crate::app::ui_state::settings::Settings;
 use crate::app::widgets::settings::content::LoadedGame;
+use crate::app::widgets::settings::form::Form;
 use crate::icons;
+use citrine_gb::gb::ppu::compat::CompatPalette;
+use citrine_gb::gb::ppu::types::color::RGBA;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
-use egui::{Color32, Rect, RichText, Sense, Ui, vec2};
+use egui::{Align, Color32, Layout, Rect, RichText, Sense, Ui, vec2};
 
 #[derive(Default)]
 pub struct PaletteEditorState {
@@ -58,15 +61,28 @@ pub fn show(
 ) {
     let mut action = None;
 
-    ui.horizontal(|ui| {
-        ui.label("Palette")
-            .on_hover_text("Applies to every game without a palette of its own");
-        if let Some(chosen) = picker(ui, "dmg_palette_picker", &global_choice(settings), settings) {
-            action = Some(Action::SetGlobal(chosen));
-        }
+    Form::show(ui, "style", |form| {
+        form.row_with_hint(
+            "Palette",
+            "Applies to every game without a palette of its own",
+            |ui| {
+                if let Some(chosen) = picker(
+                    ui,
+                    "dmg_palette_picker",
+                    &settings.global_choice(),
+                    settings,
+                ) {
+                    action = Some(Action::SetGlobal(chosen));
+                }
+            },
+        );
     });
 
-    preview(ui, &settings.effective_theme());
+    let header = game.map(|game| game.header).unwrap_or_default();
+    preview(
+        ui,
+        &choice_colors(settings, &settings.global_choice(), header),
+    );
     ui.add_space(6.0);
 
     ui.horizontal(|ui| {
@@ -87,11 +103,9 @@ pub fn show(
             .on_hover_text("Make an editable copy of the palette shown")
             .clicked()
         {
-            let shown = settings.effective_theme();
-            let base = settings
-                .custom_palette
-                .clone()
-                .unwrap_or_else(|| settings.dmg_theme.to_string());
+            let global = settings.global_choice();
+            let shown = DmgTheme::Custom(choice_colors(settings, &global, header)[0]);
+            let base = choice_label(&global);
             let name = settings.palettes.unique_name(&base);
             action = Some(Action::Create(CustomPalette::from_theme(name, &shown)));
         }
@@ -125,18 +139,25 @@ pub fn show(
     }
 }
 
-fn global_choice(settings: &Settings) -> PaletteChoice {
-    match &settings.custom_palette {
-        Some(name) => PaletteChoice::Custom(name.clone()),
-        None => PaletteChoice::Builtin(settings.dmg_theme),
-    }
-}
-
 fn choice_label(choice: &PaletteChoice) -> String {
     match choice {
         PaletteChoice::Builtin(theme) => theme.to_string(),
         PaletteChoice::Custom(name) => name.clone(),
+        PaletteChoice::Gbc(palette) => palette.to_string(),
     }
+}
+
+fn choice_colors(settings: &Settings, choice: &PaletteChoice, header: &[u8]) -> Vec<[RGBA; 4]> {
+    let theme = match choice {
+        PaletteChoice::Builtin(theme) => *theme,
+        PaletteChoice::Custom(name) => settings
+            .palettes
+            .get(name)
+            .map(|palette| palette.to_theme())
+            .unwrap_or_else(|| settings.effective_theme()),
+        PaletteChoice::Gbc(palette) => return palette.colors(header).to_vec(),
+    };
+    vec![*theme.palette()]
 }
 
 fn picker(
@@ -148,6 +169,8 @@ fn picker(
     let mut chosen = None;
 
     egui::ComboBox::from_id_salt(id)
+        .width(ui.available_width())
+        .truncate()
         .selected_text(choice_label(selected))
         .show_ui(ui, |ui| {
             for theme in DmgTheme::SELECTABLE {
@@ -157,6 +180,17 @@ fn picker(
                     .clicked()
                 {
                     chosen = Some(PaletteChoice::Builtin(*theme));
+                }
+            }
+
+            ui.separator();
+            for palette in CompatPalette::SELECTABLE {
+                let is_selected = *selected == PaletteChoice::Gbc(*palette);
+                if ui
+                    .selectable_label(is_selected, palette.to_string())
+                    .clicked()
+                {
+                    chosen = Some(PaletteChoice::Gbc(*palette));
                 }
             }
 
@@ -189,15 +223,17 @@ fn game_section(ui: &mut Ui, settings: &Settings, game: LoadedGame, action: &mut
     });
     ui.add_space(4.0);
 
-    let own = settings.game_palette(Some(game.rom_key)).cloned();
-    let global = global_choice(settings);
+    if game.own_colors {
+        ui.label("This game has its own colours, so palettes don't change it.");
+        return;
+    }
 
-    ui.horizontal(|ui| {
+    let own = settings.game_palette(Some(game.rom_key)).cloned();
+    let global = settings.global_choice();
+
+    ui.with_layout(Layout::top_down(Align::Min), |ui| {
         if ui
-            .radio(
-                own.is_none(),
-                format!("Follow the palette above ({})", choice_label(&global)),
-            )
+            .radio(own.is_none(), "Follow the palette above")
             .clicked()
             && own.is_some()
         {
@@ -206,28 +242,30 @@ fn game_section(ui: &mut Ui, settings: &Settings, game: LoadedGame, action: &mut
                 choice: None,
             });
         }
-    });
 
-    ui.horizontal(|ui| {
         if ui.radio(own.is_some(), "Use just for this game").clicked() && own.is_none() {
             *action = Some(Action::SetGame {
                 rom_key: game.rom_key.to_string(),
                 choice: Some(global.clone()),
             });
         }
-
-        let shown = own.clone().unwrap_or_else(|| global.clone());
-        if let Some(chosen) = picker(ui, "game_palette_picker", &shown, settings) {
-            *action = Some(Action::SetGame {
-                rom_key: game.rom_key.to_string(),
-                choice: Some(chosen),
-            });
-        }
     });
 
-    if own.is_some() {
+    Form::show(ui, "style", |form| {
+        form.row("Palette", |ui| {
+            let shown = own.clone().unwrap_or_else(|| global.clone());
+            if let Some(chosen) = picker(ui, "game_palette_picker", &shown, settings) {
+                *action = Some(Action::SetGame {
+                    rom_key: game.rom_key.to_string(),
+                    choice: Some(chosen),
+                });
+            }
+        });
+    });
+
+    if let Some(own) = own {
         ui.add_space(4.0);
-        preview(ui, &settings.theme_for(Some(game.rom_key)));
+        preview(ui, &choice_colors(settings, &own, game.header));
     }
 }
 
@@ -237,11 +275,12 @@ fn editor(
     state: &mut PaletteEditorState,
     action: &mut Option<Action>,
 ) {
-    egui::Grid::new("palette_editor_grid")
-        .num_columns(2)
-        .show(ui, |ui| {
-            ui.label("Name");
-            let response = ui.text_edit_singleline(&mut state.name_buffer);
+    Form::show(ui, "style", |form| {
+        form.row("Name", |ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut state.name_buffer)
+                    .desired_width(ui.available_width()),
+            );
             if response.lost_focus()
                 || response.changed() && ui.input(|i| i.key_pressed(egui::Key::Enter))
             {
@@ -250,36 +289,33 @@ fn editor(
                     to: state.name_buffer.clone(),
                 });
             }
-            ui.end_row();
+        });
 
-            ui.label("Colours");
-            ui.horizontal(|ui| {
-                let mut colors = palette.colors;
-                let mut changed = false;
-                for (index, color) in colors.iter_mut().enumerate() {
-                    changed |= ui
-                        .color_edit_button_srgb(color)
-                        .on_hover_text(SHADE_NAMES[index])
-                        .changed();
-                }
-                if changed {
-                    action.get_or_insert(Action::Recolor {
-                        name: palette.name.clone(),
-                        colors,
-                    });
-                }
-            });
-            ui.end_row();
+        form.row("Colours", |ui| {
+            let mut colors = palette.colors;
+            let mut changed = false;
+            for (index, color) in colors.iter_mut().enumerate() {
+                changed |= ui
+                    .color_edit_button_srgb(color)
+                    .on_hover_text(SHADE_NAMES[index])
+                    .changed();
+            }
+            if changed {
+                action.get_or_insert(Action::Recolor {
+                    name: palette.name.clone(),
+                    colors,
+                });
+            }
+        });
 
-            ui.label("Share code");
-            ui.horizontal(|ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut state.code_buffer)
-                        .desired_width(190.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                if response.changed() {
-                    state.code_error = false;
+        form.row("Share code", |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .button(icons::COPY)
+                    .on_hover_text("Copy to clipboard")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(palette.to_code());
                 }
                 if ui
                     .button(format!("{} Apply", icons::CHECK))
@@ -297,45 +333,57 @@ fn editor(
                         None => state.code_error = true,
                     }
                 }
-                if ui
-                    .button(icons::COPY)
-                    .on_hover_text("Copy to clipboard")
-                    .clicked()
-                {
-                    ui.ctx().copy_text(palette.to_code());
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.code_buffer)
+                        .desired_width(ui.available_width())
+                        .font(egui::TextStyle::Monospace),
+                );
+                if response.changed() {
+                    state.code_error = false;
                 }
             });
-            ui.end_row();
         });
-
-    if state.code_error {
-        ui.colored_label(
-            ui.visuals().error_fg_color,
-            "That code needs four colours, lightest first, like F2CE44-B89D32-72611C-292406.",
-        );
-    } else {
-        ui.small("Paste a code from someone else, or copy yours to share it.");
-    }
+        if state.code_error {
+            let error = form.ctx().style().visuals.error_fg_color;
+            form.hint(
+                RichText::new(
+                    "That code needs four colours, lightest first, like F2CE44-B89D32-72611C-292406.",
+                )
+                .color(error),
+            );
+        } else {
+            form.hint("Paste a code from someone else, or copy yours to share it.");
+        }
+    });
 }
 
 const SHADE_NAMES: [&str; 4] = ["Lightest", "Light", "Dark", "Darkest"];
 
-fn preview(ui: &mut Ui, theme: &DmgTheme) {
+fn preview(ui: &mut Ui, rows: &[[RGBA; 4]]) {
     let height = 26.0;
     let width = ui.available_width().min(240.0);
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let swatch = width / 4.0;
+    let row_heights: &[f32] = if rows.len() == 3 {
+        &[14.0, 6.0, 6.0]
+    } else {
+        &[height]
+    };
 
-    for (index, color) in theme.palette().iter().enumerate() {
-        let cell = Rect::from_min_size(
-            rect.min + vec2(swatch * index as f32, 0.0),
-            vec2(swatch, height),
-        );
-        ui.painter().rect_filled(
-            cell,
-            0.0,
-            Color32::from_rgb(color.r(), color.g(), color.b()),
-        );
+    let mut top = 0.0;
+    for (row, row_height) in rows.iter().zip(row_heights) {
+        for (index, color) in row.iter().enumerate() {
+            let cell = Rect::from_min_size(
+                rect.min + vec2(swatch * index as f32, top),
+                vec2(swatch, *row_height),
+            );
+            ui.painter().rect_filled(
+                cell,
+                0.0,
+                Color32::from_rgb(color.r(), color.g(), color.b()),
+            );
+        }
+        top += row_height;
     }
     ui.painter().rect_stroke(
         rect,
@@ -371,13 +419,7 @@ fn apply(action: Action, settings: &mut Settings, state: &mut PaletteEditorState
                 .map(|p| p.to_code())
                 .unwrap_or_default();
         }
-        Action::SetGlobal(choice) => match choice {
-            PaletteChoice::Builtin(theme) => {
-                settings.dmg_theme = theme;
-                settings.custom_palette = None;
-            }
-            PaletteChoice::Custom(name) => settings.custom_palette = Some(name),
-        },
+        Action::SetGlobal(choice) => settings.set_global_choice(choice),
         Action::SetGame { rom_key, choice } => settings.set_game_palette(&rom_key, choice),
     }
     settings.dirty = true;

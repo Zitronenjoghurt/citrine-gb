@@ -180,7 +180,7 @@ impl Widget for DisassemblyView<'_> {
         ui.horizontal(|ui| {
             ui.toggle_value(self.track_pc, "Follow PC");
             ui.separator();
-            ui.checkbox(self.static_analysis_enabled, "Static Analysis");
+            ui.checkbox(self.static_analysis_enabled, "Static analysis");
             ui.separator();
             ui.label(format!("{} Instructions", row_count));
         });

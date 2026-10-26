@@ -1,4 +1,4 @@
-.PHONY: version test test-mooneye build-tests lab lab-deps check fmt lint dev native up down build logs publish results significance release bundle-mac icons
+.PHONY: version test test-mooneye ledger ledger-check build-tests lab lab-deps check fmt lint dev native up down build logs publish results significance release bundle-mac icons
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 
 version:
@@ -23,6 +23,12 @@ build-tests:
 
 test-mooneye: build-tests
 	cargo test --release --test mooneye
+
+ledger:
+	cargo test --release --test ledger -- --write
+
+ledger-check:
+	cargo test --release --test ledger
 
 test:
 	cargo test --release -- --nocapture

@@ -18,7 +18,7 @@ impl Widget for DebugActions<'_> {
         let response = ui.button("Dump JSON");
 
         if response.clicked()
-            && let Ok(json) = self.emulator.gb.dump_json()
+            && let Ok(json) = self.emulator.gb.dump_json(crate::storage::now_unix())
         {
             FileSaver::new("citrine_dump.json")
                 .add_filter("JSON", &["json"])
@@ -26,7 +26,7 @@ impl Widget for DebugActions<'_> {
         }
 
         ui.separator();
-        ui.label("Input Recording");
+        ui.label("Input recording");
         ui.label(
             "Records button input with cycle timestamps for replay in the lab. \
              Start from a fresh ROM load for deterministic replay.",
@@ -40,11 +40,11 @@ impl Widget for DebugActions<'_> {
                     self.emulator.recorder.event_count()
                 ),
             );
-            if ui.button("Stop Recording").clicked() {
+            if ui.button("Stop recording").clicked() {
                 self.emulator.recorder.stop();
             }
         } else {
-            if ui.button("Start Recording").clicked() {
+            if ui.button("Start recording").clicked() {
                 self.emulator.start_recording();
             }
             if self.emulator.recorder.has_data() {
@@ -52,7 +52,7 @@ impl Widget for DebugActions<'_> {
                     "{} event(s) captured",
                     self.emulator.recorder.event_count()
                 ));
-                if ui.button("Export Recording").clicked()
+                if ui.button("Export recording").clicked()
                     && let Some(json) = self.emulator.recorder.export_json()
                 {
                     FileSaver::new("citrine_recording.json")

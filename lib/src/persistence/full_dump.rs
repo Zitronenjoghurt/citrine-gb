@@ -1,6 +1,7 @@
 use crate::error::GbResult;
 use crate::gb::GameBoy;
 use crate::persistence::sram_dump::SramDump;
+#[cfg(feature = "brotli")]
 use std::io::Write;
 
 #[derive(serde::Serialize)]

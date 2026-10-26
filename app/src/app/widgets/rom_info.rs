@@ -29,7 +29,7 @@ impl Widget for RomInfo<'_> {
                 ui.label(self.header.cgb_mode.to_string());
                 ui.end_row();
 
-                ui.label("Cartridge Type");
+                ui.label("Cartridge type");
                 ui.label(
                     self.header
                         .cartridge_type
@@ -38,7 +38,7 @@ impl Widget for RomInfo<'_> {
                 );
                 ui.end_row();
 
-                ui.label("Expected ROM Size");
+                ui.label("Expected ROM size");
                 ui.label(format!(
                     "{} ({} banks)",
                     self.header.rom_size_pretty(),
@@ -46,7 +46,7 @@ impl Widget for RomInfo<'_> {
                 ));
                 ui.end_row();
 
-                ui.label("Expected RAM Size");
+                ui.label("Expected RAM size");
                 ui.label(format!(
                     "{} ({} banks)",
                     self.header.ram_size_pretty(),
@@ -54,30 +54,30 @@ impl Widget for RomInfo<'_> {
                 ));
                 ui.end_row();
 
-                ui.label("Overseas Only");
+                ui.label("Overseas only");
                 ui.label(yes_no(self.header.overseas_only));
                 ui.end_row();
 
-                ui.label("SGB Support");
+                ui.label("SGB support");
                 ui.label(yes_no(self.header.sgb_support));
                 ui.end_row();
 
-                ui.label("Valid Nintendo Logo");
+                ui.label("Valid Nintendo logo");
                 ui.label(yes_no(self.header.valid_nintendo_logo));
                 ui.end_row();
 
-                ui.label("Version Number");
+                ui.label("Version number");
                 ui.label(format!("{}", self.header.version_number));
                 ui.end_row();
 
-                ui.label("Header Checksum");
+                ui.label("Header checksum");
                 ui.label(format!(
                     "Provided: 0x{:02X} | Calculated: 0x{:02X}",
                     self.header.provided_header_checksum, self.header.actual_header_checksum
                 ));
                 ui.end_row();
 
-                ui.label("Global Checksum");
+                ui.label("Global checksum");
                 ui.label(format!(
                     "Provided: 0x{:04X} | Calculated: 0x{:04X}",
                     self.header.provided_global_checksum, self.header.actual_global_checksum

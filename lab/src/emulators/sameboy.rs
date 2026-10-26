@@ -123,6 +123,23 @@ impl SameBoyEmulator {
     }
 }
 
+impl SameBoyEmulator {
+    pub fn save_battery(&mut self) -> Vec<u8> {
+        unsafe {
+            let size = sys::GB_save_battery_size(self.gb).max(0) as usize;
+            let mut buffer = vec![0u8; size];
+            sys::GB_save_battery_to_buffer(self.gb, buffer.as_mut_ptr(), buffer.len());
+            buffer
+        }
+    }
+
+    pub fn load_battery(&mut self, data: &[u8]) {
+        unsafe {
+            sys::GB_load_battery_from_buffer(self.gb, data.as_ptr(), data.len());
+        }
+    }
+}
+
 impl Default for SameBoyEmulator {
     fn default() -> Self {
         Self::new()

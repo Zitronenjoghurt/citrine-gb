@@ -1,6 +1,7 @@
 pub mod apu;
 pub mod apu_waves;
 pub mod audio_debug;
+pub mod confirm;
 pub mod debug_actions;
 pub mod disassembly;
 pub mod generic_select;
@@ -12,6 +13,7 @@ pub mod reset_slider;
 pub mod rom_info;
 pub mod settings;
 pub mod snapshots;
+pub mod tab_bar;
 pub mod time_control;
 pub mod toggle_button;
 pub mod touch_controls;
