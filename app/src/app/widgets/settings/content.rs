@@ -1,3 +1,5 @@
+use crate::app::events::AppEventQueue;
+use crate::app::tabs::Tab;
 use crate::app::ui_state::keybinds::BindingCapture;
 use crate::app::ui_state::settings::{
     ConsoleChoice, LayoutMode, ScalingMode, Settings, SettingsTab,
@@ -25,6 +27,7 @@ pub struct SettingsContent<'a> {
     palette_editor: &'a mut PaletteEditorState,
     audio: Option<&'a Audio>,
     game: Option<LoadedGame<'a>>,
+    events: Option<&'a mut AppEventQueue>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +47,7 @@ impl<'a> SettingsContent<'a> {
         palette_editor: &'a mut PaletteEditorState,
         audio: Option<&'a Audio>,
         game: Option<LoadedGame<'a>>,
+        events: Option<&'a mut AppEventQueue>,
     ) -> Self {
         Self {
             settings,
@@ -51,6 +55,7 @@ impl<'a> SettingsContent<'a> {
             palette_editor,
             audio,
             game,
+            events,
         }
     }
 }
@@ -269,7 +274,11 @@ impl SettingsContent<'_> {
     }
 
     fn controls(self, ui: &mut Ui) {
-        controls::show(ui, self.settings, self.capture);
+        if controls::show(ui, self.settings, self.capture)
+            && let Some(events) = self.events
+        {
+            events.open_tab(Tab::ControllerDebug);
+        }
     }
 
     fn style(self, ui: &mut Ui) {
@@ -455,7 +464,8 @@ mod tests {
         };
         let output = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                SettingsContent::new(&mut settings, &mut capture, &mut editor, None, None).ui(ui);
+                SettingsContent::new(&mut settings, &mut capture, &mut editor, None, None, None)
+                    .ui(ui);
             });
         });
         output

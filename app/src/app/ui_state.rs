@@ -37,6 +37,8 @@ pub struct UiState {
     #[serde(skip, default)]
     pub audio_debug: crate::app::widgets::audio_debug::AudioDebugState,
     #[serde(skip, default)]
+    pub controller_debug: crate::controller_debug::ControllerDebugState,
+    #[serde(skip, default)]
     pub toast_area: Option<egui::Rect>,
     #[serde(skip, default)]
     pub tab_fit: crate::app::tabs::TabFit,

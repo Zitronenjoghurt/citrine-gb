@@ -285,6 +285,7 @@ pub enum Captured {
 pub struct BindingCapture {
     pub pending: Option<PendingBinding>,
     pub captured: Option<Captured>,
+    shown: bool,
 }
 
 impl BindingCapture {
@@ -315,6 +316,17 @@ impl BindingCapture {
         if self.pending.is_some() {
             self.captured = Some(captured);
         }
+    }
+
+    pub fn mark_shown(&mut self) {
+        self.shown = true;
+    }
+
+    pub fn end_frame(&mut self) {
+        if !self.shown {
+            self.cancel();
+        }
+        self.shown = false;
     }
 
     pub fn take(&mut self) -> Option<(BindingTarget, Captured)> {
@@ -395,6 +407,22 @@ mod tests {
         }
         assert_eq!(bindings.unbound(), vec![GbButton::Start]);
         assert!(!bindings.is_default());
+    }
+
+    #[test]
+    fn a_binding_nobody_can_see_stops_waiting() {
+        let mut capture = BindingCapture::default();
+        capture.start(BindingTarget::Button(GbButton::A), BindingKind::Any);
+        capture.mark_shown();
+        capture.end_frame();
+        assert!(capture.is_waiting(), "the controls are on screen");
+
+        capture.end_frame();
+        assert!(
+            !capture.is_waiting(),
+            "the controls closed, so the controller and keyboard play again"
+        );
+        assert!(!capture.wants(BindingKind::Gamepad));
     }
 
     #[test]

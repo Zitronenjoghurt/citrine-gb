@@ -71,6 +71,7 @@ fn content(viewer: &mut TabViewer, ui: &mut egui::Ui) {
         &mut viewer.ui.palette_editor,
         viewer.audio.as_ref(),
         game,
+        Some(viewer.events),
     )
     .ui(ui);
 }

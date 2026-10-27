@@ -1,3 +1,15 @@
+# 0.7.1 - 2026-10-27
+
+## Added
+
+- Controller debug tab with live controller state, an input log and a report to copy or save
+
+## Fixed
+
+- A binding left waiting after leaving Settings → Controls no longer blocks input
+- Buttons held through a snapshot or ROM load no longer stick
+- Flicking the stick from one side to the other no longer leaves the first direction held
+
 # 0.7.0 - 2026-10-26
 
 ## Added

@@ -1,11 +1,13 @@
 use crate::app::ui_state::keybinds::{
-    BindingCapture, BindingKind, Captured, GbButton, KeyBindings, PadButton,
+    BindingCapture, BindingKind, Captured, GbButton, KeyBindings,
 };
 use crate::app::ui_state::settings::{ConsoleChoice, ScalingMode};
 use crate::audio::AudioLink;
 use crate::audio::pacer::{AudioFeed, FrameClock};
 use crate::autosave::{AutosaveInterval, LastGood, PlayClock, StateCopy};
+use crate::controller_debug::PadLog;
 use crate::media::recording::ScreenRecorder;
+use crate::pad_input::{PadAction, PadInput};
 use crate::recorder::InputRecorder;
 use crate::storage::{SaveStore, now_unix};
 use crate::utils::avg_timer::AvgTimer;
@@ -16,8 +18,6 @@ use citrine_gb::persistence::full_dump::FullDumpRef;
 use citrine_gb::persistence::rtc_footer::RtcFooter;
 use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb::rom::Rom;
-use gilrs::Axis;
-use gilrs::EventType::{AxisChanged, ButtonPressed, ButtonReleased};
 use strum::IntoEnumIterator;
 
 const SAVE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
@@ -134,6 +134,7 @@ impl Emulator {
         gil: &mut gilrs::Gilrs,
         bindings: &KeyBindings,
         capture: &mut BindingCapture,
+        log: Option<&mut PadLog>,
     ) -> GbResult<()> {
         self.update_avg_timer.start();
 
@@ -141,7 +142,7 @@ impl Emulator {
             self.update_texture(ctx);
         }
 
-        self.handle_input(ctx, gil, bindings, capture);
+        self.handle_input(ctx, gil, bindings, capture, log);
 
         if !self.running {
             self.advance(web_time::Instant::now());
@@ -239,31 +240,33 @@ impl Emulator {
         self.recorder.start(&self.gb);
     }
 
-    pub fn press(&mut self, button: JoypadState) {
+    pub fn press(&mut self, button: JoypadState) -> bool {
         if self.held.contains(button) {
-            return;
+            return false;
         }
         self.held.insert(button);
         let total_cycles = self.gb.debugger.total_cycles;
         self.gb.press_button(button);
         self.recorder.record(total_cycles, button, true);
+        true
     }
 
-    pub fn release(&mut self, button: JoypadState) {
+    pub fn release(&mut self, button: JoypadState) -> bool {
         if !self.held.contains(button) {
-            return;
+            return false;
         }
         self.held.remove(button);
         let total_cycles = self.gb.debugger.total_cycles;
         self.gb.release_button(button);
         self.recorder.record(total_cycles, button, false);
+        true
     }
 
-    pub fn set_held(&mut self, button: JoypadState, pressed: bool) {
+    pub fn set_held(&mut self, button: JoypadState, pressed: bool) -> bool {
         if pressed {
-            self.press(button);
+            self.press(button)
         } else {
-            self.release(button);
+            self.release(button)
         }
     }
 
@@ -277,40 +280,60 @@ impl Emulator {
         }
     }
 
+    fn sync_joypad(&mut self) {
+        for button in GbButton::iter() {
+            let joypad = button.joypad();
+            if self.held.contains(joypad) {
+                self.gb.press_button(joypad);
+            } else {
+                self.gb.release_button(joypad);
+            }
+        }
+    }
+
+    fn apply_pad(&mut self, action: PadAction, capture: &mut BindingCapture) -> bool {
+        match action {
+            PadAction::Press(button) => self.press(button.joypad()),
+            PadAction::Release(button) => self.release(button.joypad()),
+            PadAction::Steer { on, off } => {
+                let mut changed = false;
+                for button in off {
+                    changed |= self.release(button.joypad());
+                }
+                if let Some(button) = on {
+                    changed |= self.press(button.joypad());
+                }
+                changed
+            }
+            PadAction::Capture(pad) => {
+                capture.record(Captured::Pad(pad));
+                true
+            }
+            PadAction::Ignore(_) => false,
+        }
+    }
+
     pub fn handle_input(
         &mut self,
         ctx: &egui::Context,
         gil: &mut gilrs::Gilrs,
         bindings: &KeyBindings,
         capture: &mut BindingCapture,
+        mut log: Option<&mut PadLog>,
     ) {
-        while let Some(gilrs::Event { event, .. }) = gil.next_event() {
-            match event {
-                ButtonPressed(btn, ..) => {
-                    let Some(pad) = PadButton::from_gilrs(btn) else {
-                        continue;
-                    };
-                    if capture.wants(BindingKind::Gamepad) {
-                        capture.record(Captured::Pad(pad));
-                        continue;
-                    }
-                    if let Some(button) = bindings.button_for_pad(pad) {
-                        self.press(button.joypad());
-                    }
-                }
-                ButtonReleased(btn, ..) => {
-                    if let Some(button) =
-                        PadButton::from_gilrs(btn).and_then(|pad| bindings.button_for_pad(pad))
-                    {
-                        self.release(button.joypad());
-                    }
-                }
-                AxisChanged(axis, value, ..) if bindings.stick_as_dpad => match axis {
-                    Axis::DPadX | Axis::LeftStickX => self.handle_x_axis(value),
-                    Axis::DPadY | Axis::LeftStickY => self.handle_y_axis(value),
-                    _ => {}
-                },
-                _ => {}
+        while let Some(gilrs::Event { id, event, .. }) = gil.next_event() {
+            let input = PadInput::from_gilrs(&event);
+            let action = crate::pad_input::route(input, bindings, capture);
+            let changed = self.apply_pad(action, capture);
+            if let Some(log) = log.as_deref_mut() {
+                log.record(
+                    web_time::Instant::now(),
+                    id,
+                    input,
+                    PadInput::code(&event),
+                    action,
+                    changed,
+                );
             }
         }
 
@@ -343,28 +366,6 @@ impl Emulator {
             if let Some(button) = bindings.button_for_key(key) {
                 self.set_held(button.joypad(), pressed);
             }
-        }
-    }
-
-    pub fn handle_x_axis(&mut self, value: f32) {
-        if value < -0.5 {
-            self.press(JoypadState::LEFT);
-        } else if value > 0.5 {
-            self.press(JoypadState::RIGHT);
-        } else {
-            self.release(JoypadState::LEFT);
-            self.release(JoypadState::RIGHT);
-        }
-    }
-
-    pub fn handle_y_axis(&mut self, value: f32) {
-        if value < -0.5 {
-            self.press(JoypadState::DOWN);
-        } else if value > 0.5 {
-            self.press(JoypadState::UP);
-        } else {
-            self.release(JoypadState::UP);
-            self.release(JoypadState::DOWN);
         }
     }
 
@@ -464,6 +465,7 @@ impl Emulator {
         self.imported_legacy_save = false;
         self.gb
             .load_rom_with_model(rom, self.console.model_for(rom))?;
+        self.sync_joypad();
 
         let key = self.gb.cartridge.header.sha256_hex_string();
         #[cfg(not(target_arch = "wasm32"))]
@@ -549,6 +551,7 @@ impl Emulator {
         let sample_rate = self.gb.apu.output_sample_rate;
         self.gb = restored;
         self.gb.apu.set_sample_rate(sample_rate);
+        self.sync_joypad();
         self.running = true;
         self.started_at = Some(web_time::Instant::now());
         self.play = PlayClock::default();
@@ -921,6 +924,44 @@ mod tests {
         emulator
             .store
             .autosave_ids(emulator.rom_key().expect("key"))
+    }
+
+    fn gb_held(emulator: &mut Emulator) -> u8 {
+        use citrine_gb::{ReadMemory, WriteMemory};
+        let joypad = &mut emulator.gb.joypad;
+        joypad.write_naive(0xFF00, 0x10);
+        let buttons = !joypad.read_naive(0xFF00) & 0x0F;
+        joypad.write_naive(0xFF00, 0x20);
+        let dpad = !joypad.read_naive(0xFF00) & 0x0F;
+        buttons | (dpad << 4)
+    }
+
+    #[test]
+    fn the_game_boy_sees_what_is_held_after_a_load() {
+        let mut emulator = emulator("held-sync");
+        running(&mut emulator, 0x03);
+        emulator.press(JoypadState::A);
+        emulator.save_snapshot(0).expect("save");
+        emulator.release(JoypadState::A);
+        emulator.press(JoypadState::RIGHT);
+
+        assert!(emulator.load_snapshot(0).expect("load"));
+        assert_eq!(
+            gb_held(&mut emulator),
+            JoypadState::RIGHT.bits(),
+            "A was let go before the load and Right is still down"
+        );
+        assert!(emulator.release(JoypadState::RIGHT));
+        assert_eq!(gb_held(&mut emulator), 0);
+
+        emulator.press(JoypadState::START);
+        running(&mut emulator, 0x03);
+        assert_eq!(gb_held(&mut emulator), JoypadState::START.bits());
+        assert!(
+            emulator.release(JoypadState::START),
+            "the release reaches the game"
+        );
+        assert_eq!(gb_held(&mut emulator), 0);
     }
 
     #[test]

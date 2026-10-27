@@ -329,6 +329,7 @@ impl Citrine {
                     audio: &mut self.audio,
                     commonmark: &mut self.commonmark,
                     emulator: &mut self.emulator,
+                    gil: &self.gil,
                     events: &mut self.events,
                     files: &mut self.files,
                     media: &mut self.media,

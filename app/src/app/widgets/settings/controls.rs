@@ -11,9 +11,11 @@ use crate::icons;
 use egui::{Response, RichText, Ui, Widget};
 use strum::IntoEnumIterator;
 
-pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) {
+pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) -> bool {
+    capture.mark_shown();
     apply_capture(settings, capture);
     capture_banner(ui, capture);
+    let mut debug = false;
 
     section(ui, icons::GAME_CONTROLLER, "Game Boy buttons", |ui| {
         let unbound = settings.bindings.unbound();
@@ -40,6 +42,13 @@ pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) 
                 .on_hover_text("Also read the analog stick as a d-pad")
                 .changed();
         });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            debug = ui
+                .button(format!("{} Controller debug", icons::BUG))
+                .on_hover_text("Live controller state and an input log to send with a bug report")
+                .clicked();
+        });
     });
 
     section(ui, icons::KEYBOARD, "Shortcuts", |ui| {
@@ -62,6 +71,7 @@ pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) 
         ui.add_space(6.0);
         touch_grid(ui, settings);
     });
+    debug
 }
 
 fn apply_capture(settings: &mut Settings, capture: &mut BindingCapture) {
@@ -113,7 +123,7 @@ fn capture_banner(ui: &mut Ui, capture: &mut BindingCapture) {
     ui.add_space(8.0);
 }
 
-pub(super) fn section(ui: &mut Ui, icon: &str, title: &str, body: impl FnOnce(&mut Ui)) {
+pub(crate) fn section(ui: &mut Ui, icon: &str, title: &str, body: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new(icon).size(15.0));

@@ -12,6 +12,7 @@ use strum_macros::EnumIter;
 mod apu;
 mod apu_waves;
 mod audio_debug;
+mod controller_debug;
 mod debug_actions;
 mod disassembly;
 mod e2e;
@@ -32,6 +33,7 @@ pub struct TabViewer<'a> {
     pub audio: &'a mut Option<Audio>,
     pub commonmark: &'a mut egui_commonmark::CommonMarkCache,
     pub emulator: &'a mut Emulator,
+    pub gil: &'a gilrs::Gilrs,
     pub events: &'a mut AppEventQueue,
     pub files: &'a mut FileChannels,
     pub media: &'a mut MediaStore,
@@ -52,6 +54,7 @@ impl TabViewer<'_> {
             Tab::Homebrew => homebrew::show(self, ui),
             Tab::Info => info::show(self, ui),
             Tab::AudioDebug => audio_debug::show(self, ui),
+            Tab::ControllerDebug => controller_debug::show(self, ui),
             Tab::Apu => apu::show(self, ui),
             Tab::ApuWaves => apu_waves::show(self, ui),
             Tab::Disassembly => disassembly::show(self, ui),
@@ -107,7 +110,13 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     }
 
     fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
-        [!matches!(tab, Tab::Saves | Tab::Media | Tab::Info), true]
+        [
+            !matches!(
+                tab,
+                Tab::Saves | Tab::Media | Tab::Info | Tab::ControllerDebug
+            ),
+            true,
+        ]
     }
 }
 
@@ -118,6 +127,7 @@ pub enum Tab {
     Apu,
     ApuWaves,
     AudioDebug,
+    ControllerDebug,
     DebugActions,
     Disassembly,
     E2ETest,
@@ -147,6 +157,7 @@ impl Tab {
             Tab::Homebrew => "Homebrew",
             Tab::Info => "About",
             Tab::AudioDebug => "Audio debug",
+            Tab::ControllerDebug => "Controller debug",
             Tab::Apu => "APU",
             Tab::ApuWaves => "APU waves",
             Tab::Disassembly => "Disassembly",

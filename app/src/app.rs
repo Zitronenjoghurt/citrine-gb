@@ -211,6 +211,14 @@ impl eframe::App for Citrine {
         self.codec_confirm(ctx);
         self.reset_confirm(ctx);
         self.mobile_escape(ctx);
+        self.ui.capture.end_frame();
+        let debug_open = self.dock.find_tab(&Tab::ControllerDebug).is_some()
+            || self.mobile.sheet == Some(mobile::Sheet::Panel(Tab::ControllerDebug));
+        let now = web_time::Instant::now();
+        self.ui.controller_debug.set_open(debug_open, now);
+        self.ui
+            .controller_debug
+            .note_focus(ctx.input(|i| i.viewport().focused), now);
 
         self.drain_file_channels();
         self.handle_dropped_files(ctx);
@@ -219,7 +227,13 @@ impl eframe::App for Citrine {
         let Self {
             emulator, gil, ui, ..
         } = self;
-        let result = emulator.update(ctx, gil, &ui.settings.bindings, &mut ui.capture);
+        let result = emulator.update(
+            ctx,
+            gil,
+            &ui.settings.bindings,
+            &mut ui.capture,
+            ui.controller_debug.log_mut(),
+        );
         if let Err(err) = result {
             self.toasts.error(format!("Emulation error: {err}"));
         }
@@ -313,6 +327,7 @@ impl Citrine {
                 audio: &mut self.audio,
                 commonmark: &mut self.commonmark,
                 emulator: &mut self.emulator,
+                gil: &self.gil,
                 events: &mut self.events,
                 files: &mut self.files,
                 media: &mut self.media,
@@ -473,6 +488,7 @@ impl Citrine {
                         Tab::Performance,
                         Tab::DebugActions,
                         Tab::AudioDebug,
+                        Tab::ControllerDebug,
                         Tab::E2ETest,
                     ] {
                         if ui.button(tab.label()).clicked() {
