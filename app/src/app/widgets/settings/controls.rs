@@ -31,16 +31,36 @@ pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) 
         buttons_table(ui, settings, capture);
 
         ui.add_space(10.0);
+        Form::show(ui, "stick_steering", |form| {
+            form.row("Left stick steers", |ui| {
+                settings.dirty |= ui
+                    .checkbox(&mut settings.bindings.stick_as_dpad, "")
+                    .on_hover_text("Also read the analog stick as a d-pad")
+                    .changed();
+            });
+            form.row("Stick dead zone", |ui| {
+                ui.add_enabled_ui(settings.bindings.stick_as_dpad, |ui| {
+                    let response = ResetSlider::new(
+                        &mut settings.bindings.stick_deadzone,
+                        KeyBindings::DEADZONES,
+                    )
+                    .default_value(KeyBindings::DEFAULT_DEADZONE)
+                    .suffix("%")
+                    .ui(ui);
+                    if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                        settings.dirty = true;
+                    }
+                    response.on_hover_text("How far the stick moves before it presses a direction");
+                });
+            });
+        });
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             if reset_button(ui, !settings.bindings.is_default()) {
                 settings.bindings = KeyBindings::default();
                 capture.cancel();
                 settings.dirty = true;
             }
-            settings.dirty |= ui
-                .checkbox(&mut settings.bindings.stick_as_dpad, "Left stick steers")
-                .on_hover_text("Also read the analog stick as a d-pad")
-                .changed();
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {

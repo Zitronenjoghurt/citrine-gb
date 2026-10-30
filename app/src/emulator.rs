@@ -6,8 +6,9 @@ use crate::audio::AudioLink;
 use crate::audio::pacer::{AudioFeed, FrameClock};
 use crate::autosave::{AutosaveInterval, LastGood, PlayClock, StateCopy};
 use crate::controller_debug::PadLog;
+use crate::held::{Change, HeldButtons, InputSource};
 use crate::media::recording::ScreenRecorder;
-use crate::pad_input::{PadAction, PadInput};
+use crate::pad_input::{PadAction, PadEvent, PadInput, PadSource};
 use crate::recorder::InputRecorder;
 use crate::storage::{SaveStore, now_unix};
 use crate::utils::avg_timer::AvgTimer;
@@ -58,7 +59,7 @@ pub struct Emulator {
     /// 0.0 (pure smear) to 1.0 (instant, no ghosting)
     pub ghosting_blend: f32,
     pub scaling: ScalingMode,
-    held: JoypadState,
+    held: HeldButtons,
     texture: Option<egui::TextureHandle>,
     upscale_buffer: Vec<u8>,
     last_update: Option<web_time::Instant>,
@@ -98,7 +99,7 @@ impl Default for Emulator {
             enable_ghosting: true,
             ghosting_blend: 0.7,
             scaling: ScalingMode::default(),
-            held: JoypadState::empty(),
+            held: HeldButtons::default(),
             texture: None,
             upscale_buffer: Vec::new(),
             last_update: None,
@@ -131,7 +132,7 @@ impl Emulator {
     pub fn update(
         &mut self,
         ctx: &egui::Context,
-        gil: &mut gilrs::Gilrs,
+        pads: &mut dyn PadSource,
         bindings: &KeyBindings,
         capture: &mut BindingCapture,
         log: Option<&mut PadLog>,
@@ -142,7 +143,7 @@ impl Emulator {
             self.update_texture(ctx);
         }
 
-        self.handle_input(ctx, gil, bindings, capture, log);
+        self.handle_input(ctx, pads, bindings, capture, log);
 
         if !self.running {
             self.advance(web_time::Instant::now());
@@ -186,6 +187,11 @@ impl Emulator {
             self.frame_avg_timer.start();
             self.gb.run_frame();
             self.frame_avg_timer.stop();
+            let owed = self.held.take_owed();
+            self.apply(Change {
+                pressed: JoypadState::empty(),
+                released: owed,
+            });
             ran_frame = true;
             heard = self.capture_frame(heard);
 
@@ -240,50 +246,61 @@ impl Emulator {
         self.recorder.start(&self.gb);
     }
 
-    pub fn press(&mut self, button: JoypadState) -> bool {
-        if self.held.contains(button) {
-            return false;
-        }
-        self.held.insert(button);
-        let total_cycles = self.gb.debugger.total_cycles;
-        self.gb.press_button(button);
-        self.recorder.record(total_cycles, button, true);
-        true
+    pub fn press(&mut self, source: InputSource, button: JoypadState) -> bool {
+        self.set_source(source, button, button)
     }
 
-    pub fn release(&mut self, button: JoypadState) -> bool {
-        if !self.held.contains(button) {
-            return false;
-        }
-        self.held.remove(button);
-        let total_cycles = self.gb.debugger.total_cycles;
-        self.gb.release_button(button);
-        self.recorder.record(total_cycles, button, false);
-        true
+    pub fn release(&mut self, source: InputSource, button: JoypadState) -> bool {
+        self.set_source(source, button, JoypadState::empty())
     }
 
-    pub fn set_held(&mut self, button: JoypadState, pressed: bool) -> bool {
+    pub fn set_held(&mut self, source: InputSource, button: JoypadState, pressed: bool) -> bool {
         if pressed {
-            self.press(button)
+            self.press(source, button)
         } else {
-            self.release(button)
+            self.release(source, button)
         }
     }
 
     pub fn is_held(&self, button: JoypadState) -> bool {
-        self.held.contains(button)
+        self.held.held().contains(button)
     }
 
     pub fn release_all(&mut self) {
+        let change = self.held.clear();
+        self.apply(change);
+    }
+
+    fn set_source(&mut self, source: InputSource, mask: JoypadState, down: JoypadState) -> bool {
+        let before = self.held.held();
+        let change = self.held.set(source, mask, down);
+        self.apply(change);
+        before.bits() != self.held.held().bits()
+    }
+
+    fn apply(&mut self, change: Change) {
+        let total_cycles = self.gb.debugger.total_cycles;
         for button in GbButton::iter() {
-            self.release(button.joypad());
+            let joypad = button.joypad();
+            if change.pressed.contains(joypad) {
+                self.gb.press_button(joypad);
+                self.recorder.record(total_cycles, joypad, true);
+            } else if change.released.contains(joypad) {
+                self.gb.release_button(joypad);
+                self.recorder.record(total_cycles, joypad, false);
+            }
         }
     }
 
     fn sync_joypad(&mut self) {
+        let owed = self.held.take_owed();
+        self.apply(Change {
+            pressed: JoypadState::empty(),
+            released: owed,
+        });
         for button in GbButton::iter() {
             let joypad = button.joypad();
-            if self.held.contains(joypad) {
+            if self.is_held(joypad) {
                 self.gb.press_button(joypad);
             } else {
                 self.gb.release_button(joypad);
@@ -291,51 +308,78 @@ impl Emulator {
         }
     }
 
-    fn apply_pad(&mut self, action: PadAction, capture: &mut BindingCapture) -> bool {
+    fn apply_pad(
+        &mut self,
+        source: InputSource,
+        action: PadAction,
+        capture: &mut BindingCapture,
+    ) -> bool {
         match action {
-            PadAction::Press(button) => self.press(button.joypad()),
-            PadAction::Release(button) => self.release(button.joypad()),
+            PadAction::Press(button) => self.press(source, button.joypad()),
+            PadAction::Release(button) => self.release(source, button.joypad()),
             PadAction::Steer { on, off } => {
-                let mut changed = false;
-                for button in off {
-                    changed |= self.release(button.joypad());
-                }
-                if let Some(button) = on {
-                    changed |= self.press(button.joypad());
-                }
-                changed
+                let mask = off
+                    .iter()
+                    .chain(on.iter())
+                    .fold(JoypadState::empty(), |all, b| all | b.joypad());
+                let down = on.map_or(JoypadState::empty(), GbButton::joypad);
+                self.set_source(source, mask, down)
             }
             PadAction::Capture(pad) => {
                 capture.record(Captured::Pad(pad));
                 true
             }
+            PadAction::Unplugged => {
+                let before = self.held.held();
+                let change = match source {
+                    InputSource::PadButtons(pad) => self.held.forget_pad(pad),
+                    _ => Change::default(),
+                };
+                self.apply(change);
+                before.bits() != self.held.held().bits()
+            }
             PadAction::Ignore(_) => false,
+        }
+    }
+
+    pub fn handle_pads(
+        &mut self,
+        pads: &mut dyn PadSource,
+        bindings: &KeyBindings,
+        capture: &mut BindingCapture,
+        mut log: Option<&mut PadLog>,
+    ) {
+        while let Some(PadEvent { pad, input, code }) = pads.next_event() {
+            let source = match input {
+                PadInput::Moved(axis, _) => InputSource::PadAxis(pad, axis),
+                _ => InputSource::PadButtons(pad),
+            };
+            let zone = self.held.of(source);
+            let steering = GbButton::iter().find(|b| zone.contains(b.joypad()));
+            let action = crate::pad_input::route(input, bindings, capture, steering);
+            let changed = self.apply_pad(source, action, capture);
+            let Some(log) = log.as_deref_mut() else {
+                continue;
+            };
+            let now = web_time::Instant::now();
+            match input {
+                PadInput::Moved(axis, value) if self.held.of(source).bits() == zone.bits() => {
+                    log.record_still(now, pad, axis, value, code, action);
+                }
+                _ => log.record(now, pad, input, code, action, changed),
+            }
         }
     }
 
     pub fn handle_input(
         &mut self,
         ctx: &egui::Context,
-        gil: &mut gilrs::Gilrs,
+        pads: &mut dyn PadSource,
         bindings: &KeyBindings,
         capture: &mut BindingCapture,
-        mut log: Option<&mut PadLog>,
+        log: Option<&mut PadLog>,
     ) {
-        while let Some(gilrs::Event { id, event, .. }) = gil.next_event() {
-            let input = PadInput::from_gilrs(&event);
-            let action = crate::pad_input::route(input, bindings, capture);
-            let changed = self.apply_pad(action, capture);
-            if let Some(log) = log.as_deref_mut() {
-                log.record(
-                    web_time::Instant::now(),
-                    id,
-                    input,
-                    PadInput::code(&event),
-                    action,
-                    changed,
-                );
-            }
-        }
+        self.handle_pads(pads, bindings, capture, log);
 
         if ctx.wants_keyboard_input() && !capture.wants(BindingKind::Keyboard) {
             return;
@@ -364,7 +408,7 @@ impl Emulator {
                 continue;
             }
             if let Some(button) = bindings.button_for_key(key) {
-                self.set_held(button.joypad(), pressed);
+                self.set_held(InputSource::Keyboard, button.joypad(), pressed);
             }
         }
     }
@@ -873,8 +917,11 @@ impl Emulator {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use crate::app::ui_state::keybinds::{BindingTarget, PadButton};
+    use crate::pad_input::{PadAxis, PadInput, PadKey};
 
     const RAM_LEN: usize = 0x2000;
+    const KEYS: InputSource = InputSource::Keyboard;
 
     fn emulator(name: &str) -> Emulator {
         let root =
@@ -940,10 +987,10 @@ mod tests {
     fn the_game_boy_sees_what_is_held_after_a_load() {
         let mut emulator = emulator("held-sync");
         running(&mut emulator, 0x03);
-        emulator.press(JoypadState::A);
+        emulator.press(KEYS, JoypadState::A);
         emulator.save_snapshot(0).expect("save");
-        emulator.release(JoypadState::A);
-        emulator.press(JoypadState::RIGHT);
+        emulator.release(KEYS, JoypadState::A);
+        emulator.press(KEYS, JoypadState::RIGHT);
 
         assert!(emulator.load_snapshot(0).expect("load"));
         assert_eq!(
@@ -951,14 +998,14 @@ mod tests {
             JoypadState::RIGHT.bits(),
             "A was let go before the load and Right is still down"
         );
-        assert!(emulator.release(JoypadState::RIGHT));
+        assert!(emulator.release(KEYS, JoypadState::RIGHT));
         assert_eq!(gb_held(&mut emulator), 0);
 
-        emulator.press(JoypadState::START);
+        emulator.press(KEYS, JoypadState::START);
         running(&mut emulator, 0x03);
         assert_eq!(gb_held(&mut emulator), JoypadState::START.bits());
         assert!(
-            emulator.release(JoypadState::START),
+            emulator.release(KEYS, JoypadState::START),
             "the release reaches the game"
         );
         assert_eq!(gb_held(&mut emulator), 0);
@@ -1133,5 +1180,355 @@ mod tests {
         assert!(item.thumbnail.is_some());
         assert_eq!(MediaStore::at(root.clone()).items().len(), 1);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    struct FakePads(std::collections::VecDeque<PadEvent>);
+
+    impl PadSource for FakePads {
+        fn next_event(&mut self) -> Option<PadEvent> {
+            self.0.pop_front()
+        }
+
+        fn pads(&self, _seen: &[usize]) -> Vec<crate::controller_debug::PadInfo> {
+            Vec::new()
+        }
+
+        fn api(&self) -> String {
+            "fake".to_string()
+        }
+    }
+
+    fn fake(events: &[(usize, PadInput)]) -> FakePads {
+        FakePads(
+            events
+                .iter()
+                .map(|&(pad, input)| PadEvent {
+                    pad,
+                    input,
+                    code: None,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn any_pad_source_drives_the_bindings() {
+        let mut emulator = emulator("pad-source");
+        let bindings = KeyBindings::default();
+        let mut capture = BindingCapture::default();
+        let mut log = PadLog::new(web_time::Instant::now());
+        let mut pads = fake(&[
+            (3, PadInput::Connected),
+            (3, PadInput::Pressed(PadKey::Known(PadButton::East))),
+            (3, PadInput::Moved(PadAxis::LeftStickX, -0.9)),
+        ]);
+        emulator.handle_pads(&mut pads, &bindings, &mut capture, Some(&mut log));
+        assert!(emulator.is_held(GbButton::A.joypad()));
+        assert!(emulator.is_held(GbButton::Left.joypad()));
+        assert_eq!(log.len(), 3);
+        assert_eq!(log.seen(), &[3]);
+
+        let mut pads = fake(&[
+            (3, PadInput::Released(PadKey::Known(PadButton::East))),
+            (3, PadInput::Moved(PadAxis::LeftStickX, 0.0)),
+        ]);
+        emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
+        assert!(!emulator.is_held(GbButton::A.joypad()));
+        assert!(!emulator.is_held(GbButton::Left.joypad()));
+    }
+
+    #[test]
+    fn any_pad_source_feeds_a_waiting_binding() {
+        let mut emulator = emulator("pad-capture");
+        let bindings = KeyBindings::default();
+        let mut capture = BindingCapture::default();
+        capture.start(BindingTarget::Button(GbButton::B), BindingKind::Gamepad);
+        let mut pads = fake(&[(
+            1,
+            PadInput::Pressed(PadKey::Known(PadButton::RightTrigger2)),
+        )]);
+        emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
+        assert_eq!(
+            capture.take(),
+            Some((
+                BindingTarget::Button(GbButton::B),
+                Captured::Pad(PadButton::RightTrigger2)
+            ))
+        );
+        assert!(!emulator.is_held(GbButton::B.joypad()));
+    }
+
+    fn d_pad(button: PadButton, pressed: bool) -> PadInput {
+        if pressed {
+            PadInput::Pressed(PadKey::Known(button))
+        } else {
+            PadInput::Released(PadKey::Known(button))
+        }
+    }
+
+    fn stick_x(value: f32) -> PadInput {
+        PadInput::Moved(PadAxis::LeftStickX, value)
+    }
+
+    fn stick_y(value: f32) -> PadInput {
+        PadInput::Moved(PadAxis::LeftStickY, value)
+    }
+
+    fn noise(count: usize) -> Vec<(usize, PadInput)> {
+        (0..count)
+            .map(|i| {
+                let value = if i % 2 == 0 { 0.02 } else { -0.02 };
+                let input = if i % 3 == 0 {
+                    stick_y(value)
+                } else {
+                    stick_x(value)
+                };
+                (0, input)
+            })
+            .collect()
+    }
+
+    fn feed(emulator: &mut Emulator, bindings: &KeyBindings, events: &[(usize, PadInput)]) {
+        let mut capture = BindingCapture::default();
+        emulator.handle_pads(&mut fake(events), bindings, &mut capture, None);
+    }
+
+    fn pads_in(emulator: &mut Emulator, events: &[(usize, PadInput)]) {
+        feed(emulator, &KeyBindings::default(), events);
+    }
+
+    fn play_a_frame(emulator: &mut Emulator) {
+        emulator.running = true;
+        let start = web_time::Instant::now();
+        emulator.advance(start);
+        emulator.advance(start + std::time::Duration::from_millis(50));
+    }
+
+    fn holds(emulator: &Emulator, button: GbButton) -> bool {
+        emulator.is_held(button.joypad())
+    }
+
+    #[test]
+    fn stick_noise_never_lets_go_of_a_held_d_pad() {
+        let mut emulator = emulator("pad-noise");
+        running(&mut emulator, 0x03);
+        pads_in(&mut emulator, &[(0, d_pad(PadButton::DPadLeft, true))]);
+        pads_in(&mut emulator, &noise(50));
+        assert!(holds(&emulator, GbButton::Left));
+        play_a_frame(&mut emulator);
+        assert_eq!(gb_held(&mut emulator), JoypadState::LEFT.bits());
+    }
+
+    #[test]
+    fn a_d_pad_tap_reaches_the_game_for_a_frame() {
+        let mut emulator = emulator("pad-tap");
+        running(&mut emulator, 0x03);
+        let mut tap = vec![(0, d_pad(PadButton::DPadLeft, true))];
+        tap.extend(noise(6));
+        tap.push((0, d_pad(PadButton::DPadLeft, false)));
+        pads_in(&mut emulator, &tap);
+        assert!(!holds(&emulator, GbButton::Left), "the player let go");
+        assert_eq!(
+            gb_held(&mut emulator),
+            JoypadState::LEFT.bits(),
+            "the game still sees the tap until a frame runs"
+        );
+        play_a_frame(&mut emulator);
+        assert_eq!(gb_held(&mut emulator), 0);
+    }
+
+    #[test]
+    fn a_stick_flick_reaches_the_game_for_a_frame() {
+        let mut emulator = emulator("pad-flick");
+        running(&mut emulator, 0x03);
+        pads_in(
+            &mut emulator,
+            &[(0, stick_x(0.95)), (0, stick_x(0.3)), (0, stick_x(0.01))],
+        );
+        assert!(!holds(&emulator, GbButton::Right));
+        assert_eq!(gb_held(&mut emulator), JoypadState::RIGHT.bits());
+        play_a_frame(&mut emulator);
+        assert_eq!(gb_held(&mut emulator), 0);
+    }
+
+    #[test]
+    fn a_centred_stick_lets_go_of_only_what_it_held() {
+        let mut emulator = emulator("pad-centre");
+        running(&mut emulator, 0x03);
+        pads_in(
+            &mut emulator,
+            &[(0, d_pad(PadButton::DPadUp, true)), (0, stick_x(-0.9))],
+        );
+        play_a_frame(&mut emulator);
+        pads_in(&mut emulator, &[(0, stick_x(0.0))]);
+        assert!(!holds(&emulator, GbButton::Left));
+        assert!(holds(&emulator, GbButton::Up));
+        assert_eq!(gb_held(&mut emulator), JoypadState::UP.bits());
+    }
+
+    #[test]
+    fn the_d_pad_and_the_stick_hold_the_same_button_together() {
+        let mut emulator = emulator("pad-both");
+        running(&mut emulator, 0x03);
+        pads_in(
+            &mut emulator,
+            &[(0, d_pad(PadButton::DPadLeft, true)), (0, stick_x(-0.9))],
+        );
+        play_a_frame(&mut emulator);
+        pads_in(&mut emulator, &[(0, stick_x(0.0))]);
+        assert!(holds(&emulator, GbButton::Left), "the d-pad still holds it");
+        pads_in(&mut emulator, &[(0, stick_x(-0.9))]);
+        play_a_frame(&mut emulator);
+        pads_in(&mut emulator, &[(0, d_pad(PadButton::DPadLeft, false))]);
+        assert!(holds(&emulator, GbButton::Left), "the stick still holds it");
+        assert_eq!(gb_held(&mut emulator), JoypadState::LEFT.bits());
+        pads_in(&mut emulator, &[(0, stick_x(0.0))]);
+        assert!(!holds(&emulator, GbButton::Left));
+        assert_eq!(gb_held(&mut emulator), 0);
+    }
+
+    #[test]
+    fn the_keyboard_and_a_pad_do_not_let_go_of_each_other() {
+        let mut emulator = emulator("pad-keys");
+        running(&mut emulator, 0x03);
+        emulator.press(KEYS, JoypadState::A);
+        pads_in(&mut emulator, &[(0, d_pad(PadButton::East, true))]);
+        play_a_frame(&mut emulator);
+        pads_in(&mut emulator, &[(0, d_pad(PadButton::East, false))]);
+        assert!(holds(&emulator, GbButton::A));
+        pads_in(&mut emulator, &[(0, d_pad(PadButton::East, true))]);
+        emulator.release(KEYS, JoypadState::A);
+        assert!(holds(&emulator, GbButton::A));
+    }
+
+    #[test]
+    fn stick_diagonals_act_on_each_axis_alone() {
+        let mut emulator = emulator("pad-diagonal");
+        running(&mut emulator, 0x03);
+        pads_in(&mut emulator, &[(0, stick_x(-0.8)), (0, stick_y(-0.8))]);
+        assert!(holds(&emulator, GbButton::Left));
+        assert!(holds(&emulator, GbButton::Down));
+        play_a_frame(&mut emulator);
+        pads_in(&mut emulator, &[(0, stick_y(0.02))]);
+        assert!(holds(&emulator, GbButton::Left));
+        assert!(!holds(&emulator, GbButton::Down));
+        pads_in(&mut emulator, &[(0, stick_y(0.8)), (0, stick_x(0.01))]);
+        assert!(holds(&emulator, GbButton::Up));
+        assert!(!holds(&emulator, GbButton::Left));
+    }
+
+    #[test]
+    fn a_stick_resting_near_the_dead_zone_does_not_flicker() {
+        let mut emulator = emulator("pad-edge");
+        running(&mut emulator, 0x03);
+        let mut log = PadLog::new(web_time::Instant::now());
+        let bindings = KeyBindings::default();
+        let mut capture = BindingCapture::default();
+        let mut send = |emulator: &mut Emulator, log: &mut PadLog, values: &[f32]| {
+            let events: Vec<(usize, PadInput)> = values.iter().map(|&v| (0, stick_x(v))).collect();
+            emulator.handle_pads(&mut fake(&events), &bindings, &mut capture, Some(log));
+        };
+        send(&mut emulator, &mut log, &[0.46, 0.49, 0.47, 0.5, 0.48]);
+        assert!(!holds(&emulator, GbButton::Right), "not past the dead zone");
+        send(&mut emulator, &mut log, &[0.53]);
+        assert!(holds(&emulator, GbButton::Right));
+        let before = log.len();
+        let jitter: Vec<f32> = (0..40)
+            .map(|i| if i % 2 == 0 { 0.52 } else { 0.42 })
+            .collect();
+        send(&mut emulator, &mut log, &jitter);
+        assert!(holds(&emulator, GbButton::Right), "held through the jitter");
+        assert_eq!(log.len(), before + 1, "the jitter is one log line");
+        send(&mut emulator, &mut log, &[0.38]);
+        assert!(!holds(&emulator, GbButton::Right));
+    }
+
+    #[test]
+    fn the_dead_zone_setting_moves_where_the_stick_presses() {
+        let mut emulator = emulator("pad-deadzone");
+        running(&mut emulator, 0x03);
+        let mut bindings = KeyBindings::default();
+        bindings.stick_deadzone = 30;
+        feed(&mut emulator, &bindings, &[(0, stick_x(-0.35))]);
+        assert!(holds(&emulator, GbButton::Left));
+        feed(&mut emulator, &bindings, &[(0, stick_x(-0.22))]);
+        assert!(holds(&emulator, GbButton::Left), "lets go only below 0.20");
+        feed(&mut emulator, &bindings, &[(0, stick_x(-0.15))]);
+        assert!(!holds(&emulator, GbButton::Left));
+    }
+
+    #[test]
+    fn an_unplugged_pad_lets_go_of_what_it_held() {
+        let mut emulator = emulator("pad-unplug");
+        running(&mut emulator, 0x03);
+        emulator.press(KEYS, JoypadState::A);
+        pads_in(
+            &mut emulator,
+            &[
+                (0, d_pad(PadButton::East, true)),
+                (0, d_pad(PadButton::Start, true)),
+                (0, stick_x(-0.9)),
+                (1, d_pad(PadButton::South, true)),
+            ],
+        );
+        play_a_frame(&mut emulator);
+        pads_in(&mut emulator, &[(0, PadInput::Disconnected)]);
+        assert!(holds(&emulator, GbButton::A), "the keyboard still holds it");
+        assert!(holds(&emulator, GbButton::B), "pad 1 still holds it");
+        assert!(!holds(&emulator, GbButton::Start));
+        assert!(!holds(&emulator, GbButton::Left));
+        assert_eq!(
+            gb_held(&mut emulator),
+            (JoypadState::A | JoypadState::B).bits()
+        );
+    }
+
+    #[test]
+    fn letting_go_of_everything_clears_every_source() {
+        let mut emulator = emulator("pad-release-all");
+        running(&mut emulator, 0x03);
+        emulator.press(KEYS, JoypadState::A);
+        emulator.press(InputSource::Touch, JoypadState::B);
+        pads_in(
+            &mut emulator,
+            &[(0, d_pad(PadButton::DPadUp, true)), (0, stick_x(0.9))],
+        );
+        emulator.release_all();
+        assert!(GbButton::iter().all(|b| !holds(&emulator, b)));
+        assert_eq!(gb_held(&mut emulator), 0, "taps owed a frame go too");
+        pads_in(&mut emulator, &[(0, stick_x(0.95))]);
+        assert!(
+            holds(&emulator, GbButton::Right),
+            "a stick still pushed holds again on its next move"
+        );
+    }
+
+    #[test]
+    fn stick_noise_folds_into_one_log_line_per_axis() {
+        let mut emulator = emulator("pad-log");
+        let bindings = KeyBindings::default();
+        let mut capture = BindingCapture::default();
+        let mut log = PadLog::new(web_time::Instant::now());
+        let mut events = vec![(0, d_pad(PadButton::DPadUp, true))];
+        events.extend(noise(90));
+        events.push((0, PadInput::Moved(PadAxis::RightStickX, 0.01)));
+        events.push((0, d_pad(PadButton::DPadUp, false)));
+        events.extend(noise(9));
+        emulator.handle_pads(&mut fake(&events), &bindings, &mut capture, Some(&mut log));
+        let lines: Vec<String> = log.entries().map(|e| e.event()).collect();
+        assert_eq!(lines.len(), 7, "{lines:#?}");
+        assert!(lines[0].contains("DPadUp pressed"));
+        assert!(
+            lines[1].contains("LeftStickY moved 30 times between -0.02 and +0.02"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("LeftStickX moved 60 times"),
+            "{}",
+            lines[2]
+        );
+        assert!(lines[3].contains("RightStickX at +0.01"), "{}", lines[3]);
+        assert!(lines[4].contains("DPadUp released"));
     }
 }

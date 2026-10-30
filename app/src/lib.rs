@@ -3,6 +3,7 @@ mod audio;
 mod autosave;
 mod controller_debug;
 mod emulator;
+mod held;
 mod homebrew;
 mod media;
 mod pad_input;

@@ -1,3 +1,14 @@
+# 0.7.2 - 2026-10-30
+
+## Added
+
+- Stick dead zone setting in Settings → Controls
+
+## Fixed
+
+- PlayStation and Switch controllers now work on Windows through SDL
+- D-pad taps and left and right register properly with the left stick steering on
+
 # 0.7.1 - 2026-10-27
 
 ## Added

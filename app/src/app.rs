@@ -8,6 +8,7 @@ use crate::emulator::{Emulator, SaveImport};
 use crate::icons;
 use crate::media::recording::{self, Availability, FinishedRecording, Outcome, StopReason};
 use crate::media::{Frame as MediaFrame, MediaId, MediaItem, MediaKind, MediaStore, NewMedia};
+use crate::pad_input::PadSource;
 use crate::storage::SettingsStore;
 use crate::utils::file_channels::FileChannels;
 use crate::utils::file_loader::FileLoader;
@@ -19,7 +20,6 @@ use eframe::{Frame, Storage};
 use egui::{CentralPanel, Color32, Context, FontDefinitions, TopBottomPanel};
 use egui_commonmark::CommonMarkCache;
 use egui_dock::{DockState, NodeIndex, SurfaceIndex};
-use gilrs::Gilrs;
 use strum::IntoEnumIterator;
 use toasts::{Toast, Toasts};
 
@@ -47,8 +47,8 @@ pub struct Citrine {
     pub emulator: Emulator,
     #[serde(skip, default)]
     pub files: FileChannels,
-    #[serde(skip, default = "default_gilrs")]
-    pub gil: Gilrs,
+    #[serde(skip, default = "crate::pad_input::open_source")]
+    pub pads: Box<dyn PadSource>,
     #[serde(skip, default)]
     pub toasts: Toasts,
     #[serde(skip, default)]
@@ -102,7 +102,7 @@ impl Default for Citrine {
             ui: UiState::default(),
             emulator: Emulator::default(),
             files: FileChannels::default(),
-            gil: default_gilrs(),
+            pads: crate::pad_input::open_source(),
             toasts: Toasts::default(),
             audio: None,
             events: events::AppEventQueue::default(),
@@ -147,10 +147,6 @@ fn touch_layout_for(layout: LayoutMode, size: egui::Vec2) -> bool {
         LayoutMode::Mobile => true,
         LayoutMode::Auto => size.x.min(size.y) < MOBILE_BREAKPOINT,
     }
-}
-
-fn default_gilrs() -> Gilrs {
-    Gilrs::new().unwrap()
 }
 
 impl Citrine {
@@ -225,11 +221,11 @@ impl eframe::App for Citrine {
         self.unlock_audio_on_interaction(ctx);
 
         let Self {
-            emulator, gil, ui, ..
+            emulator, pads, ui, ..
         } = self;
         let result = emulator.update(
             ctx,
-            gil,
+            pads.as_mut(),
             &ui.settings.bindings,
             &mut ui.capture,
             ui.controller_debug.log_mut(),
@@ -327,7 +323,7 @@ impl Citrine {
                 audio: &mut self.audio,
                 commonmark: &mut self.commonmark,
                 emulator: &mut self.emulator,
-                gil: &self.gil,
+                pads: self.pads.as_ref(),
                 events: &mut self.events,
                 files: &mut self.files,
                 media: &mut self.media,

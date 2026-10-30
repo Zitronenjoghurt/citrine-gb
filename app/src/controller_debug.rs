@@ -1,8 +1,7 @@
 use crate::app::ui_state::keybinds::{
     BindingKind, BindingTarget, GbButton, KeyBindings, PendingBinding,
 };
-use crate::pad_input::{PadAction, PadInput};
-use gilrs::{Axis, Button, GamepadId, MappingSource, PowerInfo};
+use crate::pad_input::{PadAction, PadAxis, PadInput};
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter, Write};
 use std::time::Duration;
@@ -12,39 +11,6 @@ use web_time::Instant;
 pub const LOG_CAP: usize = 1000;
 pub const REPORT_FILE: &str = "citrine-controller-report.txt";
 
-pub const BUTTONS: [Button; 19] = [
-    Button::South,
-    Button::East,
-    Button::North,
-    Button::West,
-    Button::C,
-    Button::Z,
-    Button::LeftTrigger,
-    Button::LeftTrigger2,
-    Button::RightTrigger,
-    Button::RightTrigger2,
-    Button::Select,
-    Button::Start,
-    Button::Mode,
-    Button::LeftThumb,
-    Button::RightThumb,
-    Button::DPadUp,
-    Button::DPadDown,
-    Button::DPadLeft,
-    Button::DPadRight,
-];
-
-pub const AXES: [Axis; 8] = [
-    Axis::LeftStickX,
-    Axis::LeftStickY,
-    Axis::LeftZ,
-    Axis::RightStickX,
-    Axis::RightStickY,
-    Axis::RightZ,
-    Axis::DPadX,
-    Axis::DPadY,
-];
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum EntryKind {
     Pad {
@@ -53,6 +19,15 @@ pub enum EntryKind {
         code: Option<String>,
         action: PadAction,
         changed: bool,
+    },
+    Still {
+        gamepad: usize,
+        axis: PadAxis,
+        code: Option<String>,
+        action: PadAction,
+        moves: u32,
+        low: f32,
+        high: f32,
     },
     Focus(bool),
 }
@@ -76,20 +51,41 @@ impl LogEntry {
                 code,
                 action,
                 changed,
+            } => format!(
+                "pad {gamepad}  {input}{}  =>  {}",
+                code_text(code),
+                action.describe(*changed)
+            ),
+            EntryKind::Still {
+                gamepad,
+                axis,
+                code,
+                action,
+                moves,
+                low,
+                high,
             } => {
-                let code = code
-                    .as_ref()
-                    .map(|code| format!("  code {code}"))
-                    .unwrap_or_default();
+                let moved = if *moves == 1 {
+                    format!("{axis:?} at {low:+.2}")
+                } else {
+                    format!("{axis:?} moved {moves} times between {low:+.2} and {high:+.2}")
+                };
                 format!(
-                    "pad {gamepad}  {input}{code}  =>  {}",
-                    action.describe(*changed)
+                    "pad {gamepad}  {moved}{}  =>  {}",
+                    code_text(code),
+                    action.describe(false)
                 )
             }
             EntryKind::Focus(true) => "window focused".to_string(),
             EntryKind::Focus(false) => "window lost focus".to_string(),
         }
     }
+}
+
+fn code_text(code: &Option<String>) -> String {
+    code.as_ref()
+        .map(|code| format!("  code {code}"))
+        .unwrap_or_default()
 }
 
 impl Display for LogEntry {
@@ -102,7 +98,7 @@ pub struct PadLog {
     started: Instant,
     entries: VecDeque<LogEntry>,
     dropped: usize,
-    seen: Vec<GamepadId>,
+    seen: Vec<usize>,
 }
 
 impl PadLog {
@@ -118,23 +114,77 @@ impl PadLog {
     pub fn record(
         &mut self,
         now: Instant,
-        id: GamepadId,
+        gamepad: usize,
         input: PadInput,
         code: Option<String>,
         action: PadAction,
         changed: bool,
     ) {
-        if !self.seen.contains(&id) {
-            self.seen.push(id);
-        }
+        self.note_seen(gamepad);
         self.push(
             now,
             EntryKind::Pad {
-                gamepad: usize::from(id),
+                gamepad,
                 input,
                 code,
                 action,
                 changed,
+            },
+        );
+    }
+
+    fn note_seen(&mut self, gamepad: usize) {
+        if !self.seen.contains(&gamepad) {
+            self.seen.push(gamepad);
+        }
+    }
+
+    pub fn record_still(
+        &mut self,
+        now: Instant,
+        gamepad: usize,
+        axis: PadAxis,
+        value: f32,
+        code: Option<String>,
+        action: PadAction,
+    ) {
+        self.note_seen(gamepad);
+        let still_run = self
+            .entries
+            .iter_mut()
+            .rev()
+            .take_while(|entry| matches!(entry.kind, EntryKind::Still { .. }));
+        for entry in still_run {
+            if let EntryKind::Still {
+                gamepad: still_pad,
+                axis: still_axis,
+                code: still_code,
+                action: still_action,
+                moves,
+                low,
+                high,
+            } = &mut entry.kind
+                && *still_pad == gamepad
+                && *still_axis == axis
+            {
+                *still_code = code;
+                *still_action = action;
+                *moves += 1;
+                *low = low.min(value);
+                *high = high.max(value);
+                return;
+            }
+        }
+        self.push(
+            now,
+            EntryKind::Still {
+                gamepad,
+                axis,
+                code,
+                action,
+                moves: 1,
+                low: value,
+                high: value,
             },
         );
     }
@@ -172,7 +222,7 @@ impl PadLog {
         self.dropped
     }
 
-    pub fn seen(&self) -> &[GamepadId] {
+    pub fn seen(&self) -> &[usize] {
         &self.seen
     }
 }
@@ -224,7 +274,7 @@ impl ControllerDebugState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ButtonState {
-    pub button: Button,
+    pub name: String,
     pub code: String,
     pub pressed: bool,
     pub value: f32,
@@ -232,7 +282,8 @@ pub struct ButtonState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxisState {
-    pub axis: Axis,
+    pub axis: PadAxis,
+    pub name: String,
     pub code: String,
     pub value: f32,
 }
@@ -247,119 +298,33 @@ pub struct RawState {
 pub struct PadInfo {
     pub id: usize,
     pub name: String,
-    pub os_name: String,
-    pub map_name: Option<String>,
-    pub vendor: Option<u16>,
-    pub product: Option<u16>,
-    pub uuid: [u8; 16],
-    pub mapping: &'static str,
-    pub power: String,
-    pub connected: bool,
-    pub rumble: bool,
+    pub details: Vec<(&'static str, String)>,
     pub buttons: Vec<ButtonState>,
     pub axes: Vec<AxisState>,
     pub raw: Vec<RawState>,
 }
 
 impl PadInfo {
-    pub fn from_gilrs(pad: &gilrs::Gamepad) -> Self {
-        let buttons = BUTTONS
-            .iter()
-            .filter_map(|&button| {
-                let code = pad.button_code(button)?;
-                let data = pad.button_data(button);
-                Some(ButtonState {
-                    button,
-                    code: code.to_string(),
-                    pressed: data.is_some_and(|d| d.is_pressed()),
-                    value: data.map_or(0.0, |d| d.value()),
-                })
-            })
-            .collect();
-        let axes = AXES
-            .iter()
-            .filter_map(|&axis| {
-                let code = pad.axis_code(axis)?;
-                Some(AxisState {
-                    axis,
-                    code: code.to_string(),
-                    value: pad.value(axis),
-                })
-            })
-            .collect();
-        let state = pad.state();
-        let mut raw: Vec<RawState> = state
-            .buttons()
-            .map(|(code, data)| (code, data.value()))
-            .chain(state.axes().map(|(code, data)| (code, data.value())))
-            .filter(|(code, _)| pad.axis_or_btn_name(*code).is_none())
-            .map(|(code, value)| RawState {
-                code: code.to_string(),
-                value,
-            })
-            .collect();
-        raw.sort_by(|a, b| a.code.cmp(&b.code));
-
-        Self {
-            id: usize::from(pad.id()),
-            name: pad.name().to_string(),
-            os_name: pad.os_name().to_string(),
-            map_name: pad.map_name().map(str::to_string),
-            vendor: pad.vendor_id(),
-            product: pad.product_id(),
-            uuid: pad.uuid(),
-            mapping: mapping_name(pad.mapping_source()),
-            power: power_name(pad.power_info()),
-            connected: pad.is_connected(),
-            rumble: pad.is_ff_supported(),
-            buttons,
-            axes,
-            raw,
-        }
-    }
-
-    pub fn ids(&self) -> String {
-        let hex = |id: Option<u16>| id.map_or("unknown".to_string(), |id| format!("{id:04x}"));
-        format!("{}:{}", hex(self.vendor), hex(self.product))
-    }
-
-    pub fn uuid_text(&self) -> String {
-        let hex: String = self.uuid.iter().map(|b| format!("{b:02x}")).collect();
-        format!(
-            "{}-{}-{}-{}-{}",
-            &hex[0..8],
-            &hex[8..12],
-            &hex[12..16],
-            &hex[16..20],
-            &hex[20..32]
-        )
-    }
-
     pub fn pressed(&self) -> Vec<String> {
         self.buttons
             .iter()
             .filter(|b| b.pressed)
-            .map(|b| format!("{:?}", b.button))
+            .map(|b| b.name.clone())
             .collect()
     }
 }
 
-fn mapping_name(source: MappingSource) -> &'static str {
-    match source {
-        MappingSource::SdlMappings => "SDL mapping",
-        MappingSource::Driver => "driver layout",
-        MappingSource::None => "none",
-    }
+pub fn usb_id(vendor: Option<u16>, product: Option<u16>) -> String {
+    let hex = |id: Option<u16>| id.map_or("unknown".to_string(), |id| format!("{id:04x}"));
+    format!("{}:{}", hex(vendor), hex(product))
 }
 
-fn power_name(power: PowerInfo) -> String {
-    match power {
-        PowerInfo::Unknown => "unknown".to_string(),
-        PowerInfo::Wired => "wired".to_string(),
-        PowerInfo::Discharging(level) => format!("battery at {level}%"),
-        PowerInfo::Charging(level) => format!("charging, {level}%"),
-        PowerInfo::Charged => "charged".to_string(),
-    }
+pub fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -367,16 +332,16 @@ pub struct SystemInfo {
     pub version: &'static str,
     pub build: String,
     pub os: String,
-    pub backend: &'static str,
+    pub backend: String,
 }
 
 impl SystemInfo {
-    pub fn current() -> Self {
+    pub fn current(backend: String) -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION"),
             build: build_target(),
             os: os_version(),
-            backend: backend(),
+            backend,
         }
     }
 }
@@ -418,20 +383,6 @@ fn os_version() -> String {
         .unwrap_or_else(|| "unknown browser".to_string())
 }
 
-fn backend() -> &'static str {
-    if cfg!(target_arch = "wasm32") {
-        "browser Gamepad API"
-    } else if cfg!(target_os = "windows") {
-        "Windows.Gaming.Input"
-    } else if cfg!(target_os = "linux") {
-        "evdev with udev"
-    } else if cfg!(target_os = "macos") {
-        "IOKit HID"
-    } else {
-        "unknown"
-    }
-}
-
 pub fn capture_text(pending: Option<PendingBinding>) -> String {
     let Some(pending) = pending else {
         return "none".to_string();
@@ -456,8 +407,12 @@ pub fn held_text(held: &[GbButton]) -> String {
     names.join(", ")
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+pub fn steer_text(bindings: &KeyBindings) -> String {
+    if bindings.stick_as_dpad {
+        format!("on, dead zone {}%", bindings.deadzone_percent())
+    } else {
+        "off".to_string()
+    }
 }
 
 pub struct Report<'a> {
@@ -487,22 +442,16 @@ impl Display for Report<'_> {
         writeln!(out, "Game Boy buttons held: {}", held_text(self.held))?;
         writeln!(out)?;
 
+        let deadzone = self.bindings.deadzone();
         writeln!(out, "== Controllers ({})", self.pads.len())?;
         if self.pads.is_empty() {
             writeln!(out, "none found")?;
         }
         for pad in self.pads {
             writeln!(out, "Pad {}: {}", pad.id, pad.name)?;
-            writeln!(out, "  OS name: {}", pad.os_name)?;
-            if let Some(map_name) = &pad.map_name {
-                writeln!(out, "  Mapping name: {map_name}")?;
+            for (label, value) in &pad.details {
+                writeln!(out, "  {label}: {value}")?;
             }
-            writeln!(out, "  Mapping: {}", pad.mapping)?;
-            writeln!(out, "  USB ID: {}", pad.ids())?;
-            writeln!(out, "  UUID: {}", pad.uuid_text())?;
-            writeln!(out, "  Power: {}", pad.power)?;
-            writeln!(out, "  Connected: {}", yes_no(pad.connected))?;
-            writeln!(out, "  Rumble: {}", yes_no(pad.rumble))?;
             let pressed = pad.pressed();
             let pressed = if pressed.is_empty() {
                 "none".to_string()
@@ -513,15 +462,35 @@ impl Display for Report<'_> {
             let buttons: Vec<String> = pad
                 .buttons
                 .iter()
-                .map(|b| format!("{:?} {}", b.button, b.code))
+                .map(|b| format!("{} {}", b.name, b.code))
                 .collect();
             writeln!(out, "  Buttons ({}): {}", buttons.len(), buttons.join(", "))?;
             let axes: Vec<String> = pad
                 .axes
                 .iter()
-                .map(|a| format!("{:?} {} at {:+.2}", a.axis, a.code, a.value))
+                .map(|a| format!("{} {} at {:+.2}", a.name, a.code, a.value))
                 .collect();
             writeln!(out, "  Axes ({}): {}", axes.len(), axes.join(", "))?;
+            let stick: Vec<String> = pad
+                .axes
+                .iter()
+                .filter(|a| a.axis.is_left_stick())
+                .map(|a| {
+                    let side = if a.value.abs() > deadzone {
+                        "past"
+                    } else {
+                        "inside"
+                    };
+                    format!("{} {:+.2} {side}", a.name, a.value)
+                })
+                .collect();
+            if !stick.is_empty() {
+                writeln!(
+                    out,
+                    "  Left stick against the dead zone ({deadzone:.2}): {}",
+                    stick.join(", ")
+                )?;
+            }
             if !pad.raw.is_empty() {
                 let raw: Vec<String> = pad
                     .raw
@@ -534,15 +503,7 @@ impl Display for Report<'_> {
         writeln!(out)?;
 
         writeln!(out, "== Bindings")?;
-        writeln!(
-            out,
-            "Left stick steers: {}",
-            if self.bindings.stick_as_dpad {
-                "on"
-            } else {
-                "off"
-            }
-        )?;
+        writeln!(out, "Left stick steers: {}", steer_text(self.bindings))?;
         for button in GbButton::iter() {
             let keys: Vec<&str> = self
                 .bindings
@@ -595,12 +556,13 @@ impl Display for Report<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pad_input::Ignored;
+    use crate::app::ui_state::keybinds::PadButton;
+    use crate::pad_input::{Ignored, PadKey};
 
     fn pad_entry(action: PadAction) -> EntryKind {
         EntryKind::Pad {
             gamepad: 0,
-            input: PadInput::Pressed(Button::East),
+            input: PadInput::Pressed(PadKey::Known(PadButton::East)),
             code: Some("Button(1)".to_string()),
             action,
             changed: true,
@@ -611,23 +573,21 @@ mod tests {
         PadInfo {
             id: 0,
             name: "Xbox Wireless Controller".to_string(),
-            os_name: "Xbox Wireless Controller".to_string(),
-            map_name: None,
-            vendor: Some(0x045e),
-            product: Some(0x0b13),
-            uuid: [0x12; 16],
-            mapping: "driver layout",
-            power: "battery at 80%".to_string(),
-            connected: true,
-            rumble: true,
+            details: vec![
+                ("OS name", "Xbox Wireless Controller".to_string()),
+                ("USB ID", usb_id(Some(0x045e), Some(0x0b13))),
+                ("UUID", "12121212-1212-1212-1212-121212121212".to_string()),
+                ("Power", "battery at 80%".to_string()),
+            ],
             buttons: vec![ButtonState {
-                button: Button::East,
+                name: "East".to_string(),
                 code: "Button(1)".to_string(),
                 pressed: true,
                 value: 1.0,
             }],
             axes: vec![AxisState {
-                axis: Axis::LeftStickX,
+                axis: PadAxis::LeftStickX,
+                name: "LeftStickX".to_string(),
                 code: "Axis(0)".to_string(),
                 value: -0.25,
             }],
@@ -711,7 +671,7 @@ mod tests {
             at: Duration::ZERO,
             kind: EntryKind::Pad {
                 gamepad: 1,
-                input: PadInput::Pressed(Button::LeftTrigger),
+                input: PadInput::Pressed(PadKey::Known(PadButton::LeftTrigger)),
                 code: None,
                 action: PadAction::Ignore(Ignored::Unbound),
                 changed: false,
@@ -733,7 +693,7 @@ mod tests {
             version: "0.7.1",
             build: "windows x86_64 msvc, native, release".to_string(),
             os: "Windows 11 Pro 10.0.22631 [64-bit]".to_string(),
-            backend: "Windows.Gaming.Input",
+            backend: "SDL 3.4.18".to_string(),
         };
         let pads = [sample_pad()];
         let bindings = KeyBindings::default();
@@ -755,7 +715,7 @@ mod tests {
             "Citrine: 0.7.1",
             "Build: windows x86_64 msvc, native, release",
             "OS: Windows 11 Pro 10.0.22631 [64-bit]",
-            "Controller API: Windows.Gaming.Input",
+            "Controller API: SDL 3.4.18",
             "Window focused: yes",
             "Binding capture: waiting for a key or controller button for Game Boy B",
             "Game Boy buttons held: A",
@@ -766,8 +726,9 @@ mod tests {
             "Power: battery at 80%",
             "Pressed now: East",
             "Axes (1): LeftStickX Axis(0) at -0.25",
+            "Left stick against the dead zone (0.50): LeftStickX -0.25 inside",
             "== Bindings",
-            "Left stick steers: on",
+            "Left stick steers: on, dead zone 50%",
             "A: keys Q, Z, Y, O; controller East, West",
             "== Event log, 1 event",
             "=>  Game Boy A down",
@@ -781,7 +742,7 @@ mod tests {
 
     #[test]
     fn an_empty_report_still_reads_well() {
-        let system = SystemInfo::current();
+        let system = SystemInfo::current("browser Gamepad API".to_string());
         let report = Report {
             system: &system,
             focused: None,
@@ -796,6 +757,7 @@ mod tests {
         assert!(report.contains("Binding capture: none"));
         assert!(report.contains("Window focused: unknown"));
         assert!(report.contains("== Event log\nnot recording"));
+        assert!(report.contains("Controller API: browser Gamepad API"));
         assert!(report.contains(&format!("Citrine: {}", env!("CARGO_PKG_VERSION"))));
     }
 }

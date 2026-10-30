@@ -26,7 +26,6 @@ egui_commonmark = "0.22.0"
 egui_dock = { version = "0.18.0", features = ["serde"] }
 egui-phosphor = { version = "0.11.0", features = ["regular"] }
 egui_plot = "0.34.1"
-gilrs = "0.11.1"
 jiff = "0.2.20"
 log = "0.4.29"
 png = "0.18.1"
@@ -50,6 +49,12 @@ rusty_aac = "2.0.1"
 sha2 = "0.10.8"
 ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
+
+[target.'cfg(not(windows))'.dependencies]
+gilrs = "0.11.1"
+
+[target.'cfg(windows)'.dependencies]
+sdl3-sys = { version = "0.7.2", default-features = false, features = ["build-from-source-static", "no-sdl-audio", "no-sdl-camera", "no-sdl-dialog", "no-sdl-gpu", "no-sdl-render", "no-sdl-tray"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 base64 = "0.22.1"

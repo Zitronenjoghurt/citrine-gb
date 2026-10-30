@@ -4,6 +4,7 @@ use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
 use crate::media::MediaStore;
+use crate::pad_input::PadSource;
 use crate::utils::file_channels::FileChannels;
 use egui::{Ui, WidgetText};
 use std::collections::{HashMap, HashSet};
@@ -33,7 +34,7 @@ pub struct TabViewer<'a> {
     pub audio: &'a mut Option<Audio>,
     pub commonmark: &'a mut egui_commonmark::CommonMarkCache,
     pub emulator: &'a mut Emulator,
-    pub gil: &'a gilrs::Gilrs,
+    pub pads: &'a dyn PadSource,
     pub events: &'a mut AppEventQueue,
     pub files: &'a mut FileChannels,
     pub media: &'a mut MediaStore,

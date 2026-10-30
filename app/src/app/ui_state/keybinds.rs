@@ -74,31 +74,6 @@ pub enum PadButton {
 }
 
 impl PadButton {
-    pub fn from_gilrs(button: gilrs::Button) -> Option<Self> {
-        Some(match button {
-            gilrs::Button::South => Self::South,
-            gilrs::Button::East => Self::East,
-            gilrs::Button::North => Self::North,
-            gilrs::Button::West => Self::West,
-            gilrs::Button::LeftTrigger => Self::LeftTrigger,
-            gilrs::Button::LeftTrigger2 => Self::LeftTrigger2,
-            gilrs::Button::RightTrigger => Self::RightTrigger,
-            gilrs::Button::RightTrigger2 => Self::RightTrigger2,
-            gilrs::Button::Select => Self::Select,
-            gilrs::Button::Start => Self::Start,
-            gilrs::Button::Mode => Self::Mode,
-            gilrs::Button::LeftThumb => Self::LeftThumb,
-            gilrs::Button::RightThumb => Self::RightThumb,
-            gilrs::Button::DPadUp => Self::DPadUp,
-            gilrs::Button::DPadDown => Self::DPadDown,
-            gilrs::Button::DPadLeft => Self::DPadLeft,
-            gilrs::Button::DPadRight => Self::DPadRight,
-            _ => return None,
-        })
-    }
-}
-
-impl PadButton {
     pub fn short_name(self) -> &'static str {
         match self {
             Self::South => "South",
@@ -166,6 +141,7 @@ pub struct KeyBindings {
     keyboard: Vec<(egui::Key, GbButton)>,
     gamepad: Vec<(PadButton, GbButton)>,
     pub stick_as_dpad: bool,
+    pub stick_deadzone: u8,
 }
 
 impl Default for KeyBindings {
@@ -205,11 +181,24 @@ impl Default for KeyBindings {
                 (PadButton::Select, GbButton::Select),
             ],
             stick_as_dpad: true,
+            stick_deadzone: Self::DEFAULT_DEADZONE,
         }
     }
 }
 
 impl KeyBindings {
+    pub const DEFAULT_DEADZONE: u8 = 50;
+    pub const DEADZONES: std::ops::RangeInclusive<u8> = 20..=90;
+
+    pub fn deadzone_percent(&self) -> u8 {
+        self.stick_deadzone
+            .clamp(*Self::DEADZONES.start(), *Self::DEADZONES.end())
+    }
+
+    pub fn deadzone(&self) -> f32 {
+        f32::from(self.deadzone_percent()) / 100.0
+    }
+
     pub fn button_for_key(&self, key: egui::Key) -> Option<GbButton> {
         self.keyboard
             .iter()
@@ -426,11 +415,35 @@ mod tests {
     }
 
     #[test]
-    fn gilrs_buttons_we_do_not_bind_are_ignored() {
+    fn the_dead_zone_saves_and_old_files_get_the_default() {
+        let old: KeyBindings = serde_json::from_str(r#"{"stick_as_dpad":true}"#).expect("loads");
+        assert_eq!(old.stick_deadzone, KeyBindings::DEFAULT_DEADZONE);
+
+        let mut bindings = KeyBindings {
+            stick_deadzone: 30,
+            ..KeyBindings::default()
+        };
+        let saved = serde_json::to_string(&bindings).expect("saves");
+        let loaded: KeyBindings = serde_json::from_str(&saved).expect("loads");
+        assert_eq!(loaded.stick_deadzone, 30);
+        assert!(!loaded.is_default());
+
+        bindings.stick_deadzone = 5;
+        assert_eq!(bindings.deadzone_percent(), 20);
+    }
+
+    #[test]
+    fn saved_controller_bindings_still_load() {
+        let saved = r#"{"gamepad":[["LeftTrigger2","A"],["DPadUp","Up"]],"stick_as_dpad":false}"#;
+        let bindings: KeyBindings = serde_json::from_str(saved).expect("loads");
         assert_eq!(
-            PadButton::from_gilrs(gilrs::Button::South),
-            Some(PadButton::South)
+            bindings.button_for_pad(PadButton::LeftTrigger2),
+            Some(GbButton::A)
         );
-        assert_eq!(PadButton::from_gilrs(gilrs::Button::Unknown), None);
+        assert_eq!(
+            bindings.button_for_pad(PadButton::DPadUp),
+            Some(GbButton::Up)
+        );
+        assert!(!bindings.stick_as_dpad);
     }
 }

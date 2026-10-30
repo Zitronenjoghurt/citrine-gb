@@ -2,7 +2,7 @@ use crate::app::tabs::TabViewer;
 use crate::app::ui_state::keybinds::GbButton;
 use crate::app::widgets::settings::controls::section;
 use crate::app::widgets::settings::form::Form;
-use crate::controller_debug::{PadInfo, REPORT_FILE, Report, SystemInfo, capture_text};
+use crate::controller_debug::{PadInfo, REPORT_FILE, Report, SystemInfo, capture_text, steer_text};
 use crate::icons;
 use crate::utils::file_saver::FileSaver;
 use egui::{Label, RichText, Ui, Widget};
@@ -10,15 +10,17 @@ use strum::IntoEnumIterator;
 
 const SHOWN_EVENTS: usize = 200;
 const CHIP_HEIGHT: f32 = 20.0;
-const AXIS_WIDTH: f32 = 100.0;
+const AXIS_WIDTH: f32 = 88.0;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
-    let system = SystemInfo::current();
+    let system = SystemInfo::current(viewer.pads.api());
     let pads = pads(viewer);
     let held: Vec<GbButton> = GbButton::iter()
         .filter(|b| viewer.emulator.is_held(b.joypad()))
         .collect();
     let focused = ui.input(|i| i.viewport().focused);
+    let bindings = &viewer.ui.settings.bindings;
+    let deadzone = bindings.stick_as_dpad.then(|| bindings.deadzone());
 
     ui.horizontal(|ui| {
         let copy = ui.button(format!("{} Copy report", icons::COPY));
@@ -56,7 +58,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
             if i > 0 {
                 ui.add_space(12.0);
             }
-            pad_rows(ui, pad);
+            pad_rows(ui, pad, deadzone);
         }
     });
 
@@ -74,13 +76,16 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
             form.row("Citrine", |ui| value(ui, system.version));
             form.row("Build", |ui| value(ui, &system.build));
             form.row("OS", |ui| value(ui, &system.os));
-            form.row("Controller API", |ui| value(ui, system.backend));
+            form.row("Controller API", |ui| value(ui, &system.backend));
             let focus = match focused {
                 Some(true) => "yes",
                 Some(false) => "no",
                 None => "unknown",
             };
             form.row("Window focused", |ui| value(ui, focus));
+            form.row("Left stick steers", |ui| {
+                value(ui, &steer_text(&viewer.ui.settings.bindings))
+            });
             form.row("Binding capture", |ui| {
                 value(ui, &capture_text(viewer.ui.capture.pending))
             });
@@ -138,46 +143,28 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
 }
 
 fn pads(viewer: &TabViewer) -> Vec<PadInfo> {
-    let gil = viewer.gil;
-    let mut pads: Vec<PadInfo> = gil
-        .gamepads()
-        .map(|(_, pad)| PadInfo::from_gilrs(&pad))
-        .collect();
-    if let Some(log) = viewer.ui.controller_debug.log() {
-        for &id in log.seen() {
-            if gil.connected_gamepad(id).is_none() {
-                pads.push(PadInfo::from_gilrs(&gil.gamepad(id)));
-            }
-        }
-    }
-    pads.sort_by_key(|pad| pad.id);
-    pads
+    let seen = viewer
+        .ui
+        .controller_debug
+        .log()
+        .map_or(&[][..], |log| log.seen());
+    viewer.pads.pads(seen)
 }
 
-fn pad_rows(ui: &mut Ui, pad: &PadInfo) {
+fn pad_rows(ui: &mut Ui, pad: &PadInfo, deadzone: Option<f32>) {
     let title = format!("Pad {}  {}", pad.id, pad.name);
     ui.add(Label::new(RichText::new(&title).strong()).truncate())
         .on_hover_text(&title);
     ui.add_space(4.0);
     Form::show(ui, ("controller_debug_pad", pad.id), |form| {
         form.striped();
-        form.row("OS name", |ui| value(ui, &pad.os_name));
-        if let Some(map_name) = &pad.map_name {
-            form.row("Mapping name", |ui| value(ui, map_name));
+        for (label, text) in &pad.details {
+            form.row(label, |ui| value(ui, text).on_hover_text(text));
         }
-        form.row("Mapping", |ui| value(ui, pad.mapping));
-        form.row("USB ID", |ui| value(ui, &pad.ids()));
-        form.row("UUID", |ui| value(ui, &pad.uuid_text()));
-        form.row("Power", |ui| value(ui, &pad.power));
-        form.row("Connected", |ui| {
-            value(ui, if pad.connected { "yes" } else { "no" })
-        });
-        form.row("Rumble", |ui| {
-            value(ui, if pad.rumble { "yes" } else { "no" })
-        });
         for axis in &pad.axes {
-            form.row(&format!("{:?}", axis.axis), |ui| {
-                axis_bar(ui, axis.value);
+            form.row(&axis.name, |ui| {
+                let deadzone = deadzone.filter(|_| axis.axis.is_left_stick());
+                axis_bar(ui, axis.value, deadzone);
                 ui.label(RichText::new(format!("{:+.2}", axis.value)).monospace())
                     .on_hover_text(format!("Code {}", axis.code))
             });
@@ -194,13 +181,12 @@ fn pad_rows(ui: &mut Ui, pad: &PadInfo) {
     }
     ui.horizontal_wrapped(|ui| {
         for button in &pad.buttons {
-            chip(ui, &format!("{:?}", button.button), button.pressed)
-                .on_hover_text(format!("Code {}", button.code));
+            chip(ui, &button.name, button.pressed).on_hover_text(format!("Code {}", button.code));
         }
     });
 }
 
-fn axis_bar(ui: &mut Ui, value: f32) {
+fn axis_bar(ui: &mut Ui, value: f32, deadzone: Option<f32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(AXIS_WIDTH, 8.0), egui::Sense::hover());
     let visuals = ui.visuals();
     let painter = ui.painter();
@@ -208,12 +194,27 @@ fn axis_bar(ui: &mut Ui, value: f32) {
     let centre = rect.center().x;
     let end = centre + value.clamp(-1.0, 1.0) * rect.width() / 2.0;
     let fill = egui::Rect::from_x_y_ranges(centre.min(end)..=centre.max(end), rect.y_range());
-    painter.rect_filled(fill, 2.0, visuals.selection.bg_fill);
+    let inside = deadzone.is_some_and(|zone| value.abs() <= zone);
+    let colour = if inside {
+        visuals.widgets.inactive.bg_fill
+    } else {
+        visuals.selection.bg_fill
+    };
+    painter.rect_filled(fill, 2.0, colour);
     painter.vline(
         centre,
         rect.y_range(),
         visuals.widgets.noninteractive.bg_stroke,
     );
+    if let Some(zone) = deadzone {
+        for side in [-1.0, 1.0] {
+            painter.vline(
+                centre + side * zone * rect.width() / 2.0,
+                rect.y_range(),
+                visuals.widgets.noninteractive.fg_stroke,
+            );
+        }
+    }
 }
 
 fn chip(ui: &mut Ui, label: &str, lit: bool) -> egui::Response {

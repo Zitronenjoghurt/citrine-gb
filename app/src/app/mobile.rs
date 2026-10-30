@@ -3,6 +3,7 @@ use crate::app::tabs::{CONTENT_MARGIN, Tab, TabViewer};
 use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::app::ui_state::touch::TouchSettings;
 use crate::app::widgets::touch_controls::{self as touch, TouchInput, TouchLayout};
+use crate::held::InputSource;
 use crate::icons;
 use citrine_gb::gb::joypad::JoypadState;
 use egui::{Context, Rect, Ui, vec2};
@@ -211,7 +212,7 @@ impl Citrine {
         let stuck = self.mobile.touch.reset();
         for button in ALL_BUTTONS {
             if stuck.contains(button) {
-                self.emulator.release(button);
+                self.emulator.release(InputSource::Touch, button);
             }
         }
     }
@@ -257,9 +258,9 @@ impl Citrine {
 
         for button in ALL_BUTTONS {
             if pressed.contains(button) {
-                self.emulator.press(button);
+                self.emulator.press(InputSource::Touch, button);
             } else if released.contains(button) {
-                self.emulator.release(button);
+                self.emulator.release(InputSource::Touch, button);
             }
         }
 
@@ -329,7 +330,7 @@ impl Citrine {
                     audio: &mut self.audio,
                     commonmark: &mut self.commonmark,
                     emulator: &mut self.emulator,
-                    gil: &self.gil,
+                    pads: self.pads.as_ref(),
                     events: &mut self.events,
                     files: &mut self.files,
                     media: &mut self.media,
