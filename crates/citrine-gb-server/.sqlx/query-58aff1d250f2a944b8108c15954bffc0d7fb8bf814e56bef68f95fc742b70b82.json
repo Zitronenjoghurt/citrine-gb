@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE saves SET version = ?4, file = ?5, label = ?6, updated_at = ?7\n                      WHERE owner = ?1 AND game = ?2 AND slot = ?3 AND version = ?8",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "58aff1d250f2a944b8108c15954bffc0d7fb8bf814e56bef68f95fc742b70b82"
+}

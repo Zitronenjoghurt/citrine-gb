@@ -1,0 +1,112 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", online_id, public_key, display_name, last_seen, quota_bytes, banned AS \"banned: bool\",\n                   (SELECT COALESCE(SUM(size), 0) FROM files WHERE owner = accounts.id) AS \"storage_used!: i64\",\n                   (SELECT COUNT(*) FROM files WHERE owner = accounts.id) AS \"files!: i64\"\n               FROM accounts\n               WHERE (?1 = '%%' OR display_name LIKE ?1 ESCAPE '\\' OR online_id = ?2)\n               ORDER BY last_seen DESC, id DESC LIMIT ?3 OFFSET ?4",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "online_id",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "online_id"
+          }
+        }
+      },
+      {
+        "name": "public_key",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "public_key"
+          }
+        }
+      },
+      {
+        "name": "display_name",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "name": "last_seen",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "last_seen"
+          }
+        }
+      },
+      {
+        "name": "quota_bytes",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "quota_bytes"
+          }
+        }
+      },
+      {
+        "name": "banned: bool",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "banned"
+          }
+        }
+      },
+      {
+        "name": "storage_used!: i64",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "files!: i64",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f33db89a1af8ba53dade3dba4dfad1e364516f0646462cdfb9add5f7041d3a07"
+}

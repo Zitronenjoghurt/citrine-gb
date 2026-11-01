@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.game AS \"game!\", s.slot AS \"slot!\", s.version AS \"version!\", s.label AS \"label!\",\n                      s.updated_at AS \"updated_at!\", f.size AS \"size!\"\n                 FROM saves s JOIN files f ON f.id = s.file\n                WHERE s.owner = ?1\n                ORDER BY s.game, s.slot",
+  "describe": {
+    "columns": [
+      {
+        "name": "game!",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "saves",
+            "name": "game"
+          }
+        }
+      },
+      {
+        "name": "slot!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "saves",
+            "name": "slot"
+          }
+        }
+      },
+      {
+        "name": "version!",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "saves",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "name": "label!",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "saves",
+            "name": "label"
+          }
+        }
+      },
+      {
+        "name": "updated_at!",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "saves",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "name": "size!",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "size"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "38e3e03de35ffa4834776ec21b99ae575557989e0701f235b95f5319c1c85037"
+}

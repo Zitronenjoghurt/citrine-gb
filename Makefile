@@ -15,7 +15,7 @@ lab: lab-deps
 	cargo test --release -p citrine-gb-lab
 
 lab-deps:
-	git submodule update --init lab/SameBoy
+	git submodule update --init crates/sameboy-sys/SameBoy
 
 build-tests:
 	git submodule update --init tests/mooneye
@@ -48,27 +48,27 @@ lint:
 
 dev:
 	cargo install trunk
-	cd app && trunk serve --release --open
+	cd crates/citrine-gb-app && trunk serve --release --open
 
 native:
 	cargo run --release --bin citrine-gb-app
 
 up:
-	docker compose -f server/docker/docker-compose.yml up -d
+	docker compose -f crates/citrine-gb-server/docker/docker-compose.yml up -d
 
 down:
-	docker compose -f server/docker/docker-compose.yml down
+	docker compose -f crates/citrine-gb-server/docker/docker-compose.yml down
 
 build:
 	docker image prune -f
-	docker compose -f server/docker/docker-compose.yml build
+	docker compose -f crates/citrine-gb-server/docker/docker-compose.yml build
 
 logs:
-	docker compose -f server/docker/docker-compose.yml logs -f
+	docker compose -f crates/citrine-gb-server/docker/docker-compose.yml logs -f
 
 publish:
 	cargo test -p citrine-gb --release
-	cd lib && cargo publish
+	cd crates/citrine-gb && cargo publish
 
 icons:
 	./scripts/gen-icns.sh

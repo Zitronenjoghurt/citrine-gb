@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT owner, size, created_at FROM files WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "owner",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "owner"
+          }
+        }
+      },
+      {
+        "name": "size",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c1c928e6f2bb91f88ac5931cc292cf2c51e026a1427b91a93cca71cb6a1289e1"
+}

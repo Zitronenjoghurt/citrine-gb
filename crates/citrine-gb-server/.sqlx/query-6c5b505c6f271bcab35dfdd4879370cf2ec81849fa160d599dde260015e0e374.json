@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.id AS \"id!: i64\", a.online_id AS \"online_id!: i64\", m.sent_at AS \"sent_at!: i64\",\n                   m.nonce AS \"nonce!: Vec<u8>\", m.body AS \"body!: Vec<u8>\"\n               FROM messages m JOIN accounts a ON a.id = m.from_id\n               WHERE m.to_id = ?1 ORDER BY m.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "online_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "online_id"
+          }
+        }
+      },
+      {
+        "name": "sent_at!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "sent_at"
+          }
+        }
+      },
+      {
+        "name": "nonce!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "nonce"
+          }
+        }
+      },
+      {
+        "name": "body!: Vec<u8>",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "body"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6c5b505c6f271bcab35dfdd4879370cf2ec81849fa160d599dde260015e0e374"
+}

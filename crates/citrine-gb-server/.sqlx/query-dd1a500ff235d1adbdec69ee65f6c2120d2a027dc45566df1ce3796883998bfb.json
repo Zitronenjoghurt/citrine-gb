@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO admin_recovery_codes (hash) VALUES (?1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "dd1a500ff235d1adbdec69ee65f6c2120d2a027dc45566df1ce3796883998bfb"
+}

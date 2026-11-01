@@ -1,3 +1,45 @@
+# 0.8.0 - 2026-11-01
+
+## Added
+
+- Online play with rollback: invite a friend, join them or just watch them play
+- Local link cable: play two games side by side
+- Cloud saves with a conflict picker
+- Friends tab with requests, blocking and an online status
+- End-to-end encrypted chat with read receipts and emojis by RhosGFX
+- Discord Rich Presence on desktop, with screenshots and Pokémon progress
+- Game info tab for Pokémon Red to Crystal: party, boxes, bag and Pokédex
+- Event partner that trades official event Pokémon to your game
+- Stats tab: play time charts, per-game stats and Pokémon progress
+- Send screenshots, recordings and input replays in chat
+- Settings and stats sync between devices
+- Real game names from MAME's game list
+- Full-size viewer for screenshots and recordings
+- Focus mode: drag the screen around, Esc to leave
+- Settings → Your data: export, import or delete everything
+- Controller buttons as shortcuts
+- Games that run on both consoles remember which one you picked
+
+## Changed
+
+- Improved emulation performance
+- Web version follows browser zoom and HiDPI screens
+- Setting hints open from an info button
+- Focus mode hint fades after 3 seconds
+- Version number at the bottom of Settings
+- No more "Audio started" message
+
+## Fixed
+
+- Windows build no longer opens a console window
+- Oversized buttons and a blurry picture in Chrome's phone emulation
+- Time control stepping stops at breakpoints
+- APU tab mutes survive setting changes
+- Media tab buttons fit the panel
+- Settings no longer show through the page picker
+- Disassembly shows every byte of an instruction
+- Style page palette colours line up
+
 # 0.7.2 - 2026-10-30
 
 ## Added
@@ -108,17 +150,17 @@
 - Sound channels now match the hardware in NR52 status, length counters, triggers, the sweep, wave
   RAM, square duty, envelopes and noise timing
 - Sound is 6 dB quieter, the same level as SameBoy, and loud games no longer clip
+- Audio no longer swaps left and right, stays silent after a failed device open, or overflows
+  during long debugger steps
+- Web audio no longer forces a 44.1 kHz audio context
 - MBC1 multicart ROMs now bank correctly
 - MBC3 games with a clock and MBC5 rumble games with a battery now keep their saves
 - Importing a wrongly sized save for an MBC2 game no longer crashes
 - Battery saves no longer lose data on reset, game switch, snapshot or export
+- Typo in the legacy save import message
 - Settings from an older build no longer reset when a new field is added
 - Picking "Custom" in the palette dropdown created an unusable transparent palette
 - Game titles no longer end in a box on colour games
-- Typo in the legacy save import message
-- Audio no longer swaps left and right, stays silent after a failed device open, or overflows
-  during long debugger steps
-- Web audio no longer forces a 44.1 kHz audio context
 - Holding a gamepad axis no longer records duplicate input events
 - Settings, Saves and General Info tabs fit narrow panels without scrolling sideways
 - Tab bars that do not fit one row become a dropdown
@@ -138,11 +180,11 @@
 - Audio Debug and APU Waves tabs for inspecting the sound hardware while a game runs
 - Performance tab showing emulation and frame timings
 - Input recording (Debug Actions tab): captures button presses with cycle timestamps for replay
+- Full emulator state dump as JSON
+- Optional randomized power-on RAM, matching how real hardware boots (Settings → Developer)
 - Snapshots: unlimited save-state slots per game with thumbnails
 - A Saves tab with `.sav` import and export
 - Recently played ROMs in the file menu (native only)
-- Optional randomized power-on RAM, matching how real hardware boots (Settings → Developer)
-- Full emulator state dump as JSON
 - MBC5 cartridge support
 - Frame-by-frame accuracy comparison against the SameBoy reference emulator (`lab/`), with committed
   result snapshots under `experiments/`
@@ -164,10 +206,10 @@
 - Interrupt dispatch now reads the target vector from `IE` after pushing the return address, so a
   stack push onto `$FFFF` can redirect or cancel the interrupt
 - `RETI` now enables `IME` immediately instead of after the following instruction
-- Breakpoints are now checked every instruction instead of once per frame, so they actually trigger
 - Unused I/O register bits now read as 1 (serial `SC`, `TAC`), unmapped I/O registers read `0xFF`,
   and `IE` is a full 8-bit read/write register
 - The HALT bug is now emulated
+- Breakpoints are now checked every instruction instead of once per frame, so they actually trigger
 - Building the library standalone with only the `debug` feature failed to compile
 
 ---

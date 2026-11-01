@@ -1,17 +1,32 @@
 [workspace]
-members = ["app", "lab", "lab/sameboy-sys", "lib", "server"]
-default-members = ["app", "lib", "server"]
+members = ["crates/*"]
+default-members = [
+    "crates/citrine-gb",
+    "crates/citrine-gb-app",
+    "crates/citrine-gb-gamedata",
+    "crates/citrine-gb-net",
+    "crates/citrine-gb-partner",
+    "crates/citrine-gb-server",
+]
 resolver = "3"
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://gb.lemon.industries"
 repository = "https://github.com/Zitronenjoghurt/citrine-gb"
 
 [workspace.dependencies]
-citrine-gb = { path = "lib" }
+citrine-gb = { path = "crates/citrine-gb" }
+citrine-gb-gamedata = { path = "crates/citrine-gb-gamedata" }
+citrine-gb-net = { path = "crates/citrine-gb-net" }
+citrine-gb-partner = { path = "crates/citrine-gb-partner" }
+citrine-gb-server = { path = "crates/citrine-gb-server" }
+sameboy-sys = { path = "crates/sameboy-sys" }
+
+[profile.dev.package.citrine-gb]
+opt-level = 3
 
 [profile.dev.package.sameboy-sys]
 opt-level = 3
@@ -20,6 +35,12 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.rusty_aac]
+opt-level = 3
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
 opt-level = 3
 
 [profile.dist]

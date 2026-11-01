@@ -1,0 +1,23 @@
+[package]
+name = "citrine-gb-net"
+description = "Wire protocol, identity and end-to-end crypto shared by the Citrine app and server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+crypto_box = { version = "0.9.1", default-features = false, features = ["alloc", "salsa20"] }
+crypto_secretbox = { version = "0.1.1", default-features = false, features = ["alloc", "salsa20"] }
+getrandom = "0.2.17"
+hkdf = "0.12.4"
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.17", features = ["js"] }

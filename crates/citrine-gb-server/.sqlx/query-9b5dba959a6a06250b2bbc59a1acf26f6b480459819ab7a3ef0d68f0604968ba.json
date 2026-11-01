@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT version AS \"version!\", execution_time = -1 AS \"skipped!: bool\"\n               FROM _sqlx_migrations ORDER BY version",
+  "describe": {
+    "columns": [
+      {
+        "name": "version!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "_sqlx_migrations",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "name": "skipped!: bool",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "9b5dba959a6a06250b2bbc59a1acf26f6b480459819ab7a3ef0d68f0604968ba"
+}

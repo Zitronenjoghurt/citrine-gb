@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM files WHERE id = ?1 AND owner = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "5327aef326b2087581931436588e7327ef4388b45f82c70f01eef3177c514413"
+}

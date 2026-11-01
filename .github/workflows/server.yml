@@ -37,7 +37,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: server/docker/Dockerfile
+          file: crates/citrine-gb-server/docker/Dockerfile
           push: true
           platforms: linux/amd64
           cache-from: type=gha

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM blocks WHERE blocker = ?1 AND blocked = ?2) AS \"yes!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "yes!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a710469db77ae3a93b8300a1030b9dcb029c479fd0a4e4691b18c0c9843e3a03"
+}

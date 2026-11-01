@@ -1,0 +1,17 @@
+[package]
+name = "citrine-gb-partner"
+description = "Plays the other Game Boy in the Pokémon games' Cable Club and offers documented event Pokémon by link trade."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+citrine-gb = { workspace = true, features = ["persistence"] }
+citrine-gb-gamedata = { workspace = true }
+thiserror = "2.0.18"
+
+[dev-dependencies]
+citrine-gb = { workspace = true, features = ["persistence", "png"] }

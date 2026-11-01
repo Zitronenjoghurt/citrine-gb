@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO accounts (online_id, auth_hash, public_key, display_name, created_at, last_seen)\n                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)\n                 ON CONFLICT (online_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "214b02a09a53d22702d344b97898ec283c34b9088e41dc10e209b4f1c1e061d7"
+}

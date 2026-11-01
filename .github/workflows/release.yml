@@ -63,7 +63,7 @@ jobs:
         shell: bash
         env:
           TARGETS: ${{ matrix.targets }}
-          # Matches LSMinimumSystemVersion in app/macos/Info.plist. Rust's
+          # Matches LSMinimumSystemVersion in crates/citrine-gb-app/macos/Info.plist. Rust's
           # aarch64-apple-darwin is pinned to 11.0 anyway. This makes the
           # x86_64 slice of the universal binary agree with it.
           MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -102,9 +102,9 @@ jobs:
               mkdir "$ARCHIVE"
               cp LICENSE CHANGELOG.md "$ARCHIVE"/
               cp "target/${{ matrix.targets }}/dist/citrine-gb-app" "$ARCHIVE/citrine"
-              cp app/linux/citrine.desktop "$ARCHIVE"/
-              cp app/linux/install.sh "$ARCHIVE"/
-              cp app/assets/icon-256x256.png "$ARCHIVE/citrine.png"
+              cp crates/citrine-gb-app/linux/citrine.desktop "$ARCHIVE"/
+              cp crates/citrine-gb-app/linux/install.sh "$ARCHIVE"/
+              cp crates/citrine-gb-app/assets/icon-256x256.png "$ARCHIVE/citrine.png"
               chmod +x "$ARCHIVE/citrine" "$ARCHIVE/install.sh"
               ARCHIVE_FILE="$ARCHIVE.tar.gz"
               tar czf "$ARCHIVE_FILE" "$ARCHIVE"

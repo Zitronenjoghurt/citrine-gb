@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM messages WHERE id = ?1 AND to_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "53478f7107e5b58957eb138e22ec4abcebb3209e3c753bae59413957c5f1313c"
+}

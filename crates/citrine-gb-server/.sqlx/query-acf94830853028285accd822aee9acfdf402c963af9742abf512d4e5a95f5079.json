@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM invites\n               LEFT JOIN accounts ON accounts.id = invites.used_by\n               WHERE (?1 = '%%' OR invites.note LIKE ?1 ESCAPE '\\' OR accounts.display_name LIKE ?1 ESCAPE '\\'\n                      OR invites.code = ?2 OR accounts.online_id = ?3)\n                 AND (?4 = 0 OR (?4 = 1 AND invites.used_at IS NULL) OR (?4 = 2 AND invites.used_at IS NOT NULL))",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "acf94830853028285accd822aee9acfdf402c963af9742abf512d4e5a95f5079"
+}

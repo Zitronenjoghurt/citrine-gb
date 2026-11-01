@@ -1,0 +1,199 @@
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{Backend, data_dir};
+#[cfg(target_arch = "wasm32")]
+pub use web::Backend;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use directories::ProjectDirs;
+    use std::path::PathBuf;
+
+    const FALLBACK_DIR: &str = "citrine-data";
+
+    #[derive(Clone)]
+    pub struct Backend {
+        root: PathBuf,
+    }
+
+    pub fn data_dir() -> PathBuf {
+        match ProjectDirs::from("", "", "citrine") {
+            Some(dirs) => dirs.data_dir().to_path_buf(),
+            None => PathBuf::from(FALLBACK_DIR),
+        }
+    }
+
+    impl Default for Backend {
+        fn default() -> Self {
+            Self {
+                root: data_dir().join("saves"),
+            }
+        }
+    }
+
+    impl Backend {
+        pub fn settings() -> Self {
+            Self { root: data_dir() }
+        }
+
+        pub fn at(root: PathBuf) -> Self {
+            Self { root }
+        }
+
+        fn path(&self, namespace: &str, name: &str) -> PathBuf {
+            self.root.join(namespace).join(name)
+        }
+
+        pub fn read(&self, namespace: &str, name: &str) -> Option<Vec<u8>> {
+            std::fs::read(self.path(namespace, name)).ok()
+        }
+
+        pub fn write(&self, namespace: &str, name: &str, data: &[u8]) -> std::io::Result<()> {
+            let path = self.path(namespace, name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let temp = path.with_extension("tmp");
+            std::fs::write(&temp, data)?;
+            std::fs::rename(&temp, &path)
+        }
+
+        pub fn delete(&self, namespace: &str, name: &str) -> std::io::Result<()> {
+            match std::fs::remove_file(self.path(namespace, name)) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            }
+        }
+
+        pub fn exists(&self, namespace: &str, name: &str) -> bool {
+            self.path(namespace, name).is_file()
+        }
+
+        pub fn size(&self, namespace: &str, name: &str) -> u64 {
+            std::fs::metadata(self.path(namespace, name)).map_or(0, |m| m.len())
+        }
+
+        pub fn clear(&self, namespace: &str) -> std::io::Result<()> {
+            match std::fs::remove_dir_all(self.root.join(namespace)) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            }
+        }
+
+        pub fn list(&self, namespace: &str) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(self.root.join(namespace)) else {
+                return Vec::new();
+            };
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+
+        pub fn namespaces(&self) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(&self.root) else {
+                return Vec::new();
+            };
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+
+        pub fn location(&self) -> String {
+            self.root.display().to_string()
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod web {
+    use base64::Engine;
+
+    #[derive(Default, Clone)]
+    pub struct Backend;
+
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok()?
+    }
+
+    fn key(namespace: &str, name: &str) -> String {
+        format!("citrine/{namespace}/{name}")
+    }
+
+    impl Backend {
+        pub fn settings() -> Self {
+            Self
+        }
+
+        pub fn read(&self, namespace: &str, name: &str) -> Option<Vec<u8>> {
+            let raw = storage()?.get_item(&key(namespace, name)).ok()??;
+            base64::engine::general_purpose::STANDARD.decode(raw).ok()
+        }
+
+        pub fn write(&self, namespace: &str, name: &str, data: &[u8]) -> std::io::Result<()> {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+            storage()
+                .ok_or_else(|| std::io::Error::other("local storage unavailable"))?
+                .set_item(&key(namespace, name), &encoded)
+                .map_err(|_| std::io::Error::other("local storage write failed (quota?)"))
+        }
+
+        pub fn delete(&self, namespace: &str, name: &str) -> std::io::Result<()> {
+            if let Some(storage) = storage() {
+                let _ = storage.remove_item(&key(namespace, name));
+            }
+            Ok(())
+        }
+
+        pub fn exists(&self, namespace: &str, name: &str) -> bool {
+            self.read(namespace, name).is_some()
+        }
+
+        pub fn size(&self, namespace: &str, name: &str) -> u64 {
+            storage()
+                .and_then(|s| s.get_item(&key(namespace, name)).ok().flatten())
+                .map_or(0, |raw| raw.len() as u64 / 4 * 3)
+        }
+
+        pub fn clear(&self, namespace: &str) -> std::io::Result<()> {
+            for name in self.list(namespace) {
+                self.delete(namespace, &name)?;
+            }
+            Ok(())
+        }
+
+        pub fn list(&self, namespace: &str) -> Vec<String> {
+            let Some(storage) = storage() else {
+                return Vec::new();
+            };
+            let prefix = format!("citrine/{namespace}/");
+            let count = storage.length().unwrap_or(0);
+            (0..count)
+                .filter_map(|i| storage.key(i).ok().flatten())
+                .filter_map(|k| k.strip_prefix(&prefix).map(str::to_owned))
+                .collect()
+        }
+
+        pub fn namespaces(&self) -> Vec<String> {
+            let Some(storage) = storage() else {
+                return Vec::new();
+            };
+            let count = storage.length().unwrap_or(0);
+            let mut found: Vec<String> = (0..count)
+                .filter_map(|i| storage.key(i).ok().flatten())
+                .filter_map(|k| {
+                    let rest = k.strip_prefix("citrine/")?;
+                    rest.split_once('/').map(|(ns, _)| ns.to_owned())
+                })
+                .collect();
+            found.sort();
+            found.dedup();
+            found
+        }
+
+        pub fn location(&self) -> String {
+            "browser local storage".to_string()
+        }
+    }
+}

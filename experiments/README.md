@@ -4,7 +4,7 @@ One-shot snapshots of the emulator's accuracy, collected with `make results`
 (= `cargo run --release -p citrine-gb-lab --bin collect`). Each run captures:
 
 1. **Mooneye suite.** Every DMG acceptance/emulator-only ROM, executed in-process with the
-   same Fibonacci-register convention as `lib/tests/mooneye.rs`.
+   same Fibonacci-register convention as `crates/citrine-gb/tests/mooneye.rs`.
 2. **SameBoy frame diff.** Every ROM in `roms/games/` and `roms/test/` (dmg-acid2 + blargg)
    compared against SameBoy for 3600 frames (cycle-aligned, greyscale-normalized, no PNG
    dumps), swept over alignment tolerances 0, 1, 2, 5 and 10. ROMs with a matching input

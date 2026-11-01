@@ -1,0 +1,18 @@
+[package]
+name = "citrine-gb-gamedata"
+description = "Reads the trainer, party, boxes and bag of the Game Boy Pokémon games from their ROM, save and work RAM."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+fixtures = []
+
+[dependencies]
+thiserror = "2.0.18"
+
+[dev-dependencies]
+citrine-gb = { workspace = true, features = ["persistence"] }

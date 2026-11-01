@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT secret FROM admin_totp WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "secret",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "admin_totp",
+            "name": "secret"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "08e63fad1483a0b310f12209affbaf207667c0484c841803ec1d52a56ae14d26"
+}

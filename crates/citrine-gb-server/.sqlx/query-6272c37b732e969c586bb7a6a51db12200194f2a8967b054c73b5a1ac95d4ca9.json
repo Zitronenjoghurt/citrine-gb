@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM admin_totp",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "6272c37b732e969c586bb7a6a51db12200194f2a8967b054c73b5a1ac95d4ca9"
+}

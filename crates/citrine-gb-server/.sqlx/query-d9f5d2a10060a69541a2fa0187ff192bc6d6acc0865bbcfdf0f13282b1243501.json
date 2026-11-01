@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM friendships WHERE a = ?1 AND b = ?2) AS \"yes!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "yes!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d9f5d2a10060a69541a2fa0187ff192bc6d6acc0865bbcfdf0f13282b1243501"
+}

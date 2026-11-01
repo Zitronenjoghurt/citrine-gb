@@ -1,0 +1,31 @@
+[package]
+name = "citrine-gb-lab"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+name = "citrine_lab"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citrine-gb-lab"
+path = "src/main.rs"
+
+[[bin]]
+name = "collect"
+path = "src/bin/collect.rs"
+
+[[bin]]
+name = "analyze"
+path = "src/bin/analyze.rs"
+
+[dependencies]
+citrine-gb = { workspace = true, features = ["debug", "persistence", "recording"] }
+sameboy-sys = { workspace = true }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+png = "0.18"
+indicatif = "0.17"

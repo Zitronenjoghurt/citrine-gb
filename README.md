@@ -6,16 +6,28 @@
 **WORK IN PROGRESS**\
 A soon-to-be cycle-accurate Game Boy and Game Boy Color emulator.
 
-The core functionality is available as a [standalone crate](lib/README.md).
+The core functionality is available as a [standalone crate](crates/citrine-gb/README.md).
+
+### AI Use
+After I burned out on the project around v0.6.0 but still had friends enjoying the emulator, I set to improve the accuracy and implement certain features with Claude x-x Please bear with me! The core worked end-to-end with the Game Boy, it still had some minor inaccuracies tho. Now most inaccuracies have been ironed out, GBC support is in and even rollback netcode for online play with friends. I always stayed part of the creative and technical process behind the new features that I would have probably never had the motivation to tackle completely alone.
 
 # Features
 
 Read [FEATURES.md](FEATURES.md) for a list of current and planned features.
 
+# Supported platforms
+
+- Windows (x86_64)
+- macOS (universal, Apple Silicon and Intel)
+- Linux (x86_64 and aarch64)
+- Web (via [Citrine Web](https://gb.lemon.industries))
+
+Download the latest build from [Releases](https://github.com/Zitronenjoghurt/citrine-gb/releases).
+
 # Accuracy
 
 Citrine is compared frame-by-frame against the [SameBoy](https://github.com/LIJI32/SameBoy) reference
-emulator by the harness in [lab/](lab/README.md). Result snapshots live in
+emulator by the harness in [crates/citrine-gb-lab/](crates/citrine-gb-lab/README.md). Result snapshots live in
 [experiments/](experiments/README.md).
 
 # Testing
@@ -48,11 +60,6 @@ colours.
 The ledger only grows: `make ledger-check` fails as soon as a line in passing.txt stops passing.
 To drop a line, delete it by hand and say why in the commit.
 
-# Supported platforms
+# Server
 
-- Windows (x86_64)
-- macOS (universal, Apple Silicon and Intel)
-- Linux (x86_64 and aarch64)
-- Web (via [Citrine Web](https://gb.lemon.industries))
-
-Download the latest build from [Releases](https://github.com/Zitronenjoghurt/citrine-gb/releases).
+[crates/citrine-gb-server/](crates/citrine-gb-server/README.md) hosts the web version of Citrine and the online relay for playing with friends, cloud saves, etc.

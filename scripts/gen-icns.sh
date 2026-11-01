@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ASSETS="$ROOT/app/assets"
+ASSETS="$ROOT/crates/citrine-gb-app/assets"
 SRC="$ASSETS/icon.png"
 SET="$ASSETS/icon.iconset"
 

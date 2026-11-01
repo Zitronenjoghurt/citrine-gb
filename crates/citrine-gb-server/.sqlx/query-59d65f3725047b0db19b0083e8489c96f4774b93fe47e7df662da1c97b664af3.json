@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO saves (owner, game, slot, version, file, label, updated_at)\n                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "59d65f3725047b0db19b0083e8489c96f4774b93fe47e7df662da1c97b664af3"
+}

@@ -24,9 +24,9 @@ lipo -create -output "$APP/Contents/MacOS/citrine" \
 	"$ROOT/target/x86_64-apple-darwin/dist/citrine-gb-app"
 chmod +x "$APP/Contents/MacOS/citrine"
 
-cp "$ROOT/app/assets/icon.icns" "$APP/Contents/Resources/icon.icns"
+cp "$ROOT/crates/citrine-gb-app/assets/icon.icns" "$APP/Contents/Resources/icon.icns"
 cp "$ROOT/LICENSE"              "$APP/Contents/Resources/LICENSE"
-sed "s/__VERSION__/${VERSION}/g" "$ROOT/app/macos/Info.plist" > "$APP/Contents/Info.plist"
+sed "s/__VERSION__/${VERSION}/g" "$ROOT/crates/citrine-gb-app/macos/Info.plist" > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 codesign --force --sign - --timestamp=none "$APP"

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM admin_recovery_codes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "97de18747e5383cbc296fe782b5d15d367d4257887ee414e6bdf61a4315ab0e6"
+}

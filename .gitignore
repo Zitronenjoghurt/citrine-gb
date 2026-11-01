@@ -19,8 +19,15 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .DS_Store
 .idea/
-app/dist
+crates/citrine-gb-app/dist
 /build
 /roms
-/lab/report.json
-/lab/diff
+/crates/citrine-gb-lab/report.json
+/crates/citrine-gb-lab/diff
+
+.env
+/data
+/static
+crates/citrine-gb-server/data
+crates/citrine-gb-server/static
+crates/citrine-gb-server/docker/data
