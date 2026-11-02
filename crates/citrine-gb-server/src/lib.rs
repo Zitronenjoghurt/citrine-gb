@@ -1,6 +1,7 @@
 mod admin;
 mod client_ip;
 pub mod config;
+mod connections;
 mod db;
 mod hub;
 mod limit;
@@ -8,6 +9,8 @@ mod relay;
 mod screens;
 mod settings;
 mod stats;
+mod storage;
+mod two_factor;
 
 pub use config::{Config, ConfigError};
 
@@ -15,10 +18,11 @@ use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use citrine_gb_net::Notice;
+use citrine_gb_net::{Notice, RelayKey, RelaySecret};
+use connections::Connections;
 use db::Db;
 use hub::Hub;
-use limit::Attempts;
+use limit::{Attempts, Rates};
 use screens::Screens;
 use settings::Settings;
 use stats::Stats;
@@ -27,11 +31,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use storage::Storage;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
 
 const KEEP_MESSAGES_SECS: u64 = 30 * 86_400;
+const EMPTY_ACCOUNT_SECS: u64 = 30 * 86_400;
 const KEEP_BACKUPS: usize = 14;
 
 pub fn now() -> u64 {
@@ -66,12 +72,24 @@ pub struct App {
     hub: Hub,
     screens: Screens,
     stats: Stats,
-    relay_attempts: Attempts,
+    wrong_tries: Attempts,
+    unknown_tries: Attempts,
+    account_tries: Attempts<i64>,
     admin_attempts: Attempts,
     admin_hash: Option<[u8; 32]>,
     admin_sessions: Mutex<HashMap<[u8; 32], Instant>>,
     admin_setup: Mutex<Option<Vec<u8>>>,
     files_dir: PathBuf,
+    storage: Arc<Storage>,
+    connections: Arc<Connections>,
+    rates: Rates,
+    relay_secret: RelaySecret,
+}
+
+impl App {
+    pub(crate) fn relay_key(&self) -> RelayKey {
+        self.relay_secret.public()
+    }
 }
 
 impl App {
@@ -98,7 +116,44 @@ pub struct Running {
     purge: JoinHandle<()>,
 }
 
-async fn tidy(db: &Db, now: u64) {
+async fn delete_empty_accounts(app: &App, now: u64) {
+    if !app.settings.get().delete_empty {
+        return;
+    }
+    let ids = match app
+        .db
+        .empty_accounts(now.saturating_sub(EMPTY_ACCOUNT_SECS))
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => return log::error!("database: {e}"),
+    };
+    let online = app.hub.online();
+    let mut deleted = 0;
+    for id in ids.into_iter().filter(|id| !online.contains_key(id)) {
+        match app.db.delete_account(id).await {
+            Ok(Some(_)) => deleted += 1,
+            Ok(None) => {}
+            Err(e) => return log::error!("database: {e}"),
+        }
+    }
+    if deleted > 0 {
+        log::info!("deleted {deleted} accounts that stayed empty for 30 days");
+    }
+}
+
+async fn tidy(app: &App, now: u64) {
+    delete_empty_accounts(app, now).await;
+    let db = &app.db;
+    let request_age = app.config.limits.friend_request_age;
+    match db
+        .purge_requests(now.saturating_sub(request_age.as_secs()))
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => log::info!("removed {n} friend requests nobody answered"),
+        Err(e) => log::error!("database: {e}"),
+    }
     match db
         .purge_messages(now.saturating_sub(KEEP_MESSAGES_SECS))
         .await
@@ -149,11 +204,23 @@ async fn back_up(db: &Db, dir: &Path, now: u64) {
 
 impl Running {
     pub async fn tidy(&self, now: u64) {
-        tidy(&self.app.db, now).await;
+        tidy(&self.app, now).await;
+    }
+
+    pub async fn require_invites(&self) -> sqlx::Result<()> {
+        self.app.settings.set_flag(settings::INVITES, true).await
+    }
+
+    pub async fn create_invite(&self) -> sqlx::Result<citrine_gb_net::InviteCode> {
+        Ok(self.app.db.create_invite("", now()).await?.code)
     }
 
     pub async fn back_up(&self, now: u64) {
         back_up(&self.app.db, &self.app.config.data_dir.join("backups"), now).await;
+    }
+
+    pub fn relay_key(&self) -> RelayKey {
+        self.app.relay_key()
     }
 
     pub async fn stop(self) {
@@ -211,10 +278,18 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
             );
         }
     }
+    let relay_secret =
+        RelaySecret::from_bytes(db.relay_secret(*RelaySecret::random().as_bytes()).await?);
+    log::info!("relay key {}", relay_secret.public().fingerprint());
     let settings = Settings::load(&config, db.clone()).await?;
     let effective = settings.get();
     if effective.relay && !effective.password_set && !config.relay_open {
         return Err(ConfigError::OpenRelay.into());
+    }
+    if config.game_sharing && !effective.invites {
+        log::warn!(
+            "CITRINE_GAME_SHARING is on, but the relay passes games on only while new accounts need an invite code. Set CITRINE_INVITES=true, or turn on invite codes in the admin panel's Settings"
+        );
     }
     let app = Arc::new(App {
         admin_hash: config.admin_password.as_deref().map(settings::hash),
@@ -224,11 +299,26 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         hub: Hub::default(),
         screens: Screens::default(),
         stats: Stats::default(),
-        relay_attempts: Attempts::new(10, Duration::from_secs(60)),
+        wrong_tries: Attempts::new(
+            config.limits.wrong_tries_per_minute,
+            Duration::from_secs(60),
+        ),
+        unknown_tries: Attempts::new(
+            config.limits.unknown_tries_per_minute,
+            Duration::from_secs(60),
+        ),
+        account_tries: Attempts::new(
+            config.limits.wrong_tries_per_minute,
+            Duration::from_secs(60),
+        ),
         admin_attempts: Attempts::new(5, Duration::from_secs(60)),
         admin_sessions: Mutex::new(HashMap::new()),
         admin_setup: Mutex::new(None),
+        storage: Arc::new(Storage::new(config.data_dir.clone(), &config.limits)),
+        connections: Arc::new(Connections::new(&config.limits)),
+        rates: Rates::new(&config.limits),
         files_dir,
+        relay_secret,
     });
 
     let mut router = Router::new()
@@ -270,13 +360,14 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         );
     }
 
+    let tidied = app.clone();
     let backups = config.data_dir.join("backups");
     let purge = tokio::spawn(async move {
         let mut every = tokio::time::interval(Duration::from_secs(3600));
         loop {
             every.tick().await;
-            tidy(&db, now()).await;
-            back_up(&db, &backups, now()).await;
+            tidy(&tidied, now()).await;
+            back_up(&tidied.db, &backups, now()).await;
         }
     });
 

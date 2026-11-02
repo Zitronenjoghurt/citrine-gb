@@ -1,7 +1,7 @@
 use citrine_gb_net::{
-    Account, CHUNK_BYTES, ClientMsg, EndReason, ErrorCode, FriendState, GameKey, MAX_SCREEN_BYTES,
-    NONCE_BYTES, Notice, OnlineId, PROTOCOL_VERSION, Presence, RelayId, RelayPassword, Sealed,
-    ServerInfo, ServerMsg, SessionId,
+    Account, CHUNK_BYTES, Channel, ClientHandshake, ClientMsg, DeviceId, DeviceInfo, DeviceKey,
+    EndReason, ErrorCode, FriendState, GameKey, MAX_SCREEN_BYTES, NONCE_BYTES, Notice, OnlineId,
+    PROTOCOL_VERSION, Presence, RelayId, RelayPassword, Sealed, ServerInfo, ServerMsg, SessionId,
 };
 use citrine_gb_server::{Config, ConfigError, Running, StartError, start};
 use futures_util::{SinkExt, StreamExt};
@@ -20,6 +20,20 @@ fn config(dir: &Path, vars: &[(&str, &str)]) -> Config {
     let mut map: HashMap<String, String> = HashMap::from([
         ("CITRINE_BIND".into(), "127.0.0.1".into()),
         ("CITRINE_PORT".into(), "0".into()),
+        ("CITRINE_DISK_FLOOR_MB".into(), "0".into()),
+        ("CITRINE_DISK_FLOOR_PERCENT".into(), "0".into()),
+        ("CITRINE_IP_CONNECTIONS".into(), "100000".into()),
+        ("CITRINE_IP_UNSIGNED".into(), "100000".into()),
+        ("CITRINE_IP_CONNECTS_PER_MINUTE".into(), "100000".into()),
+        ("CITRINE_SIGN_UPS_PER_IP".into(), "100000".into()),
+        ("CITRINE_SIGN_UPS_PER_HOUR".into(), "100000".into()),
+        ("CITRINE_MESSAGES_PER_SECOND".into(), "100000".into()),
+        ("CITRINE_MESSAGE_BURST".into(), "100000".into()),
+        ("CITRINE_CHATS_PER_SECOND".into(), "100000".into()),
+        ("CITRINE_CHAT_BURST".into(), "100000".into()),
+        ("CITRINE_CHAT_KB_PER_SECOND".into(), "100000".into()),
+        ("CITRINE_FRIEND_REQUESTS_PER_HOUR".into(), "100000".into()),
+        ("CITRINE_FRIEND_REQUEST_BURST".into(), "100000".into()),
         (
             "CITRINE_DATA_DIR".into(),
             dir.join("data").display().to_string(),
@@ -44,19 +58,48 @@ async fn server(dir: &Path, vars: &[(&str, &str)]) -> Running {
 
 struct Client {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    channel: Channel,
+    device: Option<DeviceKey>,
+    devices: Option<(Vec<DeviceInfo>, DeviceId)>,
 }
 
 impl Client {
+    async fn secure(mut ws: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
+        let (handshake, first) = ClientHandshake::start();
+        ws.send(Message::Binary(first.into())).await.unwrap();
+        let reply = loop {
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(Message::Binary(bytes)))) => break bytes,
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("no handshake reply: {other:?}"),
+            }
+        };
+        let (_, channel) = handshake.finish(&reply).unwrap();
+        Self {
+            ws,
+            channel,
+            device: None,
+            devices: None,
+        }
+    }
+
+    async fn send_raw(&mut self, bytes: Vec<u8>) {
+        let sealed = self.channel.seal(&bytes);
+        self.ws.send(Message::Binary(sealed.into())).await.unwrap();
+    }
+
     async fn connect(addr: SocketAddr) -> Self {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/relay"))
             .await
             .unwrap();
-        Self { ws }
+        Self::secure(ws).await
     }
 
     async fn send(&mut self, msg: ClientMsg) {
         self.ws
-            .send(Message::Binary(msg.encode().unwrap().into()))
+            .send(Message::Binary(
+                self.channel.seal(&msg.encode().unwrap()).into(),
+            ))
             .await
             .unwrap();
     }
@@ -68,7 +111,11 @@ impl Client {
                 .expect("timed out waiting for the server");
             match frame {
                 Some(Ok(Message::Binary(bytes))) => {
-                    return Some(ServerMsg::decode(&bytes).unwrap());
+                    match ServerMsg::decode(&self.channel.open(&bytes).unwrap()).unwrap() {
+                        ServerMsg::Device(key) => self.device = Some(key),
+                        ServerMsg::Devices { list, this } => self.devices = Some((list, this)),
+                        msg => return Some(msg),
+                    }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
                 Some(Ok(_)) => continue,
@@ -134,6 +181,7 @@ impl Client {
             public_key: keys.public_key(),
             display_name: name.into(),
             invite: None,
+            device_name: "Test".into(),
         })
         .await;
         let account = c.welcome().await;
@@ -141,15 +189,50 @@ impl Client {
     }
 
     async fn sign_in(addr: SocketAddr, id: &RelayId) -> (Self, Account) {
+        Self::sign_in_as(addr, id, None, "Test").await
+    }
+
+    async fn sign_in_as(
+        addr: SocketAddr,
+        id: &RelayId,
+        device: Option<DeviceKey>,
+        name: &str,
+    ) -> (Self, Account) {
         let mut c = Self::connect(addr).await;
         c.hello().await;
         c.send(ClientMsg::SignIn {
             relay_password: Some(RelayPassword(PASSWORD.into())),
             auth_key: id.keys().auth_key().clone(),
+            device: device.clone(),
+            code: None,
+            device_name: name.into(),
         })
         .await;
         let account = c.welcome().await;
+        c.device = c.device.take().or(device);
         (c, account)
+    }
+
+    async fn devices_until(&mut self, done: impl Fn(&[DeviceInfo]) -> bool) {
+        for _ in 0..100 {
+            self.quiet().await;
+            if self.devices.as_ref().is_some_and(|(list, _)| done(list)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the device list never changed: {:?}", self.devices);
+    }
+
+    async fn devices_now(&mut self) -> (Vec<DeviceInfo>, DeviceId) {
+        for _ in 0..100 {
+            self.quiet().await;
+            if let Some(devices) = self.devices.clone() {
+                return devices;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("no device list came")
     }
 
     async fn welcome(&mut self) -> Account {
@@ -235,6 +318,10 @@ impl Admin {
         r
     }
 
+    async fn json(&self, path: &str) -> serde_json::Value {
+        serde_json::from_str(&self.get(path).await).unwrap()
+    }
+
     async fn get(&self, path: &str) -> String {
         let r = self
             .http
@@ -262,6 +349,7 @@ async fn wrong_relay_password_is_refused() {
             public_key: keys.public_key(),
             display_name: "Eve".into(),
             invite: None,
+            device_name: "Test".into(),
         })
         .await;
         assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::WrongPassword));
@@ -296,6 +384,7 @@ async fn sign_up_then_sign_in_with_the_same_relay_id() {
         public_key: id.keys().public_key(),
         display_name: "Again".into(),
         invite: None,
+        device_name: "Test".into(),
     })
     .await;
     assert_eq!(dup.recv().await, ServerMsg::Error(ErrorCode::AccountExists));
@@ -306,6 +395,9 @@ async fn sign_up_then_sign_in_with_the_same_relay_id() {
         .send(ClientMsg::SignIn {
             relay_password: Some(RelayPassword(PASSWORD.into())),
             auth_key: RelayId::random().keys().auth_key().clone(),
+            device: None,
+            code: None,
+            device_name: "Test".into(),
         })
         .await;
     assert_eq!(
@@ -313,12 +405,29 @@ async fn sign_up_then_sign_in_with_the_same_relay_id() {
         ServerMsg::Error(ErrorCode::UnknownAccount)
     );
 
+    let mut other = Client::connect(s.addr).await;
+    other.hello().await;
+    other
+        .send(ClientMsg::SignIn {
+            relay_password: Some(RelayPassword(PASSWORD.into())),
+            auth_key: id.keys().auth_key().clone(),
+            device: None,
+            code: None,
+            device_name: "Test".into(),
+        })
+        .await;
+    other.welcome().await;
+    c.quiet().await;
+
     let mut elsewhere = Client::connect(s.addr).await;
     elsewhere.hello().await;
     elsewhere
         .send(ClientMsg::SignIn {
             relay_password: Some(RelayPassword(PASSWORD.into())),
             auth_key: id.keys().auth_key().clone(),
+            device: c.device.clone(),
+            code: None,
+            device_name: "Test".into(),
         })
         .await;
     elsewhere.welcome().await;
@@ -338,6 +447,9 @@ async fn sign_in_needs_hello_first() {
     c.send(ClientMsg::SignIn {
         relay_password: Some(RelayPassword(PASSWORD.into())),
         auth_key: RelayId::random().keys().auth_key().clone(),
+        device: None,
+        code: None,
+        device_name: "Test".into(),
     })
     .await;
     assert_eq!(
@@ -421,7 +533,7 @@ async fn what_a_friend_plays_reaches_only_them_sealed() {
         0x88, 0x5C, 0x21, 0xF0, 0x96,
     ];
 
-    b.send(ClientMsg::SetStatus { away: false }).await;
+    b.send(ClientMsg::SetStatus { away: true }).await;
     let presence = a
         .expect("presence", |m| matches!(m, ServerMsg::Presence { .. }))
         .await;
@@ -492,6 +604,9 @@ async fn friend_list_on_sign_in_and_decline_and_remove() {
         .send(ClientMsg::SignIn {
             relay_password: Some(RelayPassword(PASSWORD.into())),
             auth_key: a_id.keys().auth_key().clone(),
+            device: None,
+            code: None,
+            device_name: "Test".into(),
         })
         .await;
     assert!(matches!(again.recv().await, ServerMsg::Welcome(_)));
@@ -564,6 +679,9 @@ async fn an_offline_message_arrives_on_next_connect() {
     b.send(ClientMsg::SignIn {
         relay_password: Some(RelayPassword(PASSWORD.into())),
         auth_key: b_id.keys().auth_key().clone(),
+        device: None,
+        code: None,
+        device_name: "Test".into(),
     })
     .await;
     b.welcome().await;
@@ -581,9 +699,16 @@ async fn an_offline_message_arrives_on_next_connect() {
 
     b.send(ClientMsg::ChatAck(vec![id])).await;
     b.quiet().await;
+    let known = b.device.clone();
     drop(b);
-    let (mut b, _) = Client::sign_in(s.addr, &b_id).await;
+    let (mut b, _) = Client::sign_in_as(s.addr, &b_id, known, "Test").await;
     b.quiet().await;
+    let (mut fresh, _) = Client::sign_in(s.addr, &b_id).await;
+    let ServerMsg::Chat(copy) = fresh.recv().await else {
+        panic!("a new device gets the chats of the last 30 days")
+    };
+    assert_eq!(copy.id, id);
+    drop(fresh);
 
     let live = a_id.keys().seal(&b_id.keys().public_key(), b"live");
     a.send(ClientMsg::Chat {
@@ -745,6 +870,68 @@ async fn no_storage_means_no_file_sharing() {
     s.stop().await;
 }
 
+#[tokio::test]
+async fn a_total_storage_cap_set_in_the_panel_refuses_uploads_and_shows_on_the_dashboard() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let admin = Admin::login(s.addr).await;
+    let stats = admin.json("/admin/stats").await;
+    assert!(stats["storage_total"].as_u64().unwrap() <= 10 << 30);
+    admin
+        .post(
+            "/admin/settings",
+            &[
+                ("name", "Citrine"),
+                ("sign_ups", "on"),
+                ("quota_mb", "100"),
+                ("storage_total_mb", "1"),
+                ("max_message_kb", "64"),
+                ("max_file_mb", "25"),
+            ],
+        )
+        .await;
+    let stats = admin.json("/admin/stats").await;
+    assert_eq!(stats["storage_total"], 1 << 20);
+    assert!(
+        admin
+            .get("/admin/settings")
+            .await
+            .contains(r#"name="storage_total_mb" type="number" min="0" step="1" value="1""#)
+    );
+    let (mut a, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+    assert_eq!(
+        upload(&mut a, 1, &vec![1; 2 << 20]).await,
+        ServerMsg::UploadFailed {
+            tag: 1,
+            error: ErrorCode::QuotaFull
+        }
+    );
+    admin
+        .post("/admin/settings/reset", &[("key", "storage_total_mb")])
+        .await;
+    assert!(matches!(
+        upload(&mut a, 2, &vec![1; 2 << 20]).await,
+        ServerMsg::Uploaded { .. }
+    ));
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn invite_codes_can_be_required_from_the_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[("CITRINE_INVITES", "true")]).await;
+    let mut c = Client::connect(s.addr).await;
+    assert!(c.hello().await.invites_required);
+    let admin = Admin::login(s.addr).await;
+    assert!(
+        admin
+            .get("/admin/settings")
+            .await
+            .contains("From the environment")
+    );
+    s.stop().await;
+}
+
 fn put(tag: u32, slot: &str, base: u64, data: &[u8]) -> ClientMsg {
     ClientMsg::PutSave {
         tag,
@@ -768,7 +955,7 @@ async fn saves_keep_a_version_and_count_toward_storage() {
         panic!("expected the save to be stored")
     };
     assert_eq!((info.version, info.size), (1, 1000));
-    assert!(matches!(a.recv().await, ServerMsg::Account(acc) if acc.storage_used == 1000));
+    assert!(matches!(a.recv().await, ServerMsg::Account(acc) if acc.storage_used == 4096 + 12));
 
     a.send(put(2, "battery", 0, &[8; 500])).await;
     let ServerMsg::SaveRefused {
@@ -783,7 +970,7 @@ async fn saves_keep_a_version_and_count_toward_storage() {
 
     a.send(put(3, "battery", 1, &[9; 600])).await;
     assert!(matches!(a.recv().await, ServerMsg::SaveStored { tag: 3, info } if info.version == 2));
-    assert!(matches!(a.recv().await, ServerMsg::Account(acc) if acc.storage_used == 600));
+    assert!(matches!(a.recv().await, ServerMsg::Account(acc) if acc.storage_used == 4096 + 12));
 
     a.send(put(4, "slot-0", 0, &vec![1; 1_048_000])).await;
     assert!(matches!(
@@ -808,7 +995,7 @@ async fn saves_keep_a_version_and_count_toward_storage() {
     drop(a);
 
     let (mut b, account) = Client::sign_in(s.addr, &id).await;
-    assert_eq!(account.storage_used, 600);
+    assert_eq!(account.storage_used, 4096 + 12);
     b.send(ClientMsg::ListSaves).await;
     let ServerMsg::Saves(saves) = b.recv().await else {
         panic!("expected the list")
@@ -991,8 +1178,25 @@ async fn game_files_cross_only_when_the_relay_shares_games() {
     let dir = tempfile::tempdir().unwrap();
     let s = server(dir.path(), &[("CITRINE_GAME_SHARING", "true")]).await;
     let ((mut a, a_acc, _), (mut b, b_acc, _)) = friends(s.addr).await;
-    assert!(a.hello().await.game_sharing);
+    assert!(!a.hello().await.game_sharing);
     let session = start_session(&mut a, &mut b, &a_acc, &b_acc).await;
+    a.send(ClientMsg::Game {
+        session,
+        sealed: sealed(7),
+    })
+    .await;
+    assert_eq!(a.recv().await, ServerMsg::Error(ErrorCode::GameSharingOff));
+    let admin = Admin::login(s.addr).await;
+    assert!(
+        admin
+            .get("/admin/settings")
+            .await
+            .contains("Waits for invite codes")
+    );
+    admin
+        .post("/admin/settings", &settings_form(&[("invites", "on")]))
+        .await;
+    assert!(a.hello().await.game_sharing);
     let part = Sealed {
         nonce: [7; NONCE_BYTES],
         ciphertext: vec![0x5A; 192 * 1024 + 64],
@@ -1143,6 +1347,9 @@ async fn ban_disconnects_and_blocks_sign_in() {
         .send(ClientMsg::SignIn {
             relay_password: Some(RelayPassword(PASSWORD.into())),
             auth_key: id.keys().auth_key().clone(),
+            device: None,
+            code: None,
+            device_name: "Test".into(),
         })
         .await;
     assert_eq!(again.recv().await, ServerMsg::Error(ErrorCode::Banned));
@@ -1173,12 +1380,18 @@ async fn password_change_can_sign_everyone_out() {
     old.send(ClientMsg::SignIn {
         relay_password: Some(RelayPassword(PASSWORD.into())),
         auth_key: id.keys().auth_key().clone(),
+        device: None,
+        code: None,
+        device_name: "Test".into(),
     })
     .await;
     assert_eq!(old.recv().await, ServerMsg::Error(ErrorCode::WrongPassword));
     old.send(ClientMsg::SignIn {
         relay_password: Some(RelayPassword("new one".into())),
         auth_key: id.keys().auth_key().clone(),
+        device: None,
+        code: None,
+        device_name: "Test".into(),
     })
     .await;
     old.welcome().await;
@@ -1466,6 +1679,7 @@ async fn settings_changed_in_the_panel_persist_across_a_restart() {
         public_key: keys.public_key(),
         display_name: "Late".into(),
         invite: None,
+        device_name: "Test".into(),
     })
     .await;
     assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::SignUpsClosed));
@@ -1506,6 +1720,7 @@ async fn an_open_relay_must_be_chosen() {
         public_key: keys.public_key(),
         display_name: "Open".into(),
         invite: None,
+        device_name: "Test".into(),
     })
     .await;
     c.welcome().await;
@@ -1517,16 +1732,16 @@ async fn garbage_frames_get_an_error_not_a_crash() {
     let dir = tempfile::tempdir().unwrap();
     let s = server(dir.path(), &[]).await;
     let mut c = Client::connect(s.addr).await;
-    c.ws.send(Message::Binary(vec![0xFF, 0x00, 0x13].into()))
-        .await
-        .unwrap();
+    c.send_raw(vec![0xFF, 0x00, 0x13]).await;
     assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::BadMessage));
     c.hello().await;
     s.stop().await;
 }
 
 fn png(fill: u8, len: usize) -> Vec<u8> {
-    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend_from_slice(&480u32.to_be_bytes());
+    png.extend_from_slice(&432u32.to_be_bytes());
     png.resize(len, fill);
     png
 }
@@ -1914,6 +2129,7 @@ async fn a_relay_password_set_in_the_panel_is_stored_as_argon2id() {
         public_key: keys.public_key(),
         display_name: "Lime".into(),
         invite: None,
+        device_name: "Test".into(),
     })
     .await;
     c.welcome().await;
@@ -1968,5 +2184,523 @@ async fn web_on_without_its_files_says_so_and_how_to_build_them() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    s.stop().await;
+}
+
+fn settings_form<'a>(extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut form = vec![
+        ("name", "Citrine"),
+        ("sign_ups", "on"),
+        ("pictures", "on"),
+        ("quota_mb", "100"),
+        ("max_message_kb", "64"),
+        ("max_file_mb", "25"),
+    ];
+    form.extend_from_slice(extra);
+    form
+}
+
+fn position(page: &str, needle: &str) -> usize {
+    page.find(needle)
+        .unwrap_or_else(|| panic!("{needle} is not on the page"))
+}
+
+#[tokio::test]
+async fn the_users_page_shows_when_accounts_joined_and_sorts_by_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let (old, _) = Client::sign_up(s.addr, &RelayId::random(), "Olga").await;
+    drop(old);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (_new, _) = Client::sign_up(s.addr, &RelayId::random(), "Nina").await;
+    let admin = Admin::login(s.addr).await;
+    let newest = admin.get("/admin/users?sort=newest").await;
+    assert!(newest.contains("<span>Joined</span>"));
+    assert!(position(&newest, "Nina") < position(&newest, "Olga"));
+    assert!(newest.contains("127.0.0.1"));
+    assert!(newest.contains("Ban 2 from the last hour"));
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn a_bulk_ban_takes_only_the_accounts_that_joined_after_the_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let (mut old, _) = Client::sign_up(s.addr, &RelayId::random(), "Olga").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let since = unix();
+    let (mut a, _) = Client::sign_up(s.addr, &RelayId::random(), "Spam 1").await;
+    let (mut b, _) = Client::sign_up(s.addr, &RelayId::random(), "Spam 2").await;
+    let admin = Admin::login(s.addr).await;
+    let r = admin
+        .post("/admin/users/ban-new", &[("since", &since.to_string())])
+        .await;
+    assert!(
+        r.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("done=banned-many")
+    );
+    for c in [&mut a, &mut b] {
+        assert_eq!(c.recv().await, ServerMsg::Notice(Notice::Banned));
+        c.closed().await;
+    }
+    old.quiet().await;
+    let users = admin.get("/admin/users").await;
+    assert_eq!(users.matches(r#"aria-label="Banned""#).count(), 4);
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_removes_it_and_its_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, _, a_id), (mut b, _, _)) = friends(s.addr).await;
+    let ServerMsg::Uploaded { file, .. } = upload(&mut a, 1, b"a picture").await else {
+        panic!("expected the upload to finish")
+    };
+    let files = dir.path().join("data").join("files");
+    assert_eq!(std::fs::read_dir(&files).unwrap().count(), 1);
+    let admin = Admin::login(s.addr).await;
+    admin
+        .post("/admin/users/1/delete", &[("back", "/admin/users")])
+        .await;
+    a.expect("the disconnect", |m| {
+        *m == ServerMsg::Notice(Notice::Disconnected)
+    })
+    .await;
+    a.closed().await;
+    assert_eq!(std::fs::read_dir(&files).unwrap().count(), 0);
+    b.send(ClientMsg::Download(file.id)).await;
+    b.expect("refusal", |m| {
+        *m == ServerMsg::DownloadFailed {
+            file: file.id,
+            error: ErrorCode::UnknownFile,
+        }
+    })
+    .await;
+    let mut again = Client::connect(s.addr).await;
+    again.hello().await;
+    again
+        .send(ClientMsg::SignIn {
+            relay_password: Some(RelayPassword(PASSWORD.into())),
+            auth_key: a_id.keys().auth_key().clone(),
+            device: None,
+            code: None,
+            device_name: "Test".into(),
+        })
+        .await;
+    assert_eq!(
+        again.recv().await,
+        ServerMsg::Error(ErrorCode::UnknownAccount)
+    );
+    let users = admin.get("/admin/users").await;
+    assert!(users.contains("1 account"));
+    assert!(!users.contains("Ana"));
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn a_banned_accounts_files_stop_downloading() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, _, _), (mut b, _, _)) = friends(s.addr).await;
+    let ServerMsg::Uploaded { file, .. } = upload(&mut a, 1, b"a picture").await else {
+        panic!("expected the upload to finish")
+    };
+    let admin = Admin::login(s.addr).await;
+    admin
+        .post("/admin/users/1/ban", &[("back", "/admin/users")])
+        .await;
+    b.send(ClientMsg::Download(file.id)).await;
+    b.expect("refusal", |m| {
+        *m == ServerMsg::DownloadFailed {
+            file: file.id,
+            error: ErrorCode::UnknownFile,
+        }
+    })
+    .await;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn a_blocked_address_is_refused_until_the_block_is_lifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let id = RelayId::random();
+    let (mut c, _) = Client::sign_up(s.addr, &id, "Spam").await;
+    let admin = Admin::login(s.addr).await;
+    admin
+        .post("/admin/users/1/block", &[("back", "/admin/users")])
+        .await;
+    assert_eq!(c.recv().await, ServerMsg::Notice(Notice::Disconnected));
+    c.closed().await;
+    let refused = tokio_tungstenite::connect_async(format!("ws://{}/relay", s.addr)).await;
+    assert!(refused.is_err());
+    let users = admin.get("/admin/users").await;
+    assert!(users.contains("Blocked addresses"));
+    assert!(users.contains("24 h left"));
+    let stats: serde_json::Value = admin.json("/admin/stats").await;
+    assert_eq!(stats["refused"]["blocked"], 1);
+    admin
+        .post("/admin/blocks/unblock", &[("address", "127.0.0.1")])
+        .await;
+    assert!(
+        !admin
+            .get("/admin/users")
+            .await
+            .contains("Blocked addresses")
+    );
+    Client::sign_in(s.addr, &id).await;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn refusals_show_on_the_dashboard() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[("CITRINE_INBOX_MESSAGES", "1")]).await;
+    let ((mut a, _, _), (b, b_acc, _)) = friends(s.addr).await;
+    drop(b);
+    for tag in 0..2 {
+        a.send(ClientMsg::Chat {
+            tag,
+            to: b_acc.online_id,
+            sealed: sealed(1),
+        })
+        .await;
+    }
+    a.expect("refusal", |m| {
+        *m == ServerMsg::ChatFailed {
+            tag: 1,
+            error: ErrorCode::InboxFull,
+        }
+    })
+    .await;
+    let admin = Admin::login(s.addr).await;
+    let stats: serde_json::Value = admin.json("/admin/stats").await;
+    assert_eq!(stats["refused"]["inbox"], 1);
+    assert_eq!(stats["refused"]["chats"], 0);
+    assert_eq!(stats["waiting"], 1);
+    assert!(stats["database"].as_u64().unwrap() > 0);
+    let dashboard = admin.get("/admin").await;
+    assert!(dashboard.contains("Refused in the last hour"));
+    assert!(dashboard.contains(r#"data-stat="refused_inbox">1<"#));
+    assert!(dashboard.contains("Waiting messages"));
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn refused_sign_ups_offer_to_turn_sign_ups_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[("CITRINE_SIGN_UPS_PER_IP", "1")]).await;
+    Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+    let mut c = Client::connect(s.addr).await;
+    c.hello().await;
+    let keys = RelayId::random().keys();
+    c.send(ClientMsg::SignUp {
+        relay_password: Some(RelayPassword(PASSWORD.into())),
+        auth_key: keys.auth_key().clone(),
+        public_key: keys.public_key(),
+        display_name: "Ben".into(),
+        invite: None,
+        device_name: "Test".into(),
+    })
+    .await;
+    assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::TooManyTries));
+    let admin = Admin::login(s.addr).await;
+    assert!(
+        admin
+            .get("/admin")
+            .await
+            .contains("1 sign-up refused in the last hour.")
+    );
+    admin.post("/admin/sign-ups", &[("on", "off")]).await;
+    let mut probe = Client::connect(s.addr).await;
+    assert!(!probe.hello().await.sign_ups_open);
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn empty_accounts_go_after_30_days_only_when_the_admin_turns_it_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((a, _, _), (b, _, _)) = friends(s.addr).await;
+    let (empty, _) = Client::sign_up(s.addr, &RelayId::random(), "Ghost").await;
+    let (online, _) = Client::sign_up(s.addr, &RelayId::random(), "Here").await;
+    drop((a, b, empty));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let later = unix() + 31 * 86_400;
+    s.tidy(later).await;
+    let admin = Admin::login(s.addr).await;
+    assert!(admin.get("/admin/users").await.contains("4 accounts"));
+    admin
+        .post("/admin/settings", &settings_form(&[("delete_empty", "on")]))
+        .await;
+    s.tidy(later).await;
+    let users = admin.get("/admin/users").await;
+    assert!(users.contains("3 accounts"));
+    assert!(!users.contains("Ghost"));
+    assert!(users.contains("Here"));
+    drop(online);
+    s.stop().await;
+}
+
+fn chat_to(from: &RelayId, to: &RelayId, to_acc: &Account, tag: u32, text: &[u8]) -> ClientMsg {
+    ClientMsg::Chat {
+        tag,
+        to: to_acc.online_id,
+        sealed: from.keys().seal(&to.keys().public_key(), text),
+    }
+}
+
+#[tokio::test]
+async fn two_devices_are_one_friend_and_both_get_every_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, a_acc, a_id), (mut b, b_acc, b_id)) = friends(s.addr).await;
+    let (mut a2, _) = Client::sign_in_as(s.addr, &a_id, None, "Android phone").await;
+    let (list, this) = a2.devices_now().await;
+    b.quiet().await;
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().all(|d| d.online));
+    assert!(
+        list.iter()
+            .any(|d| d.id == this && d.name == "Android phone")
+    );
+    let (_, first) = a.devices_now().await;
+    assert_ne!(first, this);
+
+    b.send(chat_to(&b_id, &a_id, &a_acc, 1, b"hi both")).await;
+    b.expect("sent", |m| matches!(m, ServerMsg::ChatSent { .. }))
+        .await;
+    for device in [&mut a, &mut a2] {
+        let ServerMsg::Chat(msg) = device
+            .expect("chat", |m| matches!(m, ServerMsg::Chat(_)))
+            .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            a_id.keys()
+                .open(&b_id.keys().public_key(), &msg.sealed)
+                .unwrap(),
+            b"hi both"
+        );
+    }
+
+    a2.send(chat_to(&a_id, &b_id, &b_acc, 2, b"from the phone"))
+        .await;
+    let ServerMsg::ChatSent { id, .. } = a2
+        .expect("sent", |m| matches!(m, ServerMsg::ChatSent { .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    let ServerMsg::ChatCopy { to, message } = a
+        .expect("copy", |m| matches!(m, ServerMsg::ChatCopy { .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (to, message.id, message.from),
+        (b_acc.online_id, id, a_acc.online_id)
+    );
+    assert_eq!(
+        a_id.keys()
+            .open(&b_id.keys().public_key(), &message.sealed)
+            .unwrap(),
+        b"from the phone"
+    );
+    let ServerMsg::Chat(msg) = b.expect("chat", |m| matches!(m, ServerMsg::Chat(_))).await else {
+        unreachable!()
+    };
+    assert_eq!(msg.id, id);
+    a2.quiet().await;
+
+    a.send(ClientMsg::SetStatus { away: true }).await;
+    a.quiet().await;
+    b.quiet().await;
+    a2.send(ClientMsg::SetStatus { away: true }).await;
+    let away = b.recv().await;
+    assert_eq!(
+        away,
+        ServerMsg::Presence {
+            who: a_acc.online_id,
+            presence: Presence::Online { away: true }
+        }
+    );
+    drop(a2);
+    a.devices_until(|list| list.iter().filter(|d| d.online).count() == 1)
+        .await;
+    b.quiet().await;
+    drop(a);
+    b.expect("offline", |m| {
+        matches!(
+            m,
+            ServerMsg::Presence {
+                presence: Presence::Offline { .. },
+                ..
+            }
+        )
+    })
+    .await;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn friend_changes_and_saves_reach_the_other_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, _, a_id), (mut b, b_acc, _)) = friends(s.addr).await;
+    let (mut a2, _) = Client::sign_in(s.addr, &a_id).await;
+    a2.quiet().await;
+
+    a.send(ClientMsg::RemoveFriend(b_acc.online_id)).await;
+    for device in [&mut a, &mut a2] {
+        assert_eq!(
+            device
+                .expect("gone", |m| matches!(m, ServerMsg::FriendGone(_)))
+                .await,
+            ServerMsg::FriendGone(b_acc.online_id)
+        );
+    }
+    b.expect("gone", |m| matches!(m, ServerMsg::FriendGone(_)))
+        .await;
+
+    a.send(put(1, "battery", 0, &[7; 100])).await;
+    a.expect("stored", |m| matches!(m, ServerMsg::SaveStored { .. }))
+        .await;
+    a2.expect("saves changed", |m| matches!(m, ServerMsg::SavesChanged))
+        .await;
+    a2.expect(
+        "storage",
+        |m| matches!(m, ServerMsg::Account(acc) if acc.storage_used > 0),
+    )
+    .await;
+    a2.quiet().await;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn an_invite_reaches_every_device_and_one_of_them_plays() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, a_acc, _), (mut b, b_acc, b_id)) = friends(s.addr).await;
+    let (mut b2, _) = Client::sign_in(s.addr, &b_id).await;
+    b2.quiet().await;
+    a.quiet().await;
+
+    a.send(ClientMsg::Invite {
+        to: b_acc.online_id,
+        sealed: sealed(1),
+    })
+    .await;
+    let ServerMsg::Invited { session, .. } = a.recv().await else {
+        panic!("expected invited")
+    };
+    for device in [&mut b, &mut b2] {
+        assert!(
+            matches!(device.recv().await, ServerMsg::Invite { session: s, .. } if s == session)
+        );
+    }
+    b2.send(ClientMsg::AnswerInvite {
+        session,
+        accept: true,
+    })
+    .await;
+    assert_eq!(
+        b2.recv().await,
+        ServerMsg::SessionStarted {
+            session,
+            with: a_acc.online_id
+        }
+    );
+    assert_eq!(
+        b.recv().await,
+        ServerMsg::SessionEnded {
+            session,
+            reason: EndReason::Left
+        }
+    );
+    assert_eq!(
+        a.recv().await,
+        ServerMsg::SessionStarted {
+            session,
+            with: b_acc.online_id
+        }
+    );
+    a.send(ClientMsg::Play {
+        session,
+        sealed: sealed(3),
+    })
+    .await;
+    assert_eq!(
+        b2.recv().await,
+        ServerMsg::Play {
+            session,
+            sealed: sealed(3)
+        }
+    );
+    b.send(ClientMsg::Play {
+        session,
+        sealed: sealed(4),
+    })
+    .await;
+    assert_eq!(b.recv().await, ServerMsg::Error(ErrorCode::UnknownSession));
+    b.quiet().await;
+    drop(b);
+    a.quiet().await;
+    drop(b2);
+    a.expect("ended", |m| {
+        matches!(
+            m,
+            ServerMsg::SessionEnded {
+                reason: EndReason::Disconnected,
+                ..
+            }
+        )
+    })
+    .await;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn a_device_signed_out_from_another_loses_the_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let id = RelayId::random();
+    let (mut mac, _) = Client::sign_up(s.addr, &id, "Ana").await;
+    let (mut phone, _) = Client::sign_in_as(s.addr, &id, None, "Android phone").await;
+    let phone_key = phone.device.clone().expect("a device key");
+    let (_, this) = phone.devices_now().await;
+
+    mac.send(ClientMsg::SignOutDevice(this)).await;
+    let notice = phone.recv().await;
+    assert_eq!(notice, ServerMsg::Notice(Notice::SignedOut));
+    phone.closed().await;
+    mac.devices_until(|list| list.len() == 1).await;
+
+    let mut again = Client::connect(s.addr).await;
+    again.hello().await;
+    again
+        .send(ClientMsg::SignIn {
+            relay_password: Some(RelayPassword(PASSWORD.into())),
+            auth_key: id.keys().auth_key().clone(),
+            device: Some(phone_key),
+            code: None,
+            device_name: "Android phone".into(),
+        })
+        .await;
+    assert_eq!(again.recv().await, ServerMsg::Error(ErrorCode::SignedOut));
+
+    mac.send(ClientMsg::SignOutDevice(this)).await;
+    assert_eq!(mac.recv().await, ServerMsg::Error(ErrorCode::UnknownDevice));
+
+    let (_, mac_this) = mac.devices_now().await;
+    mac.send(ClientMsg::SignOutDevice(mac_this)).await;
+    mac.closed().await;
+    let (fresh, _) = Client::sign_in(s.addr, &id).await;
+    drop(fresh);
     s.stop().await;
 }

@@ -23,9 +23,8 @@ pub fn avc_config(sps: &[u8], pps: &[u8]) -> Vec<u8> {
 }
 
 pub enum AudioCodec {
-    Aac {
-        config: Vec<u8>,
-    },
+    #[cfg_attr(not(feature = "audio-codec"), allow(dead_code))]
+    Aac { config: Vec<u8> },
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Opus,
 }

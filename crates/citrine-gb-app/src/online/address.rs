@@ -1,3 +1,4 @@
+use citrine_gb_net::Fingerprint;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -13,6 +14,8 @@ pub enum AddressError {
     Empty,
     #[error("That isn't a server address")]
     Invalid,
+    #[error("The relay key after # is wrong")]
+    Key,
 }
 
 impl ServerAddress {
@@ -87,6 +90,15 @@ impl ServerAddress {
 impl fmt::Display for ServerAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.key())
+    }
+}
+
+pub fn relay_key_in(input: &str) -> Result<Option<Fingerprint>, AddressError> {
+    match input.split_once('#') {
+        Some((_, key)) if !key.trim().is_empty() => {
+            key.trim().parse().map(Some).map_err(|_| AddressError::Key)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -211,6 +223,21 @@ mod tests {
             let address = parse(text);
             assert_eq!(parse(&address.key()), address, "{text}");
         }
+    }
+
+    #[test]
+    fn an_address_may_carry_the_relay_key() {
+        let key = citrine_gb_net::RelayKey([3; 32]).fingerprint();
+        let typed = format!("gb.lemon.industries#{}", key.compact().to_lowercase());
+        assert_eq!(relay_key_in(&typed), Ok(Some(key)));
+        assert_eq!(
+            ServerAddress::parse(&typed).unwrap(),
+            ServerAddress::parse("gb.lemon.industries").unwrap()
+        );
+        assert_eq!(relay_key_in(&format!("x.org#{key}")), Ok(Some(key)));
+        assert_eq!(relay_key_in("gb.lemon.industries"), Ok(None));
+        assert_eq!(relay_key_in("gb.lemon.industries#"), Ok(None));
+        assert_eq!(relay_key_in("x.org#K7QM"), Err(AddressError::Key));
     }
 
     #[test]

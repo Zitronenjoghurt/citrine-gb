@@ -1,6 +1,7 @@
 use super::*;
 use crate::media::{Frame, MediaKind, NewMedia};
-use crate::online::chat::{ChatEntry, Conversation, Delivery, History};
+use crate::online::chat::history::History;
+use crate::online::chat::{ChatEntry, Conversation, Delivery};
 use crate::online::settings::RelayEntry;
 use citrine_gb_net::{Body, OnlineId};
 use std::path::{Path, PathBuf};
@@ -92,6 +93,8 @@ fn sign_in(settings: &mut Settings) {
             password: "secret password".into(),
             online_id: Some("1234".into()),
             display_name: Some("Clara".into()),
+            relay_key: None,
+            device: None,
         },
     );
 }
@@ -159,6 +162,7 @@ fn history(entries: &[(u64, u64)]) -> History {
             at: *at,
             body: Body::Text(format!("message {id}")),
             delivery: Delivery::Received,
+            change: crate::online::chat::Change::Kept,
         });
     }
     History::from([(OnlineId::new(7).unwrap(), chat)])

@@ -247,7 +247,15 @@ mod tests {
                 replaced: Some(FileId([1; 16])),
             }
         );
-        assert_eq!(db.storage_used(me).await.unwrap(), 60);
+        assert_eq!(db.storage_used(me).await.unwrap(), 4096 + 5);
+        assert_eq!(
+            db.usage(me).await.unwrap(),
+            crate::db::Usage {
+                bytes: 4096 + 5,
+                files: 0,
+                saves: 1
+            }
+        );
         assert_eq!(db.saves_of(me).await.unwrap().len(), 1);
         assert!(db.files_of(me).await.unwrap().is_empty());
     }

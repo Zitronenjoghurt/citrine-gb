@@ -36,6 +36,82 @@ pub fn week_start(date: Date) -> Date {
         .unwrap_or(date)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CablePartner {
+    Game(String),
+    Event(String),
+    Friend(String),
+}
+
+impl CablePartner {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Game(rom) => format!("game:{rom}"),
+            Self::Event(event) => format!("event:{event}"),
+            Self::Friend(id) => format!("friend:{id}"),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        let (kind, id) = key.split_once(':')?;
+        let id = id.to_string();
+        match kind {
+            "game" => Some(Self::Game(id)),
+            "event" => Some(Self::Event(id)),
+            "friend" => Some(Self::Friend(id)),
+            _ => None,
+        }
+    }
+
+    pub fn online(&self) -> bool {
+        matches!(self, Self::Friend(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CableTotals {
+    pub partner: CablePartner,
+    pub name: String,
+    pub ms: u64,
+    pub sessions: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CableSum {
+    pub ms: u64,
+    pub sessions: u64,
+}
+
+pub fn cable_sum(cable: &[CableTotals], online: bool) -> CableSum {
+    cable
+        .iter()
+        .filter(|totals| totals.partner.online() == online)
+        .fold(CableSum::default(), |sum, totals| CableSum {
+            ms: sum.ms + totals.ms,
+            sessions: sum.sessions + totals.sessions,
+        })
+}
+
+fn add_cable(into: &mut Vec<CableTotals>, from: &CableTotals) {
+    match into
+        .iter_mut()
+        .find(|totals| totals.partner == from.partner)
+    {
+        Some(totals) => {
+            totals.ms += from.ms;
+            totals.sessions += from.sessions;
+            if totals.name.is_empty() {
+                totals.name = from.name.clone();
+            }
+        }
+        None => into.push(from.clone()),
+    }
+}
+
+fn sort_cable(cable: &mut [CableTotals]) {
+    cable.sort_by(|a, b| b.ms.cmp(&a.ms).then_with(|| a.name.cmp(&b.name)));
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GameTotals {
     pub rom: String,
@@ -52,6 +128,7 @@ pub struct GameTotals {
     pub loads: u64,
     pub link_ms: u64,
     pub together_ms: u64,
+    pub cable: Vec<CableTotals>,
     pub days: BTreeMap<String, u64>,
     pub progress: BTreeMap<String, Progress>,
 }
@@ -70,6 +147,7 @@ pub struct Overview {
     pub link_ms: u64,
     pub together_ms: u64,
     pub chat_messages: u64,
+    pub cable: Vec<CableTotals>,
     pub days: BTreeMap<String, u64>,
     pub games: Vec<GameTotals>,
 }
@@ -121,6 +199,21 @@ impl Book {
                     totals.loads += u64::from(counts.loads);
                     totals.link_ms += counts.link_ms;
                     totals.together_ms += counts.together_ms;
+                    for (key, cable) in &counts.cable {
+                        let Some(partner) = CablePartner::from_key(key) else {
+                            continue;
+                        };
+                        let name = game.partners.get(key).cloned().unwrap_or_default();
+                        add_cable(
+                            &mut totals.cable,
+                            &CableTotals {
+                                partner,
+                                name,
+                                ms: cable.ms,
+                                sessions: u64::from(cable.sessions),
+                            },
+                        );
+                    }
                     overview.fast_forward_ms += counts.fast_forward_ms;
                     overview.rewinds += u64::from(counts.rewinds);
                     if counts.play_ms > 0 {
@@ -148,9 +241,16 @@ impl Book {
             overview.loads += totals.loads;
             overview.link_ms += totals.link_ms;
             overview.together_ms += totals.together_ms;
+            for cable in &totals.cable {
+                add_cable(&mut overview.cable, cable);
+            }
             for (day, ms) in &totals.days {
                 *overview.days.entry(day.clone()).or_default() += ms;
             }
+        }
+        sort_cable(&mut overview.cable);
+        for totals in games.values_mut() {
+            sort_cable(&mut totals.cable);
         }
         overview.games = games
             .into_values()

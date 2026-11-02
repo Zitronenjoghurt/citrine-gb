@@ -139,7 +139,9 @@ fn encode(
     scale: usize,
 ) -> anyhow::Result<Output> {
     let mut mp4 = Mp4Writer::new(BufWriter::with_capacity(1 << 20, file))?;
-    mp4.layout().set_audio(audio.format());
+    if let Some(format) = audio.format() {
+        mp4.layout().set_audio(format);
+    }
     for message in receiver {
         match message {
             Message::Frame(rgba, repeat) => {
@@ -169,7 +171,9 @@ fn encode(
     for packet in audio.finish()? {
         mp4.write_audio(&packet.data, packet.duration)?;
     }
-    mp4.layout().set_audio(audio.format());
+    if let Some(format) = audio.format() {
+        mp4.layout().set_audio(format);
+    }
     let writer = mp4.finish()?;
     let file = writer.into_inner().map_err(|e| e.into_error())?;
     file.sync_all()?;

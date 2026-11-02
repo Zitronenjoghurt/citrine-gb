@@ -81,6 +81,7 @@ impl Citrine {
         self.try_start_audio();
         self.ui.linked.picking = false;
         self.ui.linked.listing = false;
+        self.ui.linked.from_list = true;
         if self.mobile.sheet.is_some() {
             self.close_mobile_sheet();
         } else {
@@ -122,6 +123,7 @@ impl Citrine {
     pub(super) fn end_link(&mut self) {
         self.ui.linked.picking = false;
         self.ui.linked.listing = false;
+        self.ui.linked.from_list = false;
         if let Err(err) = self.emulator.end_link() {
             self.toasts
                 .error(format!("Couldn't save the second game: {err}"));

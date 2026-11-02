@@ -24,6 +24,24 @@ pub fn display_name(input: &str) -> Result<String, NameError> {
     Ok(name.to_string())
 }
 
+pub fn device_name(input: &str) -> String {
+    let name: String = input
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(crate::MAX_DEVICE_NAME_CHARS)
+        .collect();
+    match name.trim() {
+        "" => "Device".into(),
+        name => name.to_string(),
+    }
+}
+
+pub fn is_phone(device_name: &str) -> bool {
+    ["phone", "Android", "iPhone", "iPad"]
+        .iter()
+        .any(|word| device_name.contains(word))
+}
+
 pub fn initials(name: &str) -> String {
     let mut words = name.split_whitespace();
     let first = words.next().and_then(|w| w.chars().next());
@@ -45,6 +63,23 @@ pub fn avatar_hues(seed: u64) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_names_are_cleaned_and_never_empty() {
+        assert_eq!(device_name("  Firefox on Mac "), "Firefox on Mac");
+        assert_eq!(device_name("Linux\u{7}PC"), "LinuxPC");
+        assert_eq!(device_name(" \n"), "Device");
+        assert_eq!(device_name(&"x".repeat(90)).chars().count(), 40);
+    }
+
+    #[test]
+    fn phones_are_told_from_computers() {
+        assert!(is_phone("Android phone"));
+        assert!(is_phone("Chrome on Android"));
+        assert!(is_phone("Safari on iPhone"));
+        assert!(!is_phone("Linux PC"));
+        assert!(!is_phone("Firefox on Mac"));
+    }
 
     #[test]
     fn initials_from_names() {

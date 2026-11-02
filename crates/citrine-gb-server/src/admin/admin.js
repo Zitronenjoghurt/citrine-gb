@@ -34,6 +34,13 @@
         set("storage_total", "of " + bytes(s.storage_total));
         set("bytes_in", bytes(s.bytes_in));
         set("bytes_out", bytes(s.bytes_out));
+        set("database", bytes(s.database));
+        set("waiting", s.waiting);
+        set("waiting_bytes", bytes(s.waiting_bytes));
+        Object.entries(s.refused || {}).forEach(([key, n]) => {
+          set("refused_" + key, n);
+          document.querySelectorAll('[data-refused="' + key + '"]').forEach((row) => row.classList.toggle("none", n === 0));
+        });
         const bar = document.querySelector('[data-stat="storage_bar"]');
         if (bar) bar.style.width = (s.storage_total ? Math.min(100, s.storage_used / s.storage_total * 100) : 0) + "%";
         uptime = s.uptime; base = performance.now();

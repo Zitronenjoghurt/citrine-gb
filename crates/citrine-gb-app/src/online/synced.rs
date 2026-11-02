@@ -180,12 +180,7 @@ impl Online {
     }
 
     pub fn settings_problem(&self) -> Option<SyncState> {
-        self.account_state(SLOT).filter(|state| {
-            matches!(
-                state,
-                SyncState::Full | SyncState::TooLarge | SyncState::NoStorage
-            )
-        })
+        self.account_problem(SLOT)
     }
 }
 

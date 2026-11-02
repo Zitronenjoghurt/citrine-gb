@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO account_recovery_codes (account_id, hash) VALUES (?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "822ee737c6034de46499ba9b330e51a966e10948952bb7fa56df9608660c9a61"
+}

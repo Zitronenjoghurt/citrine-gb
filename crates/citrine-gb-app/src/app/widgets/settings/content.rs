@@ -8,9 +8,11 @@ use crate::app::ui_state::ui_theme::UiTheme;
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::info_mark::info_mark;
 use crate::app::widgets::reset_slider::ResetSlider;
+use crate::app::widgets::section::{section, section_with_hint};
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::settings::palette::PaletteEditorState;
 use crate::app::widgets::settings::{controls, online, palette, your_data};
+use crate::app::widgets::text::faint;
 use crate::audio::{Audio, DEFAULT_LATENCY_MS, MAX_LATENCY_MS, MIN_LATENCY_MS};
 use crate::autosave::{AutosaveInterval, DEFAULT_KEEP, MAX_KEEP};
 use citrine_gb::gb::GbModel;
@@ -142,7 +144,7 @@ impl SettingsContent<'_> {
         let game = self.game;
         #[cfg(not(target_arch = "wasm32"))]
         let discord = self.discord;
-        let touch = crate::app::mobile_layout(s.layout, ui.ctx());
+        let touch = s.layout.is_touch(ui.ctx());
 
         Form::show(ui, "general", |form| {
             let both = game.filter(|game| plays_on_both(game.cgb_mode));
@@ -190,7 +192,7 @@ impl SettingsContent<'_> {
                     .ui(ui)
                     .changed();
             });
-            if s.layout == LayoutMode::Desktop && crate::app::desktop_too_narrow(form.ctx()) {
+            if s.layout == LayoutMode::Desktop && LayoutMode::too_narrow_for_desktop(form.ctx()) {
                 form.hint(
                     "This window is too narrow for the desktop layout, so it uses the touch layout.",
                 );
@@ -219,7 +221,7 @@ impl SettingsContent<'_> {
         });
 
         ui.add_space(10.0);
-        controls::section_with_hint(
+        section_with_hint(
             ui,
             crate::icons::CLOCK_COUNTER_CLOCKWISE,
             "Autosave",
@@ -259,7 +261,7 @@ impl SettingsContent<'_> {
         );
 
         ui.add_space(10.0);
-        controls::section(ui, crate::icons::CAMERA, "Capture", |ui| {
+        section(ui, crate::icons::CAMERA, "Capture", |ui| {
             Form::show(ui, "capture", |form| {
                 form.row("Screenshot scale", |ui| {
                     s.dirty |= capture_scale(ui, &mut s.screenshot_scale, 1);
@@ -289,11 +291,7 @@ impl SettingsContent<'_> {
             crate::storage::SettingsStore::default().location()
         );
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("Citrine {}", env!("CARGO_PKG_VERSION")))
-                    .small()
-                    .weak(),
-            );
+            ui.label(faint(format!("Citrine {}", env!("CARGO_PKG_VERSION"))));
             info_mark(ui, &where_kept);
         });
     }
@@ -766,7 +764,10 @@ mod tests {
                 display_name: "Clara".into(),
                 storage_used: 0,
                 quota_bytes: 0,
+                two_factor: false,
+                codes_left: 0,
             },
+            &Default::default(),
         );
         settings
     }

@@ -1,6 +1,7 @@
 use super::record::{Book, Record};
 use super::recorder::Recorder;
 use crate::online::Online;
+use crate::online::cloud::SyncState;
 use crate::storage::{Backend, compress, decompress};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -12,6 +13,12 @@ const SLOT: &str = "stats";
 const KEEP_EVERY: Duration = Duration::from_secs(30);
 const PUSH_EVERY: Duration = Duration::from_secs(120);
 const MAX_IMPORT_BYTES: usize = 32 << 20;
+
+impl Online {
+    pub fn stats_problem(&self) -> Option<SyncState> {
+        self.account_problem(SLOT)
+    }
+}
 
 #[derive(Clone)]
 pub struct StatsStore {

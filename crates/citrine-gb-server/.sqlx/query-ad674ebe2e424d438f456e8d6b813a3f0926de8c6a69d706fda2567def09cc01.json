@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM friend_requests\n              WHERE from_id IN (SELECT id FROM accounts WHERE created_at >= ?1 AND banned = 0)\n                 OR to_id IN (SELECT id FROM accounts WHERE created_at >= ?1 AND banned = 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ad674ebe2e424d438f456e8d6b813a3f0926de8c6a69d706fda2567def09cc01"
+}

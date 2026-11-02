@@ -19,6 +19,8 @@ pub struct FileChannels {
     pub folder_rx: Receiver<std::path::PathBuf>,
     pub save_tx: Sender<SaveOutcome>,
     pub save_rx: Receiver<SaveOutcome>,
+    pub copy_tx: Sender<Result<String, String>>,
+    pub copy_rx: Receiver<Result<String, String>>,
 }
 
 impl Default for FileChannels {
@@ -31,6 +33,7 @@ impl Default for FileChannels {
         #[cfg(not(target_arch = "wasm32"))]
         let (folder_tx, folder_rx) = channel();
         let (save_tx, save_rx) = channel();
+        let (copy_tx, copy_rx) = channel();
         Self {
             rom_tx,
             rom_rx,
@@ -48,6 +51,8 @@ impl Default for FileChannels {
             folder_rx,
             save_tx,
             save_rx,
+            copy_tx,
+            copy_rx,
         }
     }
 }

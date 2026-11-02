@@ -1,12 +1,14 @@
 use crate::app::ui_state::palette::{CustomPalette, PaletteChoice};
 use crate::app::ui_state::settings::Settings;
+use crate::app::widgets::palette_strip::palette_strip;
+use crate::app::widgets::section::heading;
 use crate::app::widgets::settings::content::LoadedGame;
 use crate::app::widgets::settings::form::Form;
 use crate::icons;
 use citrine_gb::gb::ppu::compat::CompatPalette;
 use citrine_gb::gb::ppu::types::color::RGBA;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
-use egui::{Align, Color32, Layout, Rect, RichText, Sense, Ui, vec2};
+use egui::{Align, Layout, RichText, Ui};
 
 #[derive(Default)]
 pub struct PaletteEditorState {
@@ -78,7 +80,7 @@ pub fn show(
             },
         );
         form.under(|ui| {
-            preview(
+            palette_strip(
                 ui,
                 &choice_colors(settings, &settings.global_choice(), header),
             )
@@ -217,8 +219,7 @@ fn game_section(ui: &mut Ui, settings: &Settings, game: LoadedGame, action: &mut
         game.title
     };
     ui.horizontal(|ui| {
-        ui.label(RichText::new(icons::GAME_CONTROLLER).size(15.0));
-        ui.label(RichText::new(title).strong().size(15.0));
+        heading(ui, icons::GAME_CONTROLLER, title);
     });
     ui.add_space(4.0);
 
@@ -261,7 +262,7 @@ fn game_section(ui: &mut Ui, settings: &Settings, game: LoadedGame, action: &mut
             }
         });
         if let Some(own) = &own {
-            form.under(|ui| preview(ui, &choice_colors(settings, own, game.header)));
+            form.under(|ui| palette_strip(ui, &choice_colors(settings, own, game.header)));
         }
     });
 }
@@ -355,40 +356,6 @@ fn editor(
 const SHARE_HINT: &str = "Paste a code from someone else, or copy yours to share it.";
 
 const SHADE_NAMES: [&str; 4] = ["Lightest", "Light", "Dark", "Darkest"];
-
-fn preview(ui: &mut Ui, rows: &[[RGBA; 4]]) {
-    let height = 26.0;
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    let swatch = width / 4.0;
-    let row_heights: &[f32] = if rows.len() == 3 {
-        &[14.0, 6.0, 6.0]
-    } else {
-        &[height]
-    };
-
-    let mut top = 0.0;
-    for (row, row_height) in rows.iter().zip(row_heights) {
-        for (index, color) in row.iter().enumerate() {
-            let cell = Rect::from_min_size(
-                rect.min + vec2(swatch * index as f32, top),
-                vec2(swatch, *row_height),
-            );
-            ui.painter().rect_filled(
-                cell,
-                0.0,
-                Color32::from_rgb(color.r(), color.g(), color.b()),
-            );
-        }
-        top += row_height;
-    }
-    ui.painter().rect_stroke(
-        rect,
-        2.0,
-        ui.visuals().widgets.inactive.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
-}
 
 fn apply(action: Action, settings: &mut Settings, state: &mut PaletteEditorState) {
     match action {

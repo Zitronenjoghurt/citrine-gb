@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO signed_out_devices (key_hash, account_id, at) VALUES (?1, ?2, ?3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "ca4ace01c75918c0710b4236a056e1e4cb717d16c649bd49c331aaa1d6d13ffa"
+}

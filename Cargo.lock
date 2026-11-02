@@ -288,7 +288,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
 dependencies = [
  "base64ct",
- "blake2",
+ "blake2 0.11.0",
  "cpufeatures 0.3.1",
  "password-hash",
 ]
@@ -515,6 +515,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60d4bd9d1db2c6bdf285e223a7fa369d5ce98ec767dec949c6ca62863ce61757"
 dependencies = [
  "core2",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -761,6 +770,17 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "chacha20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
@@ -768,6 +788,19 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
+dependencies = [
+ "aead",
+ "chacha20 0.9.1",
+ "cipher",
+ "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -783,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.11.0",
@@ -807,9 +840,10 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb-app"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "base64 0.22.1",
  "brotli",
  "bzip2",
@@ -844,6 +878,7 @@ dependencies = [
  "pollster",
  "postcard",
  "proc-macro2",
+ "qrcode",
  "quote",
  "resvg",
  "rfd",
@@ -875,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb-gamedata"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "citrine-gb",
  "thiserror 2.0.18",
@@ -897,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb-net"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "crypto_box",
  "crypto_secretbox",
@@ -907,12 +942,13 @@ dependencies = [
  "ruzstd",
  "serde",
  "sha2 0.10.9",
+ "snow",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "citrine-gb-partner"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "citrine-gb",
  "citrine-gb-gamedata",
@@ -921,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "citrine-gb-server"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "argon2",
  "axum",
@@ -4453,7 +4489,7 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
- "chacha20",
+ "chacha20 0.10.2",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -5264,6 +5300,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "snow"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "599b506ccc4aff8cf7844bc42cf783009a434c1e26c964432560fb6d6ad02d82"
+dependencies = [
+ "blake2 0.10.6",
+ "chacha20poly1305",
+ "curve25519-dalek",
+ "rustc_version",
+ "subtle",
 ]
 
 [[package]]

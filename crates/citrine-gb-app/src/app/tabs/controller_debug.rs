@@ -1,7 +1,10 @@
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::keybinds::GbButton;
-use crate::app::widgets::settings::controls::section;
+use crate::app::widgets;
+use crate::app::widgets::chip::chip_text;
+use crate::app::widgets::section::{heading, section};
 use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::text::faint;
 use crate::controller_debug::{PadInfo, REPORT_FILE, Report, SystemInfo, capture_text, steer_text};
 use crate::icons;
 use crate::utils::file_saver::FileSaver;
@@ -9,7 +12,6 @@ use egui::{Label, RichText, Ui, Widget};
 use strum::IntoEnumIterator;
 
 const SHOWN_EVENTS: usize = 200;
-const CHIP_HEIGHT: f32 = 20.0;
 const AXIS_WIDTH: f32 = 88.0;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
@@ -95,8 +97,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     let count = viewer.ui.controller_debug.log().map_or(0, |log| log.len());
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(icons::LIST_BULLETS).size(15.0));
-        ui.label(RichText::new("Event log").strong().size(15.0));
+        heading(ui, icons::LIST_BULLETS, "Event log");
         ui.label(RichText::new(count.to_string()).weak());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let clear = ui.add_enabled(
@@ -112,11 +113,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     });
     ui.separator();
     ui.add_space(2.0);
-    ui.label(
-        RichText::new("Clears when you close this tab.")
-            .small()
-            .weak(),
-    );
+    ui.label(faint("Clears when you close this tab."));
     ui.add_space(4.0);
 
     let Some(log) = viewer.ui.controller_debug.log() else {
@@ -134,11 +131,9 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     }
     let hidden = log.len().saturating_sub(SHOWN_EVENTS) + log.dropped();
     if hidden > 0 {
-        ui.label(
-            RichText::new(format!("{hidden} older events are in the report only."))
-                .small()
-                .weak(),
-        );
+        ui.label(faint(format!(
+            "{hidden} older events are in the report only."
+        )));
     }
 }
 
@@ -222,21 +217,15 @@ fn chip(ui: &mut Ui, label: &str, lit: bool) -> egui::Response {
     let (fill, text) = if lit {
         (
             visuals.selection.bg_fill,
-            RichText::new(label)
-                .size(11.0)
-                .color(visuals.selection.stroke.color),
+            chip_text(label).color(visuals.selection.stroke.color),
         )
     } else {
         (
             visuals.widgets.inactive.weak_bg_fill,
-            RichText::new(label).size(11.0).weak(),
+            chip_text(label).weak(),
         )
     };
-    egui::Button::new(text)
-        .fill(fill)
-        .stroke(visuals.widgets.inactive.bg_stroke)
-        .corner_radius(4)
-        .min_size(egui::vec2(0.0, CHIP_HEIGHT))
+    widgets::chip::chip(ui, text, fill)
         .sense(egui::Sense::hover())
         .ui(ui)
 }

@@ -1,6 +1,7 @@
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::app::widgets;
+use crate::app::widgets::action::more_button;
 use crate::icons;
 use crate::media::{Frame, MediaId, MediaItem, MediaKind, format_length, format_size, local_stamp};
 use egui::{ColorImage, Context, TextureHandle, TextureOptions, Ui, vec2};
@@ -167,6 +168,7 @@ pub fn empty_line(
 }
 
 enum Action {
+    Pass(MediaId, crate::media::clipboard::Way),
     Export(MediaId),
     #[cfg(not(target_arch = "wasm32"))]
     Reveal(MediaId),
@@ -185,7 +187,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
 
     if items.is_empty() {
         let key = |action| viewer.ui.settings.hotkeys.key_name(action);
-        let mobile = crate::app::mobile_layout(viewer.ui.settings.layout, ui.ctx());
+        let mobile = viewer.ui.settings.layout.is_touch(ui.ctx());
         ui.label(empty_line(
             mobile,
             key(HotkeyAction::Screenshot),
@@ -460,12 +462,21 @@ fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool)
                 .on_hover_text(item.id.file_name());
             });
             ui.add(egui::Label::new(egui::RichText::new(facts_line(item)).small()).truncate());
-            let mut buttons = vec![(
+            let mut buttons = Vec::new();
+            buttons.push((
                 icons::DOWNLOAD_SIMPLE,
                 "Export",
                 "Export",
                 Action::Export(item.id.clone()),
-            )];
+            ));
+            if let Some(way) = crate::media::clipboard::way(item.info.kind) {
+                buttons.push((
+                    way.icon(),
+                    way.label(),
+                    way.hint(item.info.kind),
+                    Action::Pass(item.id.clone(), way),
+                ));
+            }
             if can_send {
                 buttons.push((
                     icons::PAPER_PLANE_TILT,
@@ -503,7 +514,7 @@ fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool)
                         action = Some(act);
                     }
                 }
-                let more = egui::Button::new(icons::DOTS_THREE).min_size(vec2(side, side));
+                let more = more_button(side);
                 egui::containers::menu::MenuButton::from_button(more)
                     .ui(ui, |ui| {
                         for ((icon, _, hint, act), _) in buttons {
@@ -541,6 +552,9 @@ fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool)
 
 fn apply(viewer: &mut TabViewer, action: Action) {
     match action {
+        Action::Pass(id, way) => {
+            crate::media::clipboard::run(way, viewer.media, &id, viewer.files.copy_tx.clone())
+        }
         Action::Export(id) => crate::media::export(viewer.media, &id, viewer.files.save_tx.clone()),
         #[cfg(not(target_arch = "wasm32"))]
         Action::Reveal(id) => {

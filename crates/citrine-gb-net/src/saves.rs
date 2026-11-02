@@ -9,6 +9,12 @@ use sha2::{Digest, Sha256};
 pub const MAX_SLOT_CHARS: usize = 64;
 pub const MAX_LABEL_BYTES: usize = 1024;
 pub const MAX_SAVE_BYTES: usize = crate::MAX_FRAME_BYTES - 8 * 1024;
+pub const STORAGE_BLOCK: u64 = 4096;
+
+pub fn storage_cost(bytes: u64) -> u64 {
+    bytes.max(STORAGE_BLOCK)
+}
+
 const MAX_PAYLOAD_BYTES: usize = 32 << 20;
 const GAME_INFO: &[u8] = b"save game";
 

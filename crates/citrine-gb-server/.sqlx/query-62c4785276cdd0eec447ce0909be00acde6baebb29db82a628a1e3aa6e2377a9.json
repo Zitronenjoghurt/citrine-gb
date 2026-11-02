@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO message_deliveries (device_id, message_id)\n           SELECT ?2, id FROM messages\n            WHERE (to_id = ?1 AND receiver_keeps = 1) OR (from_id = ?1 AND sender_keeps = 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "62c4785276cdd0eec447ce0909be00acde6baebb29db82a628a1e3aa6e2377a9"
+}

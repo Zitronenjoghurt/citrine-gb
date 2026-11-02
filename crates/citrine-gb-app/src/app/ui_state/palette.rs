@@ -2,6 +2,8 @@ use citrine_gb::gb::ppu::compat::CompatPalette;
 use citrine_gb::gb::ppu::types::color::RGBA;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 
+const MAX_SHARED_NAME: usize = 64;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CustomPalette {
     pub name: String,
@@ -26,6 +28,19 @@ impl CustomPalette {
 
     pub fn to_theme(&self) -> DmgTheme {
         DmgTheme::Custom(self.rgba())
+    }
+
+    pub fn to_shared(&self) -> String {
+        serde_json::to_string(self).expect("a palette always serialises")
+    }
+
+    pub fn from_shared(json: &str) -> Option<Self> {
+        let palette: Self = serde_json::from_str(json).ok()?;
+        let name = palette.name.trim();
+        (!name.is_empty() && name.chars().count() <= MAX_SHARED_NAME).then(|| Self {
+            name: name.to_owned(),
+            colors: palette.colors,
+        })
     }
 
     pub fn to_code(&self) -> String {
@@ -111,6 +126,22 @@ impl PaletteLibrary {
             Some(existing) => *existing = palette,
             None => self.entries.push(palette),
         }
+    }
+
+    pub fn with_colors(&self, colors: &[[u8; 3]; 4]) -> Option<&CustomPalette> {
+        self.entries.iter().find(|entry| &entry.colors == colors)
+    }
+
+    pub fn add_shared(&mut self, palette: &CustomPalette) -> String {
+        if let Some(existing) = self.with_colors(&palette.colors) {
+            return existing.name.clone();
+        }
+        let name = self.unique_name(&palette.name);
+        self.entries.push(CustomPalette {
+            name: name.clone(),
+            colors: palette.colors,
+        });
+        name
     }
 
     pub fn remove(&mut self, name: &str) {
@@ -206,6 +237,36 @@ mod tests {
             library.get("Mine").expect("present").colors[0],
             [99, 99, 99]
         );
+    }
+
+    #[test]
+    fn a_shared_palette_round_trips_and_adds_once() {
+        let lemon = CustomPalette::parse_code("Lemon", "FFF-CC0-880-220").unwrap();
+        let shared = lemon.to_shared();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&shared).unwrap(),
+            serde_json::to_value(&lemon).unwrap()
+        );
+        let back = CustomPalette::from_shared(&shared).unwrap();
+        assert_eq!(back, lemon);
+
+        let mut library = PaletteLibrary::default();
+        library.upsert(palette("Lemon"));
+        assert_eq!(library.add_shared(&back), "Lemon 2");
+        assert_eq!(library.add_shared(&back), "Lemon 2");
+        assert_eq!(library.entries().len(), 2);
+        assert_eq!(library.with_colors(&lemon.colors).unwrap().name, "Lemon 2");
+    }
+
+    #[test]
+    fn a_shared_palette_needs_a_name_and_four_colours() {
+        for json in [
+            r#"{"name":"  ","colors":[[0,0,0],[1,1,1],[2,2,2],[3,3,3]]}"#,
+            r#"{"name":"x","colors":[[0,0,0]]}"#,
+            "not json",
+        ] {
+            assert!(CustomPalette::from_shared(json).is_none(), "{json}");
+        }
     }
 
     #[test]

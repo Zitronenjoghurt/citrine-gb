@@ -1,4 +1,5 @@
 use super::OpenError;
+use super::aac::AacDecoder;
 use super::demux::{self, Codec, Track};
 use crate::media::Frame;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -8,11 +9,6 @@ use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapProd, HeapRb};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use symphonia_codec_aac::AacDecoder;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
-use symphonia_core::packet::Packet;
-use symphonia_core::units::{Duration, Timestamp};
 use web_time::Instant;
 
 const AHEAD_SECS: f64 = 0.25;
@@ -292,13 +288,7 @@ impl Sound {
         let Codec::Aac { config } = &track.codec else {
             return None;
         };
-        let mut params = AudioCodecParameters::new();
-        params
-            .for_codec(CODEC_ID_AAC)
-            .with_sample_rate(track.sample_rate)
-            .with_extra_data(config.clone().into_boxed_slice());
-        let options = AudioDecoderOptions::default().gapless(false);
-        let decoder = AacDecoder::try_new(&params, &options).ok()?;
+        let decoder = AacDecoder::new(config, track.sample_rate)?;
         Some(Self {
             rate: track.sample_rate.max(1),
             track,
@@ -332,20 +322,8 @@ impl Sound {
         };
         let sample = self.track.samples[self.next];
         self.next += 1;
-        let packet = Packet::new(
-            0,
-            Timestamp::new(sample.time as i64),
-            Duration::new(1024),
-            data.to_vec(),
-        );
-        let channels = match self.decoder.decode(&packet) {
-            Ok(buffer) => {
-                let channels = buffer.spec().channels().count().max(1);
-                self.decoded.clear();
-                buffer.copy_to_vec_interleaved(&mut self.decoded);
-                channels
-            }
-            Err(_) => return true,
+        let Some(channels) = self.decoder.decode(sample.time, data, &mut self.decoded) else {
+            return true;
         };
         let frames = self.decoded.len() / channels;
         let skip = self.drop.min(frames);
@@ -452,6 +430,7 @@ mod tests {
     use crate::media::recording::headless;
 
     #[test]
+    #[cfg_attr(not(feature = "audio-codec"), ignore = "needs the audio-codec feature")]
     fn a_recording_plays_back_its_frames_and_sound() {
         let recorded = headless::record(
             include_bytes!("../../../homebrew/tobu.gb"),

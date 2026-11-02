@@ -40,18 +40,18 @@ impl AacEncoder {
         })
     }
 
-    pub fn format(&self) -> AudioFormat {
+    pub fn format(&self) -> Option<AudioFormat> {
         let config = vec![
             (2 << 3) | (self.rate_index >> 1),
             ((self.rate_index & 1) << 7) | ((CHANNELS as u8) << 3),
         ];
-        AudioFormat {
+        Some(AudioFormat {
             codec: AudioCodec::Aac { config },
             sample_rate: self.sample_rate,
             channels: CHANNELS as u16,
             priming: BLOCK as u32,
             frames: self.frames,
-        }
+        })
     }
 
     pub fn push(&mut self, samples: &[f32]) -> anyhow::Result<Vec<Packet>> {
@@ -137,7 +137,7 @@ mod tests {
         packets += encoder.finish().unwrap().len();
         let blocks = (48_000 * 5 + 333usize).div_ceil(BLOCK);
         assert_eq!(packets, blocks + 1);
-        assert_eq!(encoder.format().frames, 48_000 * 5 + 333);
+        assert_eq!(encoder.format().unwrap().frames, 48_000 * 5 + 333);
     }
 
     #[test]

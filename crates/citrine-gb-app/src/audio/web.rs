@@ -7,14 +7,16 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    AudioContext, AudioNode, AudioProcessingEvent, AudioWorkletNode, AudioWorkletNodeOptions, Blob,
-    BlobPropertyBag, GainNode, MessageEvent, MessagePort, ScriptProcessorNode, Url,
+    AudioContext, AudioContextState, AudioNode, AudioProcessingEvent, AudioWorkletNode,
+    AudioWorkletNodeOptions, Blob, BlobPropertyBag, EventTarget, GainNode, MessageEvent,
+    MessagePort, ScriptProcessorNode, Url,
 };
 
 const PROCESSOR: &str = include_str!("worklet.js");
 const PROCESSOR_NAME: &str = "citrine-output";
 const FALLBACK_FRAMES: u32 = 2048;
 const QUANTUM_FRAMES: usize = 128;
+const GESTURES: [&str; 4] = ["pointerup", "touchend", "click", "keydown"];
 
 enum Mode {
     Loading(QueueWriter),
@@ -40,6 +42,12 @@ pub struct WebOutput {
     ctx: AudioContext,
     gain: GainNode,
     link: Rc<RefCell<Link>>,
+    wake: Option<Wake>,
+}
+
+struct Wake {
+    on_gesture: Closure<dyn FnMut()>,
+    on_visible: Closure<dyn FnMut()>,
 }
 
 pub struct PortWriter {
@@ -53,9 +61,11 @@ impl WebOutput {
         let ctx = AudioContext::new()?;
         let gain = ctx.create_gain()?;
         gain.connect_with_audio_node(&ctx.destination())?;
+        let wake = Wake::install(&ctx);
         Ok(Self {
             ctx,
             gain,
+            wake,
             link: Rc::new(RefCell::new(Link {
                 mode: Mode::Closed,
                 node: None,
@@ -109,7 +119,11 @@ impl WebOutput {
     }
 
     pub fn resume(&self) -> Result<(), JsValue> {
-        self.ctx.resume().map(|_| ())
+        wake(&self.ctx)
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.ctx.state() == AudioContextState::Running
     }
 
     pub fn reset_stats(&self) {
@@ -121,6 +135,9 @@ impl WebOutput {
 
 impl Drop for WebOutput {
     fn drop(&mut self) {
+        if let Some(wake) = self.wake.take() {
+            wake.remove();
+        }
         let mut link = self.link.borrow_mut();
         if let Some(node) = link.node.take() {
             if link.on_process.is_some() {
@@ -204,6 +221,78 @@ impl PortWriter {
     pub fn stats(&self) -> &Arc<QueueStats> {
         &self.stats
     }
+}
+
+impl Wake {
+    fn install(ctx: &AudioContext) -> Option<Self> {
+        let window = web_sys::window()?;
+        let document = window.document()?;
+        let gesture_ctx = ctx.clone();
+        let on_gesture = Closure::<dyn FnMut()>::new(move || {
+            let _ = wake(&gesture_ctx);
+        });
+        let visible_ctx = ctx.clone();
+        let on_visible = Closure::<dyn FnMut()>::new(move || {
+            let visible = web_sys::window()
+                .and_then(|w| w.document())
+                .is_some_and(|d| !d.hidden());
+            if visible {
+                let _ = wake(&visible_ctx);
+            }
+        });
+        let target: &EventTarget = window.as_ref();
+        for name in GESTURES {
+            let _ = target.add_event_listener_with_callback_and_bool(
+                name,
+                on_gesture.as_ref().unchecked_ref(),
+                true,
+            );
+        }
+        let _ = document.add_event_listener_with_callback(
+            "visibilitychange",
+            on_visible.as_ref().unchecked_ref(),
+        );
+        Some(Self {
+            on_gesture,
+            on_visible,
+        })
+    }
+
+    fn remove(self) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let target: &EventTarget = window.as_ref();
+        for name in GESTURES {
+            let _ = target.remove_event_listener_with_callback_and_bool(
+                name,
+                self.on_gesture.as_ref().unchecked_ref(),
+                true,
+            );
+        }
+        if let Some(document) = window.document() {
+            let _ = document.remove_event_listener_with_callback(
+                "visibilitychange",
+                self.on_visible.as_ref().unchecked_ref(),
+            );
+        }
+    }
+}
+
+fn wake(ctx: &AudioContext) -> Result<(), JsValue> {
+    if matches!(
+        ctx.state(),
+        AudioContextState::Running | AudioContextState::Closed
+    ) {
+        return Ok(());
+    }
+    let resumed = ctx.resume()?;
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(err) = JsFuture::from(resumed).await {
+            log::warn!("Audio did not resume: {err:?}");
+        }
+    });
+    Ok(())
 }
 
 fn post_flag(port: &MessagePort, key: &str, value: bool) {

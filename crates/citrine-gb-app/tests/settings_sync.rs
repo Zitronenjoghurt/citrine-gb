@@ -1,6 +1,6 @@
 use citrine_gb_app::online::cloud::{SaveStore, SyncState};
 use citrine_gb_app::online::synced::{SyncDoc, Values, now_millis};
-use citrine_gb_app::online::{Online, OnlineSettings, Phase, ServerAddress};
+use citrine_gb_app::online::{Online, OnlineSettings, Phase, ServerAddress, Trust};
 use citrine_gb_server::{Config, Running, start};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -31,6 +31,8 @@ impl Relay {
         let vars: HashMap<&str, String> = HashMap::from([
             ("CITRINE_BIND", "127.0.0.1".into()),
             ("CITRINE_PORT", "0".into()),
+            ("CITRINE_DISK_FLOOR_MB", "0".into()),
+            ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
             (
                 "CITRINE_DATA_DIR",
                 dir.path().join("data").display().to_string(),
@@ -154,7 +156,12 @@ impl Device {
 
 fn first_account(relay: &Relay) -> (Device, OnlineSettings) {
     let mut online = Online::default();
-    online.probe(relay.address.clone(), PASSWORD.into(), Instant::now());
+    online.probe(
+        relay.address.clone(),
+        PASSWORD.into(),
+        Trust::default(),
+        Instant::now(),
+    );
     let limit = Instant::now() + Duration::from_secs(20);
     while online.phase() != Phase::Probed {
         online.update(Instant::now());
@@ -174,6 +181,7 @@ fn first_account(relay: &Relay) -> (Device, OnlineSettings) {
         &joined.relay_id,
         &joined.password,
         &joined.account,
+        &joined.trust,
     );
     online.leave();
     let mut device = Device::new(&settings);

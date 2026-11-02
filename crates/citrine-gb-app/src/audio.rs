@@ -205,12 +205,17 @@ impl Audio {
     }
 
     pub fn resume(&mut self) {
-        if self.resumed {
-            return;
-        }
         let Some(stream) = &self.stream else {
             return;
         };
+        #[cfg(target_arch = "wasm32")]
+        if self.resumed && stream.is_running() {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.resumed {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let result = stream.play().map_err(|err| err.to_string());
         #[cfg(target_arch = "wasm32")]

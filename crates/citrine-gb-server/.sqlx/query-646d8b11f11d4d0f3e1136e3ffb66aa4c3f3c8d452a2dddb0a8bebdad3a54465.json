@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"one!: i64\" FROM signed_out_devices WHERE account_id = ?1 AND key_hash = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "one!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "646d8b11f11d4d0f3e1136e3ffb66aa4c3f3c8d452a2dddb0a8bebdad3a54465"
+}

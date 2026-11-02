@@ -5,6 +5,7 @@ use std::io::Read;
 
 pub const MAX_TEXT_CHARS: usize = 4000;
 pub const MAX_RECEIPT_IDS: usize = 300;
+pub const MAX_PALETTE_BYTES: usize = 1024;
 pub const MAX_UNPACKED_BYTES: usize = 64 << 20;
 const MAX_ENVELOPE_BYTES: usize = 1 << 20;
 const RAW: u8 = 0;
@@ -36,6 +37,15 @@ pub enum Body {
     Text(String),
     Share(Share),
     Receipt(Receipt),
+    Palette(String),
+    Edit(Edit),
+    Delete(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edit {
+    pub id: u64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +147,7 @@ impl Envelope {
 
     pub fn packed(&self) -> Vec<u8> {
         let plain = postcard::to_allocvec(self).expect("an envelope always serialises");
-        let compress = matches!(self.body, Body::Text(_));
+        let compress = matches!(self.body, Body::Text(_) | Body::Edit(_));
         pack(&plain, compress)
     }
 
@@ -203,7 +213,18 @@ mod tests {
             delivered: vec![1, 2],
             read: vec![u64::MAX],
         });
-        for body in [Body::Text("hi 🍋 hi".into()), Body::Share(share()), receipt] {
+        let bodies = [
+            Body::Text("hi 🍋 hi".into()),
+            Body::Share(share()),
+            receipt,
+            Body::Palette(r#"{"name":"Lemon","colors":[[255,255,204]]}"#.into()),
+            Body::Edit(Edit {
+                id: 9,
+                text: "hi again".into(),
+            }),
+            Body::Delete(9),
+        ];
+        for body in bodies {
             let envelope = Envelope::new(body);
             let sealed = alice.seal_envelope(&bob.public_key(), &envelope);
             assert_eq!(
@@ -240,6 +261,29 @@ mod tests {
         }));
         let plain = postcard::to_allocvec(&receipt).unwrap();
         assert!(postcard::from_bytes::<OlderEnvelope>(&plain).is_err());
+    }
+
+    #[test]
+    fn an_older_app_still_reads_texts_after_the_new_kinds() {
+        #[allow(dead_code)]
+        #[derive(Debug, Serialize, Deserialize)]
+        enum OlderBody {
+            Text(String),
+            Share(Share),
+            Receipt(Receipt),
+        }
+        #[allow(dead_code)]
+        #[derive(Debug, Serialize, Deserialize)]
+        struct OlderEnvelope {
+            id: u64,
+            body: OlderBody,
+        }
+        let text = postcard::to_allocvec(&Envelope::new(Body::Text("hi".into()))).unwrap();
+        assert!(postcard::from_bytes::<OlderEnvelope>(&text).is_ok());
+        for body in [Body::Palette("{}".into()), Body::Delete(1)] {
+            let plain = postcard::to_allocvec(&Envelope::new(body)).unwrap();
+            assert!(postcard::from_bytes::<OlderEnvelope>(&plain).is_err());
+        }
     }
 
     #[test]

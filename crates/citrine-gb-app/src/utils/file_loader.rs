@@ -8,6 +8,31 @@ pub struct PickedFile {
     pub path: Option<std::path::PathBuf>,
 }
 
+impl PickedFile {
+    pub fn from_drop(file: egui::DroppedFile) -> Option<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = file.path {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let data = std::fs::read(&path).ok()?;
+            return Some(Self {
+                name,
+                data,
+                path: Some(path),
+            });
+        }
+        let data = file.bytes?.to_vec();
+        Some(Self {
+            name: file.name,
+            data,
+            #[cfg(not(target_arch = "wasm32"))]
+            path: None,
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct FileLoader {
     dialog: AsyncFileDialog,

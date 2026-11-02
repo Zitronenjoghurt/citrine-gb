@@ -1,4 +1,5 @@
 use crate::app::events::AppEvent;
+use crate::app::widgets::action::dismiss_button;
 use crate::icons;
 use egui::{Align2, Color32, Context, Id, Label, Order, Rect, RichText, Ui, pos2, vec2};
 use std::time::Duration;
@@ -279,11 +280,7 @@ fn body(ui: &mut Ui, toast: &Toast, width: f32) -> Clicked {
                 clicked = Clicked::Button;
             }
         }
-        if ui
-            .add(egui::Button::new(icons::X).frame(false))
-            .on_hover_text("Dismiss")
-            .clicked()
-        {
+        if ui.add(dismiss_button()).on_hover_text("Dismiss").clicked() {
             clicked = Clicked::Close;
         }
         clicked

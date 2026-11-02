@@ -1,0 +1,35 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                   (SELECT COALESCE(SUM(MAX(size, 4096)), 0) FROM files WHERE owner = ?1)\n                     + (SELECT COALESCE(SUM(LENGTH(label)), 0) FROM saves WHERE owner = ?1) AS \"bytes!: i64\",\n                   (SELECT COUNT(*) FROM files WHERE owner = ?1 AND id NOT IN (SELECT file FROM saves)) AS \"files!: i64\",\n                   (SELECT COUNT(*) FROM saves WHERE owner = ?1) AS \"saves!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "bytes!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "files!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "saves!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e9765a304bf8c291af8767259d769e0213d7c7e35b36c7beea9ba26c6c5859e2"
+}

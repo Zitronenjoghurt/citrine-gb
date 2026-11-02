@@ -30,6 +30,27 @@ impl fmt::Debug for AuthKey {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceKey(pub [u8; 32]);
+
+impl DeviceKey {
+    pub fn random() -> Self {
+        let mut bytes = [0; 32];
+        getrandom::getrandom(&mut bytes).expect("no system random source");
+        Self(bytes)
+    }
+
+    pub fn hash(&self) -> [u8; 32] {
+        Sha256::digest(self.0).into()
+    }
+}
+
+impl fmt::Debug for DeviceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DeviceKey(..)")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PublicKey(pub [u8; 32]);
 

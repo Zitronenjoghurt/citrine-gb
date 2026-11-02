@@ -17,7 +17,7 @@ pub enum UiTheme {
 impl UiTheme {
     pub fn apply(&self, ctx: &egui::Context) {
         match self {
-            Self::Dark => ctx.set_visuals(egui::Visuals::dark()),
+            Self::Dark => ctx.set_visuals(dark()),
             Self::Light => ctx.set_visuals(egui::Visuals::light()),
             Self::CatppuccinLatte => catppuccin_egui::set_theme(ctx, catppuccin_egui::LATTE),
             Self::CatppuccinFrappe => catppuccin_egui::set_theme(ctx, catppuccin_egui::FRAPPE),
@@ -26,6 +26,15 @@ impl UiTheme {
             }
             Self::CatppuccinMocha => catppuccin_egui::set_theme(ctx, catppuccin_egui::MOCHA),
         }
+    }
+}
+
+const DARK_ERROR: egui::Color32 = egui::Color32::from_rgb(255, 150, 150);
+
+fn dark() -> egui::Visuals {
+    egui::Visuals {
+        error_fg_color: DARK_ERROR,
+        ..egui::Visuals::dark()
     }
 }
 
@@ -41,3 +50,6 @@ impl Display for UiTheme {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

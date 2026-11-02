@@ -89,7 +89,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
         let recorder = &self.emulator.screen_recorder;
         if *tab == Tab::GameBoy && recorder.is_recording() {
-            let time = crate::app::recording_time(recorder);
+            let time = recorder.elapsed_label();
             return egui::RichText::new(format!("{}  {}  {time}", tab.title(), icons::RECORD))
                 .color(egui::Color32::RED)
                 .into();

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT key_hash FROM devices WHERE id = ?1 AND account_id = ?2 AND left_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "key_hash",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "key_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e091b64c7f5f01e2e95c93959e2fbdf62fa8080ed34c49d9ff29979b20cc1835"
+}

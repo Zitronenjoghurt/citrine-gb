@@ -1,6 +1,6 @@
 use citrine_gb_net::{
-    ClientMsg, ErrorCode, InviteCode, PROTOCOL_VERSION, RelayId, RelayPassword, ServerInfo,
-    ServerMsg,
+    Channel, ClientHandshake, ClientMsg, ErrorCode, InviteCode, PROTOCOL_VERSION, RelayId,
+    RelayPassword, ServerInfo, ServerMsg,
 };
 use citrine_gb_server::{Config, Running, start};
 use futures_util::{SinkExt, StreamExt};
@@ -16,9 +16,27 @@ const PASSWORD: &str = "lemon tree";
 const ADMIN: &str = "admin pass";
 
 async fn server(dir: &Path) -> Running {
-    let map: HashMap<String, String> = HashMap::from([
+    server_with(dir, &[]).await
+}
+
+async fn server_with(dir: &Path, vars: &[(&str, &str)]) -> Running {
+    let mut map: HashMap<String, String> = HashMap::from([
         ("CITRINE_BIND".into(), "127.0.0.1".into()),
         ("CITRINE_PORT".into(), "0".into()),
+        ("CITRINE_DISK_FLOOR_MB".into(), "0".into()),
+        ("CITRINE_DISK_FLOOR_PERCENT".into(), "0".into()),
+        ("CITRINE_IP_CONNECTIONS".into(), "100000".into()),
+        ("CITRINE_IP_UNSIGNED".into(), "100000".into()),
+        ("CITRINE_IP_CONNECTS_PER_MINUTE".into(), "100000".into()),
+        ("CITRINE_SIGN_UPS_PER_IP".into(), "100000".into()),
+        ("CITRINE_SIGN_UPS_PER_HOUR".into(), "100000".into()),
+        ("CITRINE_MESSAGES_PER_SECOND".into(), "100000".into()),
+        ("CITRINE_MESSAGE_BURST".into(), "100000".into()),
+        ("CITRINE_CHATS_PER_SECOND".into(), "100000".into()),
+        ("CITRINE_CHAT_BURST".into(), "100000".into()),
+        ("CITRINE_CHAT_KB_PER_SECOND".into(), "100000".into()),
+        ("CITRINE_FRIEND_REQUESTS_PER_HOUR".into(), "100000".into()),
+        ("CITRINE_FRIEND_REQUEST_BURST".into(), "100000".into()),
         (
             "CITRINE_DATA_DIR".into(),
             dir.join("data").display().to_string(),
@@ -28,6 +46,9 @@ async fn server(dir: &Path) -> Running {
         ("CITRINE_RELAY_PASSWORD".into(), PASSWORD.into()),
         ("CITRINE_ADMIN_PASSWORD".into(), ADMIN.into()),
     ]);
+    for (k, v) in vars {
+        map.insert(k.to_string(), v.to_string());
+    }
     start(Config::from_vars(|k| map.get(k).cloned()).unwrap())
         .await
         .unwrap()
@@ -35,19 +56,36 @@ async fn server(dir: &Path) -> Running {
 
 struct Client {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    channel: Channel,
 }
 
 impl Client {
+    async fn secure(mut ws: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
+        let (handshake, first) = ClientHandshake::start();
+        ws.send(Message::Binary(first.into())).await.unwrap();
+        let reply = loop {
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(Message::Binary(bytes)))) => break bytes,
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("no handshake reply: {other:?}"),
+            }
+        };
+        let (_, channel) = handshake.finish(&reply).unwrap();
+        Self { ws, channel }
+    }
+
     async fn connect(addr: SocketAddr) -> Self {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/relay"))
             .await
             .unwrap();
-        Self { ws }
+        Self::secure(ws).await
     }
 
     async fn send(&mut self, msg: ClientMsg) {
         self.ws
-            .send(Message::Binary(msg.encode().unwrap().into()))
+            .send(Message::Binary(
+                self.channel.seal(&msg.encode().unwrap()).into(),
+            ))
             .await
             .unwrap();
     }
@@ -58,7 +96,12 @@ impl Client {
                 .await
                 .expect("timed out waiting for the server");
             match frame {
-                Some(Ok(Message::Binary(bytes))) => return ServerMsg::decode(&bytes).unwrap(),
+                Some(Ok(Message::Binary(bytes))) => {
+                    match ServerMsg::decode(&self.channel.open(&bytes).unwrap()).unwrap() {
+                        ServerMsg::Device(_) | ServerMsg::Devices { .. } => continue,
+                        msg => return msg,
+                    }
+                }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
                     panic!("the server closed the connection")
                 }
@@ -88,6 +131,7 @@ impl Client {
             public_key: keys.public_key(),
             display_name: name.into(),
             invite,
+            device_name: "Test".into(),
         })
         .await;
     }
@@ -96,6 +140,9 @@ impl Client {
         self.send(ClientMsg::SignIn {
             relay_password: Some(RelayPassword(PASSWORD.into())),
             auth_key: id.keys().auth_key().clone(),
+            device: None,
+            code: None,
+            device_name: "Test".into(),
         })
         .await;
     }
@@ -414,5 +461,25 @@ async fn closed_sign_ups_win_over_invites() {
     );
     let page = admin.get("/admin/invites").await;
     assert!(page.contains("New accounts are off"));
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn invite_sign_ups_skip_the_hourly_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server_with(dir.path(), &[("CITRINE_SIGN_UPS_PER_HOUR", "1")]).await;
+    let joined = join(s.addr, &RelayId::random(), "Ana", None).await;
+    welcomed(&joined);
+    assert_eq!(
+        join(s.addr, &RelayId::random(), "Ben", None).await,
+        ServerMsg::Error(ErrorCode::SignUpsClosed)
+    );
+    let admin = Admin::login(s.addr).await;
+    admin.require_invites(true).await;
+    for name in ["Cy", "Dee"] {
+        let (_, code) = admin.make_invite(name).await;
+        let joined = join(s.addr, &RelayId::random(), name, Some(code)).await;
+        welcomed(&joined);
+    }
     s.stop().await;
 }

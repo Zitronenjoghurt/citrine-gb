@@ -1,4 +1,4 @@
-use crate::crypto::{AuthKey, PublicKey, Sealed};
+use crate::crypto::{AuthKey, DeviceKey, PublicKey, Sealed};
 use crate::id::OnlineId;
 use crate::invite::InviteCode;
 use crate::saves::{GameKey, SaveInfo};
@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
 pub const CHUNK_BYTES: usize = 256 * 1024;
 pub const MAX_SCREEN_BYTES: usize = 64 * 1024;
@@ -15,6 +15,8 @@ pub type GameHash = [u8; 20];
 pub type SessionId = u64;
 pub type MessageId = u64;
 pub type Tag = u32;
+pub type DeviceId = u64;
+pub const MAX_DEVICE_NAME_CHARS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FileId(pub [u8; 16]);
@@ -25,6 +27,15 @@ pub struct RelayPassword(pub String);
 impl fmt::Debug for RelayPassword {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("RelayPassword(..)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OneTimeCode(pub String);
+
+impl fmt::Debug for OneTimeCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OneTimeCode(..)")
     }
 }
 
@@ -49,6 +60,8 @@ pub struct Account {
     pub display_name: String,
     pub storage_used: u64,
     pub quota_bytes: u64,
+    pub two_factor: bool,
+    pub codes_left: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +102,15 @@ pub struct FileInfo {
     pub created: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: DeviceId,
+    pub name: String,
+    pub added: u64,
+    pub last_seen: u64,
+    pub online: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EndReason {
     Declined,
@@ -105,6 +127,7 @@ pub enum Notice {
     PasswordChanged,
     SignedInElsewhere,
     ShuttingDown,
+    SignedOut,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -163,6 +186,16 @@ pub enum ErrorCode {
     SaveChanged,
     #[error("this server doesn't allow Discord screenshots")]
     PicturesOff,
+    #[error("their inbox is full")]
+    InboxFull,
+    #[error("this account asks for a two-factor code")]
+    CodeNeeded,
+    #[error("the two-factor code is wrong")]
+    CodeWrong,
+    #[error("another device signed this one out")]
+    SignedOut,
+    #[error("no such device")]
+    UnknownDevice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,10 +210,14 @@ pub enum ClientMsg {
         public_key: PublicKey,
         display_name: String,
         invite: Option<InviteCode>,
+        device_name: String,
     },
     SignIn {
         relay_password: Option<RelayPassword>,
         auth_key: AuthKey,
+        device: Option<DeviceKey>,
+        code: Option<OneTimeCode>,
+        device_name: String,
     },
     SetDisplayName(String),
     SetStatus {
@@ -253,6 +290,18 @@ pub enum ClientMsg {
         base: u64,
     },
     Screen(Vec<u8>),
+    TwoFactorStart,
+    TwoFactorConfirm(OneTimeCode),
+    TwoFactorOff(OneTimeCode),
+    NewRecoveryCodes(OneTimeCode),
+    DeleteAccount {
+        code: Option<OneTimeCode>,
+    },
+    SignOutDevice(DeviceId),
+    Restate {
+        id: MessageId,
+        sealed: Option<Sealed>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +406,21 @@ pub enum ServerMsg {
         path: String,
     },
     ScreenRefused(ErrorCode),
+    Device(DeviceKey),
+    TwoFactorSetup {
+        secret: Vec<u8>,
+    },
+    RecoveryCodes(Vec<String>),
+    AccountDeleted,
+    Devices {
+        list: Vec<DeviceInfo>,
+        this: DeviceId,
+    },
+    ChatCopy {
+        to: OnlineId,
+        message: ChatMessage,
+    },
+    SavesChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -467,6 +531,13 @@ mod tests {
             ClientMsg::GetSave { .. } => "GetSave",
             ClientMsg::DeleteSave { .. } => "DeleteSave",
             ClientMsg::Screen(_) => "Screen",
+            ClientMsg::TwoFactorStart => "TwoFactorStart",
+            ClientMsg::TwoFactorConfirm(_) => "TwoFactorConfirm",
+            ClientMsg::TwoFactorOff(_) => "TwoFactorOff",
+            ClientMsg::NewRecoveryCodes(_) => "NewRecoveryCodes",
+            ClientMsg::DeleteAccount { .. } => "DeleteAccount",
+            ClientMsg::SignOutDevice(_) => "SignOutDevice",
+            ClientMsg::Restate { .. } => "Restate",
         }
     }
 
@@ -508,6 +579,13 @@ mod tests {
             ServerMsg::SaveDeleted { .. } => "SaveDeleted",
             ServerMsg::ScreenStored { .. } => "ScreenStored",
             ServerMsg::ScreenRefused(_) => "ScreenRefused",
+            ServerMsg::Device(_) => "Device",
+            ServerMsg::TwoFactorSetup { .. } => "TwoFactorSetup",
+            ServerMsg::RecoveryCodes(_) => "RecoveryCodes",
+            ServerMsg::AccountDeleted => "AccountDeleted",
+            ServerMsg::Devices { .. } => "Devices",
+            ServerMsg::ChatCopy { .. } => "ChatCopy",
+            ServerMsg::SavesChanged => "SavesChanged",
         }
     }
 
@@ -524,10 +602,14 @@ mod tests {
                 public_key: keys.public_key(),
                 display_name: "Clara".into(),
                 invite: Some("7KQ2-M9XD-4HTB".parse().unwrap()),
+                device_name: "Firefox on Mac".into(),
             },
             ClientMsg::SignIn {
                 relay_password: None,
                 auth_key: keys.auth_key().clone(),
+                device: Some(DeviceKey([6; 32])),
+                code: Some(OneTimeCode("123456".into())),
+                device_name: "Android phone".into(),
             },
             ClientMsg::SetDisplayName("Zitrone".into()),
             ClientMsg::SetStatus { away: true },
@@ -598,6 +680,16 @@ mod tests {
                 base: 4,
             },
             ClientMsg::Screen(vec![4; 500]),
+            ClientMsg::TwoFactorStart,
+            ClientMsg::TwoFactorConfirm(OneTimeCode("123456".into())),
+            ClientMsg::TwoFactorOff(OneTimeCode("1234-5678-9012".into())),
+            ClientMsg::NewRecoveryCodes(OneTimeCode("654321".into())),
+            ClientMsg::DeleteAccount { code: None },
+            ClientMsg::SignOutDevice(4),
+            ClientMsg::Restate {
+                id: 9,
+                sealed: Some(sealed()),
+            },
         ]
     }
 
@@ -607,6 +699,8 @@ mod tests {
             display_name: "Clara".into(),
             storage_used: 1234,
             quota_bytes: 100 << 20,
+            two_factor: true,
+            codes_left: 9,
         };
         let friend = Friend {
             online_id: friend_id(),
@@ -743,6 +837,32 @@ mod tests {
                 path: "/f/0123456789abcdef0123456789abcdef".into(),
             },
             ServerMsg::ScreenRefused(ErrorCode::RateLimited),
+            ServerMsg::Device(DeviceKey([8; 32])),
+            ServerMsg::TwoFactorSetup {
+                secret: vec![1; 20],
+            },
+            ServerMsg::RecoveryCodes(vec!["1234-5678-9012".into()]),
+            ServerMsg::AccountDeleted,
+            ServerMsg::Devices {
+                list: vec![DeviceInfo {
+                    id: 3,
+                    name: "Android phone".into(),
+                    added: 1_700_000_000,
+                    last_seen: 1_700_000_100,
+                    online: true,
+                }],
+                this: 3,
+            },
+            ServerMsg::ChatCopy {
+                to: friend_id(),
+                message: ChatMessage {
+                    id: 5,
+                    from: friend_id(),
+                    at: 1_700_000_000,
+                    sealed: sealed(),
+                },
+            },
+            ServerMsg::SavesChanged,
         ]
     }
 
@@ -750,7 +870,7 @@ mod tests {
     fn every_client_message_round_trips() {
         let all = all_client();
         let names: BTreeSet<_> = all.iter().map(client_name).collect();
-        assert_eq!(names.len(), 29);
+        assert_eq!(names.len(), 36);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -762,12 +882,21 @@ mod tests {
     fn every_server_message_round_trips() {
         let all = all_server();
         let names: BTreeSet<_> = all.iter().map(server_name).collect();
-        assert_eq!(names.len(), 36);
+        assert_eq!(names.len(), 43);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
             assert_eq!(ServerMsg::decode(&bytes), Ok(msg));
         }
+    }
+
+    #[test]
+    fn a_restate_that_deletes_round_trips() {
+        let msg = ClientMsg::Restate {
+            id: 9,
+            sealed: None,
+        };
+        assert_eq!(ClientMsg::decode(&msg.encode().unwrap()), Ok(msg));
     }
 
     #[test]
@@ -800,6 +929,11 @@ mod tests {
             ErrorCode::Server,
             ErrorCode::SaveChanged,
             ErrorCode::PicturesOff,
+            ErrorCode::InboxFull,
+            ErrorCode::CodeNeeded,
+            ErrorCode::CodeWrong,
+            ErrorCode::SignedOut,
+            ErrorCode::UnknownDevice,
         ];
         for error in errors {
             let msg = ServerMsg::Error(error);
@@ -813,6 +947,7 @@ mod tests {
             Notice::PasswordChanged,
             Notice::SignedInElsewhere,
             Notice::ShuttingDown,
+            Notice::SignedOut,
         ];
         for notice in notices {
             let msg = ServerMsg::Notice(notice);
@@ -898,7 +1033,13 @@ mod tests {
         let msg = ClientMsg::SignIn {
             relay_password: Some(RelayPassword("hunter2".into())),
             auth_key: RelayId::from_bytes([3; 32]).keys().auth_key().clone(),
+            device: Some(DeviceKey([0xEE; 32])),
+            code: Some(OneTimeCode("481220".into())),
+            device_name: "Linux PC".into(),
         };
-        assert!(!format!("{msg:?}").contains("hunter2"));
+        let text = format!("{msg:?}");
+        assert!(!text.contains("hunter2"));
+        assert!(!text.contains("481220"));
+        assert!(!text.contains("238"));
     }
 }

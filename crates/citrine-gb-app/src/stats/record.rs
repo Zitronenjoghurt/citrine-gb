@@ -13,6 +13,14 @@ pub struct GameDay {
     pub rewinds: u32,
     pub link_ms: u64,
     pub together_ms: u64,
+    pub cable: BTreeMap<String, CableDay>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CableDay {
+    pub ms: u64,
+    pub sessions: u32,
 }
 
 impl GameDay {
@@ -26,6 +34,11 @@ impl GameDay {
         self.rewinds = self.rewinds.max(other.rewinds);
         self.link_ms = self.link_ms.max(other.link_ms);
         self.together_ms = self.together_ms.max(other.together_ms);
+        for (partner, theirs) in &other.cable {
+            let mine = self.cable.entry(partner.clone()).or_default();
+            mine.ms = mine.ms.max(theirs.ms);
+            mine.sessions = mine.sessions.max(theirs.sessions);
+        }
     }
 }
 
@@ -56,6 +69,7 @@ pub struct GameRecord {
     pub longest_session_ms: u64,
     pub days: BTreeMap<String, GameDay>,
     pub progress: BTreeMap<String, Progress>,
+    pub partners: BTreeMap<String, String>,
 }
 
 impl GameRecord {
@@ -63,6 +77,11 @@ impl GameRecord {
         if !other.name.is_empty() && (self.name.is_empty() || other.last_played > self.last_played)
         {
             self.name = other.name.clone();
+        }
+        for (partner, name) in &other.partners {
+            if !self.partners.contains_key(partner) || other.last_played > self.last_played {
+                self.partners.insert(partner.clone(), name.clone());
+            }
         }
         if other.first_played > 0
             && (self.first_played == 0 || other.first_played < self.first_played)

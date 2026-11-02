@@ -4,7 +4,7 @@ use egui::Widget;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     let settings = &viewer.ui.settings;
-    let controls = if crate::app::mobile_layout(settings.layout, ui.ctx()) {
+    let controls = if settings.layout.is_touch(ui.ctx()) {
         Controls::Touch
     } else {
         Controls::Desktop {

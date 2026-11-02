@@ -318,7 +318,8 @@ input::placeholder { color: var(--muted); }
   font-weight: 600;
 }
 
-.banner span { flex: 1; }
+.banner { flex-wrap: wrap; }
+.banner span { flex: 1 1 180px; }
 
 .tiles {
   display: grid;
@@ -344,6 +345,12 @@ input::placeholder { color: var(--muted); }
 .bar { height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; margin-top: 8px; }
 .bar i { display: block; height: 100%; background: var(--brand); border-radius: 3px; }
 
+.refused { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 0 24px; }
+.refused-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.refused-row .value { font-weight: 700; font-variant-numeric: tabular-nums; }
+.refused-row.none { color: var(--muted); }
+.refused-row.none .value { font-weight: 400; }
+
 .address { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .address .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -359,7 +366,7 @@ input::placeholder { color: var(--muted); }
 
 .user-row {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) 120px 140px 170px 112px;
+  grid-template-columns: minmax(0, 2fr) 120px 100px 140px 140px 112px;
   gap: 16px;
   align-items: center;
   padding: 12px 20px;
@@ -387,8 +394,19 @@ input::placeholder { color: var(--muted); }
 .badge { display: inline-flex; color: var(--danger); }
 .badge svg { width: 16px; height: 16px; }
 
-.seen { display: flex; align-items: center; gap: 6px; font-size: 14px; }
-.seen.online { color: var(--ok); font-weight: 600; }
+.seen { display: grid; gap: 2px; font-size: 14px; min-width: 0; }
+.seen .state { display: flex; align-items: center; gap: 6px; }
+.seen .online { color: var(--ok); font-weight: 600; }
+.seen .ip { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.joined { font-size: 14px; }
+.joined .narrow { display: none; }
+
+.toolbar .segmented .btn { text-decoration: none; }
+.toolbar .segmented a.btn[aria-pressed="false"]:hover { color: var(--text); }
+
+.blocked-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.blocked-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.blocked h2 { margin-bottom: 8px; }
 
 .storage { font-size: 14px; font-variant-numeric: tabular-nums; }
 .storage .bar { margin-top: 4px; }
@@ -447,10 +465,17 @@ input::placeholder { color: var(--muted); }
 [popover] h3 { margin: 0 0 6px; font-size: 16px; }
 [popover] p { margin: 0 0 16px; color: var(--muted); }
 [popover] .who { margin-bottom: 16px; }
-[popover] .menu { display: grid; gap: 8px; }
+[popover] .menu { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 [popover] .menu .btn { justify-content: flex-start; width: 100%; }
+[popover] .devices { margin-top: 16px; display: grid; gap: 8px; }
+[popover] .devices h4 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
+[popover] .device { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+[popover] .device .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 [popover] .buttons { display: flex; gap: 8px; justify-content: flex-end; }
 [popover] form.inline { display: flex; gap: 8px; align-items: center; }
+[popover] form.inline input { flex: 1; min-width: 0; appearance: textfield; }
+[popover] .menu form.inline .btn { width: auto; flex: none; }
+[popover] form.inline input::-webkit-inner-spin-button { appearance: none; margin: 0; }
 [popover] form > .field { margin-bottom: 16px; }
 [popover].hint-pop { width: min(300px, calc(100vw - 32px)); padding: 12px 14px; font-size: 14px; color: var(--text); }
 [popover].hint-pop::backdrop { background: transparent; }
@@ -600,6 +625,11 @@ input::placeholder { color: var(--muted); }
     gap: 8px 12px;
     padding: 14px 16px;
   }
+  .users.newest .user-row .seen { display: none; }
+  .users:not(.newest) .user-row .joined { display: none; }
+  .user-row .joined { grid-area: seen; }
+  .joined .wide { display: none; }
+  .joined .narrow { display: inline; }
   .user-row:nth-child(2) { border-top: 0; }
   .user-row .who { grid-area: who; }
   .user-row .actions { grid-area: actions; }

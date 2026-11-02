@@ -1,6 +1,7 @@
 use crate::app::events::AppEventQueue;
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::settings::{SettingsTab, console_name};
+use crate::app::widgets::action::wide_button;
 use crate::app::widgets::homebrew::{self, HomebrewList};
 use crate::emulator::Emulator;
 use crate::icons;
@@ -27,6 +28,7 @@ pub struct LinkUi {
     fitted_height: Option<f32>,
     pub picking: bool,
     pub listing: bool,
+    pub from_list: bool,
     pub events: partner::EventCache,
 }
 
@@ -233,7 +235,7 @@ fn row(ui: &mut Ui, title: &str, detail: &str, link_width: f32) -> bool {
 }
 
 fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
-    if crate::app::mobile_layout(viewer.ui.settings.layout, ui.ctx()) {
+    if viewer.ui.settings.layout.is_touch(ui.ctx()) {
         panel_body(viewer, ui, false);
         return;
     }
@@ -246,7 +248,7 @@ fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
 }
 
 fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
-    let touch = crate::app::mobile_layout(viewer.ui.settings.layout, ui.ctx());
+    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
     let Some(link) = viewer.emulator.link.as_ref() else {
         return;
     };
@@ -342,13 +344,11 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
     }
 
     ui.add_space(6.0);
-    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y.max(32.0));
-    if ui
-        .add_sized(
-            size,
-            egui::Button::new(format!("{}  Close {title}", icons::X)).truncate(),
-        )
-        .clicked()
+    if wide_button(
+        ui,
+        egui::Button::new(format!("{}  Close {title}", icons::X)).truncate(),
+    )
+    .clicked()
     {
         viewer.events.end_link();
     }

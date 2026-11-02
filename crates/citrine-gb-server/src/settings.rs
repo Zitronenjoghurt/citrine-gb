@@ -4,8 +4,9 @@ use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
 
 pub const NAME: &str = "name";
 pub const RELAY: &str = "relay";
@@ -15,9 +16,13 @@ pub const SIGN_UPS: &str = "sign_ups";
 pub const INVITES: &str = "invites";
 pub const PICTURES: &str = "discord_pictures";
 pub const QUOTA: &str = "default_quota_mb";
+pub const STORAGE_TOTAL: &str = "storage_total_mb";
 pub const MAX_MESSAGE: &str = "max_message_kb";
 pub const MAX_FILE: &str = "max_file_mb";
+pub const DELETE_EMPTY: &str = "delete_empty_accounts";
 
+pub const DEFAULT_STORAGE_MB: u64 = 100;
+pub const OPEN_STORAGE_MB: u64 = 20;
 pub const DEFAULT_MAX_MESSAGE_KB: u64 = 64;
 pub const DEFAULT_MAX_FILE_MB: u64 = 25;
 const NO_PASSWORD: &str = "none";
@@ -39,8 +44,11 @@ pub struct Effective {
     pub invites: bool,
     pub pictures: bool,
     pub quota_bytes: u64,
+    pub storage_total_bytes: u64,
     pub max_message_bytes: u64,
     pub max_file_bytes: u64,
+    pub game_sharing: bool,
+    pub delete_empty: bool,
 }
 
 pub fn hash(password: &str) -> [u8; 32] {
@@ -88,11 +96,21 @@ fn flag(value: &str) -> Option<bool> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    Right,
+    Wrong,
+    Busy,
+}
+
 pub struct Settings {
     config: Config,
     env_password: Option<String>,
     panel: RwLock<HashMap<String, String>>,
     db: Arc<Db>,
+    admitted: Semaphore,
+    verifies: Semaphore,
+    accepted: Mutex<Option<(String, [u8; 32])>>,
 }
 
 impl Settings {
@@ -103,6 +121,9 @@ impl Settings {
             config: config.clone(),
             panel: RwLock::new(panel),
             db,
+            admitted: Semaphore::new(config.limits.password_checks + config.limits.password_queue),
+            verifies: Semaphore::new(config.limits.password_checks),
+            accepted: Mutex::new(None),
         })
     }
 
@@ -144,20 +165,39 @@ impl Settings {
     }
 
     pub fn get(&self) -> Effective {
+        let password_set = self.stored_password().is_some();
+        let invites = self.panel_flag(INVITES).unwrap_or(self.config.invites);
+        let open_to_anyone = self.config.relay_open && !password_set && !invites;
+        let default_quota = if open_to_anyone {
+            OPEN_STORAGE_MB
+        } else {
+            DEFAULT_STORAGE_MB
+        };
         Effective {
             name: self.panel(NAME).unwrap_or_else(|| self.default_name()),
             relay: self.panel_flag(RELAY).unwrap_or(self.config.relay),
             kill: self.panel_flag(KILL).unwrap_or(false),
-            password_set: self.stored_password().is_some(),
+            password_set,
             sign_ups: self.panel_flag(SIGN_UPS).unwrap_or(true),
-            invites: self.panel_flag(INVITES).unwrap_or(false),
+            invites,
             pictures: self.panel_flag(PICTURES).unwrap_or(true),
-            quota_bytes: self.panel_number(QUOTA).unwrap_or(self.config.storage_mb) << 20,
+            quota_bytes: self
+                .panel_number(QUOTA)
+                .or(self.config.storage_mb)
+                .unwrap_or(default_quota)
+                << 20,
+            storage_total_bytes: self
+                .panel_number(STORAGE_TOTAL)
+                .map_or(self.config.limits.storage_total_bytes, |mb| {
+                    mb.saturating_mul(1 << 20)
+                }),
             max_message_bytes: self
                 .panel_number(MAX_MESSAGE)
                 .unwrap_or(DEFAULT_MAX_MESSAGE_KB)
                 << 10,
             max_file_bytes: self.panel_number(MAX_FILE).unwrap_or(DEFAULT_MAX_FILE_MB) << 20,
+            game_sharing: self.config.game_sharing && invites,
+            delete_empty: self.panel_flag(DELETE_EMPTY).unwrap_or(false),
         }
     }
 
@@ -169,6 +209,8 @@ impl Settings {
             RELAY => "CITRINE_RELAY",
             PASSWORD => "CITRINE_RELAY_PASSWORD",
             QUOTA => "CITRINE_STORAGE_MB",
+            STORAGE_TOTAL => "CITRINE_STORAGE_TOTAL_MB",
+            INVITES => "CITRINE_INVITES",
             NAME => "CITRINE_PUBLIC_URL",
             _ => return Source::Default,
         };
@@ -183,21 +225,47 @@ impl Settings {
         self.config.relay_open
     }
 
-    pub async fn check_password(&self, given: Option<String>) -> bool {
+    fn accepted(&self) -> std::sync::MutexGuard<'_, Option<(String, [u8; 32])>> {
+        self.accepted.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    async fn verify(&self, given: String, stored: String) -> Check {
+        let known = self
+            .accepted()
+            .as_ref()
+            .is_some_and(|(hashed, secret)| *hashed == stored && same_secret(&given, secret));
+        if known {
+            return Check::Right;
+        }
+        let Ok(_admitted) = self.admitted.try_acquire() else {
+            return Check::Busy;
+        };
+        let Ok(_verify) = self.verifies.acquire().await else {
+            return Check::Busy;
+        };
+        let secret = hash(&given);
+        let checked = stored.clone();
+        let ok = tokio::task::spawn_blocking(move || verify_password(&given, &checked))
+            .await
+            .unwrap_or(false);
+        if !ok {
+            return Check::Wrong;
+        }
+        *self.accepted() = Some((stored, secret));
+        Check::Right
+    }
+
+    pub async fn check_password(&self, given: Option<String>) -> Check {
         let given = given.unwrap_or_default();
         let (ok, upgrade) = match self.stored_password() {
-            None => return true,
-            Some(Stored::Argon(stored)) => {
-                let ok =
-                    tokio::task::spawn_blocking(move || verify_password(&given, &stored)).await;
-                (ok.unwrap_or(false), None)
-            }
+            None => return Check::Right,
+            Some(Stored::Argon(stored)) => (self.verify(given, stored).await, None),
             Some(Stored::Sha256(expected)) => {
                 if !same_secret(&given, &expected) {
-                    return false;
+                    return Check::Wrong;
                 }
                 let hashed = tokio::task::spawn_blocking(move || hash_password(&given)).await;
-                (true, hashed.ok())
+                (Check::Right, hashed.ok())
             }
         };
         if let Some(hashed) = upgrade {
@@ -267,16 +335,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invite_codes_start_from_the_env_until_the_panel_changes_them() {
+        let (_dir, s) = settings(&[]).await;
+        assert!(!s.get().invites);
+        assert_eq!(s.source(INVITES), Source::Default);
+        let (_dir, s) = settings(&[("CITRINE_INVITES", "true")]).await;
+        assert!(s.get().invites);
+        assert_eq!(s.source(INVITES), Source::Env);
+        s.set_flag(INVITES, false).await.unwrap();
+        assert!(!s.get().invites);
+        assert_eq!(s.source(INVITES), Source::Panel);
+        s.reset(INVITES).await.unwrap();
+        assert!(s.get().invites);
+    }
+
+    #[tokio::test]
+    async fn game_sharing_follows_invite_codes_from_the_env() {
+        let (_dir, s) = settings(&[("CITRINE_GAME_SHARING", "true")]).await;
+        assert!(!s.get().game_sharing);
+        let (_dir, s) = settings(&[
+            ("CITRINE_GAME_SHARING", "true"),
+            ("CITRINE_INVITES", "true"),
+        ])
+        .await;
+        assert!(s.get().game_sharing);
+    }
+
+    #[tokio::test]
+    async fn the_total_storage_cap_comes_from_the_env_until_the_panel_sets_one() {
+        let (_dir, s) = settings(&[]).await;
+        assert_eq!(s.get().storage_total_bytes, 10 << 30);
+        assert_eq!(s.source(STORAGE_TOTAL), Source::Default);
+        let (_dir, s) = settings(&[("CITRINE_STORAGE_TOTAL_MB", "500")]).await;
+        assert_eq!(s.get().storage_total_bytes, 500 << 20);
+        assert_eq!(s.source(STORAGE_TOTAL), Source::Env);
+        s.set(STORAGE_TOTAL, "40").await.unwrap();
+        assert_eq!(s.get().storage_total_bytes, 40 << 20);
+        assert_eq!(s.source(STORAGE_TOTAL), Source::Panel);
+        s.reset(STORAGE_TOTAL).await.unwrap();
+        assert_eq!(s.get().storage_total_bytes, 500 << 20);
+    }
+
+    #[tokio::test]
+    async fn a_relay_open_to_anyone_starts_with_a_smaller_quota() {
+        let (_dir, s) = settings(&[("CITRINE_RELAY_OPEN", "true")]).await;
+        assert_eq!(s.get().quota_bytes, 20 << 20);
+        s.set_flag(INVITES, true).await.unwrap();
+        assert_eq!(s.get().quota_bytes, 100 << 20);
+        let (_dir, s) =
+            settings(&[("CITRINE_RELAY_OPEN", "true"), ("CITRINE_STORAGE_MB", "60")]).await;
+        assert_eq!(s.get().quota_bytes, 60 << 20);
+        let (_dir, s) = settings(&[
+            ("CITRINE_RELAY_OPEN", "true"),
+            ("CITRINE_RELAY_PASSWORD", "pw"),
+        ])
+        .await;
+        assert_eq!(s.get().quota_bytes, 100 << 20);
+        let (_dir, s) = settings(&[]).await;
+        assert_eq!(s.get().quota_bytes, 100 << 20);
+    }
+
+    #[tokio::test]
     async fn password_from_env_then_panel_then_reset() {
         let (_dir, s) = settings(&[("CITRINE_RELAY_PASSWORD", "env-pw")]).await;
-        assert!(s.check_password(Some("env-pw".into())).await);
-        assert!(!s.check_password(Some("env-pW".into())).await);
-        assert!(!s.check_password(None).await);
+        assert_eq!(s.check_password(Some("env-pw".into())).await, Check::Right);
+        assert_eq!(s.check_password(Some("env-pW".into())).await, Check::Wrong);
+        assert_eq!(s.check_password(None).await, Check::Wrong);
         s.set_password(Some("panel-pw")).await.unwrap();
-        assert!(s.check_password(Some("panel-pw".into())).await);
-        assert!(!s.check_password(Some("env-pw".into())).await);
+        assert_eq!(
+            s.check_password(Some("panel-pw".into())).await,
+            Check::Right
+        );
+        assert_eq!(s.check_password(Some("env-pw".into())).await, Check::Wrong);
         s.reset(PASSWORD).await.unwrap();
-        assert!(s.check_password(Some("env-pw".into())).await);
+        assert_eq!(s.check_password(Some("env-pw".into())).await, Check::Right);
     }
 
     #[tokio::test]
@@ -293,22 +425,65 @@ mod tests {
         let (_dir, s) = settings(&[]).await;
         let old: String = hash("old-pw").iter().map(|b| format!("{b:02x}")).collect();
         s.set(PASSWORD, &old).await.unwrap();
-        assert!(!s.check_password(Some("old-pW".into())).await);
+        assert_eq!(s.check_password(Some("old-pW".into())).await, Check::Wrong);
         assert_eq!(s.db.settings().await.unwrap()[PASSWORD], old);
-        assert!(s.check_password(Some("old-pw".into())).await);
+        assert_eq!(s.check_password(Some("old-pw".into())).await, Check::Right);
         let upgraded = s.db.settings().await.unwrap()[PASSWORD].clone();
         assert!(upgraded.starts_with("$argon2id$"));
-        assert!(s.check_password(Some("old-pw".into())).await);
-        assert!(!s.check_password(Some("old-pW".into())).await);
+        assert_eq!(s.check_password(Some("old-pw".into())).await, Check::Right);
+        assert_eq!(s.check_password(Some("old-pW".into())).await, Check::Wrong);
         assert!(s.get().password_set);
+    }
+
+    #[tokio::test]
+    async fn password_checks_wait_in_a_short_line() {
+        let (_dir, s) = settings(&[
+            ("CITRINE_RELAY_PASSWORD", "pw"),
+            ("CITRINE_PASSWORD_CHECKS", "1"),
+            ("CITRINE_PASSWORD_QUEUE", "1"),
+        ])
+        .await;
+        let checks = tokio::join!(
+            s.check_password(Some("a".into())),
+            s.check_password(Some("b".into())),
+            s.check_password(Some("c".into())),
+        );
+        assert_eq!(checks, (Check::Wrong, Check::Wrong, Check::Busy));
+        assert_eq!(s.check_password(Some("pw".into())).await, Check::Right);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_password_skips_the_slow_check_until_it_changes() {
+        let (_dir, s) = settings(&[
+            ("CITRINE_RELAY_PASSWORD", "pw"),
+            ("CITRINE_PASSWORD_CHECKS", "1"),
+            ("CITRINE_PASSWORD_QUEUE", "0"),
+        ])
+        .await;
+        assert_eq!(s.check_password(Some("pw".into())).await, Check::Right);
+        let checks = tokio::join!(
+            s.check_password(Some("pw".into())),
+            s.check_password(Some("pw".into())),
+        );
+        assert_eq!(checks, (Check::Right, Check::Right));
+        s.set_password(Some("new")).await.unwrap();
+        let checks = tokio::join!(
+            s.check_password(Some("pw".into())),
+            s.check_password(Some("pw".into())),
+        );
+        assert_eq!(checks, (Check::Wrong, Check::Busy));
+        assert_eq!(s.check_password(Some("new".into())).await, Check::Right);
     }
 
     #[tokio::test]
     async fn no_password_lets_anyone_in() {
         let (_dir, s) = settings(&[]).await;
         assert!(!s.get().password_set);
-        assert!(s.check_password(None).await);
-        assert!(s.check_password(Some("anything".into())).await);
+        assert_eq!(s.check_password(None).await, Check::Right);
+        assert_eq!(
+            s.check_password(Some("anything".into())).await,
+            Check::Right
+        );
     }
 
     #[tokio::test]

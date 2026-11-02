@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE account_totp SET last_step = ?2 WHERE account_id = ?1 AND last_step < ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3312689d811f3b7b9df4e088dbda31c1bdb6aa8ce5a16b3f2dcf3b0c8e324644"
+}

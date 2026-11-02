@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (SELECT COALESCE(SUM(MAX(size, 4096)), 0) FROM files)\n                 + (SELECT COALESCE(SUM(LENGTH(label)), 0) FROM saves)\n                 + (SELECT COALESCE(SUM(LENGTH(body)), 0) FROM messages) AS \"n!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a034a4703da798a1e16050319dc4d664a61727b1c869a7c529f965a3b84757d0"
+}

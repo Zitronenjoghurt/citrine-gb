@@ -1,5 +1,7 @@
 use super::ROW_HEIGHT;
 use crate::app::tabs::TabViewer;
+use crate::app::widgets::action::action_height;
+use crate::app::widgets::field::row_field;
 use crate::app::widgets::info_mark::info_mark;
 use crate::emulator::Emulator;
 use crate::icons;
@@ -236,7 +238,7 @@ fn shelf_card(ui: &mut Ui, count: usize, game: &str, button_width: f32) -> bool 
 }
 
 pub fn list(viewer: &mut TabViewer, ui: &mut Ui) {
-    let touch = crate::app::mobile_layout(viewer.ui.settings.layout, ui.ctx());
+    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
     viewer.ui.linked.events.refresh(ui.ctx(), viewer.emulator);
     if !touch
         && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
@@ -265,9 +267,7 @@ fn list_body(ui: &mut Ui, cache: &mut EventCache, touch: bool) -> (bool, Option<
                 .clicked();
         }
         ui.add(
-            egui::TextEdit::singleline(&mut cache.search)
-                .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
-                .vertical_align(egui::Align::Center)
+            row_field(ui, &mut cache.search)
                 .hint_text(format!(
                     "{}  Search {count} events",
                     icons::MAGNIFYING_GLASS
@@ -382,6 +382,15 @@ pub fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
     };
     viewer.ui.linked.events.refresh(ui.ctx(), viewer.emulator);
     let sprite = viewer.ui.linked.events.sprite(partner.event()).cloned();
+    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
+    let mut back = !touch && panel_back(ui);
+    if !touch
+        && viewer.ui.linked.from_list
+        && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+        && !crate::app::mobile::layer_open(ui.ctx())
+    {
+        back = true;
+    }
     let picks = egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -391,6 +400,7 @@ pub fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
                 &partner.status(),
                 sprite.as_ref(),
                 partner.plugged(),
+                touch,
             )
         })
         .inner;
@@ -399,12 +409,21 @@ pub fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
     {
         partner.set_plugged(plugged);
     }
-    if picks.another {
+    if back || picks.another {
         viewer.ui.linked.listing = true;
+        viewer.ui.linked.from_list = false;
     }
     if picks.close {
         viewer.events.end_link();
     }
+}
+
+fn panel_back(ui: &mut Ui) -> bool {
+    let back = ui
+        .button(format!("{}  All events", icons::ARROW_LEFT))
+        .clicked();
+    ui.add_space(4.0);
+    back
 }
 
 fn panel_body(
@@ -413,6 +432,7 @@ fn panel_body(
     status: &Status,
     sprite: Option<&egui::TextureHandle>,
     plugged: bool,
+    offer_another: bool,
 ) -> PanelPicks {
     let mut picks = PanelPicks::default();
     let row_padding =
@@ -427,7 +447,7 @@ fn panel_body(
         picks.plugged = Some(plugged);
     }
     ui.add_space(6.0);
-    let height = ui.spacing().interact_size.y.max(32.0);
+    let height = action_height(ui);
     let another = format!("{}  Another event", icons::LIST_BULLETS);
     let close = format!("{}  Close event partner", icons::X);
     let padding = ui.spacing().button_padding.x;
@@ -441,7 +461,10 @@ fn panel_body(
                 + 2.0 * padding
         })
         .fold(0.0, f32::max);
-    if needed * 2.0 + ui.spacing().item_spacing.x <= ui.available_width() {
+    if !offer_another {
+        let size = egui::vec2(ui.available_width(), height);
+        picks.close = ui.add_sized(size, egui::Button::new(&close)).clicked();
+    } else if needed * 2.0 + ui.spacing().item_spacing.x <= ui.available_width() {
         ui.columns(2, |columns| {
             let width = columns[0].available_width();
             picks.another = columns[0]

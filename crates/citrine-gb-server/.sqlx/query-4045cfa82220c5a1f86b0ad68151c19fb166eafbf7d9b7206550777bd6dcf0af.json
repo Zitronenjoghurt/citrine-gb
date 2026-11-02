@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE accounts SET banned = 1 WHERE created_at >= ?1 AND banned = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4045cfa82220c5a1f86b0ad68151c19fb166eafbf7d9b7206550777bd6dcf0af"
+}

@@ -9,9 +9,11 @@ pub fn icon(state: SyncState) -> &'static str {
         SyncState::Fetching => icons::CLOUD_ARROW_DOWN,
         SyncState::Conflict => icons::CLOUD_WARNING,
         SyncState::OnlyHere => icons::CLOUD_SLASH,
-        SyncState::Full | SyncState::TooLarge | SyncState::NoStorage | SyncState::Unreadable => {
-            icons::CLOUD_X
-        }
+        SyncState::Full
+        | SyncState::TooLarge
+        | SyncState::NoStorage
+        | SyncState::NoAccountStorage
+        | SyncState::Unreadable => icons::CLOUD_X,
     }
 }
 
@@ -21,6 +23,7 @@ pub fn color(ui: &Ui, state: SyncState) -> Color32 {
         | SyncState::Full
         | SyncState::TooLarge
         | SyncState::NoStorage
+        | SyncState::NoAccountStorage
         | SyncState::Unreadable => ui.visuals().warn_fg_color,
         _ => ui.visuals().weak_text_color(),
     }
@@ -30,7 +33,7 @@ pub fn short_text(state: SyncState) -> Option<&'static str> {
     match state {
         SyncState::Full => Some("Cloud full"),
         SyncState::TooLarge => Some("Too large for the cloud"),
-        SyncState::NoStorage => Some("No cloud storage"),
+        SyncState::NoStorage | SyncState::NoAccountStorage => Some("No cloud storage"),
         SyncState::Unreadable => Some("Can't open the cloud copy"),
         _ => None,
     }

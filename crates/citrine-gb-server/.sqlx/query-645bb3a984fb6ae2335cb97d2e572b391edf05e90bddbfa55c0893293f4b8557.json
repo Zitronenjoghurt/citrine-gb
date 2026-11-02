@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM message_deliveries WHERE device_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "645bb3a984fb6ae2335cb97d2e572b391edf05e90bddbfa55c0893293f4b8557"
+}

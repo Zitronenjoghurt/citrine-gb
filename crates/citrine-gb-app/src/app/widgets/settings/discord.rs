@@ -1,6 +1,6 @@
 use crate::app::ui_state::settings::Settings;
 use crate::app::widgets::generic_select::GenericSelect;
-use crate::app::widgets::settings::controls;
+use crate::app::widgets::section::section_with_hint;
 use crate::app::widgets::settings::form::Form;
 use crate::discord::{GameNow, Presence, ShotInterval, presence};
 use crate::icons;
@@ -16,7 +16,7 @@ pub fn section(
     screen: Option<egui::TextureId>,
     pictures_off: bool,
 ) {
-    controls::section_with_hint(ui, icons::DISCORD_LOGO, "Discord", DISCORD_NOTE, |ui| {
+    section_with_hint(ui, icons::DISCORD_LOGO, "Discord", DISCORD_NOTE, |ui| {
         Form::show(ui, "discord", |form| {
             form.row("Show activity", |ui| {
                 s.dirty |= ui

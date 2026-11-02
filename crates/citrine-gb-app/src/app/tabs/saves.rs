@@ -1,5 +1,6 @@
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
+use crate::app::widgets::action::more_button;
 use crate::app::widgets::cloud_mark::cloud_status;
 use crate::app::widgets::scroll;
 use crate::app::widgets::settings::form::Form;
@@ -425,7 +426,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     if new_button.clicked() {
         action = Some(SlotAction::New);
     }
-    let touch = crate::app::mobile_layout(viewer.ui.settings.layout, ui.ctx());
+    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
     if let Some(hint) = quick_keys_hint(touch, &viewer.ui.settings.hotkeys) {
         ui.add(egui::Label::new(egui::RichText::new(hint).small()).wrap());
     }
@@ -527,8 +528,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
                                 action = Some(SlotAction::Save(slot));
                             }
                             let side = crate::app::mobile::touch_square(ui);
-                            let more = egui::Button::new(icons::DOTS_THREE)
-                                .min_size(egui::vec2(side, side));
+                            let more = more_button(side);
                             egui::containers::menu::MenuButton::from_button(more)
                                 .ui(ui, |ui| {
                                     if !touch

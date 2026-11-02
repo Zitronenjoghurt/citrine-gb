@@ -1,3 +1,7 @@
+mod limits;
+
+pub use limits::Limits;
+
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -26,11 +30,13 @@ pub struct Config {
     pub admin_2fa_reset: bool,
     pub static_dir: PathBuf,
     pub data_dir: PathBuf,
-    pub storage_mb: u64,
+    pub storage_mb: Option<u64>,
     pub game_sharing: bool,
+    pub invites: bool,
     pub bind: IpAddr,
     pub port: u16,
     pub public_url: Option<String>,
+    pub limits: Limits,
     pub trusted_proxy_hops: usize,
     pub given: BTreeSet<&'static str>,
 }
@@ -54,9 +60,11 @@ impl std::fmt::Debug for Config {
             .field("data_dir", &self.data_dir)
             .field("storage_mb", &self.storage_mb)
             .field("game_sharing", &self.game_sharing)
+            .field("invites", &self.invites)
             .field("bind", &self.bind)
             .field("port", &self.port)
             .field("public_url", &self.public_url)
+            .field("limits", &self.limits)
             .field("trusted_proxy_hops", &self.trusted_proxy_hops)
             .field("given", &self.given)
             .finish()
@@ -74,6 +82,7 @@ const VARS: &[&str] = &[
     "CITRINE_DATA_DIR",
     "CITRINE_STORAGE_MB",
     "CITRINE_GAME_SHARING",
+    "CITRINE_INVITES",
     "CITRINE_BIND",
     "CITRINE_PORT",
     "CITRINE_PUBLIC_URL",
@@ -115,6 +124,7 @@ impl Config {
         let var = |name: &str| var(name).filter(|v| !v.trim().is_empty());
         let given = VARS
             .iter()
+            .chain(limits::VARS)
             .copied()
             .filter(|name| var(name).is_some())
             .collect();
@@ -139,12 +149,16 @@ impl Config {
             data_dir: var("CITRINE_DATA_DIR")
                 .unwrap_or_else(|| "./data".into())
                 .into(),
-            storage_mb: number("CITRINE_STORAGE_MB", var("CITRINE_STORAGE_MB"), 100)?,
+            storage_mb: var("CITRINE_STORAGE_MB")
+                .map(|v| number("CITRINE_STORAGE_MB", Some(v), 0))
+                .transpose()?,
             game_sharing: switch("CITRINE_GAME_SHARING", var("CITRINE_GAME_SHARING"), false)?,
+            invites: switch("CITRINE_INVITES", var("CITRINE_INVITES"), false)?,
             bind,
             port: number("CITRINE_PORT", var("CITRINE_PORT"), 13707)?,
             public_url: var("CITRINE_PUBLIC_URL")
                 .map(|u| u.trim().trim_end_matches('/').to_string()),
+            limits: Limits::from_vars(var)?,
             trusted_proxy_hops: number(
                 "CITRINE_TRUSTED_PROXY_HOPS",
                 var("CITRINE_TRUSTED_PROXY_HOPS"),
@@ -189,8 +203,9 @@ mod tests {
         assert!(!c.admin_2fa_reset);
         assert_eq!(c.static_dir, PathBuf::from("./static"));
         assert_eq!(c.data_dir, PathBuf::from("./data"));
-        assert_eq!(c.storage_mb, 100);
+        assert_eq!(c.storage_mb, None);
         assert!(!c.game_sharing);
+        assert!(!c.invites);
         assert_eq!(c.port, 13707);
         assert_eq!(c.bind, IpAddr::from([0, 0, 0, 0]));
         assert_eq!(c.public_url, None);
@@ -210,6 +225,7 @@ mod tests {
             ("CITRINE_DATA_DIR", "/srv/data"),
             ("CITRINE_STORAGE_MB", "0"),
             ("CITRINE_GAME_SHARING", "true"),
+            ("CITRINE_INVITES", "true"),
             ("CITRINE_PORT", "8080"),
             ("CITRINE_BIND", "127.0.0.1"),
             ("CITRINE_PUBLIC_URL", "https://gb.example.com/"),
@@ -224,8 +240,9 @@ mod tests {
         assert!(c.admin_2fa_reset);
         assert_eq!(c.static_dir, PathBuf::from("/srv/static"));
         assert_eq!(c.data_dir, PathBuf::from("/srv/data"));
-        assert_eq!(c.storage_mb, 0);
+        assert_eq!(c.storage_mb, Some(0));
         assert!(c.game_sharing);
+        assert!(c.invites);
         assert_eq!(c.port, 8080);
         assert_eq!(c.bind, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(c.public_url.as_deref(), Some("https://gb.example.com"));

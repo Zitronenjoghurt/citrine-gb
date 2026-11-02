@@ -39,7 +39,7 @@ fn side_by_side(viewer: &mut TabViewer, ui: &mut egui::Ui) {
 fn stacked(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     let settings = &mut viewer.ui.settings;
     let dev_mode = settings.dev_mode;
-    let docked = !crate::app::mobile_layout(settings.layout, ui.ctx());
+    let docked = !settings.layout.is_touch(ui.ctx());
 
     let tabs: Vec<(SettingsTab, String)> = SettingsTab::iter_with_dev_mode(dev_mode)
         .map(|tab| (tab, format!("{} {}", tab.icon(), tab.title())))

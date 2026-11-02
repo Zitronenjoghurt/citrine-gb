@@ -1,26 +1,27 @@
-use crate::db::{AccountRow, InviteRefusal, NewSave, SaveWrite};
-use crate::hub::{Conn, QUEUE};
+use crate::connections::{Refusal, Slot};
+use crate::db::AccountRow;
+use crate::hub::{Outbox, Queued};
 use crate::limit::{Bucket, ConnLimit};
-use crate::screens::PNG_SIGNATURE;
+use crate::stats::Refused;
+use crate::storage::Reservation;
 use crate::{App, now};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use citrine_gb_net::Sealer;
 use citrine_gb_net::{
-    Account, AuthKey, CHUNK_BYTES, ChatMessage, ClientMsg, ErrorCode, FileId, FileInfo, Friend,
-    FriendState, GameKey, InviteCode, MAX_FRAME_BYTES, MAX_LABEL_BYTES, MAX_SCREEN_BYTES,
-    MessageId, Notice, OnlineId, PROTOCOL_VERSION, Presence, PublicKey, RelayPassword, SaveInfo,
-    Sealed, ServerInfo, ServerMsg, SessionId, Tag, display_name, valid_slot,
+    ClientMsg, ErrorCode, FileId, GameKey, MAX_FRAME_BYTES, MessageId, Notice, OnlineId,
+    PROTOCOL_VERSION, Presence, ServerInfo, ServerMsg, Tag,
 };
 use futures_util::{SinkExt, StreamExt};
+use handshake::handshake;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -28,7 +29,16 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const PING_EVERY: Duration = Duration::from_secs(25);
 const MAX_UPLOADS: usize = 4;
 const MAX_ACKS: usize = 1000;
+const MESSAGE_PAGE: u32 = 200;
 const SCREEN_EVERY_SECS: f64 = 30.0;
+const SEAL_ROOM: usize = 1024;
+
+mod account;
+mod files;
+mod friends;
+mod handshake;
+mod sessions;
+mod sign_in;
 
 pub async fn upgrade(
     State(app): State<Arc<App>>,
@@ -37,9 +47,48 @@ pub async fn upgrade(
     ws: WebSocketUpgrade,
 ) -> Response {
     let ip = app.client_ip(&headers, addr);
-    ws.max_message_size(MAX_FRAME_BYTES)
-        .max_frame_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| run(app, socket, ip))
+    let slot = match app.connections.admit(ip) {
+        Ok(slot) => slot,
+        Err(Refusal::Blocked) => {
+            app.stats.refused(Refused::Blocked);
+            return (
+                StatusCode::FORBIDDEN,
+                "This relay doesn't take connections from your address right now.",
+            )
+                .into_response();
+        }
+        Err(Refusal::Full) => {
+            app.stats.refused(Refused::Connections);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The relay is full. Try again later.",
+            )
+                .into_response();
+        }
+        Err(Refusal::Address) => {
+            app.stats.refused(Refused::Connections);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many connections from your address. Try again later.",
+            )
+                .into_response();
+        }
+    };
+    ws.max_message_size(MAX_FRAME_BYTES + SEAL_ROOM)
+        .max_frame_size(MAX_FRAME_BYTES + SEAL_ROOM)
+        .on_upgrade(move |socket| run(app, socket, ip, slot))
+}
+
+fn screen_size(png: &[u8]) -> bool {
+    let Some(header) = png.get(8..24) else {
+        return false;
+    };
+    if &header[4..8] != b"IHDR" {
+        return false;
+    }
+    let width = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    let height = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
+    (1..=4).any(|scale| width == 160 * scale && height == 144 * scale)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -68,7 +117,7 @@ pub fn info(app: &App) -> ServerInfo {
         quota_bytes: s.quota_bytes,
         max_message_bytes: s.max_message_bytes,
         max_file_bytes: s.max_file_bytes,
-        game_sharing: app.config.game_sharing,
+        game_sharing: s.game_sharing,
         pictures: s.pictures,
     }
 }
@@ -89,28 +138,32 @@ fn db<T>(result: crate::db::Result<T>) -> Result<T, ErrorCode> {
 async fn writer(
     app: Arc<App>,
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
-    mut rx: mpsc::Receiver<ServerMsg>,
+    mut rx: mpsc::Receiver<Queued>,
+    close: watch::Sender<Option<Notice>>,
+    mut sealer: Sealer,
 ) {
+    let limit = app.config.limits.send_timeout;
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
     loop {
-        tokio::select! {
-            msg = rx.recv() => {
-                let Some(msg) = msg else { break };
-                let Ok(bytes) = msg.encode() else { continue };
+        let (message, room) = tokio::select! {
+            queued = rx.recv() => {
+                let Some(Queued { bytes, room }) = queued else { break };
                 app.stats.sent(bytes.len());
-                if sink.send(Message::Binary(bytes.into())).await.is_err() {
-                    return;
-                }
+                (Message::Binary(sealer.seal(&bytes).into()), Some(room))
             }
-            _ = ping.tick() => {
-                if sink.send(Message::Ping(Default::default())).await.is_err() {
-                    return;
-                }
-            }
+            _ = ping.tick() => (Message::Ping(Default::default()), None),
+        };
+        if !matches!(
+            tokio::time::timeout(limit, sink.send(message)).await,
+            Ok(Ok(()))
+        ) {
+            close.send_replace(Some(Notice::Disconnected));
+            return;
         }
+        drop(room);
     }
-    let _ = sink.send(Message::Close(None)).await;
+    let _ = tokio::time::timeout(limit, sink.send(Message::Close(None))).await;
 }
 
 struct Upload {
@@ -119,6 +172,7 @@ struct Upload {
     received: u64,
     file: tokio::fs::File,
     path: PathBuf,
+    reserved: Reservation,
 }
 
 struct PutSave<'a> {
@@ -137,8 +191,9 @@ struct Me {
 struct Client {
     app: Arc<App>,
     ip: IpAddr,
+    slot: Slot,
     conn_id: u64,
-    tx: mpsc::Sender<ServerMsg>,
+    outbox: Outbox,
     close: watch::Sender<Option<Notice>>,
     me: Option<Me>,
     hello: Option<u16>,
@@ -146,8 +201,12 @@ struct Client {
     limited_at: Option<Instant>,
     uploads: HashMap<Tag, Upload>,
     downloads: Vec<JoinHandle<()>>,
+    download_slots: Arc<Semaphore>,
     screen: Option<String>,
     screen_limit: Bucket,
+    device: Option<i64>,
+    device_name: String,
+    pending_totp: Option<Vec<u8>>,
 }
 
 enum Event {
@@ -157,17 +216,22 @@ enum Event {
     Tick,
 }
 
-async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr) {
-    let (sink, mut stream) = socket.split();
-    let (tx, rx) = mpsc::channel(QUEUE);
-    let writer = tokio::spawn(writer(app.clone(), sink, rx));
+async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
+    let (mut sink, mut stream) = socket.split();
+    let Some(channel) = handshake(&app, &mut sink, &mut stream).await else {
+        return;
+    };
+    let (sealer, mut opener) = channel.split();
+    let (outbox, rx) = Outbox::new(app.config.limits.queue_bytes);
     let (close, mut close_rx) = watch::channel(None);
+    let mut writer = tokio::spawn(writer(app.clone(), sink, rx, close.clone(), sealer));
     let mut gate = app.hub.gate();
     let mut client = Client {
         conn_id: app.hub.conn_id(),
         app: app.clone(),
         ip,
-        tx,
+        slot,
+        outbox,
         close,
         me: None,
         hello: None,
@@ -175,8 +239,12 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr) {
         limited_at: None,
         uploads: HashMap::new(),
         downloads: Vec::new(),
+        download_slots: Arc::new(Semaphore::new(app.config.limits.downloads_at_once)),
         screen: None,
         screen_limit: Bucket::new(1.0 / SCREEN_EVERY_SECS, 1.0),
+        device: None,
+        device_name: String::new(),
+        pending_totp: None,
     };
     let settings = app.settings.get();
     let refused = if settings.kill {
@@ -195,7 +263,10 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr) {
         loop {
             let event = tokio::select! {
                 frame = stream.next() => match frame {
-                    Some(Ok(Message::Binary(bytes))) => Event::Frame(bytes.to_vec()),
+                    Some(Ok(Message::Binary(bytes))) => match opener.open(&bytes) {
+                        Ok(plain) => Event::Frame(plain),
+                        Err(_) => Event::Closed,
+                    },
                     Some(Ok(Message::Text(_))) => Event::Frame(Vec::new()),
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => Event::Closed,
                     Some(Ok(_)) => { heard = Instant::now(); continue }
@@ -213,6 +284,9 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr) {
             };
             match event {
                 Event::Frame(bytes) => {
+                    if client.me.is_none() && bytes.len() > app.config.limits.sign_in_frame_bytes {
+                        break;
+                    }
                     heard = Instant::now();
                     app.stats.received(bytes.len());
                     client.frame(&bytes).await;
@@ -234,27 +308,70 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr) {
     }
     client.finish().await;
     drop(client);
-    let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
+    if tokio::time::timeout(Duration::from_secs(5), &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
 }
 
 impl Client {
     async fn send(&self, msg: ServerMsg) {
-        let _ = self.tx.send(msg).await;
+        self.outbox.push(msg).await;
     }
 
     async fn error(&self, code: ErrorCode) {
         self.send(ServerMsg::Error(code)).await;
     }
 
+    fn refused(&self, kind: Refused) {
+        self.app.stats.refused(kind);
+    }
+
+    async fn room(&self, adding: u64) -> Result<(), ErrorCode> {
+        let total = self.app.settings.get().storage_total_bytes;
+        let result = self.app.storage.room(&self.app.db, adding, total).await;
+        if result == Err(ErrorCode::QuotaFull) {
+            self.refused(Refused::RelayStorage);
+        }
+        result
+    }
+
+    async fn rate_limited(&mut self) {
+        if self
+            .limited_at
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(1))
+        {
+            self.limited_at = Some(Instant::now());
+            self.error(ErrorCode::RateLimited).await;
+        }
+    }
+
+    async fn refuse(&mut self, msg: ClientMsg) {
+        self.refused(Refused::Messages);
+        let error = ErrorCode::RateLimited;
+        let refusal = match msg {
+            ClientMsg::Chat { tag, .. } => ServerMsg::ChatFailed { tag, error },
+            ClientMsg::Upload { tag, .. } => ServerMsg::UploadFailed { tag, error },
+            ClientMsg::Download(file) => ServerMsg::DownloadFailed { file, error },
+            ClientMsg::PutSave { tag, .. } | ClientMsg::DeleteSave { tag, .. } => {
+                ServerMsg::SaveRefused {
+                    tag,
+                    error,
+                    current: None,
+                }
+            }
+            ClientMsg::Screen(_) => ServerMsg::ScreenRefused(error),
+            _ => return self.rate_limited().await,
+        };
+        self.send(refusal).await;
+    }
+
     async fn frame(&mut self, bytes: &[u8]) {
         if !self.limit.allow(bytes.len()) {
-            if self
-                .limited_at
-                .is_none_or(|at| at.elapsed() > Duration::from_secs(1))
-            {
-                self.limited_at = Some(Instant::now());
-                self.error(ErrorCode::RateLimited).await;
-            }
+            self.refused(Refused::Messages);
+            self.rate_limited().await;
             return;
         }
         let Ok(msg) = ClientMsg::decode(bytes) else {
@@ -292,18 +409,28 @@ impl Client {
                 public_key,
                 display_name,
                 invite,
+                device_name,
             } => {
+                self.device_name = citrine_gb_net::device_name(&device_name);
                 self.sign_in(
                     relay_password,
                     auth_key,
                     Some((public_key, display_name, invite)),
+                    None,
                 )
                 .await
             }
             ClientMsg::SignIn {
                 relay_password,
                 auth_key,
-            } => self.sign_in(relay_password, auth_key, None).await,
+                device,
+                code,
+                device_name,
+            } => {
+                self.device_name = citrine_gb_net::device_name(&device_name);
+                self.sign_in(relay_password, auth_key, None, Some((device, code)))
+                    .await
+            }
             other => {
                 self.me()?;
                 self.signed_in(other).await
@@ -312,13 +439,27 @@ impl Client {
     }
 
     async fn signed_in(&mut self, msg: ClientMsg) -> Result<(), ErrorCode> {
+        let me = self.me()?.id;
+        let streamed = matches!(
+            msg,
+            ClientMsg::Play { .. } | ClientMsg::Game { .. } | ClientMsg::UploadChunk { .. }
+        );
+        if !streamed && !self.app.rates.messages.take(me, 1.0) {
+            self.refuse(msg).await;
+            return Ok(());
+        }
         match msg {
             ClientMsg::SetDisplayName(name) => self.set_name(&name).await,
             ClientMsg::SetStatus { away } => {
-                let presence = Presence::Online { away };
-                let me = self.me()?;
-                self.app.hub.set_presence(me.id, presence);
-                self.tell_friends(presence).await
+                let me = self.me()?.id;
+                match self
+                    .app
+                    .hub
+                    .set_presence(me, self.conn_id, Presence::Online { away })
+                {
+                    Some(presence) => self.tell_friends(presence).await,
+                    None => Ok(()),
+                }
             }
             ClientMsg::AddFriend(to) => self.add_friend(to).await,
             ClientMsg::AnswerFriend { from, accept } => self.answer_friend(from, accept).await,
@@ -327,7 +468,7 @@ impl Client {
             ClientMsg::Unblock(who) => {
                 let other = self.user(who).await?;
                 db(self.app.db.unblock(self.me()?.id, other.id).await)?;
-                self.send(ServerMsg::FriendGone(who)).await;
+                self.tell_me(ServerMsg::FriendGone(who)).await;
                 Ok(())
             }
             ClientMsg::Chat { tag, to, sealed } => {
@@ -338,8 +479,20 @@ impl Client {
             }
             ClientMsg::ChatAck(ids) => {
                 let ids: Vec<MessageId> = ids.into_iter().take(MAX_ACKS).collect();
-                db(self.app.db.ack_messages(self.me()?.id, &ids).await)
+                let device = self.device.ok_or(ErrorCode::NotSignedIn)?;
+                db(self.app.db.ack_messages(device, &ids).await)
             }
+            ClientMsg::Restate { id, sealed } => {
+                if let Some(sealed) = &sealed
+                    && sealed.ciphertext.len() as u64 > self.app.settings.get().max_message_bytes
+                {
+                    return Err(ErrorCode::TooLarge);
+                }
+                let me = self.me()?.id;
+                db(self.app.db.restate_message(me, id, sealed.as_ref()).await)?;
+                Ok(())
+            }
+            ClientMsg::SignOutDevice(device) => self.sign_out_device(device).await,
             ClientMsg::Upload { tag, size } => {
                 if let Err(error) = self.upload(tag, size).await {
                     self.send(ServerMsg::UploadFailed { tag, error }).await;
@@ -367,7 +520,7 @@ impl Client {
                     return Err(ErrorCode::UnknownFile);
                 }
                 let _ = tokio::fs::remove_file(file_path(&self.app, file)).await;
-                self.send(ServerMsg::FileDeleted(file)).await;
+                self.tell_me(ServerMsg::FileDeleted(file)).await;
                 self.send_account().await
             }
             ClientMsg::ListFiles => {
@@ -380,35 +533,45 @@ impl Client {
                 self.answer_invite(session, accept).await
             }
             ClientMsg::Leave(session) => {
+                let me = self.me()?.id;
                 let other = self
                     .app
                     .hub
-                    .end(session, self.me()?.id)
+                    .end(session, me, self.conn_id)
                     .ok_or(ErrorCode::UnknownSession)?;
-                self.app.hub.send(
-                    other,
-                    ServerMsg::SessionEnded {
-                        session,
-                        reason: citrine_gb_net::EndReason::Left,
-                    },
-                );
+                let ended = ServerMsg::SessionEnded {
+                    session,
+                    reason: citrine_gb_net::EndReason::Left,
+                };
+                self.app.hub.send_to(other, ended.clone());
+                self.app.hub.send_others(me, self.conn_id, ended);
                 Ok(())
             }
             ClientMsg::Play { session, sealed } => {
                 let other = self.peer(session)?;
+                if !self.session_room(session, &sealed) {
+                    self.refused(Refused::Play);
+                    self.rate_limited().await;
+                    return Ok(());
+                }
                 self.app
                     .hub
-                    .send(other, ServerMsg::Play { session, sealed });
+                    .send_to(other, ServerMsg::Play { session, sealed });
                 Ok(())
             }
             ClientMsg::Game { session, sealed } => {
-                if !self.app.config.game_sharing {
+                if !self.app.settings.get().game_sharing {
                     return Err(ErrorCode::GameSharingOff);
                 }
                 let other = self.peer(session)?;
+                if !self.session_room(session, &sealed) {
+                    self.refused(Refused::Play);
+                    self.rate_limited().await;
+                    return Ok(());
+                }
                 self.app
                     .hub
-                    .send(other, ServerMsg::Game { session, sealed });
+                    .send_to(other, ServerMsg::Game { session, sealed });
                 Ok(())
             }
             ClientMsg::Playing { to, sealed } => {
@@ -465,6 +628,7 @@ impl Client {
                     Ok(file) => {
                         let _ = tokio::fs::remove_file(file_path(&self.app, file)).await;
                         self.send(ServerMsg::SaveDeleted { tag }).await;
+                        self.others(ServerMsg::SavesChanged)?;
                         self.send_account().await
                     }
                     Err(None) => {
@@ -486,6 +650,11 @@ impl Client {
                 self.screen(png).await;
                 Ok(())
             }
+            ClientMsg::TwoFactorStart => self.two_factor_start().await,
+            ClientMsg::TwoFactorConfirm(code) => self.two_factor_confirm(code).await,
+            ClientMsg::TwoFactorOff(code) => self.two_factor_off(code).await,
+            ClientMsg::NewRecoveryCodes(code) => self.new_recovery_codes(code).await,
+            ClientMsg::DeleteAccount { code } => self.delete_account(code).await,
             ClientMsg::Hello { .. }
             | ClientMsg::Ping(_)
             | ClientMsg::SignUp { .. }
@@ -493,612 +662,16 @@ impl Client {
         }
     }
 
-    async fn sign_in(
-        &mut self,
-        password: Option<RelayPassword>,
-        auth_key: AuthKey,
-        new: Option<(PublicKey, String, Option<InviteCode>)>,
-    ) -> Result<(), ErrorCode> {
-        if self.me.is_some() {
-            return Err(ErrorCode::AlreadySignedIn);
+    async fn tell_me(&self, msg: ServerMsg) {
+        if let Some(me) = &self.me {
+            self.app.hub.send_others(me.id, self.conn_id, msg.clone());
         }
-        if self.hello != Some(PROTOCOL_VERSION) {
-            return Err(ErrorCode::Protocol {
-                server: PROTOCOL_VERSION,
-            });
-        }
-        let attempts = &self.app.relay_attempts;
-        if attempts.blocked(self.ip) {
-            return Err(ErrorCode::TooManyTries);
-        }
-        let ok = self
-            .app
-            .settings
-            .check_password(password.map(|p| p.0))
-            .await;
-        if !ok {
-            attempts.fail(self.ip);
-            return Err(ErrorCode::WrongPassword);
-        }
-        let hash = auth_key.hash();
-        let existing = db(self.app.db.account_by_auth(&hash).await)?;
-        let account = match (new, existing) {
-            (Some(_), Some(_)) => return Err(ErrorCode::AccountExists),
-            (Some((public_key, name, invite)), None) => {
-                let settings = self.app.settings.get();
-                if !settings.sign_ups {
-                    return Err(ErrorCode::SignUpsClosed);
-                }
-                let name = display_name(&name).map_err(|_| ErrorCode::BadName)?;
-                if !settings.invites {
-                    db(self
-                        .app
-                        .db
-                        .create_account(&hash, &public_key, &name, now())
-                        .await)?
-                } else {
-                    let invite = invite.ok_or(ErrorCode::InviteNeeded)?;
-                    let made = self
-                        .app
-                        .db
-                        .create_account_with_invite(&hash, &public_key, &name, now(), invite)
-                        .await;
-                    match db(made)? {
-                        Ok(account) => account,
-                        Err(refusal) => {
-                            attempts.fail(self.ip);
-                            return Err(match refusal {
-                                InviteRefusal::Wrong => ErrorCode::InviteWrong,
-                                InviteRefusal::Used => ErrorCode::InviteUsed,
-                            });
-                        }
-                    }
-                }
-            }
-            (None, Some(account)) => account,
-            (None, None) => {
-                attempts.fail(self.ip);
-                return Err(ErrorCode::UnknownAccount);
-            }
-        };
-        if account.banned {
-            return Err(ErrorCode::Banned);
-        }
-        self.enter(account).await
+        self.send(msg).await;
     }
 
-    async fn enter(&mut self, account: AccountRow) -> Result<(), ErrorCode> {
-        let presence = Presence::Online { away: false };
-        self.me = Some(Me {
-            id: account.id,
-            online_id: account.online_id,
-        });
-        let online = self.app.hub.join(
-            account.id,
-            Conn {
-                conn_id: self.conn_id,
-                tx: self.tx.clone(),
-                close: self.close.clone(),
-                presence,
-            },
-        );
-        self.app.stats.connected(online);
-        db(self.app.db.set_last_seen(account.id, now()).await)?;
-        let welcome = self.account(&account).await?;
-        self.send(ServerMsg::Welcome(welcome)).await;
-        let friends = db(self.app.db.relations(account.id).await)?
-            .into_iter()
-            .map(|(row, state)| self.friend(&row, state))
-            .collect();
-        self.send(ServerMsg::Friends(friends)).await;
-        for (id, from, at, sealed) in db(self.app.db.pending_messages(account.id).await)? {
-            self.send(ServerMsg::Chat(ChatMessage {
-                id,
-                from,
-                at,
-                sealed,
-            }))
-            .await;
-        }
-        self.tell_friends(presence).await
-    }
-
-    async fn account(&self, row: &AccountRow) -> Result<Account, ErrorCode> {
-        Ok(Account {
-            online_id: row.online_id,
-            display_name: row.display_name.clone(),
-            storage_used: db(self.app.db.storage_used(row.id).await)?,
-            quota_bytes: quota_of(&self.app, row),
-        })
-    }
-
-    async fn my_row(&self) -> Result<AccountRow, ErrorCode> {
-        db(self.app.db.account(self.me()?.id).await)?.ok_or(ErrorCode::Server)
-    }
-
-    async fn send_account(&self) -> Result<(), ErrorCode> {
-        let account = self.account(&self.my_row().await?).await?;
-        self.send(ServerMsg::Account(account)).await;
+    fn others(&self, msg: ServerMsg) -> Result<(), ErrorCode> {
+        self.app.hub.send_others(self.me()?.id, self.conn_id, msg);
         Ok(())
-    }
-
-    fn friend(&self, row: &AccountRow, state: FriendState) -> Friend {
-        let presence = (state == FriendState::Friend).then(|| {
-            self.app.hub.presence(row.id).unwrap_or(Presence::Offline {
-                last_seen: row.last_seen,
-            })
-        });
-        Friend {
-            online_id: row.online_id,
-            display_name: row.display_name.clone(),
-            public_key: row.public_key,
-            state,
-            presence,
-        }
-    }
-
-    async fn user(&self, online: OnlineId) -> Result<AccountRow, ErrorCode> {
-        let me = self.me()?;
-        match db(self.app.db.account_by_online(online).await)? {
-            Some(row) if row.id != me.id => Ok(row),
-            _ => Err(ErrorCode::UnknownUser),
-        }
-    }
-
-    async fn tell_friends(&self, presence: Presence) -> Result<(), ErrorCode> {
-        let me = self.me()?;
-        for friend in db(self.app.db.friend_ids(me.id).await)? {
-            self.app.hub.send(
-                friend,
-                ServerMsg::Presence {
-                    who: me.online_id,
-                    presence,
-                },
-            );
-        }
-        Ok(())
-    }
-
-    async fn set_name(&mut self, name: &str) -> Result<(), ErrorCode> {
-        let name = display_name(name).map_err(|_| ErrorCode::BadName)?;
-        let me = self.me()?.id;
-        db(self.app.db.set_display_name(me, &name).await)?;
-        let row = self.my_row().await?;
-        self.send(ServerMsg::Account(self.account(&row).await?))
-            .await;
-        for (other, state) in db(self.app.db.relations(me).await)? {
-            let seen_as = match state {
-                FriendState::Friend => FriendState::Friend,
-                FriendState::Incoming => FriendState::Outgoing,
-                FriendState::Outgoing => FriendState::Incoming,
-                FriendState::Blocked => continue,
-            };
-            if seen_as == FriendState::Outgoing && db(self.app.db.is_blocked(other.id, me).await)? {
-                continue;
-            }
-            self.app
-                .hub
-                .send(other.id, ServerMsg::Friend(self.friend(&row, seen_as)));
-        }
-        Ok(())
-    }
-
-    async fn add_friend(&mut self, to: OnlineId) -> Result<(), ErrorCode> {
-        let me = self.me()?.id;
-        let other = self.user(to).await?;
-        let app = self.app.clone();
-        if db(app.db.are_friends(me, other.id).await)? {
-            self.send(ServerMsg::Friend(self.friend(&other, FriendState::Friend)))
-                .await;
-            return Ok(());
-        }
-        if db(app.db.has_request(other.id, me).await)? {
-            return self.answer_friend(to, true).await;
-        }
-        db(app.db.unblock(me, other.id).await)?;
-        db(app.db.add_request(me, other.id, now()).await)?;
-        self.send(ServerMsg::Friend(
-            self.friend(&other, FriendState::Outgoing),
-        ))
-        .await;
-        if !db(app.db.is_blocked(other.id, me).await)? {
-            let row = self.my_row().await?;
-            app.hub.send(
-                other.id,
-                ServerMsg::Friend(self.friend(&row, FriendState::Incoming)),
-            );
-        }
-        Ok(())
-    }
-
-    async fn answer_friend(&mut self, from: OnlineId, accept: bool) -> Result<(), ErrorCode> {
-        let me = self.me()?.id;
-        let my_online = self.me()?.online_id;
-        let other = self.user(from).await?;
-        let app = self.app.clone();
-        if !db(app.db.has_request(other.id, me).await)? {
-            return Err(ErrorCode::UnknownUser);
-        }
-        if accept {
-            db(app.db.befriend(me, other.id, now()).await)?;
-            self.send(ServerMsg::Friend(self.friend(&other, FriendState::Friend)))
-                .await;
-            let row = self.my_row().await?;
-            app.hub.send(
-                other.id,
-                ServerMsg::Friend(self.friend(&row, FriendState::Friend)),
-            );
-        } else {
-            db(app.db.unfriend(me, other.id).await)?;
-            self.send(ServerMsg::FriendGone(from)).await;
-            app.hub.send(other.id, ServerMsg::FriendGone(my_online));
-        }
-        Ok(())
-    }
-
-    async fn remove_friend(&mut self, who: OnlineId, block: bool) -> Result<(), ErrorCode> {
-        let me = self.me()?.id;
-        let my_online = self.me()?.online_id;
-        let other = self.user(who).await?;
-        let app = self.app.clone();
-        if block {
-            db(app.db.block(me, other.id).await)?;
-            self.send(ServerMsg::Friend(self.friend(&other, FriendState::Blocked)))
-                .await;
-        } else {
-            db(app.db.unfriend(me, other.id).await)?;
-            self.send(ServerMsg::FriendGone(who)).await;
-        }
-        app.hub.send(other.id, ServerMsg::FriendGone(my_online));
-        for session in app.hub.end_between(me, other.id) {
-            let ended = ServerMsg::SessionEnded {
-                session,
-                reason: citrine_gb_net::EndReason::Left,
-            };
-            app.hub.send(other.id, ended.clone());
-            self.send(ended).await;
-        }
-        Ok(())
-    }
-
-    async fn chat(&mut self, tag: Tag, to: OnlineId, sealed: Sealed) -> Result<(), ErrorCode> {
-        let me = self.me()?;
-        let (me_id, me_online) = (me.id, me.online_id);
-        let other = self.user(to).await?;
-        if !db(self.app.db.are_friends(me_id, other.id).await)? {
-            return Err(ErrorCode::NotFriends);
-        }
-        if sealed.ciphertext.len() as u64 > self.app.settings.get().max_message_bytes {
-            return Err(ErrorCode::TooLarge);
-        }
-        let at = now();
-        let id = db(self
-            .app
-            .db
-            .insert_message(me_id, other.id, at, &sealed)
-            .await)?;
-        self.app.stats.message();
-        self.send(ServerMsg::ChatSent { tag, id, at }).await;
-        self.app.hub.send(
-            other.id,
-            ServerMsg::Chat(ChatMessage {
-                id,
-                from: me_online,
-                at,
-                sealed,
-            }),
-        );
-        Ok(())
-    }
-
-    async fn upload(&mut self, tag: Tag, size: u64) -> Result<(), ErrorCode> {
-        if self.uploads.contains_key(&tag) {
-            return Err(ErrorCode::BadMessage);
-        }
-        if self.uploads.len() >= MAX_UPLOADS {
-            return Err(ErrorCode::RateLimited);
-        }
-        let row = self.my_row().await?;
-        let quota = quota_of(&self.app, &row);
-        if quota == 0 {
-            return Err(ErrorCode::SharingOff);
-        }
-        if size == 0 || size > self.app.settings.get().max_file_bytes {
-            return Err(ErrorCode::TooLarge);
-        }
-        let reserved: u64 = self.uploads.values().map(|u| u.size).sum();
-        let used = db(self.app.db.storage_used(row.id).await)? + reserved;
-        if used.saturating_add(size) > quota {
-            return Err(ErrorCode::QuotaFull);
-        }
-        let id = random_file_id();
-        let path = self.app.files_dir.join(format!("{}.part", hex(&id.0)));
-        let file = tokio::fs::File::create(&path).await.map_err(|e| {
-            log::error!("upload: {e}");
-            ErrorCode::Server
-        })?;
-        self.uploads.insert(
-            tag,
-            Upload {
-                id,
-                size,
-                received: 0,
-                file,
-                path,
-            },
-        );
-        self.send(ServerMsg::UploadReady(tag)).await;
-        Ok(())
-    }
-
-    async fn chunk(&mut self, tag: Tag, data: &[u8]) -> Result<(), ErrorCode> {
-        let upload = self.uploads.get_mut(&tag).ok_or(ErrorCode::UnknownFile)?;
-        if upload.received + data.len() as u64 > upload.size {
-            return Err(ErrorCode::TooLarge);
-        }
-        let io = |e: std::io::Error| {
-            log::error!("upload: {e}");
-            ErrorCode::Server
-        };
-        upload.file.write_all(data).await.map_err(io)?;
-        upload.received += data.len() as u64;
-        if upload.received < upload.size {
-            return Ok(());
-        }
-        let mut upload = self.uploads.remove(&tag).ok_or(ErrorCode::Server)?;
-        upload.file.flush().await.map_err(io)?;
-        upload.file.sync_all().await.map_err(io)?;
-        let path = file_path(&self.app, upload.id);
-        tokio::fs::rename(&upload.path, &path).await.map_err(io)?;
-        let created = now();
-        let me = self.me()?.id;
-        if let Err(e) = db(self
-            .app
-            .db
-            .insert_file(upload.id, me, upload.size, created)
-            .await)
-        {
-            let _ = tokio::fs::remove_file(&path).await;
-            return Err(e);
-        }
-        self.send(ServerMsg::Uploaded {
-            tag,
-            file: FileInfo {
-                id: upload.id,
-                size: upload.size,
-                created,
-            },
-        })
-        .await;
-        self.send_account().await
-    }
-
-    async fn download(&mut self, file: FileId) -> Result<(), ErrorCode> {
-        let me = self.me()?.id;
-        let (owner, info) = db(self.app.db.file(file).await)?.ok_or(ErrorCode::UnknownFile)?;
-        if owner != me && !db(self.app.db.are_friends(owner, me).await)? {
-            return Err(ErrorCode::UnknownFile);
-        }
-        let path = file_path(&self.app, file);
-        let tx = self.tx.clone();
-        self.downloads.retain(|d| !d.is_finished());
-        self.downloads.push(tokio::spawn(async move {
-            let Ok(mut f) = tokio::fs::File::open(&path).await else {
-                let _ = tx
-                    .send(ServerMsg::DownloadFailed {
-                        file,
-                        error: ErrorCode::UnknownFile,
-                    })
-                    .await;
-                return;
-            };
-            if tx
-                .send(ServerMsg::FileStart {
-                    file,
-                    size: info.size,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-            let mut left = info.size;
-            while left > 0 {
-                let mut data = vec![0; CHUNK_BYTES.min(left as usize)];
-                if f.read_exact(&mut data).await.is_err() {
-                    let _ = tx
-                        .send(ServerMsg::DownloadFailed {
-                            file,
-                            error: ErrorCode::Server,
-                        })
-                        .await;
-                    return;
-                }
-                left -= data.len() as u64;
-                if tx.send(ServerMsg::FileChunk { file, data }).await.is_err() {
-                    return;
-                }
-            }
-        }));
-        Ok(())
-    }
-
-    async fn put_save(
-        &mut self,
-        tag: Tag,
-        put: PutSave<'_>,
-    ) -> Result<(), (ErrorCode, Option<SaveInfo>)> {
-        let plain = |code: ErrorCode| (code, None);
-        if !valid_slot(put.slot) || put.label.len() > MAX_LABEL_BYTES {
-            return Err(plain(ErrorCode::BadMessage));
-        }
-        let row = self.my_row().await.map_err(plain)?;
-        let quota = quota_of(&self.app, &row);
-        if quota == 0 {
-            return Err(plain(ErrorCode::SharingOff));
-        }
-        let size = put.data.len() as u64;
-        if size == 0 || size > self.app.settings.get().max_file_bytes {
-            return Err(plain(ErrorCode::TooLarge));
-        }
-        let current = db(self.app.db.save(row.id, put.game, put.slot).await).map_err(plain)?;
-        let version = current.as_ref().map_or(0, |(info, _)| info.version);
-        if version != put.base {
-            return Err((ErrorCode::SaveChanged, current.map(|(info, _)| info)));
-        }
-        let replacing = current.as_ref().map_or(0, |(info, _)| info.size);
-        let reserved: u64 = self.uploads.values().map(|u| u.size).sum();
-        let used = db(self.app.db.storage_used(row.id).await).map_err(plain)? + reserved;
-        if used.saturating_sub(replacing).saturating_add(size) > quota {
-            return Err(plain(ErrorCode::QuotaFull));
-        }
-        let id = random_file_id();
-        let path = file_path(&self.app, id);
-        let part = self.app.files_dir.join(format!("{}.part", hex(&id.0)));
-        let io = |e: std::io::Error| {
-            log::error!("save: {e}");
-            plain(ErrorCode::Server)
-        };
-        let mut file = tokio::fs::File::create(&part).await.map_err(io)?;
-        file.write_all(put.data).await.map_err(io)?;
-        file.sync_all().await.map_err(io)?;
-        drop(file);
-        tokio::fs::rename(&part, &path).await.map_err(io)?;
-        let new = NewSave {
-            game: put.game,
-            slot: put.slot,
-            base: put.base,
-            label: put.label,
-            file: id,
-            size,
-        };
-        let written = match db(self.app.db.put_save(row.id, new, now()).await) {
-            Ok(written) => written,
-            Err(code) => {
-                let _ = tokio::fs::remove_file(&path).await;
-                return Err(plain(code));
-            }
-        };
-        match written {
-            SaveWrite::Stored { info, replaced } => {
-                if let Some(old) = replaced {
-                    let _ = tokio::fs::remove_file(file_path(&self.app, old)).await;
-                }
-                self.send(ServerMsg::SaveStored { tag, info }).await;
-                self.send_account().await.map_err(plain)
-            }
-            SaveWrite::Changed(current) => {
-                let _ = tokio::fs::remove_file(&path).await;
-                Err((ErrorCode::SaveChanged, current))
-            }
-        }
-    }
-
-    async fn get_save(&mut self, game: GameKey, slot: String) -> Result<(), ErrorCode> {
-        let me = self.me()?.id;
-        let Some((info, file)) = db(self.app.db.save(me, game, &slot).await)? else {
-            self.send(ServerMsg::SaveMissing { game, slot }).await;
-            return Ok(());
-        };
-        match tokio::fs::read(file_path(&self.app, file)).await {
-            Ok(data) => self.send(ServerMsg::Save { info, data }).await,
-            Err(e) => {
-                log::error!("save {}: {e}", hex(&file.0));
-                self.send(ServerMsg::SaveMissing { game, slot }).await;
-            }
-        }
-        Ok(())
-    }
-
-    fn peer(&self, session: SessionId) -> Result<i64, ErrorCode> {
-        self.app
-            .hub
-            .peer(session, self.me()?.id)
-            .ok_or(ErrorCode::UnknownSession)
-    }
-
-    async fn invite(&mut self, to: OnlineId, sealed: Sealed) -> Result<(), ErrorCode> {
-        let me = self.me()?;
-        let (me_id, me_online) = (me.id, me.online_id);
-        let other = self.user(to).await?;
-        if !db(self.app.db.are_friends(me_id, other.id).await)? {
-            return Err(ErrorCode::NotFriends);
-        }
-        if !self.app.hub.is_online(other.id) {
-            return Err(ErrorCode::Offline);
-        }
-        let session = self.app.hub.invite(me_id, other.id);
-        self.send(ServerMsg::Invited { session, to }).await;
-        self.app.hub.send(
-            other.id,
-            ServerMsg::Invite {
-                session,
-                from: me_online,
-                sealed,
-            },
-        );
-        Ok(())
-    }
-
-    async fn answer_invite(&mut self, session: SessionId, accept: bool) -> Result<(), ErrorCode> {
-        let me = self.me()?;
-        let (me_id, me_online) = (me.id, me.online_id);
-        let found = self
-            .app
-            .hub
-            .answer(session, me_id, accept)
-            .ok_or(ErrorCode::UnknownSession)?;
-        if !accept {
-            self.app.hub.send(
-                found.host,
-                ServerMsg::SessionEnded {
-                    session,
-                    reason: citrine_gb_net::EndReason::Declined,
-                },
-            );
-            return Ok(());
-        }
-        let host = db(self.app.db.account(found.host).await)?.ok_or(ErrorCode::Server)?;
-        self.send(ServerMsg::SessionStarted {
-            session,
-            with: host.online_id,
-        })
-        .await;
-        self.app.hub.send(
-            found.host,
-            ServerMsg::SessionStarted {
-                session,
-                with: me_online,
-            },
-        );
-        Ok(())
-    }
-
-    async fn screen(&mut self, png: Vec<u8>) {
-        let refused = if !self.app.settings.get().pictures {
-            Some(ErrorCode::PicturesOff)
-        } else if png.len() > MAX_SCREEN_BYTES {
-            Some(ErrorCode::TooLarge)
-        } else if !png.starts_with(PNG_SIGNATURE) {
-            Some(ErrorCode::BadMessage)
-        } else if !self.screen_limit.take(1.0) {
-            Some(ErrorCode::RateLimited)
-        } else {
-            None
-        };
-        if let Some(error) = refused {
-            self.send(ServerMsg::ScreenRefused(error)).await;
-            return;
-        }
-        let token = self
-            .screen
-            .get_or_insert_with(crate::screens::token)
-            .clone();
-        self.app.screens.put(&token, png);
-        self.send(ServerMsg::ScreenStored {
-            path: format!("/f/{token}"),
-        })
-        .await;
     }
 
     async fn finish(&mut self) {
@@ -1112,15 +685,30 @@ impl Client {
             drop(upload.file);
             let _ = tokio::fs::remove_file(&upload.path).await;
         }
-        let Some(me) = &self.me else { return };
-        let Some(ended) = self.app.hub.leave(me.id, self.conn_id) else {
+        let Some(me) = self.me.as_ref().map(|me| me.id) else {
+            return;
+        };
+        let before = self.app.hub.presence(me);
+        let Some(left) = self.app.hub.leave(me, self.conn_id) else {
             return;
         };
         let last_seen = now();
-        let _ = db(self.app.db.set_last_seen(me.id, last_seen).await);
-        let _ = self.tell_friends(Presence::Offline { last_seen }).await;
-        for (session, other) in ended {
-            self.app.hub.send(
+        if let Some(device) = self.device {
+            let _ = db(self.app.db.device_seen(device, last_seen).await);
+        }
+        if left.last {
+            let _ = db(self.app.db.set_last_seen(me, last_seen).await);
+            let _ = self.tell_friends(Presence::Offline { last_seen }).await;
+        } else {
+            if let Some(after) = self.app.hub.presence(me)
+                && Some(after) != before
+            {
+                let _ = self.tell_friends(after).await;
+            }
+            let _ = self.send_devices().await;
+        }
+        for (session, other) in left.ended {
+            self.app.hub.send_to(
                 other,
                 ServerMsg::SessionEnded {
                     session,

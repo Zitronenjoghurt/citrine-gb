@@ -103,6 +103,7 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 }
 
 #[test]
+#[cfg_attr(not(feature = "audio-codec"), ignore = "needs the audio-codec feature")]
 fn five_seconds_of_homebrew_make_an_mp4_that_plays() {
     let frames = 300;
     let rec = record(

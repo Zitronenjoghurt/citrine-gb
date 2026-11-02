@@ -2,6 +2,7 @@ pub mod mp4;
 mod thumbnail;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "audio-codec"), path = "recording/no_audio.rs")]
 mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(feature = "openh264-source", allow(dead_code))]
@@ -30,6 +31,7 @@ pub const DEFAULT_SCALE: usize = 4;
 pub const MAX_SCALE: usize = 8;
 pub const VIDEO_TIMESCALE: u32 = 1_048_576;
 pub const FRAME_TICKS: u32 = 17_556;
+#[cfg_attr(not(feature = "audio-codec"), allow(dead_code))]
 pub const AUDIO_BITRATE: u32 = 256_000;
 pub const CHANNELS: usize = 2;
 
@@ -212,6 +214,10 @@ impl ScreenRecorder {
         self.session
             .as_ref()
             .map_or(Duration::ZERO, |s| frames_to_duration(s.video_frames))
+    }
+
+    pub fn elapsed_label(&self) -> String {
+        crate::media::format_length(self.elapsed().as_millis() as u64)
     }
 
     pub fn start(

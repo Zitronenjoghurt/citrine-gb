@@ -1,14 +1,17 @@
 use super::{Online, Phase};
 use crate::storage::Backend;
 use citrine_gb_net::{
-    Body, CHUNK_BYTES, ChatMessage, ClientMsg, Envelope, ErrorCode, FileId, FileInfo, FriendState,
-    MAX_RECEIPT_IDS, MAX_TEXT_CHARS, MessageId, OnlineId, Receipt, ServerMsg, Share, ShareKind,
-    Tag, pack, unpack,
+    Body, CHUNK_BYTES, ChatMessage, ClientMsg, Edit, Envelope, ErrorCode, FileId, FileInfo,
+    FriendState, MAX_PALETTE_BYTES, MAX_RECEIPT_IDS, MAX_TEXT_CHARS, MessageId, OnlineId, Receipt,
+    STORAGE_BLOCK, ServerMsg, Share, ShareKind, Tag,
 };
+use history::{decode_history, encode_history, history_name, is_history_name};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use web_time::Instant;
+
+pub mod history;
 
 pub const KEEP_PER_FRIEND: usize = 300;
 const NAMESPACE: &str = "chats";
@@ -16,7 +19,10 @@ const SAVE_EVERY: Duration = Duration::from_secs(1);
 const RECEIPT_EVERY: Duration = Duration::from_secs(1);
 const UPLOAD_PER_SECOND: f64 = 3.0 * 1024.0 * 1024.0;
 const UPLOAD_BURST: f64 = 3.0 * 1024.0 * 1024.0;
-const MAX_HISTORY_BYTES: usize = 32 << 20;
+const CHATS_PER_SECOND: f64 = 4.0;
+const CHAT_BURST: f64 = 20.0;
+const RATE_LIMITED_PAUSE: Duration = Duration::from_secs(2);
+const NO_FILE: FileId = FileId([0; 16]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Failure {
@@ -34,6 +40,7 @@ impl Failure {
             Failure::Refused(ErrorCode::SharingOff) => "Not sent, this server doesn't keep files",
             Failure::Refused(ErrorCode::NotFriends) => "Not sent, you aren't friends anymore",
             Failure::Refused(ErrorCode::RateLimited) => "Not sent, sending too fast",
+            Failure::Refused(ErrorCode::InboxFull) => "Not sent, their inbox is full",
             Failure::Refused(_) => "Not sent, the server refused it",
             Failure::Gone => "Not sent. Share it again.",
         }
@@ -62,6 +69,35 @@ impl Delivery {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Change {
+    #[default]
+    Kept,
+    Edited {
+        told: bool,
+    },
+    Deleted {
+        told: bool,
+    },
+}
+
+impl Change {
+    pub fn untold(self) -> bool {
+        matches!(
+            self,
+            Change::Edited { told: false } | Change::Deleted { told: false }
+        )
+    }
+
+    fn told(self) -> Self {
+        match self {
+            Change::Edited { .. } => Change::Edited { told: true },
+            Change::Deleted { .. } => Change::Deleted { told: true },
+            Change::Kept => Change::Kept,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatEntry {
     pub id: u64,
@@ -69,12 +105,42 @@ pub struct ChatEntry {
     pub at: u64,
     pub body: Body,
     pub delivery: Delivery,
+    pub change: Change,
+}
+
+impl ChatEntry {
+    pub fn is_deleted(&self) -> bool {
+        matches!(self.change, Change::Deleted { .. })
+    }
+
+    pub fn is_edited(&self) -> bool {
+        matches!(self.change, Change::Edited { .. })
+    }
+
+    fn reached_relay(&self, sending: bool) -> bool {
+        sending || self.delivery.rank() > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Out {
+    Entry(OnlineId, u64),
+    Change(OnlineId, u64),
+}
+
+impl Out {
+    fn friend(self) -> OnlineId {
+        match self {
+            Self::Entry(friend, _) | Self::Change(friend, _) => friend,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversation {
     pub entries: Vec<ChatEntry>,
     pub unread: usize,
+    pub relayed: BTreeMap<u64, MessageId>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +182,7 @@ pub struct ChatState {
     chats: BTreeMap<OnlineId, Conversation>,
     owner: Option<String>,
     next_tag: Tag,
-    sending: HashMap<Tag, (OnlineId, u64)>,
+    sending: HashMap<Tag, Out>,
     uploads: HashMap<Tag, Upload>,
     held: HashMap<u64, Vec<u8>>,
     downloads: HashMap<FileId, Download>,
@@ -131,19 +197,18 @@ pub struct ChatState {
     saved_at: Option<Instant>,
     budget: f64,
     budget_at: Option<Instant>,
+    queued: BTreeMap<i64, Out>,
+    change_failures: HashMap<u64, Failure>,
+    changes_due: bool,
+    paced: bool,
+    chat_tokens: f64,
+    chat_tokens_at: Option<Instant>,
+    paused_until: Option<Instant>,
 }
 
 fn take_first(ids: &mut Vec<u64>) -> Vec<u64> {
     let count = ids.len().min(MAX_RECEIPT_IDS);
     ids.drain(..count).collect()
-}
-
-fn history_name(owner: &str) -> String {
-    let safe: String = owner
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    format!("{safe}.bin")
 }
 
 impl ChatState {
@@ -199,12 +264,98 @@ impl ChatState {
         }
     }
 
+    fn take_edit(&mut self, friend: OnlineId, edit: &Edit) {
+        if edit.text.trim().is_empty() || edit.text.chars().count() > MAX_TEXT_CHARS {
+            return;
+        }
+        let Some(entry) = self.chats.get_mut(&friend).and_then(|chat| {
+            chat.entries
+                .iter_mut()
+                .find(|e| !e.mine && e.id == edit.id && !e.is_deleted())
+        }) else {
+            return;
+        };
+        if let Body::Text(text) = &mut entry.body {
+            text.clone_from(&edit.text);
+            entry.change = Change::Edited { told: true };
+            self.dirty = true;
+        }
+    }
+
+    fn take_own_receipt(&mut self, friend: OnlineId, receipt: &Receipt) {
+        let Some(chat) = self.chats.get_mut(&friend) else {
+            return;
+        };
+        for id in receipt.read.iter().take(MAX_RECEIPT_IDS) {
+            if let Some(entry) = chat.entries.iter_mut().find(|e| !e.mine && e.id == *id)
+                && entry.delivery == Delivery::Received
+            {
+                entry.delivery = Delivery::Seen;
+                chat.unread = chat.unread.saturating_sub(1);
+                self.dirty = true;
+            }
+        }
+        if let Some(owed) = self.receipts.get_mut(&friend) {
+            owed.delivered.retain(|id| !receipt.read.contains(id));
+            owed.read.retain(|id| !receipt.read.contains(id));
+        }
+    }
+
+    fn take_own_change(&mut self, friend: OnlineId, body: &Body) {
+        let (id, text) = match body {
+            Body::Edit(edit) if edit.text.chars().count() <= MAX_TEXT_CHARS => {
+                (edit.id, Some(edit.text.clone()))
+            }
+            Body::Delete(id) => (*id, None),
+            _ => return,
+        };
+        let Some(entry) = self.chats.get_mut(&friend).and_then(|chat| {
+            chat.entries
+                .iter_mut()
+                .find(|e| e.mine && e.id == id && !e.is_deleted())
+        }) else {
+            return;
+        };
+        match text {
+            Some(text) => {
+                entry.body = Body::Text(text);
+                entry.change = Change::Edited { told: true };
+            }
+            None => {
+                entry.body = Body::Text(String::new());
+                entry.change = Change::Deleted { told: true };
+                self.held.remove(&id);
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn take_delete(&mut self, friend: OnlineId, id: u64) {
+        let Some(chat) = self.chats.get_mut(&friend) else {
+            return;
+        };
+        let Some(entry) = chat
+            .entries
+            .iter_mut()
+            .find(|e| !e.mine && e.id == id && !e.is_deleted())
+        else {
+            return;
+        };
+        if entry.delivery == Delivery::Received {
+            chat.unread = chat.unread.saturating_sub(1);
+        }
+        entry.body = Body::Text(String::new());
+        entry.change = Change::Deleted { told: true };
+        self.dirty = true;
+    }
+
     fn push(&mut self, friend: OnlineId, entry: ChatEntry) {
         let chat = self.chats.entry(friend).or_default();
         chat.entries.push(entry);
         if chat.entries.len() > KEEP_PER_FRIEND {
             let extra = chat.entries.len() - KEEP_PER_FRIEND;
             for old in chat.entries.drain(..extra) {
+                chat.relayed.remove(&old.id);
                 self.held.remove(&old.id);
             }
         }
@@ -220,8 +371,7 @@ impl ChatState {
         self.files = None;
         if let Some(store) = &self.store
             && let Some(bytes) = store.read(NAMESPACE, &history_name(&owner))
-            && let Ok(plain) = unpack(&bytes, MAX_HISTORY_BYTES)
-            && let Ok(mut chats) = postcard::from_bytes::<BTreeMap<OnlineId, Conversation>>(&plain)
+            && let Some(mut chats) = decode_history(&bytes)
         {
             for entry in chats.values_mut().flat_map(|c| c.entries.iter_mut()) {
                 if entry.delivery == Delivery::Sending {
@@ -231,6 +381,7 @@ impl ChatState {
             self.chats = chats;
         }
         self.owner = Some(owner);
+        self.changes_due = true;
     }
 
     fn save(&mut self, now: Instant, force: bool) -> bool {
@@ -252,10 +403,10 @@ impl ChatState {
             return false;
         };
         self.saved_at = Some(now);
-        let Ok(plain) = postcard::to_allocvec(&self.chats) else {
+        let Some(bytes) = encode_history(&self.chats) else {
             return false;
         };
-        match store.write(NAMESPACE, &history_name(owner), &pack(&plain, true)) {
+        match store.write(NAMESPACE, &history_name(owner), &bytes) {
             Ok(()) => {
                 self.dirty = false;
                 true
@@ -267,16 +418,44 @@ impl ChatState {
         }
     }
 
+    fn in_flight_to(&self, friend: OnlineId) -> bool {
+        self.sending.values().any(|out| out.friend() == friend)
+    }
+
+    fn next_ready(&self) -> Option<i64> {
+        self.queued
+            .iter()
+            .find(|(_, out)| !self.in_flight_to(out.friend()))
+            .map(|(place, _)| *place)
+    }
+
+    fn queue_back(&mut self, out: Out) {
+        let place = self.queued.last_key_value().map_or(0, |(last, _)| last + 1);
+        self.queued.insert(place, out);
+    }
+
+    fn queue_front(&mut self, out: Out) {
+        let place = self
+            .queued
+            .first_key_value()
+            .map_or(0, |(first, _)| first - 1);
+        self.queued.insert(place, out);
+    }
+
     fn fail_pending(&mut self) {
-        let sending: Vec<(OnlineId, u64)> = self.sending.drain().map(|(_, v)| v).collect();
+        let sending: Vec<Out> = self.sending.drain().map(|(_, v)| v).collect();
         let uploads: Vec<(OnlineId, u64, Vec<u8>)> = self
             .uploads
             .drain()
             .map(|(_, u)| (u.to, u.id, u.bytes))
             .collect();
-        for (friend, id) in sending {
-            self.set_delivery(friend, id, Delivery::Failed(Failure::NotConnected));
+        let queued: Vec<Out> = std::mem::take(&mut self.queued).into_values().collect();
+        for out in sending.into_iter().chain(queued) {
+            if let Out::Entry(friend, id) = out {
+                self.set_delivery(friend, id, Delivery::Failed(Failure::NotConnected));
+            }
         }
+        self.changes_due = true;
         for (friend, id, bytes) in uploads {
             self.held.insert(id, bytes);
             self.set_delivery(friend, id, Delivery::Failed(Failure::NotConnected));
@@ -286,6 +465,33 @@ impl ChatState {
             self.fetched
                 .insert(file, Fetch::Failed("The connection dropped. Try again."));
         }
+    }
+
+    fn take_chat(&mut self, now: Instant) -> bool {
+        if self.paused_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        if !self.paced {
+            return true;
+        }
+        let earned = self.chat_tokens_at.map_or(CHAT_BURST, |at| {
+            now.duration_since(at).as_secs_f64() * CHATS_PER_SECOND
+        });
+        self.chat_tokens_at = Some(now);
+        self.chat_tokens = (self.chat_tokens + earned).min(CHAT_BURST);
+        if self.chat_tokens >= 1.0 {
+            self.chat_tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn rate_limited(&mut self, now: Instant) {
+        self.paused_until = Some(now + RATE_LIMITED_PAUSE);
+        self.paced = true;
+        self.chat_tokens = 0.0;
+        self.chat_tokens_at = Some(now);
     }
 
     fn take_budget(&mut self, now: Instant, bytes: usize) -> bool {
@@ -304,8 +510,25 @@ impl ChatState {
 }
 
 impl Online {
+    pub fn share_blocked(&self) -> Option<&'static str> {
+        let account = self.account()?;
+        if account.quota_bytes == 0 {
+            return Some(if self.info().is_some_and(|i| i.quota_bytes > 0) {
+                "Your account on this relay has no storage"
+            } else {
+                "This relay doesn't keep files"
+            });
+        }
+        (account.storage_used + STORAGE_BLOCK > account.quota_bytes)
+            .then_some("Your storage is full")
+    }
+
     pub fn persist_chats(&mut self) {
         self.chat.store = Some(Backend::settings());
+    }
+
+    pub(super) fn chat_changes_due(&mut self) {
+        self.chat.changes_due = true;
     }
 
     pub(super) fn chat_reset(&mut self) {
@@ -321,22 +544,49 @@ impl Online {
         }
         match msg {
             ServerMsg::Chat(message) => self.chat_message(message),
-            ServerMsg::ChatSent { tag, id: _, at } => {
-                if let Some((friend, id)) = self.chat.sending.remove(&tag)
-                    && let Some(entry) = self.chat.entry_mut(friend, id)
-                {
-                    entry.delivery = Delivery::Sent;
-                    entry.at = at;
-                    self.chat.dirty = true;
-                    self.chat.held.remove(&id);
+            ServerMsg::ChatCopy { to, message } => self.chat_copy(to, message),
+            ServerMsg::ChatSent { tag, id: relay, at } => match self.chat.sending.remove(&tag) {
+                Some(Out::Entry(friend, id)) => {
+                    if let Some(entry) = self.chat.entry_mut(friend, id) {
+                        entry.delivery = Delivery::Sent;
+                        entry.at = at;
+                        self.chat.dirty = true;
+                        self.chat.held.remove(&id);
+                        if let Some(chat) = self.chat.chats.get_mut(&friend) {
+                            chat.relayed.insert(id, relay);
+                        }
+                    }
+                }
+                Some(Out::Change(friend, id)) => {
+                    if let Some(entry) = self.chat.entry_mut(friend, id) {
+                        entry.change = entry.change.told();
+                        self.chat.dirty = true;
+                    }
+                    self.restate(friend, id);
+                }
+                None => {}
+            },
+            ServerMsg::ChatFailed {
+                tag,
+                error: ErrorCode::RateLimited,
+            } => {
+                self.chat.rate_limited(Instant::now());
+                if let Some(sent) = self.chat.sending.remove(&tag) {
+                    self.chat.queue_front(sent);
                 }
             }
-            ServerMsg::ChatFailed { tag, error } => {
-                if let Some((friend, id)) = self.chat.sending.remove(&tag) {
+            ServerMsg::ChatFailed { tag, error } => match self.chat.sending.remove(&tag) {
+                Some(Out::Entry(friend, id)) => {
                     self.chat
                         .set_delivery(friend, id, Delivery::Failed(Failure::Refused(error)));
                 }
-            }
+                Some(Out::Change(_, id)) => {
+                    self.chat
+                        .change_failures
+                        .insert(id, Failure::Refused(error));
+                }
+                None => {}
+            },
             ServerMsg::UploadReady(tag) => {
                 if let Some(upload) = self.chat.uploads.get_mut(&tag) {
                     upload.ready = true;
@@ -344,11 +594,19 @@ impl Online {
             }
             ServerMsg::Uploaded { tag, file } => {
                 if let Some(upload) = self.chat.uploads.remove(&tag) {
-                    if let Some(entry) = self.chat.entry_mut(upload.to, upload.id)
-                        && let Body::Share(share) = &mut entry.body
-                    {
-                        share.file = file.id;
-                        share.size = file.size;
+                    let kept = match self.chat.entry_mut(upload.to, upload.id) {
+                        Some(entry) if !entry.is_deleted() => {
+                            if let Body::Share(share) = &mut entry.body {
+                                share.file = file.id;
+                                share.size = file.size;
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !kept {
+                        self.send(ClientMsg::DeleteFile(file.id));
+                        return None;
                     }
                     if let Some(files) = &mut self.chat.files {
                         files.push(file);
@@ -413,14 +671,22 @@ impl Online {
         let Ok(envelope) = keys.open_envelope(&friend.public_key, &sealed) else {
             return;
         };
-        if let Body::Receipt(receipt) = &envelope.body {
-            self.chat.take_receipt(from, receipt, at);
-            return;
-        }
-        if let Body::Text(text) = &envelope.body
-            && text.chars().count() > MAX_TEXT_CHARS
-        {
-            return;
+        match &envelope.body {
+            Body::Receipt(receipt) => {
+                self.chat.take_receipt(from, receipt, at);
+                return;
+            }
+            Body::Edit(edit) => {
+                self.chat.take_edit(from, edit);
+                return;
+            }
+            Body::Delete(id) => {
+                self.chat.take_delete(from, *id);
+                return;
+            }
+            Body::Text(text) if text.chars().count() > MAX_TEXT_CHARS => return,
+            Body::Palette(palette) if palette.len() > MAX_PALETTE_BYTES => return,
+            _ => {}
         }
         self.chat.owe(from, envelope.id, false);
         let chat = self.chat.chats.entry(from).or_default();
@@ -436,8 +702,98 @@ impl Online {
                 at,
                 body: envelope.body,
                 delivery: Delivery::Received,
+                change: Change::Kept,
             },
         );
+    }
+
+    fn chat_copy(&mut self, to: OnlineId, message: ChatMessage) {
+        let ChatMessage {
+            id: relay,
+            at,
+            sealed,
+            ..
+        } = message;
+        self.chat.acks.push(relay);
+        let (Some(keys), Some(friend)) = (&self.keys, self.friends.get(&to)) else {
+            return;
+        };
+        let Ok(envelope) = keys.open_envelope(&friend.public_key, &sealed) else {
+            return;
+        };
+        match &envelope.body {
+            Body::Receipt(receipt) => return self.chat.take_own_receipt(to, receipt),
+            Body::Edit(_) | Body::Delete(_) => {
+                return self.chat.take_own_change(to, &envelope.body);
+            }
+            Body::Text(text) if text.chars().count() > MAX_TEXT_CHARS => return,
+            Body::Palette(palette) if palette.len() > MAX_PALETTE_BYTES => return,
+            _ => {}
+        }
+        let chat = self.chat.chats.entry(to).or_default();
+        chat.relayed.insert(envelope.id, relay);
+        if chat.entries.iter().any(|e| e.id == envelope.id) {
+            return;
+        }
+        self.chat.push(
+            to,
+            ChatEntry {
+                id: envelope.id,
+                mine: true,
+                at,
+                body: envelope.body,
+                delivery: Delivery::Sent,
+                change: Change::Kept,
+            },
+        );
+    }
+
+    fn restate(&mut self, friend: OnlineId, id: u64) {
+        let Some(&relay) = self
+            .chat
+            .chats
+            .get(&friend)
+            .and_then(|chat| chat.relayed.get(&id))
+        else {
+            return;
+        };
+        let Some(entry) = self.chat.entry_mut(friend, id) else {
+            return;
+        };
+        let body = match (&entry.change, &entry.body) {
+            (Change::Deleted { .. }, _) => None,
+            (Change::Edited { .. }, Body::Text(text)) => Some(Body::Text(text.clone())),
+            _ => return,
+        };
+        let sealed = match (body, &self.keys, self.friends.get(&friend)) {
+            (None, ..) => None,
+            (Some(body), Some(keys), Some(person)) => {
+                Some(keys.seal_envelope(&person.public_key, &Envelope { id, body }))
+            }
+            _ => return,
+        };
+        if sealed.is_none()
+            && let Some(chat) = self.chat.chats.get_mut(&friend)
+        {
+            chat.relayed.remove(&id);
+            self.chat.dirty = true;
+        }
+        self.send(ClientMsg::Restate { id: relay, sealed });
+    }
+
+    pub(super) fn chat_wipe(&mut self) {
+        if let Some(owner) = self.chat_owner() {
+            self.chat.load(owner.clone());
+            self.chat.fail_pending();
+            self.chat.chats.clear();
+            self.chat.held.clear();
+            self.chat.receipts.clear();
+            self.chat.queued.clear();
+            self.chat.dirty = false;
+            if let Some(store) = &self.chat.store {
+                let _ = store.delete(NAMESPACE, &history_name(&owner));
+            }
+        }
     }
 
     fn chat_chunk(&mut self, file: FileId, data: Vec<u8>) {
@@ -472,6 +828,7 @@ impl Online {
         }
         if self.phase != Phase::Connected {
             if !self.chat.sending.is_empty()
+                || !self.chat.queued.is_empty()
                 || !self.chat.uploads.is_empty()
                 || !self.chat.downloads.is_empty()
             {
@@ -479,6 +836,7 @@ impl Online {
             }
         } else {
             self.pump_uploads(now);
+            self.pump_queued(now);
             self.send_receipts(now);
         }
         if self.chat.save(now, false) && !self.chat.acks.is_empty() && self.is_connected() {
@@ -499,6 +857,12 @@ impl Online {
         self.chat.receipts_at = Some(now);
         let friends: Vec<OnlineId> = self.chat.receipts.keys().copied().collect();
         for friend in friends {
+            if !self.chat.receipts.contains_key(&friend) {
+                continue;
+            }
+            if !self.chat.take_chat(now) {
+                return;
+            }
             let Some(owed) = self.chat.receipts.get_mut(&friend) else {
                 continue;
             };
@@ -571,10 +935,124 @@ impl Online {
         }
     }
 
+    fn pump_queued(&mut self, now: Instant) {
+        if std::mem::take(&mut self.chat.changes_due) {
+            self.queue_untold_changes();
+        }
+        while let Some(place) = self.chat.next_ready() {
+            if !self.chat.take_chat(now) {
+                break;
+            }
+            match self.chat.queued.remove(&place) {
+                Some(Out::Entry(friend, id)) => self.transmit_entry(friend, id),
+                Some(Out::Change(friend, id)) => self.transmit_change(friend, id),
+                None => {}
+            }
+        }
+    }
+
+    fn queue_untold_changes(&mut self) {
+        let waiting: Vec<Out> = self
+            .chat
+            .sending
+            .values()
+            .chain(self.chat.queued.values())
+            .copied()
+            .collect();
+        let untold: Vec<Out> = self
+            .chat
+            .chats
+            .iter()
+            .filter(|(friend, _)| self.can_chat(**friend))
+            .flat_map(|(friend, chat)| {
+                chat.entries
+                    .iter()
+                    .filter(|e| e.mine && e.change.untold())
+                    .map(|e| Out::Change(*friend, e.id))
+            })
+            .filter(|out| !waiting.contains(out))
+            .collect();
+        for out in untold {
+            if let Out::Change(_, id) = out
+                && self.chat.change_failures.contains_key(&id)
+            {
+                continue;
+            }
+            self.chat.queue_back(out);
+        }
+    }
+
     fn send_entry(&mut self, friend: OnlineId, id: u64) {
+        let now = Instant::now();
+        if self.phase != Phase::Connected
+            || (self.chat.queued.is_empty()
+                && !self.chat.in_flight_to(friend)
+                && self.chat.take_chat(now))
+        {
+            self.transmit_entry(friend, id);
+            return;
+        }
+        if let Some(entry) = self.chat.entry_mut(friend, id) {
+            entry.delivery = Delivery::Sending;
+            self.chat.dirty = true;
+            self.chat.queue_back(Out::Entry(friend, id));
+        }
+    }
+
+    fn send_change(&mut self, friend: OnlineId, id: u64) {
+        self.chat.change_failures.remove(&id);
+        if self.phase != Phase::Connected {
+            return;
+        }
+        let out = Out::Change(friend, id);
+        if self.chat.queued.values().any(|o| *o == out) {
+            return;
+        }
+        if self.chat.queued.is_empty()
+            && !self.chat.in_flight_to(friend)
+            && self.chat.take_chat(Instant::now())
+        {
+            self.transmit_change(friend, id);
+        } else {
+            self.chat.queue_back(out);
+        }
+    }
+
+    fn transmit_change(&mut self, friend: OnlineId, id: u64) {
         let Some(entry) = self.chat.entry_mut(friend, id) else {
             return;
         };
+        let body = match (&entry.change, &entry.body) {
+            (Change::Deleted { told: false }, _) => Body::Delete(id),
+            (Change::Edited { told: false }, Body::Text(text)) => Body::Edit(Edit {
+                id,
+                text: text.clone(),
+            }),
+            _ => return,
+        };
+        let sealed = match (&self.keys, self.friends.get(&friend)) {
+            (Some(keys), Some(person)) if self.phase == Phase::Connected => {
+                keys.seal_envelope(&person.public_key, &Envelope::new(body))
+            }
+            _ => return,
+        };
+        let tag = self.chat.tag();
+        if self.send(ClientMsg::Chat {
+            tag,
+            to: friend,
+            sealed,
+        }) {
+            self.chat.sending.insert(tag, Out::Change(friend, id));
+        }
+    }
+
+    fn transmit_entry(&mut self, friend: OnlineId, id: u64) {
+        let Some(entry) = self.chat.entry_mut(friend, id) else {
+            return;
+        };
+        if entry.is_deleted() {
+            return;
+        }
         let envelope = Envelope {
             id,
             body: entry.body.clone(),
@@ -597,7 +1075,7 @@ impl Online {
             to: friend,
             sealed,
         }) {
-            self.chat.sending.insert(tag, (friend, id));
+            self.chat.sending.insert(tag, Out::Entry(friend, id));
         } else {
             self.chat
                 .set_delivery(friend, id, Delivery::Failed(Failure::NotConnected));
@@ -648,6 +1126,7 @@ impl Online {
                 at: crate::storage::now_unix(),
                 body: envelope.body,
                 delivery: Delivery::Sending,
+                change: Change::Kept,
             },
         );
         self.send_entry(friend, id);
@@ -689,6 +1168,7 @@ impl Online {
                 at: crate::storage::now_unix(),
                 body: envelope.body,
                 delivery: Delivery::Sending,
+                change: Change::Kept,
             },
         );
         self.start_upload(friend, id, bytes);
@@ -696,15 +1176,113 @@ impl Online {
         true
     }
 
+    pub fn send_palette(&mut self, friend: OnlineId, palette: String) -> bool {
+        if palette.len() > MAX_PALETTE_BYTES || !self.can_chat(friend) {
+            return false;
+        }
+        let envelope = Envelope::new(Body::Palette(palette));
+        let id = envelope.id;
+        self.chat.push(
+            friend,
+            ChatEntry {
+                id,
+                mine: true,
+                at: crate::storage::now_unix(),
+                body: envelope.body,
+                delivery: Delivery::Sending,
+                change: Change::Kept,
+            },
+        );
+        self.send_entry(friend, id);
+        self.chat.sent += 1;
+        true
+    }
+
+    fn in_flight(&self, friend: OnlineId, id: u64) -> bool {
+        self.chat
+            .sending
+            .values()
+            .any(|out| *out == Out::Entry(friend, id))
+    }
+
+    pub fn can_edit(&self, friend: OnlineId, id: u64) -> bool {
+        self.conversation(friend)
+            .and_then(|c| c.entries.iter().find(|e| e.id == id))
+            .is_some_and(|e| e.mine && !e.is_deleted() && matches!(e.body, Body::Text(_)))
+    }
+
+    pub fn edit_text(&mut self, friend: OnlineId, id: u64, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS || !self.can_edit(friend, id) {
+            return false;
+        }
+        let reached = {
+            let sending = self.in_flight(friend, id);
+            let Some(entry) = self.chat.entry_mut(friend, id) else {
+                return false;
+            };
+            if entry.body == Body::Text(text.to_owned()) {
+                return true;
+            }
+            entry.body = Body::Text(text.to_owned());
+            let reached = entry.reached_relay(sending);
+            if reached {
+                entry.change = Change::Edited { told: false };
+            }
+            reached
+        };
+        self.chat.dirty = true;
+        if reached {
+            self.send_change(friend, id);
+        }
+        true
+    }
+
+    pub fn delete_message(&mut self, friend: OnlineId, id: u64) {
+        let sending = self.in_flight(friend, id);
+        let Some(entry) = self.chat.entry_mut(friend, id) else {
+            return;
+        };
+        if !entry.mine || entry.is_deleted() {
+            return;
+        }
+        let file = match &entry.body {
+            Body::Share(share) if share.file != NO_FILE => Some(share.file),
+            _ => None,
+        };
+        if !entry.reached_relay(sending) {
+            self.chat
+                .queued
+                .retain(|_, out| *out != Out::Entry(friend, id));
+            self.forget(friend, id);
+            return;
+        }
+        entry.body = Body::Text(String::new());
+        entry.change = Change::Deleted { told: false };
+        self.chat.dirty = true;
+        self.chat.held.remove(&id);
+        if let Some(file) = file {
+            self.delete_file(file);
+        }
+        self.send_change(friend, id);
+    }
+
+    pub fn change_failure(&self, id: u64) -> Option<Failure> {
+        self.chat.change_failures.get(&id).copied()
+    }
+
     pub fn retry(&mut self, friend: OnlineId, id: u64) {
+        if self.chat.change_failures.contains_key(&id) {
+            self.send_change(friend, id);
+            return;
+        }
         let Some(entry) = self.chat.entry_mut(friend, id) else {
             return;
         };
         if !matches!(entry.delivery, Delivery::Failed(_)) {
             return;
         }
-        let needs_upload =
-            matches!(&entry.body, Body::Share(share) if share.file == FileId([0; 16]));
+        let needs_upload = matches!(&entry.body, Body::Share(share) if share.file == NO_FILE);
         if !needs_upload {
             self.send_entry(friend, id);
             return;
@@ -890,142 +1468,5 @@ impl Online {
     }
 }
 
-pub type History = BTreeMap<OnlineId, Conversation>;
-
-fn is_history_name(name: &str) -> bool {
-    name.strip_suffix(".bin").is_some_and(|stem| {
-        !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    })
-}
-
-pub fn decode_history(bytes: &[u8]) -> Option<History> {
-    let plain = unpack(bytes, MAX_HISTORY_BYTES).ok()?;
-    postcard::from_bytes(&plain).ok()
-}
-
-pub fn encode_history(history: &History) -> Option<Vec<u8>> {
-    let plain = postcard::to_allocvec(history).ok()?;
-    Some(pack(&plain, true))
-}
-
-pub fn merge_history(into: &mut History, from: &History) -> usize {
-    let mut added = 0;
-    for (friend, theirs) in from {
-        let chat = into.entry(*friend).or_default();
-        for entry in &theirs.entries {
-            if !chat.entries.iter().any(|e| e.id == entry.id) {
-                chat.entries.push(entry.clone());
-                added += 1;
-            }
-        }
-        chat.entries.sort_by_key(|e| e.at);
-        let extra = chat.entries.len().saturating_sub(KEEP_PER_FRIEND);
-        chat.entries.drain(..extra);
-    }
-    added
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mine(id: u64, delivery: Delivery) -> ChatEntry {
-        ChatEntry {
-            id,
-            mine: true,
-            at: 100,
-            body: Body::Text("hi".into()),
-            delivery,
-        }
-    }
-
-    #[test]
-    fn receipts_only_move_a_message_forward() {
-        let friend = OnlineId::new(7).unwrap();
-        let mut state = ChatState::default();
-        for entry in [
-            mine(1, Delivery::Sent),
-            mine(2, Delivery::Delivered(150)),
-            mine(3, Delivery::Read(160)),
-            mine(4, Delivery::Sending),
-            mine(5, Delivery::Failed(Failure::NotConnected)),
-            mine(6, Delivery::Sent),
-        ] {
-            state.push(friend, entry);
-        }
-        let receipt = Receipt {
-            delivered: vec![1, 2, 3, 4, 5, 6],
-            read: vec![6],
-        };
-        state.take_receipt(friend, &receipt, 200);
-        let got: Vec<Delivery> = state.chats[&friend]
-            .entries
-            .iter()
-            .map(|e| e.delivery)
-            .collect();
-        assert_eq!(
-            got,
-            [
-                Delivery::Delivered(200),
-                Delivery::Delivered(150),
-                Delivery::Read(160),
-                Delivery::Sending,
-                Delivery::Failed(Failure::NotConnected),
-                Delivery::Read(200),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_receipt_never_touches_received_messages() {
-        let friend = OnlineId::new(7).unwrap();
-        let mut state = ChatState::default();
-        let mut theirs = mine(1, Delivery::Received);
-        theirs.mine = false;
-        state.push(friend, theirs);
-        let receipt = Receipt {
-            delivered: vec![1],
-            read: vec![1],
-        };
-        state.take_receipt(friend, &receipt, 200);
-        assert_eq!(state.chats[&friend].entries[0].delivery, Delivery::Received);
-    }
-
-    #[test]
-    fn old_history_still_loads_with_the_new_ticks() {
-        #[derive(Serialize)]
-        enum OlderDelivery {
-            Sending,
-            Sent,
-            Failed(Failure),
-            Received,
-        }
-        let older = postcard::to_allocvec(&[
-            OlderDelivery::Sending,
-            OlderDelivery::Sent,
-            OlderDelivery::Failed(Failure::Gone),
-            OlderDelivery::Received,
-        ])
-        .unwrap();
-        let now: [Delivery; 4] = postcard::from_bytes(&older).unwrap();
-        assert_eq!(
-            now,
-            [
-                Delivery::Sending,
-                Delivery::Sent,
-                Delivery::Failed(Failure::Gone),
-                Delivery::Received,
-            ]
-        );
-    }
-
-    #[test]
-    fn owed_receipts_go_out_in_batches() {
-        let mut ids: Vec<u64> = (0..MAX_RECEIPT_IDS as u64 + 5).collect();
-        assert_eq!(take_first(&mut ids).len(), MAX_RECEIPT_IDS);
-        assert_eq!(
-            ids,
-            (MAX_RECEIPT_IDS as u64..MAX_RECEIPT_IDS as u64 + 5).collect::<Vec<_>>()
-        );
-    }
-}
+mod tests;

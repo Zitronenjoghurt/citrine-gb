@@ -4,10 +4,14 @@ use crate::app::ui_state::keybinds::{
 };
 use crate::app::ui_state::settings::{ScalingMode, Settings};
 use crate::app::ui_state::touch::{LandscapeControls, TouchSettings};
+use crate::app::widgets;
+use crate::app::widgets::chip::{CHIP_HEIGHT, chip_text};
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::info_mark::info_mark;
 use crate::app::widgets::reset_slider::ResetSlider;
+use crate::app::widgets::section::{section, section_with_hint};
 use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::text::faint;
 use crate::icons;
 use crate::local_link::Half;
 use egui::{Response, RichText, Ui, Widget};
@@ -162,7 +166,7 @@ fn capture_banner(ui: &mut Ui, capture: &mut BindingCapture) {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.strong("Press a key or button…");
-                ui.label(RichText::new("Esc to cancel").weak().small());
+                ui.label(faint("Esc to cancel"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::app::mobile::compact_button(ui, "Cancel").clicked() {
                         capture.cancel();
@@ -175,41 +179,6 @@ fn capture_banner(ui: &mut Ui, capture: &mut BindingCapture) {
         capture.cancel();
     }
     ui.add_space(8.0);
-}
-
-pub(crate) fn section(ui: &mut Ui, icon: &str, title: &str, body: impl FnOnce(&mut Ui)) {
-    section_with(ui, icon, title, None, body);
-}
-
-pub(crate) fn section_with_hint(
-    ui: &mut Ui,
-    icon: &str,
-    title: &str,
-    hint: &str,
-    body: impl FnOnce(&mut Ui),
-) {
-    section_with(ui, icon, title, Some(hint), body);
-}
-
-fn section_with(
-    ui: &mut Ui,
-    icon: &str,
-    title: &str,
-    hint: Option<&str>,
-    body: impl FnOnce(&mut Ui),
-) {
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(icon).size(15.0));
-        ui.label(RichText::new(title).strong().size(15.0));
-        if let Some(hint) = hint {
-            info_mark(ui, hint);
-        }
-    });
-    ui.separator();
-    ui.add_space(2.0);
-    body(ui);
-    ui.add_space(14.0);
 }
 
 const DEAD_ZONE_HINT: &str = "How far the stick moves before it presses a direction.";
@@ -232,8 +201,6 @@ const ACTION_NAME: NameCell = NameCell {
 
 const ADD_WIDTH: f32 = 26.0;
 
-const CHIP_HEIGHT: f32 = 20.0;
-
 const STACK_BELOW: f32 = 130.0;
 
 fn buttons_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) {
@@ -248,7 +215,7 @@ fn buttons_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapt
                 let keys = settings.bindings.keys_for(button);
                 let pads = settings.bindings.pads_for(button);
                 if keys.is_empty() && pads.is_empty() {
-                    ui.label(RichText::new("Nothing bound").weak().small());
+                    ui.label(faint("Nothing bound"));
                 }
                 for key in keys {
                     if chip(ui, icons::KEYBOARD, &key_label(key), key.name()) {
@@ -294,7 +261,7 @@ fn split_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCaptur
             let chips = |ui: &mut Ui, settings: &mut Settings| {
                 let keys = settings.local_link.keys_for(half, button);
                 if keys.is_empty() {
-                    ui.label(RichText::new("Nothing bound").weak().small());
+                    ui.label(faint("Nothing bound"));
                 }
                 for key in keys {
                     if chip(ui, icons::KEYBOARD, &key_label(key), key.name()) {
@@ -340,7 +307,7 @@ fn shortcuts_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCa
                 let bound = settings.hotkeys.keys_for(action);
                 let pads = settings.hotkeys.pads_for(action);
                 if bound.is_empty() && pads.is_empty() {
-                    ui.label(RichText::new("Nothing bound").weak().small());
+                    ui.label(faint("Nothing bound"));
                 }
                 for hotkey in bound {
                     let label = hotkey.to_string();
@@ -439,14 +406,8 @@ fn striped_row(ui: &mut Ui, index: usize, body: impl FnOnce(&mut Ui)) {
 }
 
 fn chip(ui: &mut Ui, icon: &str, label: &str, full: &str) -> bool {
-    let visuals = ui.visuals();
-    let text = RichText::new(format!("{icon} {label}")).size(11.0);
-    let response = egui::Button::new(text)
-        .fill(visuals.widgets.inactive.weak_bg_fill)
-        .stroke(visuals.widgets.inactive.bg_stroke)
-        .corner_radius(4)
-        .min_size(egui::vec2(0.0, CHIP_HEIGHT))
-        .ui(ui);
+    let fill = ui.visuals().widgets.inactive.weak_bg_fill;
+    let response = widgets::chip::chip(ui, chip_text(format!("{icon} {label}")), fill).ui(ui);
 
     response
         .on_hover_text(format!("{full}\n{} Click to unbind", icons::X))

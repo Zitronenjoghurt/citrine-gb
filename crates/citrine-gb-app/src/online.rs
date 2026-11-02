@@ -1,6 +1,7 @@
 use citrine_gb_net::{
-    Account, ClientMsg, ErrorCode, Friend, FriendState, GameHash, InviteCode, Keys, Notice,
-    OnlineId, PROTOCOL_VERSION, Presence, RelayId, RelayPassword, ServerInfo, ServerMsg,
+    Account, ClientMsg, DeviceId, DeviceInfo, ErrorCode, Friend, FriendState, GameHash, InviteCode,
+    Keys, Notice, OneTimeCode, OnlineId, PROTOCOL_VERSION, Presence, RelayId, RelayKey,
+    RelayPassword, ServerInfo, ServerMsg,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -13,9 +14,10 @@ pub mod cloud;
 pub mod settings;
 pub mod synced;
 pub mod transport;
+pub mod two_factor;
 
 pub use address::{AddressError, ServerAddress};
-pub use settings::{JoinedRelay, OnlineSettings, RelayEntry};
+pub use settings::{JoinedRelay, OnlineSettings, RelayEntry, Trust};
 use transport::{Connector, Transport, TransportEvent};
 
 pub const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -51,6 +53,11 @@ pub enum Problem {
     BadName,
     TooManyTries,
     Server,
+    KeyChanged,
+    KeyMismatch,
+    CodeNeeded,
+    CodeWrong,
+    SignedOut,
 }
 
 impl Problem {
@@ -67,6 +74,9 @@ impl Problem {
             ErrorCode::Banned => Self::Banned,
             ErrorCode::BadName => Self::BadName,
             ErrorCode::TooManyTries | ErrorCode::RateLimited => Self::TooManyTries,
+            ErrorCode::CodeNeeded => Self::CodeNeeded,
+            ErrorCode::CodeWrong => Self::CodeWrong,
+            ErrorCode::SignedOut => Self::SignedOut,
             _ => Self::Server,
         }
     }
@@ -80,6 +90,7 @@ impl Problem {
             Notice::PasswordChanged => Self::PasswordChanged,
             Notice::SignedInElsewhere => Self::SignedInElsewhere,
             Notice::ShuttingDown => Self::ShuttingDown,
+            Notice::SignedOut => Self::SignedOut,
         }
     }
 
@@ -101,6 +112,10 @@ impl Problem {
         matches!(self, Self::WrongPassword | Self::PasswordChanged)
     }
 
+    pub fn needs_code(self) -> bool {
+        matches!(self, Self::CodeNeeded | Self::CodeWrong)
+    }
+
     pub fn text(self) -> String {
         match self {
             Self::Unreachable => "Can't reach the server".into(),
@@ -118,7 +133,7 @@ impl Problem {
             Self::UnknownAccount => "This server has no account with that relay ID".into(),
             Self::AccountExists => "An account with this relay ID already exists".into(),
             Self::Banned => "This account is banned on this server".into(),
-            Self::SignedInElsewhere => "You signed in on another device".into(),
+            Self::SignedInElsewhere => "Citrine is open in another tab or window.".into(),
             Self::Protocol { server } if server > PROTOCOL_VERSION => {
                 "The server runs a newer Citrine. Update Citrine to connect.".into()
             }
@@ -126,6 +141,11 @@ impl Problem {
             Self::BadName => "That name isn't allowed".into(),
             Self::TooManyTries => "Too many tries. Wait a minute.".into(),
             Self::Server => "The server had a problem".into(),
+            Self::KeyChanged => "This relay's key changed".into(),
+            Self::KeyMismatch => "This relay's key doesn't match the one in the address.".into(),
+            Self::CodeNeeded => "This relay asks for your two-factor code".into(),
+            Self::CodeWrong => "That code is wrong. Try the newest one.".into(),
+            Self::SignedOut => "Another device signed this one out".into(),
         }
     }
 }
@@ -160,6 +180,8 @@ struct Target {
     password: String,
     plan: Plan,
     joined: bool,
+    trust: Trust,
+    code: Option<OneTimeCode>,
 }
 
 impl Target {
@@ -184,6 +206,7 @@ pub struct Joined {
     pub relay_id: RelayId,
     pub password: String,
     pub account: Account,
+    pub trust: Trust,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -224,6 +247,15 @@ pub struct Online {
     pictures_refused: bool,
     chat: chat::ChatState,
     cloud: cloud::CloudState,
+    relay_key: Option<RelayKey>,
+    offered_key: Option<RelayKey>,
+    trust_changed: bool,
+    setup: Option<Vec<u8>>,
+    recovery_codes: Option<Vec<String>>,
+    deleted: bool,
+    devices: Vec<DeviceInfo>,
+    this_device: Option<DeviceId>,
+    signed_out: Option<ServerAddress>,
 }
 
 impl Default for Online {
@@ -265,6 +297,15 @@ impl Online {
             pictures_refused: false,
             chat: chat::ChatState::default(),
             cloud: cloud::CloudState::default(),
+            relay_key: None,
+            offered_key: None,
+            trust_changed: false,
+            setup: None,
+            recovery_codes: None,
+            deleted: false,
+            devices: Vec::new(),
+            this_device: None,
+            signed_out: None,
         }
     }
 
@@ -272,13 +313,15 @@ impl Online {
         Self::new(Box::new(|_| Box::new(transport::Unplugged)))
     }
 
-    pub fn probe(&mut self, address: ServerAddress, password: String, now: Instant) {
+    pub fn probe(&mut self, address: ServerAddress, password: String, trust: Trust, now: Instant) {
         self.start(
             Target {
                 address,
                 password,
                 plan: Plan::Probe,
                 joined: false,
+                trust,
+                code: None,
             },
             now,
         );
@@ -305,12 +348,20 @@ impl Online {
         self.continue_with(Target { plan, ..target }, now);
     }
 
-    pub fn use_relay_id(&mut self, relay_id: RelayId, now: Instant) {
+    pub fn use_relay_id(&mut self, relay_id: RelayId, code: Option<String>, now: Instant) {
         let Some(target) = self.target.clone() else {
             return;
         };
         let plan = Plan::SignIn { relay_id };
-        self.continue_with(Target { plan, ..target }, now);
+        let code = code.map(OneTimeCode);
+        self.continue_with(
+            Target {
+                plan,
+                code,
+                ..target
+            },
+            now,
+        );
     }
 
     pub fn sign_in(&mut self, relay: JoinedRelay, now: Instant) {
@@ -322,9 +373,29 @@ impl Online {
                     relay_id: relay.relay_id,
                 },
                 joined: true,
+                trust: relay.trust,
+                code: None,
             },
             now,
         );
+    }
+
+    pub fn sign_in_with_code(&mut self, code: String, now: Instant) {
+        let Some(target) = self.target.clone() else {
+            return;
+        };
+        let code = Some(OneTimeCode(code));
+        self.continue_with(Target { code, ..target }, now);
+    }
+
+    pub fn accept_new_key(&mut self, now: Instant) {
+        let (Some(key), Some(mut target)) = (self.offered_key.take(), self.target.clone()) else {
+            return;
+        };
+        target.trust.relay_key = Some(key);
+        target.trust.expected = None;
+        self.trust_changed = true;
+        self.continue_with(target, now);
     }
 
     pub fn retry_now(&mut self, now: Instant) {
@@ -341,6 +412,15 @@ impl Online {
         }
     }
 
+    pub fn sign_out_here(&mut self) {
+        if self.phase == Phase::Connected
+            && let Some(this) = self.this_device
+        {
+            self.send(ClientMsg::SignOutDevice(this));
+        }
+        self.leave();
+    }
+
     pub fn leave(&mut self) {
         self.chat_reset();
         self.cloud_reset();
@@ -355,6 +435,14 @@ impl Online {
         self.failures = 0;
         self.joined = None;
         self.request_error = None;
+        self.relay_key = None;
+        self.offered_key = None;
+        self.trust_changed = false;
+        self.setup = None;
+        self.recovery_codes = None;
+        self.deleted = false;
+        self.devices.clear();
+        self.this_device = None;
     }
 
     fn start(&mut self, target: Target, now: Instant) {
@@ -409,6 +497,10 @@ impl Online {
                 TransportEvent::Opened => {
                     self.heard_at = Some(now);
                     self.pinged_at = Some(now);
+                    if let Some(problem) = self.check_key() {
+                        self.fail(problem, now);
+                        continue;
+                    }
                     self.send(ClientMsg::Hello {
                         protocol: PROTOCOL_VERSION,
                         app: app_name(),
@@ -436,6 +528,31 @@ impl Online {
         self.share_status();
         self.chat_tick(now);
         self.cloud_tick(now);
+    }
+
+    fn check_key(&mut self) -> Option<Problem> {
+        let key = self.conn.as_ref()?.relay_key()?;
+        self.relay_key = Some(key);
+        let target = self.target.as_mut()?;
+        if target
+            .trust
+            .expected
+            .is_some_and(|expected| expected != key.fingerprint())
+        {
+            return Some(Problem::KeyMismatch);
+        }
+        match target.trust.relay_key {
+            Some(pinned) if pinned != key => {
+                self.offered_key = Some(key);
+                Some(Problem::KeyChanged)
+            }
+            Some(_) => None,
+            None => {
+                target.trust.relay_key = Some(key);
+                self.trust_changed = true;
+                None
+            }
+        }
     }
 
     fn keep_alive(&mut self, now: Instant) {
@@ -510,6 +627,10 @@ impl Online {
     }
 
     fn fail(&mut self, problem: Problem, now: Instant) {
+        if problem == Problem::SignedOut {
+            self.signed_out = self.target.as_ref().map(|t| t.address.clone());
+            self.chat_wipe();
+        }
         self.drop_connection();
         let joined = self.target.as_ref().is_some_and(|t| t.joined);
         if joined && problem.retries() {
@@ -540,6 +661,9 @@ impl Online {
                 self.phase = Phase::Connected;
                 self.failures = 0;
                 self.sent_away = Some(false);
+                if let Some(target) = self.target.as_mut() {
+                    target.code = None;
+                }
                 if let Some(target) = self.target.as_mut()
                     && !target.joined
                 {
@@ -552,6 +676,7 @@ impl Online {
                             relay_id: relay_id.clone(),
                             password: target.password.clone(),
                             account: account.clone(),
+                            trust: target.trust.clone(),
                         });
                     }
                 }
@@ -564,6 +689,7 @@ impl Online {
             }
             ServerMsg::Friends(list) => {
                 self.friends = list.into_iter().map(|f| (f.online_id, f)).collect();
+                self.chat_changes_due();
                 self.playing.clear();
                 self.told.clear();
             }
@@ -612,6 +738,22 @@ impl Online {
                 }
                 self.send_plan();
             }
+            ServerMsg::Device(device) => {
+                if let Some(target) = self.target.as_mut() {
+                    target.trust.device = Some(device);
+                    self.trust_changed = true;
+                }
+            }
+            ServerMsg::TwoFactorSetup { secret } => self.setup = Some(secret),
+            ServerMsg::RecoveryCodes(codes) => {
+                self.setup = None;
+                self.recovery_codes = Some(codes);
+            }
+            ServerMsg::AccountDeleted => self.deleted = true,
+            ServerMsg::Devices { list, this } => {
+                self.devices = list;
+                self.this_device = Some(this);
+            }
             ServerMsg::ScreenStored { path } => {
                 self.screen = Some(path);
                 self.screens += 1;
@@ -623,7 +765,14 @@ impl Online {
             ServerMsg::ScreenRefused(_) => {}
             ServerMsg::Error(code) => match self.phase {
                 Phase::Connected => self.request_error = Some(code),
-                _ => self.fail(Problem::from_error(code), now),
+                _ => {
+                    if code == ErrorCode::CodeWrong
+                        && let Some(target) = self.target.as_mut()
+                    {
+                        target.code = None;
+                    }
+                    self.fail(Problem::from_error(code), now)
+                }
             },
             ServerMsg::Notice(notice) => self.fail(Problem::from_notice(notice), now),
             other => {
@@ -657,11 +806,15 @@ impl Online {
                     public_key: keys.public_key(),
                     display_name: name.clone(),
                     invite: *invite,
+                    device_name: cloud::device_name(),
                 }
             }
             Plan::SignIn { relay_id } => ClientMsg::SignIn {
                 relay_password: password,
                 auth_key: relay_id.keys().auth_key().clone(),
+                device: target.trust.device.clone(),
+                code: target.code.clone(),
+                device_name: cloud::device_name(),
             },
         };
         self.phase = Phase::SigningIn;
@@ -754,6 +907,84 @@ impl Online {
         self.send(ClientMsg::SetDisplayName(name.to_owned()))
     }
 
+    pub fn start_two_factor(&mut self) -> bool {
+        self.request_error = None;
+        self.send(ClientMsg::TwoFactorStart)
+    }
+
+    pub fn confirm_two_factor(&mut self, code: String) -> bool {
+        self.request_error = None;
+        self.send(ClientMsg::TwoFactorConfirm(OneTimeCode(code)))
+    }
+
+    pub fn cancel_two_factor(&mut self) {
+        self.setup = None;
+        self.request_error = None;
+    }
+
+    pub fn turn_off_two_factor(&mut self, code: String) -> bool {
+        self.request_error = None;
+        self.send(ClientMsg::TwoFactorOff(OneTimeCode(code)))
+    }
+
+    pub fn new_recovery_codes(&mut self, code: String) -> bool {
+        self.request_error = None;
+        self.send(ClientMsg::NewRecoveryCodes(OneTimeCode(code)))
+    }
+
+    pub fn delete_account(&mut self, code: Option<String>) -> bool {
+        self.request_error = None;
+        self.send(ClientMsg::DeleteAccount {
+            code: code.map(OneTimeCode),
+        })
+    }
+
+    pub fn two_factor_setup(&self) -> Option<&[u8]> {
+        self.setup.as_deref()
+    }
+
+    pub fn recovery_codes(&self) -> Option<&[String]> {
+        self.recovery_codes.as_deref()
+    }
+
+    pub fn forget_recovery_codes(&mut self) {
+        self.recovery_codes = None;
+    }
+
+    pub fn take_deleted(&mut self) -> bool {
+        std::mem::take(&mut self.deleted)
+    }
+
+    pub fn take_signed_out(&mut self) -> Option<ServerAddress> {
+        self.signed_out.take()
+    }
+
+    pub fn devices(&self) -> (&[DeviceInfo], Option<DeviceId>) {
+        (&self.devices, self.this_device)
+    }
+
+    pub fn sign_out_device(&mut self, id: DeviceId) -> bool {
+        self.request_error = None;
+        self.this_device != Some(id) && self.send(ClientMsg::SignOutDevice(id))
+    }
+
+    pub fn relay_key(&self) -> Option<RelayKey> {
+        self.relay_key
+    }
+
+    pub fn pinned_key(&self) -> Option<RelayKey> {
+        self.target.as_ref()?.trust.relay_key
+    }
+
+    pub fn offered_key(&self) -> Option<RelayKey> {
+        self.offered_key
+    }
+
+    pub fn take_trust(&mut self) -> Option<Trust> {
+        let target = self.target.as_ref().filter(|t| t.joined)?;
+        std::mem::take(&mut self.trust_changed).then(|| target.trust.clone())
+    }
+
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -784,6 +1015,20 @@ impl Online {
 
     pub fn friend(&self, id: OnlineId) -> Option<&Friend> {
         self.friends.get(&id)
+    }
+
+    pub fn display_name(&self, id: OnlineId) -> String {
+        self.friend(id)
+            .map(|f| f.display_name.clone())
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    pub fn presence(&self, friend: &Friend) -> Option<Seen> {
+        self.is_connected().then(|| seen(friend.presence))
+    }
+
+    pub fn friend_presence(&self, id: OnlineId) -> Option<Seen> {
+        self.friend(id).and_then(|f| self.presence(f))
     }
 
     pub fn people(&self) -> impl Iterator<Item = &Friend> {

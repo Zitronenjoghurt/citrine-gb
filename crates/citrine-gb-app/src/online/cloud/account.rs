@@ -1,4 +1,5 @@
-use super::{Op, Remote, SETTLE, SyncState, device_name};
+use super::device::device_name;
+use super::{Op, Remote, SETTLE, SyncState};
 use crate::online::Online;
 use citrine_gb_net::{
     ClientMsg, ErrorCode, GameKey, Keys, MAX_SAVE_BYTES, SaveInfo, SaveLabel, SavePayload,
@@ -75,7 +76,7 @@ impl AccountSlots {
 
     pub(super) fn storage_changed(&mut self) {
         self.refused
-            .retain(|_, (_, state)| *state != SyncState::Full);
+            .retain(|_, (_, state)| !state.waits_for_storage());
     }
 
     fn own_slot(name: &str, device: &str) -> String {
@@ -171,6 +172,18 @@ impl Online {
         self.cloud.account.arrived.remove(name).unwrap_or_default()
     }
 
+    pub fn account_problem(&self, name: &str) -> Option<SyncState> {
+        self.account_state(name).filter(|state| {
+            matches!(
+                state,
+                SyncState::Full
+                    | SyncState::TooLarge
+                    | SyncState::NoStorage
+                    | SyncState::NoAccountStorage
+            )
+        })
+    }
+
     pub fn account_state(&self, name: &str) -> Option<SyncState> {
         let slots = &self.cloud.account;
         let wanted = slots.wanted.get(name)?;
@@ -231,6 +244,11 @@ impl Online {
                     self.cloud.changed = true;
                     return true;
                 }
+                let remote = listing.get(&(game, slot.clone()));
+                if let Some(error) = self.cloud.doomed(data.len(), sealed_label.len(), remote) {
+                    self.account_refused(name, hash, error);
+                    return true;
+                }
                 let tag = self.cloud.tag();
                 self.send(ClientMsg::PutSave {
                     tag,
@@ -240,7 +258,7 @@ impl Online {
                     label: sealed_label,
                     data,
                 });
-                self.cloud.op = Some(Op::AccountPut {
+                self.cloud.start(Op::AccountPut {
                     tag,
                     name,
                     slot,
@@ -253,7 +271,7 @@ impl Online {
                     game,
                     slot: slot.clone(),
                 });
-                self.cloud.op = Some(Op::Get { game, slot });
+                self.cloud.start(Op::Get { game, slot });
             }
         }
         true
@@ -269,11 +287,7 @@ impl Online {
     }
 
     pub(super) fn account_refused(&mut self, name: String, hash: [u8; 32], error: ErrorCode) {
-        let state = match error {
-            ErrorCode::QuotaFull => SyncState::Full,
-            ErrorCode::TooLarge => SyncState::TooLarge,
-            _ => SyncState::NoStorage,
-        };
+        let state = self.refusal_state(error);
         self.cloud.account.refused.insert(name, (hash, state));
         self.cloud.changed = true;
     }

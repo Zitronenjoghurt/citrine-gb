@@ -1,4 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "audio-codec"), path = "playback/no_aac.rs")]
+mod aac;
+#[cfg(not(target_arch = "wasm32"))]
 mod demux;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

@@ -1,5 +1,6 @@
 use super::page::{self, Flash, Tab, ago, avatar, esc, hint, icon};
-use super::{PAGE_SIZE, confirm, guard, row, source_chip};
+use super::settings_page::{row, source_chip};
+use super::{PAGE_SIZE, confirm, guard};
 use crate::db::{InviteFilter, InviteRow};
 use crate::settings::{self, Effective};
 use crate::{App, now};

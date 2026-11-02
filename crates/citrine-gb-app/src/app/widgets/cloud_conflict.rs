@@ -1,4 +1,5 @@
 use crate::app::widgets::snapshots::relative_time;
+use crate::app::widgets::text::faint;
 use crate::online::cloud::{Choice, Conflict, ConflictSide};
 use crate::storage::{THUMB_HEIGHT, THUMB_WIDTH};
 use egui::{ColorImage, Context, RichText, TextureHandle, TextureOptions, Ui};
@@ -47,14 +48,10 @@ fn card(
                     if !side.device.is_empty() {
                         ui.label(RichText::new(&side.device).small());
                     }
-                    ui.label(
-                        RichText::new(format!("Saved {}", relative_time(side.saved_at)))
-                            .small()
-                            .weak(),
-                    );
+                    ui.label(faint(format!("Saved {}", relative_time(side.saved_at))));
                 }
                 None => {
-                    ui.label(RichText::new("Not on this device").small().weak());
+                    ui.label(faint("Not on this device"));
                 }
             }
             ui.add_space(4.0);
@@ -117,7 +114,7 @@ pub fn show(ctx: &Context, conflict: &Conflict) -> Option<Answer> {
         if !conflict.ready() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new("Getting the cloud's copy").small().weak());
+                ui.label(faint("Getting the cloud's copy"));
             });
         }
         ui.add_space(8.0);

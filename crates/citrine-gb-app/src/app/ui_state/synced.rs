@@ -261,7 +261,10 @@ mod tests {
                 display_name: format!("{MARK} name"),
                 storage_used: 0,
                 quota_bytes: 0,
+                two_factor: false,
+                codes_left: 0,
             },
+            &Default::default(),
         );
         s.touch.opacity = 0.321;
         s.touch.mirrored = true;

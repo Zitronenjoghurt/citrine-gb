@@ -1,5 +1,5 @@
 use crate::online::address::ServerAddress;
-use citrine_gb_net::{Account, RelayId};
+use citrine_gb_net::{Account, DeviceKey, Fingerprint, RelayId, RelayKey};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -44,6 +44,17 @@ pub struct RelayEntry {
     pub online_id: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub relay_key: Option<RelayKey>,
+    #[serde(default)]
+    pub device: Option<DeviceKey>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Trust {
+    pub relay_key: Option<RelayKey>,
+    pub expected: Option<Fingerprint>,
+    pub device: Option<DeviceKey>,
 }
 
 impl fmt::Debug for RelayEntry {
@@ -59,12 +70,21 @@ impl RelayEntry {
     pub fn relay_id(&self) -> Option<RelayId> {
         self.relay_id.parse().ok()
     }
+
+    pub fn trust(&self) -> Trust {
+        Trust {
+            relay_key: self.relay_key,
+            expected: None,
+            device: self.device.clone(),
+        }
+    }
 }
 
 pub struct JoinedRelay {
     pub address: ServerAddress,
     pub relay_id: RelayId,
     pub password: String,
+    pub trust: Trust,
 }
 
 impl OnlineSettings {
@@ -83,6 +103,7 @@ impl OnlineSettings {
             address: ServerAddress::parse(key).ok()?,
             relay_id: entry.relay_id()?,
             password: entry.password.clone(),
+            trust: entry.trust(),
         })
     }
 
@@ -102,6 +123,7 @@ impl OnlineSettings {
         relay_id: &RelayId,
         password: &str,
         account: &Account,
+        trust: &Trust,
     ) {
         let key = address.key();
         self.relays.insert(
@@ -111,6 +133,8 @@ impl OnlineSettings {
                 password: password.to_owned(),
                 online_id: Some(account.online_id.to_string()),
                 display_name: Some(account.display_name.clone()),
+                relay_key: trust.relay_key,
+                device: trust.device.clone(),
             },
         );
         self.address = key.clone();
@@ -123,6 +147,15 @@ impl OnlineSettings {
         {
             entry.online_id = Some(account.online_id.to_string());
             entry.display_name = Some(account.display_name.clone());
+        }
+    }
+
+    pub fn set_trust(&mut self, trust: &Trust) {
+        if let Some(key) = &self.joined
+            && let Some(entry) = self.relays.get_mut(key)
+        {
+            entry.relay_key = trust.relay_key;
+            entry.device = trust.device.clone();
         }
     }
 
@@ -157,6 +190,8 @@ mod tests {
             display_name: name.into(),
             storage_used: 0,
             quota_bytes: 0,
+            two_factor: false,
+            codes_left: 0,
         }
     }
 
@@ -174,12 +209,14 @@ mod tests {
             &lemon,
             "pw",
             &account("Clara"),
+            &Trust::default(),
         );
         settings.remember(
             &address("relay.example.org:8443"),
             &other,
             "",
             &account("Zitrone"),
+            &Trust::default(),
         );
         assert_eq!(settings.joined.as_deref(), Some("relay.example.org:8443"));
 
@@ -208,6 +245,7 @@ mod tests {
             &RelayId::random(),
             "pw",
             &account("Clara"),
+            &Trust::default(),
         );
         settings.leave();
         settings.forget("gb.lemon.industries");
@@ -219,11 +257,17 @@ mod tests {
     fn online_settings_survive_the_settings_file() {
         let mut settings = crate::app::ui_state::settings::Settings::default();
         let id = RelayId::random();
+        let trust = Trust {
+            relay_key: Some(RelayKey([4; 32])),
+            expected: None,
+            device: Some(DeviceKey([5; 32])),
+        };
         settings.online.remember(
             &address("gb.lemon.industries"),
             &id,
             "lemon tree",
             &account("Clara"),
+            &trust,
         );
         settings.online.show_playing = false;
 
@@ -240,7 +284,18 @@ mod tests {
         assert_eq!(joined.relay_id.as_bytes(), id.as_bytes());
         assert_eq!(joined.relay_id.keys().public_key(), id.keys().public_key());
         assert_eq!(joined.password, "lemon tree");
+        assert_eq!(joined.trust, trust);
         assert!(!loaded.online.show_playing);
+    }
+
+    #[test]
+    fn an_older_entry_loads_without_a_key_or_device() {
+        let settings: OnlineSettings = serde_json::from_str(
+            r#"{"joined": "x.org", "relays": {"x.org": {"relay_id": "cgb1-x", "password": "pw"}}}"#,
+        )
+        .unwrap();
+        let entry = settings.joined_entry().unwrap();
+        assert_eq!(entry.trust(), Trust::default());
     }
 
     #[test]
@@ -255,8 +310,14 @@ mod tests {
     fn debug_never_shows_the_relay_id_or_password() {
         let mut settings = OnlineSettings::default();
         let id = RelayId::random();
-        settings.remember(&address("x.org"), &id, "hunter2", &account("Clara"));
+        let trust = Trust {
+            relay_key: None,
+            expected: None,
+            device: Some(DeviceKey([0xEE; 32])),
+        };
+        settings.remember(&address("x.org"), &id, "hunter2", &account("Clara"), &trust);
         let text = format!("{settings:?}");
+        assert!(!text.contains("238"));
         assert!(!text.contains(&id.to_string()));
         assert!(!text.contains("hunter2"));
     }

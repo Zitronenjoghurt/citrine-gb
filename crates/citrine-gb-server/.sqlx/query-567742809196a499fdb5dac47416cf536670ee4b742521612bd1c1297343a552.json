@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"count!: i64\", COALESCE(SUM(LENGTH(body)), 0) AS \"bytes!: i64\" FROM messages\n                WHERE EXISTS (SELECT 1 FROM message_deliveries d JOIN devices v ON v.id = d.device_id\n                               WHERE d.message_id = messages.id AND v.account_id = messages.to_id)",
+  "describe": {
+    "columns": [
+      {
+        "name": "count!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "bytes!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "567742809196a499fdb5dac47416cf536670ee4b742521612bd1c1297343a552"
+}

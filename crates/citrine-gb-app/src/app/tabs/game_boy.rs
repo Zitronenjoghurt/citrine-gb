@@ -6,10 +6,7 @@ use egui::RichText;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     if let Some(invite) = playing::pending_ask(viewer.play) {
-        let answer = egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(10, 4))
-            .show(ui, |ui| playing::ask_banner(ui, viewer.online, &invite))
-            .inner;
+        let answer = banner_frame(ui, |ui| playing::ask_banner(ui, viewer.online, &invite));
         match answer {
             Some(Answer::Join) => {
                 let joined = playing::join(
@@ -32,10 +29,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     if let Some(ended) = viewer.ui.playing.ended.clone() {
         let again = playing::play_button(viewer.play, viewer.online, ended.friend)
             == Some(PlayButton::Ready);
-        let action = egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(10, 4))
-            .show(ui, |ui| playing::banner(ui, &ended, again))
-            .inner;
+        let action = banner_frame(ui, |ui| playing::banner(ui, &ended, again));
         match action {
             Some(BannerAction::PlayAgain) => {
                 let invited = playing::invite(
@@ -60,10 +54,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
             compact: false,
             friend_sound: playing::FriendSound::of(&viewer.ui.settings.online),
         };
-        let action = egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(10, 4))
-            .show(ui, |ui| playing::bar(ui, viewer.online, session, facts))
-            .inner;
+        let action = banner_frame(ui, |ui| playing::bar(ui, viewer.online, session, facts));
         if let Some(action) = action {
             playing::settle_bar(action, viewer.play, viewer.online, &mut viewer.ui.playing);
         }
@@ -116,4 +107,11 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
             viewer.emulator.set_link_control(Game::First);
         }
     }
+}
+
+fn banner_frame<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(10, 4))
+        .show(ui, add)
+        .inner
 }

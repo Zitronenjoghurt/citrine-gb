@@ -66,6 +66,62 @@ fn dialog(
     choice
 }
 
+pub struct CodeAsk<'a> {
+    pub message: &'a str,
+    pub code: Option<&'a mut String>,
+    pub problem: Option<&'a str>,
+    pub action: &'a str,
+}
+
+pub fn confirm_with_code(ctx: &egui::Context, id: &str, ask: CodeAsk) -> Option<bool> {
+    let mut choice = None;
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(OPEN_KEY), pass));
+    let ready = ask
+        .code
+        .as_deref()
+        .is_none_or(|code| !code.trim().is_empty());
+    let modal = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
+        ui.set_max_width(300.0);
+        ui.label(ask.message);
+        let mut enter = false;
+        if let Some(code) = ask.code {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Code");
+                let width = ui.available_width();
+                enter = crate::app::widgets::field::code_field(
+                    ui,
+                    code,
+                    "From your app, or a recovery code",
+                    width,
+                    true,
+                );
+            });
+        }
+        if let Some(problem) = ask.problem {
+            crate::app::widgets::problem::problem_line(ui, problem);
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let size = egui::vec2(80.0, 32.0);
+            let clicked = ui
+                .add_enabled(ready, egui::Button::new(ask.action).min_size(size))
+                .clicked();
+            if clicked || (enter && ready) {
+                choice = Some(true);
+            }
+            if ui.add(egui::Button::new("Cancel").min_size(size)).clicked() {
+                choice = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && choice.is_none() {
+        choice = Some(false);
+    }
+    choice
+}
+
 pub struct Ask<'a> {
     pub message: &'a str,
     pub notes: &'a [String],
@@ -125,3 +181,6 @@ pub fn is_open(ctx: &egui::Context) -> bool {
     let pass = ctx.cumulative_pass_nr();
     ctx.data(|d| d.get_temp::<u64>(egui::Id::new(OPEN_KEY))) == Some(pass)
 }
+
+#[cfg(test)]
+mod tests;

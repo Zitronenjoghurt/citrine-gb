@@ -1,3 +1,35 @@
+# 0.9.0 - 2026-11-02
+
+## Added
+
+- One account on several devices being online at once
+- Edit and delete sent chat messages
+- Two-factor sign-in for relay accounts
+- Share custom palettes in chat
+- Link cable stats per game and per friend
+- Copy or share screenshots and recordings from Media
+- Encrypted relay connections, with a warning when a relay's key changes
+- Device list on the account page, with sign-out for other devices
+- Delete your relay account
+- Stricter relay limits on connections, sign-ups, storage and messages
+- Admin panel: total storage cap, address blocks, bulk bans, account deletion and limit stats
+
+## Changed
+
+- Relays need Citrine 0.9.0 or newer
+- Leaving a relay keeps your relay ID and signs out only this device
+- Cloud sync retries after 30 seconds and holds off when storage is full
+- Chat bursts go out at the relay's pace instead of failing
+- Clear message when a friend's inbox is full
+- Game sharing only on invite-only relays
+- Play screen says when watching needs game sharing
+- Banned accounts' files stop downloading
+
+## Fixed
+
+- Phone sound starts on the first tap and comes back after switching apps
+- Back button from an event partner to the event list
+
 # 0.8.0 - 2026-11-01
 
 ## Added

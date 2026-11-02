@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO relay_key (id, secret) VALUES (1, ?1) ON CONFLICT (id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "9957f5c10d432457557db8e9e1ef31ef63c1333420025083c9774fdf49890537"
+}

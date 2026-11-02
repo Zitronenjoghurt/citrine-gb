@@ -1,11 +1,12 @@
 use super::*;
-use crate::online::Phase;
 use crate::online::address::ServerAddress;
 use crate::online::transport::{self, Connector, Transport, TransportEvent};
+use crate::online::{Phase, Trust};
+use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::netplay::{
     Advance, ConsoleSetup, Input, Player, Session, SessionConfig, encode_state,
 };
-use citrine_gb_net::{ErrorCode, FriendState, NONCE_BYTES, Sealed};
+use citrine_gb_net::{ErrorCode, FriendState, InviteCode, Mode, NONCE_BYTES, Sealed};
 use citrine_gb_server::{Config, Running, start};
 use std::collections::HashMap;
 
@@ -35,8 +36,11 @@ impl Rng {
     }
 }
 
+type Meter = std::rc::Rc<std::cell::RefCell<Vec<(Instant, usize)>>>;
+
 struct Lag {
     inner: Box<dyn Transport>,
+    meter: Meter,
     half: Duration,
     jitter_ms: u64,
     rng: Rng,
@@ -56,6 +60,11 @@ impl Lag {
 impl Transport for Lag {
     fn send(&mut self, bytes: Vec<u8>) {
         let now = Instant::now();
+        if let Ok(ClientMsg::Play { sealed, .. } | ClientMsg::Game { sealed, .. }) =
+            ClientMsg::decode(&bytes)
+        {
+            self.meter.borrow_mut().push((now, sealed.ciphertext.len()));
+        }
         let due = self.due(self.last_out, now);
         self.last_out = due;
         self.out.push_back((due, bytes));
@@ -83,7 +92,7 @@ impl Transport for Lag {
     }
 }
 
-fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64) -> Connector {
+fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64, meter: Meter) -> Connector {
     let mut websocket = transport::websocket();
     let mut opened = 0;
     Box::new(move |url| {
@@ -91,6 +100,7 @@ fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64) -> Connector {
         let now = Instant::now();
         Box::new(Lag {
             inner: websocket(url),
+            meter: meter.clone(),
             half: Duration::from_millis(one_way_ms) / 2,
             jitter_ms: jitter_ms / 2,
             rng: Rng(seed + opened),
@@ -115,6 +125,8 @@ impl Relay {
         let vars: HashMap<&str, String> = HashMap::from([
             ("CITRINE_BIND", "127.0.0.1".into()),
             ("CITRINE_PORT", "0".into()),
+            ("CITRINE_DISK_FLOOR_MB", "0".into()),
+            ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
             (
                 "CITRINE_DATA_DIR",
                 dir.path().join("data").display().to_string(),
@@ -149,6 +161,21 @@ impl Relay {
     }
 }
 
+impl Relay {
+    fn invites(&self, required: bool) -> [Option<InviteCode>; 2] {
+        let Some(running) = self.running.as_ref().filter(|_| required) else {
+            return [None, None];
+        };
+        self.runtime.block_on(async {
+            running.require_invites().await.unwrap();
+            [
+                Some(running.create_invite().await.unwrap()),
+                Some(running.create_invite().await.unwrap()),
+            ]
+        })
+    }
+}
+
 impl Drop for Relay {
     fn drop(&mut self) {
         if let Some(running) = self.running.take() {
@@ -167,6 +194,7 @@ impl Shelf for Nothing {
 
 pub(crate) struct Side {
     pub(crate) online: Online,
+    meter: Meter,
     pub(crate) play: Play,
     rng: Rng,
     held: JoypadState,
@@ -182,8 +210,10 @@ pub(crate) struct Side {
 
 impl Side {
     fn new(lag: (u64, u64), seed: u64, shelf: Box<dyn Shelf>) -> Self {
+        let meter = Meter::default();
         Self {
-            online: Online::new(lagged(lag.0, lag.1, seed)),
+            online: Online::new(lagged(lag.0, lag.1, seed, meter.clone())),
+            meter,
             play: Play::new(shelf),
             rng: Rng(seed),
             held: JoypadState::empty(),
@@ -305,17 +335,26 @@ impl Pair {
             relay,
         };
         pair.guest.presses_start = true;
+        let [host_code, guest_code] = pair.relay.invites(sharing);
         let now = Instant::now();
         for side in [&mut pair.host, &mut pair.guest] {
-            side.online
-                .probe(pair.relay.address.clone(), PASSWORD.into(), now);
+            side.online.probe(
+                pair.relay.address.clone(),
+                PASSWORD.into(),
+                Trust::default(),
+                now,
+            );
         }
         pair.until("both probed", |p| {
             p.host.online.phase() == Phase::Probed && p.guest.online.phase() == Phase::Probed
         });
         let now = Instant::now();
-        pair.host.online.create_account("Clara".into(), now);
-        pair.guest.online.create_account("Mia".into(), now);
+        pair.host
+            .online
+            .create_invited_account("Clara".into(), host_code, now);
+        pair.guest
+            .online
+            .create_invited_account("Mia".into(), guest_code, now);
         pair.until("both signed up", |p| {
             p.host.online.is_connected()
                 && p.guest.online.is_connected()
@@ -923,7 +962,7 @@ fn a_watcher_without_the_game_and_no_sharing_watches_nothing() {
     use crate::app::tabs::playing::{screen_note, watched_line};
     assert_eq!(
         screen_note("Mia", watcher).as_deref(),
-        Some("You need My Snake to watch Mia.")
+        Some("You need My Snake to watch Mia. This relay doesn't share games.")
     );
     use crate::app::tabs::playing::{Switch, bar_switches, needs_copy, play_subtitle};
     assert!(needs_copy(watcher));
@@ -1219,4 +1258,62 @@ fn watching_the_friend_brings_their_sound_and_watch_off_leaves_mine() {
     pair.guest.session_mut().drain_audio(&mut mine, &mut friend);
     assert!(!mine.is_empty());
     assert!(friend.is_empty(), "the friend's game played unwatched");
+}
+
+struct Spend {
+    bytes: usize,
+    seconds: f64,
+    peak_second: usize,
+    lowest_room: f64,
+}
+
+fn spend(meter: &Meter, per_second: f64, burst: f64) -> Spend {
+    let log = meter.borrow();
+    let first = log.first().map_or_else(Instant::now, |(at, _)| *at);
+    let last = log.last().map_or(first, |(at, _)| *at);
+    let mut room = burst;
+    let mut lowest_room = burst;
+    let mut at = first;
+    let mut peak_second = 0;
+    for (i, (when, bytes)) in log.iter().enumerate() {
+        room = (room + when.duration_since(at).as_secs_f64() * per_second).min(burst);
+        at = *when;
+        room -= *bytes as f64;
+        lowest_room = lowest_room.min(room);
+        let second: usize = log[i..]
+            .iter()
+            .take_while(|(t, _)| t.duration_since(*when) < Duration::from_secs(1))
+            .map(|(_, n)| n)
+            .sum();
+        peak_second = peak_second.max(second);
+    }
+    Spend {
+        bytes: log.iter().map(|(_, n)| n).sum(),
+        seconds: last.duration_since(first).as_secs_f64(),
+        peak_second,
+        lowest_room,
+    }
+}
+
+#[test]
+fn a_link_session_stays_inside_the_relay_play_budget() {
+    let (per_second, burst) = (256.0 * 1024.0, 12.0 * 1024.0 * 1024.0);
+    let mut pair = Pair::new(true, 30, 10, empty());
+    let session = pair.invite(custom());
+    pair.accept(session, MyGame::Borrow { save: None });
+    pair.play_frames(600);
+    assert_eq!(pair.host.session().mode(), Some(Mode::Rollback));
+    for (who, side) in [("host", &pair.host), ("guest", &pair.guest)] {
+        let s = spend(&side.meter, per_second, burst);
+        eprintln!(
+            "play bytes, {who}: {} B in {:.1} s, {:.0} B/s on average, {} B in the busiest second, {:.0} B of the 12 MB burst left at the lowest",
+            s.bytes,
+            s.seconds,
+            s.bytes as f64 / s.seconds.max(0.001),
+            s.peak_second,
+            s.lowest_room,
+        );
+        assert!(s.lowest_room > 0.0);
+        assert!((s.bytes as f64 / s.seconds) < per_second);
+    }
 }

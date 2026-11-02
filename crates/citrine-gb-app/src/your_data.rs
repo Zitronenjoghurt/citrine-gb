@@ -4,7 +4,7 @@ use crate::app::ui_state::settings::Settings;
 use crate::icons;
 use crate::media::{MediaId, MediaInfo, MediaStore};
 use crate::online::Online;
-use crate::online::chat::{decode_history, encode_history, merge_history};
+use crate::online::chat::history::{decode_history, encode_history, merge_history};
 use crate::stats::{Book, GameRecord, Stats};
 use crate::storage::SaveStore;
 use serde_json::Value;

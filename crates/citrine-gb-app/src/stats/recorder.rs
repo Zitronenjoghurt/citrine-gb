@@ -1,3 +1,4 @@
+use super::CablePartner;
 use super::record::{Book, Progress, Record};
 use std::time::Duration;
 
@@ -8,6 +9,13 @@ struct Session {
     rom: String,
     played_ms: u64,
     last_play: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CableRun {
+    rom: String,
+    partner: String,
+    last: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -23,6 +31,8 @@ pub struct Recorder {
     session: Option<Session>,
     launched: Option<(String, u64)>,
     carry: Duration,
+    cable_run: Option<CableRun>,
+    cable_carry: Duration,
     dirty: bool,
 }
 
@@ -136,6 +146,44 @@ impl Recorder {
         }
     }
 
+    pub fn cable(
+        &mut self,
+        rom: &str,
+        partner: &CablePartner,
+        name: &str,
+        played: Duration,
+        now: u64,
+        day: &str,
+    ) {
+        let total = self.cable_carry + played;
+        let ms = total.as_millis() as u64;
+        self.cable_carry = total.saturating_sub(Duration::from_millis(ms));
+        if ms == 0 {
+            return;
+        }
+        let key = partner.key();
+        let fresh = self.cable_run.as_ref().is_none_or(|run| {
+            run.rom != rom || run.partner != key || now.saturating_sub(run.last) > SESSION_GAP
+        });
+        self.cable_run = Some(CableRun {
+            rom: rom.to_string(),
+            partner: key.clone(),
+            last: now,
+        });
+        let record = self.own();
+        if !name.is_empty() {
+            let partners = &mut record.game(rom).partners;
+            if partners.get(&key).is_none_or(|known| known != name) {
+                partners.insert(key.clone(), name.to_string());
+            }
+        }
+        let counts = record.game_day(rom, day).cable.entry(key).or_default();
+        counts.ms += ms;
+        if fresh {
+            counts.sessions += 1;
+        }
+    }
+
     pub fn snapshot(&mut self, rom: &str, day: &str) {
         self.own().game_day(rom, day).snapshots += 1;
     }
@@ -184,6 +232,8 @@ impl Recorder {
         self.book = Book::new();
         self.session = None;
         self.carry = Duration::ZERO;
+        self.cable_run = None;
+        self.cable_carry = Duration::ZERO;
         self.dirty = true;
     }
 }
@@ -294,6 +344,64 @@ mod tests {
         assert_eq!((day.link_ms, day.together_ms), (3000, 4000));
         assert_eq!((day.snapshots, day.loads, day.rewinds), (1, 2, 1));
         assert_eq!(record.days[DAY].chat_messages, 1);
+    }
+
+    #[test]
+    fn cable_time_and_sessions_are_kept_per_partner() {
+        let mut stats = Recorder::new(Book::new());
+        let mia = CablePartner::Friend("7".into());
+        let red = CablePartner::Game("bb".into());
+        stats.cable(ROM, &mia, "Mia", secs(60), 100, DAY);
+        stats.cable(ROM, &mia, "Mia", secs(30), 160, DAY);
+        stats.cable(ROM, &red, "Pokémon Red", secs(20), 200, DAY);
+        stats.cable(ROM, &mia, "Mia", secs(10), 220, DAY);
+        stats.cable(ROM, &mia, "Mia", secs(5), 220 + SESSION_GAP + 1, DAY);
+        let game = &stats.book().own_record().unwrap().games[ROM];
+        let mia_day = game.days[DAY].cable[&mia.key()];
+        let red_day = game.days[DAY].cable[&red.key()];
+        assert_eq!((mia_day.ms, mia_day.sessions), (105_000, 3));
+        assert_eq!((red_day.ms, red_day.sessions), (20_000, 1));
+        assert_eq!(game.partners[&mia.key()], "Mia");
+        assert_eq!(game.partners[&red.key()], "Pokémon Red");
+    }
+
+    #[test]
+    fn the_overview_adds_cable_time_across_games_and_devices() {
+        use crate::stats::{CableSum, cable_sum};
+        let mut stats = Recorder::new(Book::new());
+        let mia = CablePartner::Friend("7".into());
+        let celebi = CablePartner::Event("celebi".into());
+        stats.cable(ROM, &mia, "Mia", secs(60), 100, DAY);
+        stats.cable("bb", &mia, "Mia", secs(30), 200, DAY);
+        stats.cable("bb", &celebi, "Celebi", secs(10), 300, DAY);
+        let mut other = Record::default();
+        other.game_day(ROM, DAY).cable.insert(
+            mia.key(),
+            super::super::record::CableDay {
+                ms: 15_000,
+                sessions: 1,
+            },
+        );
+        stats.merge_device("other", &other);
+        let overview = stats
+            .book()
+            .overview(jiff::civil::Date::new(2026, 10, 31).unwrap());
+        assert_eq!(overview.cable[0].partner, mia);
+        assert_eq!(overview.cable[0].name, "Mia");
+        assert_eq!(
+            cable_sum(&overview.cable, true),
+            CableSum {
+                ms: 105_000,
+                sessions: 3
+            }
+        );
+        assert_eq!(
+            cable_sum(&overview.cable, false),
+            CableSum {
+                ms: 10_000,
+                sessions: 1
+            }
+        );
     }
 
     #[test]

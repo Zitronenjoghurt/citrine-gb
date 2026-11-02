@@ -1,5 +1,6 @@
 use citrine_gb_app::online::{
-    JoinedRelay, Online, OnlineSettings, Phase, Problem, Seen, ServerAddress, game_title, seen,
+    JoinedRelay, Online, OnlineSettings, Phase, Problem, Seen, ServerAddress, Trust, game_title,
+    seen,
 };
 use citrine_gb_net::{FriendState, InviteCode, OnlineId, RelayId};
 use citrine_gb_server::{Config, Running, start};
@@ -29,6 +30,8 @@ impl Relay {
         let vars: HashMap<&str, String> = HashMap::from([
             ("CITRINE_BIND", "127.0.0.1".into()),
             ("CITRINE_PORT", "0".into()),
+            ("CITRINE_DISK_FLOOR_MB", "0".into()),
+            ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
             (
                 "CITRINE_DATA_DIR",
                 dir.path().join("data").display().to_string(),
@@ -79,7 +82,12 @@ fn wait(people: &mut [&mut Online], what: &str, done: impl Fn(&[&mut Online]) ->
 
 fn join(relay: &Relay, name: &str) -> (Online, JoinedRelay, OnlineId) {
     let mut online = Online::default();
-    online.probe(relay.address.clone(), PASSWORD.into(), Instant::now());
+    online.probe(
+        relay.address.clone(),
+        PASSWORD.into(),
+        Trust::default(),
+        Instant::now(),
+    );
     wait(&mut [&mut online], "the server's info", |p| {
         p[0].phase() == Phase::Probed
     });
@@ -97,6 +105,7 @@ fn join(relay: &Relay, name: &str) -> (Online, JoinedRelay, OnlineId) {
         &joined.relay_id,
         &joined.password,
         &joined.account,
+        &joined.trust,
     );
     (online, settings.joined_relay().unwrap(), id)
 }
@@ -199,12 +208,18 @@ fn two_friends_on_a_real_relay() {
     assert_eq!(ana.waiting_requests(), 0);
 
     let mut ana_phone = Online::default();
-    ana_phone.probe(relay.address.clone(), PASSWORD.into(), Instant::now());
+    ana_phone.probe(
+        relay.address.clone(),
+        PASSWORD.into(),
+        Trust::default(),
+        Instant::now(),
+    );
     wait(&mut [&mut ana_phone], "the probe", |p| {
         p[0].phase() == Phase::Probed
     });
     ana_phone.use_relay_id(
         ana_relay.relay_id.to_string().parse::<RelayId>().unwrap(),
+        None,
         Instant::now(),
     );
     wait(
@@ -212,7 +227,8 @@ fn two_friends_on_a_real_relay() {
         "the pasted relay ID",
         |p| {
             p[0].account().map(|a| a.online_id) == Some(ana_id)
-                && p[1].phase() == Phase::Stopped(Problem::SignedInElsewhere)
+                && p[1].is_connected()
+                && p[1].devices().0.len() == 2
                 && state(p[0], ben_id) == Some(FriendState::Blocked)
         },
     );
@@ -222,7 +238,12 @@ fn two_friends_on_a_real_relay() {
 fn a_wrong_password_and_an_unknown_relay_id_say_so() {
     let relay = Relay::start();
     let mut online = Online::default();
-    online.probe(relay.address.clone(), "wrong".into(), Instant::now());
+    online.probe(
+        relay.address.clone(),
+        "wrong".into(),
+        Trust::default(),
+        Instant::now(),
+    );
     wait(&mut [&mut online], "the probe", |p| {
         p[0].phase() == Phase::Probed
     });
@@ -231,11 +252,16 @@ fn a_wrong_password_and_an_unknown_relay_id_say_so() {
         p[0].phase() == Phase::Stopped(Problem::WrongPassword)
     });
 
-    online.probe(relay.address.clone(), PASSWORD.into(), Instant::now());
+    online.probe(
+        relay.address.clone(),
+        PASSWORD.into(),
+        Trust::default(),
+        Instant::now(),
+    );
     wait(&mut [&mut online], "the probe", |p| {
         p[0].phase() == Phase::Probed
     });
-    online.use_relay_id(RelayId::random(), Instant::now());
+    online.use_relay_id(RelayId::random(), None, Instant::now());
     wait(&mut [&mut online], "the refusal", |p| {
         p[0].phase() == Phase::Stopped(Problem::UnknownAccount)
     });
@@ -245,7 +271,7 @@ fn a_wrong_password_and_an_unknown_relay_id_say_so() {
 fn a_server_that_is_not_there_is_unreachable() {
     let address = ServerAddress::parse("127.0.0.1:9").unwrap();
     let mut online = Online::default();
-    online.probe(address, String::new(), Instant::now());
+    online.probe(address, String::new(), Trust::default(), Instant::now());
     wait(&mut [&mut online], "the failure", |p| {
         p[0].phase() == Phase::Stopped(Problem::Unreachable)
     });
@@ -313,7 +339,12 @@ fn a_new_account_with_an_invite_code() {
     let relay = Relay::start();
     let (cookie, code) = invite_codes_on(&relay);
     let mut mia = Online::default();
-    mia.probe(relay.address.clone(), PASSWORD.into(), Instant::now());
+    mia.probe(
+        relay.address.clone(),
+        PASSWORD.into(),
+        Trust::default(),
+        Instant::now(),
+    );
     wait(&mut [&mut mia], "the probe", |p| {
         p[0].phase() == Phase::Probed
     });
@@ -334,7 +365,12 @@ fn a_new_account_with_an_invite_code() {
     assert_eq!(joined.account.display_name, "Mia");
 
     let mut ben = Online::default();
-    ben.probe(relay.address.clone(), PASSWORD.into(), Instant::now());
+    ben.probe(
+        relay.address.clone(),
+        PASSWORD.into(),
+        Trust::default(),
+        Instant::now(),
+    );
     wait(&mut [&mut ben], "the probe", |p| {
         p[0].phase() == Phase::Probed
     });
