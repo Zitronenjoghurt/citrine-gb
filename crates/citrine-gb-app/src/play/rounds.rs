@@ -37,8 +37,9 @@ impl PlaySession {
         let Some(engine) = self.round.engine.take() else {
             return;
         };
+        let dropped = self.stage == Stage::Ended(Ending::Dropped);
         if let Engine::Rollback(r) = engine
-            && let Some(mut gb) = r.into_console()
+            && let Some(mut gb) = r.into_console(dropped)
         {
             gb.unplug_link();
             let borrowed = self
@@ -48,6 +49,7 @@ impl PlaySession {
             self.returned = Some(Returned {
                 console: gb,
                 borrowed,
+                paused: dropped,
             });
         }
     }

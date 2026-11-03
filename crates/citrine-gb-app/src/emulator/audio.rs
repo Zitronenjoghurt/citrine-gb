@@ -25,6 +25,16 @@ impl Emulator {
     }
 
     pub(super) fn drain_audio(&mut self) {
+        if self.fast_forward {
+            self.gb.apu.audio_buffer.clear();
+            if let Some(link) = &mut self.link {
+                link.clear_audio();
+            }
+            if let Some(feed) = &self.audio_feed {
+                feed.set_paused(true);
+            }
+            return;
+        }
         let mut samples = std::mem::take(&mut self.gb.apu.audio_buffer);
         if let Some(link) = &mut self.link {
             link.mix(&mut samples);

@@ -1,9 +1,9 @@
-use super::{Change, ChatEntry, Conversation, Delivery, KEEP_PER_FRIEND};
+use super::{Change, ChatEntry, Conversation, Delivery};
 use citrine_gb_net::{Body, OnlineId, pack, unpack};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
-const MAX_HISTORY_BYTES: usize = 32 << 20;
+const MAX_HISTORY_BYTES: usize = 256 << 20;
 const MARK: &[u8] = b"citrine chats 3\n";
 const SECOND_MARK: &[u8] = b"citrine chats 2\n";
 
@@ -98,8 +98,9 @@ pub fn merge_history(into: &mut History, from: &History) -> usize {
     let mut added = 0;
     for (friend, theirs) in from {
         let chat = into.entry(*friend).or_default();
+        let mut known: HashSet<u64> = chat.entries.iter().map(|e| e.id).collect();
         for entry in &theirs.entries {
-            if !chat.entries.iter().any(|e| e.id == entry.id) {
+            if known.insert(entry.id) {
                 chat.entries.push(entry.clone());
                 added += 1;
             }
@@ -108,10 +109,6 @@ pub fn merge_history(into: &mut History, from: &History) -> usize {
             chat.relayed.entry(*id).or_insert(*relay);
         }
         chat.entries.sort_by_key(|e| e.at);
-        let extra = chat.entries.len().saturating_sub(KEEP_PER_FRIEND);
-        chat.entries.drain(..extra);
-        let kept: Vec<u64> = chat.entries.iter().map(|e| e.id).collect();
-        chat.relayed.retain(|id, _| kept.contains(id));
     }
     added
 }
@@ -170,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_keeps_relay_ids_only_for_kept_messages() {
+    fn a_merge_keeps_every_message_and_its_relay_id() {
         let friend = OnlineId::new(7).unwrap();
         let entry = |id| ChatEntry {
             id,
@@ -180,8 +177,15 @@ mod tests {
             delivery: Delivery::Sent,
             change: Change::Kept,
         };
-        let total = KEEP_PER_FRIEND as u64 + 2;
-        let mut into = History::new();
+        let total = 5000;
+        let mut into = History::from([(
+            friend,
+            Conversation {
+                entries: (1..=10).map(entry).collect(),
+                unread: 0,
+                relayed: BTreeMap::new(),
+            },
+        )]);
         let from = History::from([(
             friend,
             Conversation {
@@ -190,12 +194,11 @@ mod tests {
                 relayed: (1..=total).map(|id| (id, id + 1000)).collect(),
             },
         )]);
-        merge_history(&mut into, &from);
+        assert_eq!(merge_history(&mut into, &from), total as usize - 10);
         let chat = &into[&friend];
-        assert_eq!(chat.entries.len(), KEEP_PER_FRIEND);
-        assert_eq!(chat.relayed.len(), KEEP_PER_FRIEND);
-        assert!(!chat.relayed.contains_key(&1));
-        assert_eq!(chat.relayed.get(&total), Some(&(total + 1000)));
+        assert_eq!(chat.entries.len(), total as usize);
+        assert_eq!(chat.relayed.len(), total as usize);
+        assert_eq!(chat.relayed.get(&1), Some(&1001));
     }
 
     #[test]

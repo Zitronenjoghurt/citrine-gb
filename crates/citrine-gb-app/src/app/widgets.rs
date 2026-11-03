@@ -1,4 +1,5 @@
 pub mod action;
+pub mod app_icon;
 pub mod apu;
 pub mod apu_waves;
 pub mod audio_debug;
@@ -34,3 +35,5 @@ pub mod text;
 pub mod time_control;
 pub mod toggle_button;
 pub mod touch_controls;
+pub mod typing;
+pub mod update;

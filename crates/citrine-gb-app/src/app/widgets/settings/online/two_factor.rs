@@ -12,8 +12,7 @@ use citrine_gb_net::ErrorCode;
 use egui::{RichText, Ui};
 use web_time::Instant;
 
-const ABOUT: &str =
-    "Asks for a code from an authenticator app when your relay ID signs in on another device.";
+const ABOUT: &str = "Asks for a code from an authenticator app when someone uses your sign-in key on another device.";
 const QR_SIDE: f32 = 184.0;
 const CODES_FILE: &str = "citrine-recovery-codes.txt";
 
@@ -44,7 +43,6 @@ pub(super) fn two_factor(
         return;
     };
     let (on, left) = (account.two_factor, account.codes_left);
-    ui.add_space(ui.spacing().interact_size.y.max(20.0));
     Form::show(ui, "online_two_factor", |f| {
         f.text_row("Two-factor sign-in", |ui| {
             if on {
@@ -83,6 +81,190 @@ pub(super) fn two_factor(
         form.setup_code.clear();
         online.start_two_factor();
     }
+}
+
+pub(super) fn phone(
+    ui: &mut Ui,
+    online: &mut Online,
+    form: &mut JoinForm,
+    name: &str,
+    host: &str,
+    now: Instant,
+) {
+    use crate::app::mobile::kit::{self, Row};
+    use crate::app::mobile::sheet;
+    let Some(account) = online.account() else {
+        return;
+    };
+    let (on, left) = (account.two_factor, account.codes_left);
+    if let Some(codes) = online.recovery_codes().map(<[String]>::to_vec) {
+        phone_codes(ui, online, form, &codes, name, host, now);
+        return;
+    }
+    if let Some(secret) = online.two_factor_setup().map(<[u8]>::to_vec) {
+        phone_setup(ui, online, form, &secret, name, now);
+        return;
+    }
+    sheet::note(ui, ABOUT);
+    let connected = online.is_connected();
+    if on {
+        let mut ask = None;
+        ui.add_enabled_ui(connected, |ui| {
+            kit::list(ui, |list| {
+                list.row(
+                    Row::new("Recovery codes")
+                        .value(format!("{left} left"))
+                        .no_chevron(),
+                );
+                if list
+                    .row(Row::new("New recovery codes").no_chevron())
+                    .clicked()
+                {
+                    ask = Some(Ask::NewCodes);
+                }
+                if list
+                    .row(Row::new("Turn off").danger().no_chevron())
+                    .clicked()
+                {
+                    ask = Some(Ask::TurnOff);
+                }
+            });
+        });
+        if let Some(ask) = ask {
+            open(form, ask);
+        }
+    } else if ui
+        .add_enabled_ui(connected, |ui| kit::primary_button(ui, "Set up"))
+        .inner
+    {
+        form.setup_code.clear();
+        online.start_two_factor();
+    }
+}
+
+fn phone_setup(
+    ui: &mut Ui,
+    online: &mut Online,
+    form: &mut JoinForm,
+    secret: &[u8],
+    name: &str,
+    now: Instant,
+) {
+    use crate::app::mobile::{kit, sheet};
+    sheet::note(
+        ui,
+        "Copy the key into an authenticator app, or scan the QR code with it, then type the code it shows.",
+    );
+    ui.vertical_centered(|ui| {
+        let side = QR_SIDE.min(ui.available_width());
+        ui.add(Qr::new(&otpauth_url(secret, name), side));
+    });
+    ui.add_space(12.0);
+    let copied = super::just_copied(form, "totp", now);
+    let label = if copied {
+        format!("{} Copied", icons::CHECK)
+    } else {
+        format!("{} Copy key", icons::COPY)
+    };
+    if kit::wide_button(ui, &label, false).clicked() {
+        super::copy_now(ui.ctx(), form, "totp", &secret_text(secret), now);
+    }
+    ui.add_space(12.0);
+    let response = kit::field(
+        ui,
+        row_field(ui, &mut form.setup_code)
+            .hint_text("6-digit code")
+            .char_limit(7),
+    );
+    let mut go = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if let Some(problem) = code_problem(online) {
+        ui.add_space(6.0);
+        sheet::inset(ui, |ui| problem_line(ui, &problem));
+    }
+    ui.add_space(14.0);
+    let digits = form.setup_code.chars().filter(char::is_ascii_digit).count() == 6;
+    go |= ui
+        .add_enabled_ui(digits && online.is_connected(), |ui| {
+            kit::wide_button(ui, "Turn on", true)
+        })
+        .inner
+        .clicked();
+    ui.add_space(8.0);
+    if ui
+        .vertical_centered(|ui| kit::pill(ui, "Cancel", false))
+        .inner
+        .clicked()
+    {
+        online.cancel_two_factor();
+        form.setup_code.clear();
+    }
+    if go && digits {
+        online.confirm_two_factor(form.setup_code.trim().to_owned());
+    }
+}
+
+fn phone_codes(
+    ui: &mut Ui,
+    online: &mut Online,
+    form: &mut JoinForm,
+    codes: &[String],
+    name: &str,
+    host: &str,
+    now: Instant,
+) {
+    use crate::app::mobile::{kit, sheet};
+    form.setup_code.clear();
+    sheet::note(
+        ui,
+        "Each recovery code signs in once if you lose your phone. They won't show again.",
+    );
+    egui::Frame::new()
+        .fill(kit::icon_tile_fill(ui.visuals()))
+        .corner_radius(10)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.columns(2, |columns| {
+                for (index, code) in codes.iter().enumerate() {
+                    columns[index % 2].vertical_centered(|ui| {
+                        ui.label(RichText::new(code).monospace().size(15.0));
+                    });
+                }
+            });
+        });
+    ui.add_space(14.0);
+    let all = codes.join("\n");
+    let copied = super::just_copied(form, "codes", now);
+    let label = if copied {
+        format!("{} Copied", icons::CHECK)
+    } else {
+        format!("{} Copy codes", icons::COPY)
+    };
+    if kit::wide_button(ui, &label, false).clicked() {
+        super::copy_now(ui.ctx(), form, "codes", &all, now);
+    }
+    ui.add_space(8.0);
+    if kit::wide_button(
+        ui,
+        &format!("{} Save as file", icons::DOWNLOAD_SIMPLE),
+        false,
+    )
+    .clicked()
+    {
+        save_codes(name, host, &all);
+    }
+    ui.add_space(8.0);
+    if kit::primary_button(ui, "Done") {
+        online.forget_recovery_codes();
+    }
+}
+
+fn save_codes(name: &str, host: &str, all: &str) {
+    let text = format!("Citrine recovery codes for {name} on {host}\n\n{all}\n");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    crate::utils::file_saver::FileSaver::new(CODES_FILE)
+        .add_filter("Text", &["txt"])
+        .dispatch(text.into_bytes(), tx);
 }
 
 pub(super) fn open(form: &mut JoinForm, ask: Ask) {
@@ -188,11 +370,7 @@ fn recovery_codes(
             .button(format!("{} Save as file", icons::DOWNLOAD_SIMPLE))
             .clicked()
         {
-            let text = format!("Citrine recovery codes for {name} on {host}\n\n{all}\n");
-            let (tx, _rx) = std::sync::mpsc::channel();
-            crate::utils::file_saver::FileSaver::new(CODES_FILE)
-                .add_filter("Text", &["txt"])
-                .dispatch(text.into_bytes(), tx);
+            save_codes(name, host, &all);
         }
         if ui.button("Done").clicked() {
             online.forget_recovery_codes();

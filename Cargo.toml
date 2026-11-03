@@ -11,7 +11,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://gb.lemon.industries"
@@ -48,3 +48,7 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+[profile.dist-android]
+inherits = "dist"
+strip = "debuginfo"

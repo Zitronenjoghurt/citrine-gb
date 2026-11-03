@@ -8,14 +8,23 @@ use egui::{RichText, Ui};
 use web_time::Instant;
 
 pub(super) fn storage(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: Instant) {
+    if has_storage(online) {
+        ui.add_space(ui.spacing().interact_size.y.max(20.0));
+        storage_body(ui, online, form, now);
+    }
+}
+
+pub fn has_storage(online: &Online) -> bool {
+    online
+        .account()
+        .is_some_and(|account| account.quota_bytes > 0 || account.storage_used > 0)
+}
+
+pub fn storage_body(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: Instant) {
     let Some(account) = online.account() else {
         return;
     };
-    if account.quota_bytes == 0 && account.storage_used == 0 {
-        return;
-    }
     let (used, quota) = (account.storage_used, account.quota_bytes);
-    ui.add_space(ui.spacing().interact_size.y.max(20.0));
     Form::show(ui, "online_storage", |f| {
         f.text_row("Storage", |ui| {
             ui.label(if quota == 0 {
@@ -232,10 +241,22 @@ pub(super) fn cloud_saves(ui: &mut Ui, online: &mut Online, form: &mut JoinForm)
         form.show_cloud = !form.show_cloud;
     }
     if form.show_cloud {
+        cloud_items(ui, online, form, &games);
+    }
+    cloud_confirm(ui, online, form);
+}
+
+fn cloud_items(
+    ui: &mut Ui,
+    online: &Online,
+    form: &mut JoinForm,
+    games: &[crate::online::cloud::CloudGame],
+) {
+    {
         if games.is_empty() {
             stored_note(ui, "No saves in the cloud yet");
         }
-        for game in &games {
+        for game in games {
             let title = if game.title.is_empty() {
                 "Unknown game".to_owned()
             } else {
@@ -253,6 +274,9 @@ pub(super) fn cloud_saves(ui: &mut Ui, online: &mut Online, form: &mut JoinForm)
         }
         ui.add_space(8.0);
     }
+}
+
+fn cloud_confirm(ui: &mut Ui, online: &mut Online, form: &mut JoinForm) {
     if let Some((game, title)) = form.delete_cloud.clone() {
         let question = format!("Delete the cloud saves of {title}? The saves on this device stay.");
         if let Some(yes) = confirm::confirm(ui.ctx(), "online_cloud_delete", &question, "Delete") {
@@ -262,4 +286,99 @@ pub(super) fn cloud_saves(ui: &mut Ui, online: &mut Online, form: &mut JoinForm)
             }
         }
     }
+}
+
+fn counted(count: usize, one: &str, many: &str) -> String {
+    let noun = if count == 1 { one } else { many };
+    format!("{count} {noun}")
+}
+
+pub fn storage_list(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: Instant) {
+    use crate::app::mobile::kit::{self, Row};
+    let Some(account) = online.account() else {
+        return;
+    };
+    let (used, quota) = (account.storage_used, account.quota_bytes);
+    let summary = if quota == 0 {
+        format!("{} used", crate::media::format_size(used))
+    } else {
+        format!(
+            "{} of {}",
+            crate::media::format_size(used),
+            crate::media::format_size(quota)
+        )
+    };
+    let files = online.shared_files().map(<[FileInfo]>::to_vec);
+    let due = form
+        .listed_at
+        .is_none_or(|at| now.duration_since(at) >= LIST_AGAIN);
+    if files.is_none() && online.is_connected() && due && online.list_files() {
+        form.listed_at = Some(now);
+    }
+    let caret = |open: bool| {
+        if open {
+            icons::CARET_DOWN
+        } else {
+            icons::CARET_RIGHT
+        }
+    };
+    kit::list(ui, |list| {
+        list.custom(|ui| {
+            kit::padded(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Storage").size(16.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(&summary).size(15.0).weak());
+                    });
+                });
+                if quota > 0 {
+                    ui.add_space(6.0);
+                    kit::meter(ui, (used as f32 / quota as f32).clamp(0.0, 1.0));
+                    ui.add_space(4.0);
+                }
+            })
+        });
+        let (files_value, files_size) = match &files {
+            Some(files) if files.is_empty() => ("None".to_owned(), String::new()),
+            Some(files) => (
+                counted(files.len(), "file", "files"),
+                crate::media::format_size(files.iter().map(|f| f.size).sum()),
+            ),
+            None => (String::new(), String::new()),
+        };
+        let row = Row::new("Shared files")
+            .detail(&files_size)
+            .value(files_value)
+            .trailing(caret(form.show_files));
+        if list.row(row).clicked() {
+            form.show_files = !form.show_files;
+        }
+        if form.show_files {
+            list.custom(|ui| kit::padded(ui, |ui| shared_files(ui, online, form, files)));
+        }
+        if online.cloud_enabled() && online.cloud_listed() {
+            let games = online.cloud_games();
+            let saves = games.iter().map(|game| game.saves).sum::<usize>();
+            let bytes = games.iter().map(|game| game.bytes).sum();
+            let size = crate::media::format_size(bytes);
+            let row = Row::new("Saves")
+                .detail(&size)
+                .value(counted(saves, "save", "saves"))
+                .trailing(caret(form.show_cloud));
+            if list.row(row).clicked() {
+                form.show_cloud = !form.show_cloud;
+            }
+            if form.show_cloud {
+                list.custom(|ui| kit::padded(ui, |ui| cloud_items(ui, online, form, &games)));
+            }
+        }
+        if let Some(bytes) = online.account_bytes().filter(|bytes| *bytes > 0) {
+            list.row(
+                Row::new("Settings and stats")
+                    .value(crate::media::format_size(bytes))
+                    .no_chevron(),
+            );
+        }
+    });
+    cloud_confirm(ui, online, form);
 }

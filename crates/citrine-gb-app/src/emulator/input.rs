@@ -34,6 +34,19 @@ impl Emulator {
         self.held.held().contains(button)
     }
 
+    pub fn take_pressed_by(&mut self) -> Option<InputSource> {
+        self.pressed_by.take()
+    }
+
+    pub fn release_keyboard(&mut self) {
+        let all = JoypadState::all();
+        let none = JoypadState::empty();
+        self.set_game_source(Game::First, InputSource::Keyboard, all, none);
+        if self.link.is_some() {
+            self.set_game_source(Game::Second, InputSource::Keyboard, all, none);
+        }
+    }
+
     pub fn release_all(&mut self) {
         let change = self.held.clear();
         self.apply(change);
@@ -64,6 +77,9 @@ impl Emulator {
         mask: JoypadState,
         down: JoypadState,
     ) -> bool {
+        if !(down & mask).is_empty() {
+            self.pressed_by = Some(source);
+        }
         if game == Game::Second
             && let Some(link) = &mut self.link
         {
@@ -195,6 +211,7 @@ impl Emulator {
         self.handle_pads(pads, bindings, capture, log);
 
         if ctx.wants_keyboard_input() && !capture.wants(BindingKind::Keyboard) {
+            self.release_keyboard();
             return;
         }
 
@@ -205,6 +222,7 @@ impl Emulator {
                     egui::Event::Key {
                         key,
                         pressed,
+                        repeat: false,
                         modifiers,
                         ..
                     } => Some((*key, *pressed, *modifiers)),

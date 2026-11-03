@@ -95,7 +95,7 @@ fn card(ui: &mut Ui, shown: &Presence, screen: Option<egui::TextureId>) {
                         egui::Image::new((texture, vec2(64.0 * 160.0 / 144.0, 64.0)))
                             .corner_radius(CornerRadius::same(6)),
                     ),
-                    None => match app_icon(ui.ctx()) {
+                    None => match crate::app::widgets::app_icon::texture(ui.ctx()) {
                         Some(icon) => ui.add(
                             egui::Image::new((icon.id(), size))
                                 .corner_radius(CornerRadius::same(6)),
@@ -124,19 +124,4 @@ fn card(ui: &mut Ui, shown: &Presence, screen: Option<egui::TextureId>) {
                 });
             });
         });
-}
-
-fn app_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new("discord_app_icon");
-    if let Some(handle) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
-        return Some(handle);
-    }
-    let frame = crate::media::decode_png(include_bytes!("../../../../assets/icon-128x128.png"))?;
-    let image = egui::ColorImage::from_rgba_unmultiplied(
-        [frame.width as usize, frame.height as usize],
-        &frame.rgba,
-    );
-    let handle = ctx.load_texture("discord_app_icon", image, egui::TextureOptions::LINEAR);
-    ctx.data_mut(|d| d.insert_temp(id, handle.clone()));
-    Some(handle)
 }

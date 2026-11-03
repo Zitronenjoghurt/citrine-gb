@@ -1,5 +1,6 @@
 use super::chart::day_bars;
 use super::*;
+use crate::stats::GameTotals;
 use egui::{Rect, pos2};
 
 #[test]
@@ -86,4 +87,124 @@ fn tapping_a_calendar_day_picks_it() {
     let wednesday = Date::new(2026, 10, 28).unwrap();
     assert_eq!(tap_calendar(false), Some(wednesday));
     assert_eq!(tap_calendar(true), Some(wednesday));
+}
+
+fn phone_overview() -> Overview {
+    let game = |rom: &str, name: &str, play_ms: u64| GameTotals {
+        rom: rom.into(),
+        name: name.into(),
+        play_ms,
+        sessions: 2,
+        ..Default::default()
+    };
+    Overview {
+        play_ms: 5_400_000,
+        games_played: 2,
+        games: vec![
+            game("tetris", "Tetris", 3_600_000),
+            game("zelda", "Link's Awakening", 1_800_000),
+        ],
+        ..Default::default()
+    }
+}
+
+fn phone_frame(
+    ctx: &egui::Context,
+    state: &mut StatsUi,
+    range: &mut Range,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    let overview = phone_overview();
+    let today = Date::new(2026, 10, 31).unwrap();
+    ctx.style_mut(|style| style.spacing.interact_size.y = 44.0);
+    let input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(360.0, 2400.0))),
+        events,
+        ..Default::default()
+    };
+    ctx.run(input, |ctx| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.inner_margin(14))
+            .show(ctx, |ui| {
+                phone::overview_page(ui, state, range, &overview, today);
+            });
+    })
+}
+
+fn shown_text(output: &egui::FullOutput, wanted: &str) -> Rect {
+    output
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text().trim() == wanted => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{wanted} is not on screen"))
+}
+
+fn tap_text(ctx: &egui::Context, state: &mut StatsUi, range: &mut Range, wanted: &str) {
+    let at = shown_text(&phone_frame(ctx, state, range, Vec::new()), wanted).center();
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    phone_frame(ctx, state, range, vec![egui::Event::PointerMoved(at)]);
+    phone_frame(ctx, state, range, vec![press(true)]);
+    phone_frame(ctx, state, range, vec![press(false)]);
+}
+
+#[test]
+fn phone_range_pills_fit_one_line_at_360_px() {
+    let ctx = egui::Context::default();
+    let mut state = StatsUi::default();
+    let mut range = Range::Week;
+    phone_frame(&ctx, &mut state, &mut range, Vec::new());
+    let output = phone_frame(&ctx, &mut state, &mut range, Vec::new());
+    let pills: Vec<Rect> = phone::RANGES
+        .iter()
+        .map(|pick| shown_text(&output, pick.label()))
+        .collect();
+    for pill in &pills {
+        assert!((pill.center().y - pills[0].center().y).abs() < 1.0);
+        assert!(pill.right() <= 346.0, "{pill:?}");
+    }
+    tap_text(&ctx, &mut state, &mut range, "Month");
+    assert_eq!(range, Range::Month);
+}
+
+#[test]
+fn a_phone_game_row_opens_the_game_page() {
+    let ctx = egui::Context::default();
+    let mut state = StatsUi::default();
+    let mut range = Range::Week;
+    phone_frame(&ctx, &mut state, &mut range, Vec::new());
+    tap_text(&ctx, &mut state, &mut range, "Link's Awakening");
+    assert_eq!(
+        state.page,
+        Page::Game {
+            rom: "zelda".into(),
+            name: "Link's Awakening".into(),
+        }
+    );
+}
+
+#[test]
+fn a_phone_games_list_has_a_search_and_a_sort_on_one_line() {
+    let ctx = egui::Context::default();
+    let mut state = StatsUi::default();
+    let mut range = Range::Week;
+    phone_frame(&ctx, &mut state, &mut range, Vec::new());
+    let output = phone_frame(&ctx, &mut state, &mut range, Vec::new());
+    let sort_label = format!("{}  Most played", crate::icons::ARROWS_DOWN_UP);
+    let find_label = format!("{}  Find a game", crate::icons::MAGNIFYING_GLASS);
+    let sort = shown_text(&output, &sort_label);
+    let find = shown_text(&output, &find_label);
+    assert!((sort.center().y - find.center().y).abs() < 1.0);
+    assert!(sort.right() <= 346.0, "{sort:?}");
+    tap_text(&ctx, &mut state, &mut range, &sort_label);
+    assert!(state.sort_sheet);
 }

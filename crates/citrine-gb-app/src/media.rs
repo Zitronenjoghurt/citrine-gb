@@ -3,7 +3,7 @@ pub mod clipboard;
 mod native;
 pub mod playback;
 pub mod recording;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub mod reveal;
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -378,10 +378,15 @@ pub fn format_size(bytes: u64) -> String {
     } else if value < KB * KB {
         format!("{:.0} KB", value / KB)
     } else if value < KB * KB * KB {
-        format!("{:.1} MB", value / (KB * KB))
+        format!("{} MB", one_place(value / (KB * KB)))
     } else {
-        format!("{:.1} GB", value / (KB * KB * KB))
+        format!("{} GB", one_place(value / (KB * KB * KB)))
     }
+}
+
+fn one_place(value: f64) -> String {
+    let text = format!("{value:.1}");
+    text.strip_suffix(".0").map(str::to_owned).unwrap_or(text)
 }
 
 pub fn format_length(length_ms: u64) -> String {

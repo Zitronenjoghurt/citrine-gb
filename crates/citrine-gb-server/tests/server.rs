@@ -583,6 +583,58 @@ async fn what_a_friend_plays_reaches_only_them_sealed() {
 }
 
 #[tokio::test]
+async fn typing_reaches_an_online_friend_only_and_is_never_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, a_acc, _), (mut b, b_acc, b_id)) = friends(s.addr).await;
+    let (mut c, c_acc) = Client::sign_up(s.addr, &RelayId::random(), "Cem").await;
+
+    b.send(ClientMsg::Typing {
+        to: a_acc.online_id,
+        typing: true,
+    })
+    .await;
+    let got = a
+        .expect("typing", |m| matches!(m, ServerMsg::Typing { .. }))
+        .await;
+    assert_eq!(
+        got,
+        ServerMsg::Typing {
+            from: b_acc.online_id,
+            typing: true,
+        }
+    );
+    b.send(ClientMsg::Typing {
+        to: c_acc.online_id,
+        typing: true,
+    })
+    .await;
+    b.quiet().await;
+    c.quiet().await;
+
+    drop(b);
+    a.expect("offline", |m| {
+        matches!(
+            m,
+            ServerMsg::Presence {
+                presence: Presence::Offline { .. },
+                ..
+            }
+        )
+    })
+    .await;
+    a.send(ClientMsg::Typing {
+        to: b_acc.online_id,
+        typing: true,
+    })
+    .await;
+    a.quiet().await;
+    let (mut b, _) = Client::sign_in(s.addr, &b_id).await;
+    b.quiet().await;
+    s.stop().await;
+}
+
+#[tokio::test]
 async fn friend_list_on_sign_in_and_decline_and_remove() {
     let dir = tempfile::tempdir().unwrap();
     let s = server(dir.path(), &[]).await;
@@ -705,7 +757,7 @@ async fn an_offline_message_arrives_on_next_connect() {
     b.quiet().await;
     let (mut fresh, _) = Client::sign_in(s.addr, &b_id).await;
     let ServerMsg::Chat(copy) = fresh.recv().await else {
-        panic!("a new device gets the chats of the last 30 days")
+        panic!("a new device gets the whole history")
     };
     assert_eq!(copy.id, id);
     drop(fresh);
@@ -2663,6 +2715,45 @@ async fn an_invite_reaches_every_device_and_one_of_them_plays() {
     })
     .await;
     s.stop().await;
+}
+
+#[tokio::test]
+async fn a_device_signed_in_after_every_other_left_gets_the_whole_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, a_acc, a_id), (mut b, b_acc, b_id)) = friends(s.addr).await;
+    b.send(chat_to(&b_id, &a_id, &a_acc, 1, b"first")).await;
+    b.expect("sent", |m| matches!(m, ServerMsg::ChatSent { .. }))
+        .await;
+    a.expect("chat", |m| matches!(m, ServerMsg::Chat(_))).await;
+    a.send(chat_to(&a_id, &b_id, &b_acc, 2, b"reply")).await;
+    a.expect("sent", |m| matches!(m, ServerMsg::ChatSent { .. }))
+        .await;
+    let (_, this) = a.devices_now().await;
+    a.send(ClientMsg::SignOutDevice(this)).await;
+    a.closed().await;
+
+    let (mut fresh, _) = Client::sign_in_as(s.addr, &a_id, None, "Linux PC").await;
+    let ServerMsg::Chat(first) = fresh
+        .expect("chat", |m| matches!(m, ServerMsg::Chat(_)))
+        .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(first.from, b_acc.online_id);
+    let ServerMsg::ChatCopy { to, message } = fresh
+        .expect("copy", |m| matches!(m, ServerMsg::ChatCopy { .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(to, b_acc.online_id);
+    assert_eq!(
+        a_id.keys()
+            .open(&b_id.keys().public_key(), &message.sealed)
+            .unwrap(),
+        b"reply"
+    );
 }
 
 #[tokio::test]

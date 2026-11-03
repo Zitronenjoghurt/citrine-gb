@@ -100,6 +100,11 @@ impl Emulator {
         } else {
             &self.last_frame
         };
+        self.screenshot_of(source, scale)
+    }
+
+    pub fn screenshot_of(&self, source: &[u8], scale: usize) -> (usize, usize, Vec<u8>) {
+        let scale = scale.max(1);
         let mut rgba = Vec::new();
         self.paint(source, scale, &mut rgba);
         (GB_WIDTH * scale, GB_HEIGHT * scale, rgba)

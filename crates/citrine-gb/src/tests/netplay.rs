@@ -476,6 +476,27 @@ fn snake_links_through_sessions_when_one_console_starts_later() {
     assert_eq!(cable.messages, [one + two; 2]);
 }
 
+#[test]
+fn a_console_handed_back_comes_from_the_last_confirmed_frame() {
+    let roms = roms(SNAKE, SNAKE);
+    let inputs = snake_inputs(120);
+    let mut ahead = session(&roms, Player::One, 1);
+    for frame in 0..120 {
+        if frame < 90 {
+            ahead.add_remote_input(frame, inputs[1][frame as usize]);
+        }
+        ahead
+            .add_local_input(frame, inputs[0][frame as usize])
+            .unwrap();
+        assert_eq!(ahead.advance(), Advance::Ran);
+    }
+    assert_eq!(ahead.confirmed_frame(), 90);
+    let shared = [0, 1].map(|side| inputs[side][..90].to_vec());
+    let (reference, _) = play_reference(session(&roms, Player::One, 1), &shared);
+    let handed = ahead.into_confirmed_console(Player::One);
+    assert_same_consoles(&handed, reference.console(Player::One), "confirmed frame");
+}
+
 fn exchange_program(sc: u8, first: u8, step: u8, count: u16) -> Vec<u8> {
     let [low, high] = count.to_le_bytes();
     let mut code = vec![0xAF, 0xEA, 0x00, 0xDF, 0x21, 0x00, 0xC0];

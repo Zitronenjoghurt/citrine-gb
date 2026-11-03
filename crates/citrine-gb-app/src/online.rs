@@ -15,6 +15,7 @@ pub mod settings;
 pub mod synced;
 pub mod transport;
 pub mod two_factor;
+pub mod typing;
 
 pub use address::{AddressError, ServerAddress};
 pub use settings::{JoinedRelay, OnlineSettings, RelayEntry, Trust};
@@ -256,6 +257,7 @@ pub struct Online {
     devices: Vec<DeviceInfo>,
     this_device: Option<DeviceId>,
     signed_out: Option<ServerAddress>,
+    typing: typing::Typing,
 }
 
 impl Default for Online {
@@ -306,6 +308,7 @@ impl Online {
             devices: Vec::new(),
             this_device: None,
             signed_out: None,
+            typing: typing::Typing::default(),
         }
     }
 
@@ -483,6 +486,7 @@ impl Online {
         self.told.clear();
         self.screen = None;
         self.screens = 0;
+        self.typing.reset();
     }
 
     pub fn update(&mut self, now: Instant) {
@@ -514,6 +518,11 @@ impl Online {
                         Ok(msg) => self.receive(msg, now),
                         Err(_) => {}
                     }
+                }
+                TransportEvent::Closed | TransportEvent::Failed(_)
+                    if self.phase == Phase::Probed =>
+                {
+                    self.drop_connection();
                 }
                 TransportEvent::Closed | TransportEvent::Failed(_) => {
                     let problem = match self.heard_at {
@@ -698,6 +707,7 @@ impl Online {
                 if friend.state != FriendState::Friend || !is_online(friend.presence) {
                     self.playing.remove(&id);
                     self.told.remove(&id);
+                    self.typing.gone(id);
                 }
                 self.friends.insert(id, friend);
             }
@@ -705,16 +715,25 @@ impl Online {
                 self.friends.remove(&id);
                 self.playing.remove(&id);
                 self.told.remove(&id);
+                self.typing.gone(id);
             }
             ServerMsg::Presence { who, presence } => {
                 if !is_online(Some(presence)) {
                     self.playing.remove(&who);
+                    self.typing.gone(who);
                 }
                 self.told.remove(&who);
                 if let Some(friend) = self.friends.get_mut(&who) {
                     friend.presence = Some(presence);
                 }
             }
+            ServerMsg::Typing { from, typing } => {
+                if self.friends.contains_key(&from) {
+                    self.typing.heard(from, typing, now);
+                }
+            }
+            ServerMsg::Error(ErrorCode::BadMessage)
+                if self.phase == Phase::Connected && self.typing.refused(now) => {}
             ServerMsg::Playing { from, sealed } => {
                 if let (Some(keys), Some(friend)) = (&self.keys, self.friends.get(&from))
                     && let Ok(game) = keys.open_playing(&friend.public_key, &sealed)
@@ -840,6 +859,10 @@ impl Online {
 
     pub fn pictures_off(&self) -> bool {
         self.pictures_refused || self.info.as_ref().is_some_and(|info| !info.pictures)
+    }
+
+    pub fn forget_screen(&mut self) {
+        self.screen = None;
     }
 
     pub fn screen(&self) -> Option<(&str, u64)> {
@@ -1068,6 +1091,37 @@ impl Online {
             .values()
             .filter(|f| f.state == FriendState::Incoming)
             .count()
+    }
+
+    pub fn set_typing_indicators(&mut self, on: bool, now: Instant) {
+        if let Some(signal) = self.typing.set_on(on) {
+            self.send_typing(signal, now);
+        }
+    }
+
+    pub fn compose(&mut self, draft: Option<(OnlineId, &str)>, now: Instant) {
+        if self.phase != Phase::Connected {
+            return;
+        }
+        for signal in self.typing.compose(draft, now) {
+            self.send_typing(signal, now);
+        }
+    }
+
+    fn send_typing(&mut self, signal: typing::Signal, now: Instant) {
+        let (to, typing) = signal.to();
+        if self.send(ClientMsg::Typing { to, typing }) {
+            self.typing.went_out(now);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn befriend_for_test(&mut self, friend: Friend) {
+        self.friends.insert(friend.online_id, friend);
+    }
+
+    pub fn is_typing(&self, friend: OnlineId, now: Instant) -> bool {
+        self.is_connected() && self.typing.is_typing(friend, now)
     }
 
     pub fn playing(&self, id: OnlineId) -> Option<&GameHash> {

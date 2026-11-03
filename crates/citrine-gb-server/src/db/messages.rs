@@ -162,21 +162,15 @@ impl Db {
         Ok(done.rows_affected() == 1)
     }
 
-    pub async fn purge_messages(&self, before: u64) -> Result<usize> {
-        let before = i64::try_from(before).unwrap_or(i64::MAX);
-        let done = sqlx::query!("DELETE FROM messages WHERE sent_at < ?1", before)
-            .execute(&self.pool)
-            .await?;
-        Ok(done.rows_affected() as usize)
-    }
-
     pub async fn waiting_between(&self, from: i64, to: i64) -> Result<(u64, u64)> {
         let r = sqlx::query!(
             r#"SELECT COUNT(*) AS "count!: i64", COALESCE(SUM(LENGTH(body)), 0) AS "bytes!: i64"
-               FROM messages m WHERE m.to_id = ?1 AND m.from_id = ?2
-                AND (EXISTS (SELECT 1 FROM message_deliveries d JOIN devices v ON v.id = d.device_id
-                              WHERE d.message_id = m.id AND v.account_id = ?1)
-                     OR NOT EXISTS (SELECT 1 FROM devices WHERE account_id = ?1 AND left_at IS NULL))"#,
+               FROM messages m WHERE m.to_id = ?1 AND m.from_id = ?2 AND m.receiver_keeps = 1
+                AND NOT EXISTS (SELECT 1 FROM devices v WHERE v.account_id = ?1 AND v.left_at IS NULL
+                                 AND NOT EXISTS (SELECT 1 FROM message_deliveries d
+                                                  WHERE d.device_id = v.id AND d.message_id = m.id))
+                AND (EXISTS (SELECT 1 FROM devices WHERE account_id = ?1 AND left_at IS NULL)
+                     OR m.sent_at > COALESCE((SELECT MAX(left_at) FROM devices WHERE account_id = ?1), 0))"#,
             to,
             from,
         )
@@ -246,12 +240,10 @@ mod tests {
         assert_eq!(db.waiting_between(b.id, a.id).await.unwrap(), (0, 0));
         db.ack_messages(b_mac, &[first, second]).await.unwrap();
         assert_eq!(db.pending_messages(b_web, 0, 10).await.unwrap().len(), 2);
-        assert_eq!(db.waiting_between(a.id, b.id).await.unwrap(), (2, 6));
+        assert_eq!(db.waiting_between(a.id, b.id).await.unwrap(), (0, 0));
         db.ack_messages(b_web, &[first, second]).await.unwrap();
         assert_eq!(db.waiting_between(a.id, b.id).await.unwrap(), (0, 0));
         assert_eq!(db.stored_messages().await.unwrap(), (2, 6));
-        assert_eq!(db.purge_messages(201).await.unwrap(), 2);
-        assert_eq!(db.stored_messages().await.unwrap(), (0, 0));
     }
 
     #[tokio::test]

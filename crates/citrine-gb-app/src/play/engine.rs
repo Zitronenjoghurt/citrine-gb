@@ -209,11 +209,24 @@ impl Rollback {
         self.save.take().or_else(|| self.session.local_save(false))
     }
 
-    pub fn into_console(self) -> Option<GameBoy> {
+    #[cfg(test)]
+    pub fn cable_transfers(&self) -> [u64; 2] {
+        self.session.cable_transfers()
+    }
+
+    #[cfg(test)]
+    pub fn confirmed_frame(&self) -> u32 {
+        self.session.confirmed_frame()
+    }
+
+    pub fn into_console(self, confirmed: bool) -> Option<GameBoy> {
         let local = self.session.local();
-        self.session
-            .present(local)
-            .then(|| self.session.into_console(local))
+        let present = self.session.present(local);
+        match confirmed {
+            _ if !present => None,
+            true => Some(self.session.into_confirmed_console(local)),
+            false => Some(self.session.into_console(local)),
+        }
     }
 
     pub fn tick(

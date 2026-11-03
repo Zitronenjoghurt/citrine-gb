@@ -9,8 +9,7 @@ pub fn build(controls: &Controls) -> String {
 # Welcome to Citrine v{}
 Thanks for using my emulator! If you find any issues, please report them on [GitHub](https://github.com/Zitronenjoghurt/citrine-gb/issues).
 
-Native version: [GitHub](https://github.com/Zitronenjoghurt/citrine-gb/releases/latest)\
-Web version: [Citrine Web](https://gb.lemon.industries)
+{}
 
 ---
 
@@ -52,10 +51,24 @@ To add friends and see what they play, join a relay in **Settings → Online**.
 
 {}"#,
         env!("CARGO_PKG_VERSION"),
+        downloads(cfg!(target_os = "android")),
         controls_section(controls),
         quick_slot_note(controls),
         layout_section(controls),
     )
+}
+
+const RELEASES: &str = "https://github.com/Zitronenjoghurt/citrine-gb/releases/latest";
+
+pub(super) fn downloads(android: bool) -> String {
+    let web = "Web version: [Citrine Web](https://gb.lemon.industries)";
+    if android {
+        format!("Updates: [GitHub]({RELEASES})\\\n{web}")
+    } else {
+        format!(
+            "Desktop version: [GitHub]({RELEASES})\\\nAndroid version: [GitHub]({RELEASES})\\\n{web}"
+        )
+    }
 }
 
 const TOUCH: &str =

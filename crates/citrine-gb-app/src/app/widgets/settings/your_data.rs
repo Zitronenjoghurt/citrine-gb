@@ -137,7 +137,7 @@ pub fn count_text(kind: &Kind, count: usize) -> String {
     kind.unit(count)
 }
 
-fn size_text(tally: &Tally) -> String {
+pub fn size_text(tally: &Tally) -> String {
     crate::media::format_size(if tally.count == 0 { 0 } else { tally.bytes })
 }
 

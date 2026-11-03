@@ -1,5 +1,4 @@
 use super::Citrine;
-use super::mobile::Sheet;
 use super::tabs::Tab;
 use super::ui_state::UiState;
 use super::ui_state::settings::SettingsTab;
@@ -28,9 +27,9 @@ impl Citrine {
     }
 
     fn your_data_open(&self) -> bool {
-        self.ui.settings.current_tab == SettingsTab::YourData
-            && (self.dock.find_tab(&Tab::Settings).is_some()
-                || self.mobile.sheet == Some(Sheet::Panel(Tab::Settings)))
+        (self.ui.settings.current_tab == SettingsTab::YourData
+            && self.dock.find_tab(&Tab::Settings).is_some())
+            || self.mobile.nav.settings_page() == Some(SettingsTab::YourData)
     }
 
     pub(super) fn count_your_data(&mut self) {
@@ -232,6 +231,8 @@ impl Citrine {
         }
         self.emulator.unload();
         let result = self.data_parts().delete_all();
+        self.files.rom_copies.clear();
+        self.ui.recent.clear();
         self.online.cloud_forget_local();
         self.first_launch();
         match result {
@@ -248,7 +249,7 @@ impl Citrine {
         let mut your_data = std::mem::take(&mut self.ui.your_data);
         your_data.counted_at = None;
         your_data.exporting = Exporting::Idle;
-        self.ui = UiState {
+        *self.ui = UiState {
             settings,
             recent,
             your_data,
@@ -257,9 +258,9 @@ impl Citrine {
         self.ui.settings.current_tab = SettingsTab::default();
         self.dock = DockState::new(vec![Tab::GameBoy]);
         self.open_tab(Tab::Info);
-        self.mobile.close();
+        self.mobile.nav = Default::default();
         self.game_info = Default::default();
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             self.shots = Default::default();
         }

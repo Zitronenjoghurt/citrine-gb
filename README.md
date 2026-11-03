@@ -20,6 +20,7 @@ Read [FEATURES.md](FEATURES.md) for a list of current and planned features.
 - Windows (x86_64)
 - macOS (universal, Apple Silicon and Intel)
 - Linux (x86_64 and aarch64)
+- Android (8 or newer, 64-bit ARM)
 - Web (via [Citrine Web](https://gb.lemon.industries))
 
 Download the latest build from [Releases](https://github.com/Zitronenjoghurt/citrine-gb/releases).

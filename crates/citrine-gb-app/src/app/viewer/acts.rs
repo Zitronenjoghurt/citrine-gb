@@ -81,7 +81,7 @@ pub(super) fn apply(
                 crate::media::export(viewer.media, id, viewer.files.save_tx.clone());
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         Act::Reveal => {
             if let ItemKey::Media(id) = key
                 && let Err(err) = crate::media::reveal::reveal(&viewer.media.path(id))

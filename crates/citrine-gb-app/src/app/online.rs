@@ -1,5 +1,5 @@
 use super::Citrine;
-use super::{mobile, tabs};
+use super::tabs;
 use crate::app::tabs::Tab;
 use crate::app::ui_state::synced;
 use crate::play::{MyGame, Stage};
@@ -24,6 +24,9 @@ impl Citrine {
             .set_cloud(settings.cloud_owner(), settings.cloud_saves);
         let sync = settings.cloud_saves && settings.sync_settings;
         self.online.update(now);
+        self.online
+            .set_typing_indicators(settings.typing_indicators, now);
+        self.online.compose(self.ui.friends.chat.composing(), now);
         if self
             .online
             .sync_settings(&mut self.ui.settings.synced, sync)
@@ -61,31 +64,31 @@ impl Citrine {
         if let Some(address) = self.online.take_signed_out() {
             self.online.leave();
             let key = address.key();
-            self.ui.settings.online.forget(&key);
+            self.ui.settings.online.forget_current(&key);
             self.ui.settings.dirty = true;
             self.ui.join = crate::app::widgets::settings::online::JoinForm::signed_out_of(key);
         }
         if self.online.take_deleted() {
             self.online.leave();
             if let Some(key) = self.ui.settings.online.joined.clone() {
-                self.ui.settings.online.forget(&key);
+                self.ui.settings.online.forget_current(&key);
             }
             self.ui.settings.dirty = true;
             self.ui.join = Default::default();
         }
-        if !self.ui.settings.online.is_joined() {
-            if let Some(location) = self.dock.find_tab(&Tab::Friends) {
-                self.dock.remove_tab(location);
-            }
-            if self.mobile.sheet == Some(mobile::Sheet::Panel(Tab::Friends)) {
-                self.mobile.close();
-            }
+        if !self.ui.settings.online.is_joined()
+            && let Some(location) = self.dock.find_tab(&Tab::Friends)
+        {
+            self.dock.remove_tab(location);
         }
     }
 
     pub(super) fn settle_play(&mut self, ctx: &Context) {
         if let Some(ended) = &self.ui.playing.ended
-            && self.play.invites().iter().any(|i| i.from == ended.friend)
+            && match ended.paused {
+                true => self.emulator.running,
+                false => self.play.invites().iter().any(|i| i.from == ended.friend),
+            }
         {
             self.ui.playing.ended = None;
         }
@@ -106,15 +109,29 @@ impl Citrine {
             Some(session) => {
                 let friend = session.friend();
                 let played = session.mode().is_some();
-                if let Stage::Ended(ending) = session.stage() {
-                    let name = tabs::playing::friend_name(&self.online, friend);
-                    self.ui.playing.ended = tabs::playing::ending_line(&name, ending, played)
-                        .map(|line| tabs::playing::Ended { friend, line });
+                let ending = match session.stage() {
+                    Stage::Ended(ending) => Some(ending),
+                    _ => None,
+                };
+                let mut paused = false;
+                if let Some(session) = self.play.close() {
+                    match self.emulator.finish_session(session) {
+                        Ok(held) => paused = held,
+                        Err(err) => {
+                            self.toasts.error(format!("Couldn't keep the game: {err}"));
+                        }
+                    }
                 }
-                if let Some(session) = self.play.close()
-                    && let Err(err) = self.emulator.finish_session(session)
-                {
-                    self.toasts.error(format!("Couldn't keep the game: {err}"));
+                if let Some(ending) = ending {
+                    let name = tabs::playing::friend_name(&self.online, friend);
+                    self.ui.playing.ended =
+                        tabs::playing::ending_line(&name, ending, played).map(|line| {
+                            tabs::playing::Ended {
+                                friend,
+                                line,
+                                paused,
+                            }
+                        });
                 }
                 self.ui.playing.asking_stop = false;
                 self.ui.playing.shown = false;
@@ -131,7 +148,7 @@ impl Citrine {
         if let Some(location) = self.dock.find_tab(&Tab::Playing) {
             self.dock.remove_tab(location);
         }
-        if self.mobile.sheet == Some(mobile::Sheet::Panel(Tab::Playing)) {
+        if self.mobile.showing(Tab::Playing) {
             self.close_mobile_sheet();
         }
     }

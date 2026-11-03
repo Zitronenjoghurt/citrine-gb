@@ -21,6 +21,31 @@ impl Display for LandscapeControls {
     }
 }
 
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter,
+)]
+pub enum HiddenButtons {
+    #[default]
+    Auto,
+    Show,
+    Hide,
+}
+
+impl HiddenButtons {
+    pub const NOTE: &str = "Auto hides the on-screen buttons when you press a controller button or a key, and shows them again when you tap beside the game.";
+}
+
+impl Display for HiddenButtons {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Auto => "Auto",
+            Self::Show => "Show",
+            Self::Hide => "Hide",
+        };
+        f.write_str(name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct TouchSettings {
@@ -29,6 +54,7 @@ pub struct TouchSettings {
     pub scale: f32,
     pub haptics: bool,
     pub landscape: LandscapeControls,
+    pub hidden_buttons: HiddenButtons,
     pub mirrored: bool,
     pub ui_scale: f32,
     pub scaling: ScalingMode,
@@ -42,6 +68,7 @@ impl Default for TouchSettings {
             scale: 1.0,
             haptics: true,
             landscape: LandscapeControls::default(),
+            hidden_buttons: HiddenButtons::default(),
             mirrored: false,
             ui_scale: 1.0,
             scaling: ScalingMode::Fit,

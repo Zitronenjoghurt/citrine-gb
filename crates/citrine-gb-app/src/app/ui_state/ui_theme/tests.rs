@@ -36,3 +36,18 @@ fn the_dark_red_keeps_the_red_hue() {
     assert_eq!(DARK_ERROR.r(), 255);
     assert_eq!(DARK_ERROR.g(), DARK_ERROR.b());
 }
+
+#[test]
+fn phone_row_values_read_on_cards() {
+    for (theme, least) in [(super::UiTheme::Dark, 4.5), (super::UiTheme::Light, 3.0)] {
+        let ctx = egui::Context::default();
+        theme.apply(&ctx, true);
+        let visuals = ctx.style().visuals.clone();
+        let card = crate::app::mobile::kit::card_fill(&visuals);
+        let value = crate::app::mobile::kit::value_color(&visuals);
+        assert!(
+            contrast(value, card) >= least,
+            "{theme}: {value:?} on {card:?}"
+        );
+    }
+}

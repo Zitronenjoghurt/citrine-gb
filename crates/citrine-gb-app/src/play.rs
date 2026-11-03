@@ -69,6 +69,7 @@ pub struct LinkedSave {
 pub struct Returned {
     pub console: GameBoy,
     pub borrowed: Option<GameHash>,
+    pub paused: bool,
 }
 
 pub enum MyGame {

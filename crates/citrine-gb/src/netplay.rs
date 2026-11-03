@@ -197,6 +197,15 @@ impl Session {
         consoles.swap_remove(player.index())
     }
 
+    pub fn into_confirmed_console(mut self, player: Player) -> GameBoy {
+        let frame = self.confirmed_frame();
+        let slot = &self.ring[frame as usize % RING_LEN];
+        if frame < self.frame && slot.frame == Some(frame) {
+            self.consoles[player.index()].copy_state_from(&slot.consoles[player.index()]);
+        }
+        self.into_console(player)
+    }
+
     pub fn present(&self, player: Player) -> bool {
         self.present[player.index()]
     }
@@ -207,6 +216,10 @@ impl Session {
 
     pub fn cable_plugged(&self) -> bool {
         self.cable.plugged
+    }
+
+    pub fn cable_transfers(&self) -> [u64; 2] {
+        self.cable.transfers
     }
 
     pub fn confirmed_frame(&self) -> u32 {

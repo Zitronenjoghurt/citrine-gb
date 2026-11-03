@@ -38,6 +38,10 @@ pub enum AppEvent {
     OpenSettings {
         tab: SettingsTab,
     },
+    UndoSnapshot {
+        rom_key: String,
+        slot: usize,
+    },
 }
 
 #[derive(Default)]

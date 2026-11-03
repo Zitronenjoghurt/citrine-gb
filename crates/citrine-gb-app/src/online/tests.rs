@@ -166,6 +166,37 @@ fn a_probe_reads_the_server_then_creates_the_account() {
 }
 
 #[test]
+fn a_probe_the_server_closes_stays_probed_and_signs_in_on_a_new_connection() {
+    let (mut online, wire) = client();
+    let now = Instant::now();
+    online.probe(
+        ServerAddress::parse("gb.lemon.industries").unwrap(),
+        "pw".into(),
+        Trust::default(),
+        now,
+    );
+    open(&wire);
+    push(&wire, ServerMsg::Info(info(true)));
+    online.update(now);
+    sent(&wire);
+    wire.borrow_mut().incoming.push_back(TransportEvent::Closed);
+    online.update(now + Duration::from_secs(30));
+    assert_eq!(online.phase(), Phase::Probed);
+
+    online.create_account("Clara".into(), now + Duration::from_secs(40));
+    assert_eq!(online.phase(), Phase::Connecting);
+    assert_eq!(wire.borrow().urls.len(), 2);
+    open(&wire);
+    push(&wire, ServerMsg::Info(info(true)));
+    online.update(now + Duration::from_secs(41));
+    assert!(
+        sent(&wire)
+            .iter()
+            .any(|m| matches!(m, ClientMsg::SignUp { .. }))
+    );
+}
+
+#[test]
 fn a_wrong_password_stops_and_asks() {
     let (mut online, wire) = client();
     let now = Instant::now();
@@ -1055,4 +1086,71 @@ fn a_signed_out_device_key_is_refused_at_sign_in() {
     online.update(now);
     assert_eq!(online.phase(), Phase::Stopped(Problem::SignedOut));
     assert!(online.take_signed_out().is_some());
+}
+
+#[test]
+fn an_old_relay_that_cannot_read_typing_is_left_alone_quietly() {
+    let id = RelayId::random();
+    let (mut online, wire, now) = signed_in(&id);
+    let ana = OnlineId::new(7).unwrap();
+    push(
+        &wire,
+        ServerMsg::Friend(friend(&id, 7, Some(Presence::Online { away: false }))),
+    );
+    online.update(now);
+    sent(&wire);
+    online.compose(Some((ana, "")), now);
+    online.compose(Some((ana, "h")), now);
+    assert_eq!(
+        sent(&wire),
+        [ClientMsg::Typing {
+            to: ana,
+            typing: true
+        }]
+    );
+    push(&wire, ServerMsg::Error(ErrorCode::BadMessage));
+    online.update(now);
+    assert_eq!(online.request_error(), None);
+    let later = now + crate::online::typing::SEND_EVERY * 2;
+    online.compose(Some((ana, "hi")), later);
+    online.compose(Some((ana, "")), later);
+    assert!(sent(&wire).is_empty());
+}
+
+#[test]
+fn a_typing_friend_shows_only_for_friends_and_clears_when_they_go_offline() {
+    let id = RelayId::random();
+    let (mut online, wire, now) = signed_in(&id);
+    let ana = OnlineId::new(7).unwrap();
+    let stranger = OnlineId::new(9).unwrap();
+    push(
+        &wire,
+        ServerMsg::Friend(friend(&id, 7, Some(Presence::Online { away: false }))),
+    );
+    push(
+        &wire,
+        ServerMsg::Typing {
+            from: stranger,
+            typing: true,
+        },
+    );
+    push(
+        &wire,
+        ServerMsg::Typing {
+            from: ana,
+            typing: true,
+        },
+    );
+    online.update(now);
+    assert!(online.is_typing(ana, now));
+    assert!(!online.is_typing(stranger, now));
+    push(
+        &wire,
+        ServerMsg::Presence {
+            who: ana,
+            presence: Presence::Offline { last_seen: 1 },
+        },
+    );
+    online.update(now);
+    assert!(!online.is_typing(ana, now));
 }

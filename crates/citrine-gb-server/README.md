@@ -149,11 +149,12 @@ Each file counts as at least 4 KB toward storage, the smallest piece of disk it 
 
 ## Data
 
-Accounts, friends, waiting chat messages, invite codes, settings, the relay key and the two-factor keys live in
+Accounts, friends, chat history, invite codes, settings, the relay key and the two-factor keys live in
 `citrine.db` in `CITRINE_DATA_DIR`,
 shared files in its `files` folder. The server only stores encrypted messages and files and the
-hash of each account's key, never the relay ID the keys come from. Chat messages stay 30 days,
-also after they arrive, so a device that signs in later still gets them.
+hash of each account's key, never the relay ID the keys come from. Chat messages stay until the account is deleted,
+also after they arrive, so a device that signs in later gets the whole history. The history counts
+toward `CITRINE_STORAGE_TOTAL_MB`, not toward a player's own storage.
 
 An account can be online on several devices at once. Each one gets every chat, friend change and
 invite, and the user's Manage menu lists the devices with a Sign out for each.

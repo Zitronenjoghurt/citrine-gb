@@ -18,17 +18,16 @@ mod sound;
 
 pub use actions::{invite, join, join_with, shelf_from, watch};
 pub use banners::{Answer, BannerAction, ask_banner, banner};
-pub use bar::{BarFacts, bar, latency, settle_bar};
+pub use bar::{BarFacts, Switch, bar, bar_switches, latency, settle_bar};
 pub use confirms::{stop_confirm, switch_confirm};
 pub use lines::{
-    ending_line, friend_name, friend_tab_line, game_title, play_subtitle, screen_note,
+    ending_line, friend_name, friend_tab_line, game_title, play_subtitle, quality, screen_note,
+    short_name,
 };
 pub use picker::{Pick, picker};
 pub use screen::{arriving, note_over, paint_friend_screen};
-pub use sound::{FriendSound, friend_sound_bar};
+pub use sound::{FriendSound, friend_sound, friend_sound_bar};
 
-#[cfg(test)]
-pub(crate) use bar::{Switch, bar_switches};
 #[cfg(test)]
 pub(crate) use lines::{ask_line, watched_line};
 
@@ -64,6 +63,7 @@ pub enum PickFor {
 pub struct Ended {
     pub friend: OnlineId,
     pub line: String,
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,12 +2,15 @@ use citrine_gb::gb::ppu::types::color::RGBA;
 use egui::{Color32, Rect, Sense, Ui, vec2};
 
 pub fn palette_strip(ui: &mut Ui, rows: &[[RGBA; 4]]) {
-    let height = 26.0;
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    let swatch = width / 4.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+    paint_strip(ui, rect, rows);
+}
+
+pub fn paint_strip(ui: &Ui, rect: Rect, rows: &[[RGBA; 4]]) {
+    let height = rect.height();
+    let swatch = rect.width() / 4.0;
     let row_heights: &[f32] = if rows.len() == 3 {
-        &[14.0, 6.0, 6.0]
+        &[height * 0.54, height * 0.23, height * 0.23]
     } else {
         &[height]
     };
@@ -30,7 +33,7 @@ pub fn palette_strip(ui: &mut Ui, rows: &[[RGBA; 4]]) {
     ui.painter().rect_stroke(
         rect,
         2.0,
-        ui.visuals().widgets.inactive.bg_stroke,
+        egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color().gamma_multiply(0.35)),
         egui::StrokeKind::Inside,
     );
 }

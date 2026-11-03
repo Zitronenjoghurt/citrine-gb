@@ -1,4 +1,4 @@
-use super::{CodeAsk, confirm_with_code};
+use super::{CodeAsk, confirm_with_code, destructive};
 
 #[test]
 fn enter_in_the_code_dialog_confirms() {
@@ -38,4 +38,14 @@ fn enter_in_the_code_dialog_confirms() {
         modifiers: egui::Modifiers::NONE,
     };
     assert_eq!(frame(vec![enter]), Some(true));
+}
+
+#[test]
+fn only_actions_that_lose_something_are_red() {
+    for action in ["Delete", "Delete everything", "Forget", "Reset", "Turn off"] {
+        assert!(destructive(action), "{action} should be red");
+    }
+    for action in ["Sign out", "Import", "Load", "Trust", "Restart"] {
+        assert!(!destructive(action), "{action} should not be red");
+    }
 }

@@ -302,6 +302,10 @@ pub enum ClientMsg {
         id: MessageId,
         sealed: Option<Sealed>,
     },
+    Typing {
+        to: OnlineId,
+        typing: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +425,10 @@ pub enum ServerMsg {
         message: ChatMessage,
     },
     SavesChanged,
+    Typing {
+        from: OnlineId,
+        typing: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -538,6 +546,7 @@ mod tests {
             ClientMsg::DeleteAccount { .. } => "DeleteAccount",
             ClientMsg::SignOutDevice(_) => "SignOutDevice",
             ClientMsg::Restate { .. } => "Restate",
+            ClientMsg::Typing { .. } => "Typing",
         }
     }
 
@@ -586,6 +595,7 @@ mod tests {
             ServerMsg::Devices { .. } => "Devices",
             ServerMsg::ChatCopy { .. } => "ChatCopy",
             ServerMsg::SavesChanged => "SavesChanged",
+            ServerMsg::Typing { .. } => "Typing",
         }
     }
 
@@ -689,6 +699,10 @@ mod tests {
             ClientMsg::Restate {
                 id: 9,
                 sealed: Some(sealed()),
+            },
+            ClientMsg::Typing {
+                to: friend_id(),
+                typing: false,
             },
         ]
     }
@@ -863,6 +877,10 @@ mod tests {
                 },
             },
             ServerMsg::SavesChanged,
+            ServerMsg::Typing {
+                from: friend_id(),
+                typing: true,
+            },
         ]
     }
 
@@ -870,7 +888,7 @@ mod tests {
     fn every_client_message_round_trips() {
         let all = all_client();
         let names: BTreeSet<_> = all.iter().map(client_name).collect();
-        assert_eq!(names.len(), 36);
+        assert_eq!(names.len(), 37);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -882,7 +900,7 @@ mod tests {
     fn every_server_message_round_trips() {
         let all = all_server();
         let names: BTreeSet<_> = all.iter().map(server_name).collect();
-        assert_eq!(names.len(), 43);
+        assert_eq!(names.len(), 44);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();

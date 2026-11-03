@@ -37,7 +37,7 @@ pub(super) fn top_bar(ui: &mut Ui, rect: Rect, facts: &Facts, mobile: bool, acts
                 if facts.deletable && button(ui, icons::TRASH, "Delete") {
                     acts.push(Act::Delete);
                 }
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
                 if facts.deletable && button(ui, icons::FOLDER_OPEN, crate::media::reveal::LABEL) {
                     acts.push(Act::Reveal);
                 }

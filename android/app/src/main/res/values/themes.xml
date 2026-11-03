@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="base">#FF1E1E2E</color>
+
+    <style name="Theme.Citrine" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/base</item>
+    </style>
+</resources>

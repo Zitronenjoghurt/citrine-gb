@@ -173,19 +173,16 @@ pub(super) fn game_page(
     range: &mut Range,
     game: &GameTotals,
     today: Date,
-    mobile: bool,
 ) {
-    if !mobile {
-        if ui
-            .button(format!("{}  All games", icons::ARROW_LEFT))
-            .clicked()
-        {
-            state.page = Page::Overview;
-        }
-        ui.add_space(6.0);
-        ui.add(egui::Label::new(RichText::new(&game.name).heading()).truncate());
-        ui.add_space(6.0);
+    if ui
+        .button(format!("{}  All games", icons::ARROW_LEFT))
+        .clicked()
+    {
+        state.page = Page::Overview;
     }
+    ui.add_space(6.0);
+    ui.add(egui::Label::new(RichText::new(&game.name).heading()).truncate());
+    ui.add_space(6.0);
     game_tiles(ui, game);
     ui.add_space(12.0);
     play_chart(ui, range, &game.rom, &game.days, today);

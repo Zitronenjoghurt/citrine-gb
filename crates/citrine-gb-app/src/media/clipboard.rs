@@ -37,7 +37,7 @@ pub fn pick(kind: MediaKind, shares: bool, copies_images: bool) -> Option<Way> {
         _ if shares => Some(Way::Share),
         MediaKind::Screenshot if copies_images => Some(Way::Copy),
         MediaKind::Screenshot => None,
-        MediaKind::Recording if cfg!(target_arch = "wasm32") => None,
+        MediaKind::Recording if cfg!(any(target_arch = "wasm32", target_os = "android")) => None,
         MediaKind::Recording => Some(Way::Copy),
     }
 }
@@ -46,6 +46,7 @@ pub fn way(kind: MediaKind) -> Option<Way> {
     pick(kind, platform::shares(), platform::copies_images())
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn copied(kind: MediaKind) -> String {
     format!("{} copied", kind.label())
 }
@@ -58,7 +59,10 @@ pub fn run(way: Way, store: &MediaStore, id: &MediaId, done: Sender<Result<Strin
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "android")]
+use crate::platform::android::clipboard as platform;
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod platform {
     use super::{MediaId, MediaKind, MediaStore, Sender, copied};
     use std::sync::{Mutex, OnceLock};

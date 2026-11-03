@@ -24,7 +24,12 @@ impl Citrine {
     pub(super) fn render(&mut self, ctx: &Context) {
         if self.is_mobile(ctx) {
             self.render_mobile(ctx);
-        } else if self.ui.settings.focus_mode {
+            return;
+        }
+        self.mobile.phone = false;
+        crate::app::mobile::sheet::set_area(ctx, None);
+        self.release_phone_pause();
+        if self.ui.settings.focus_mode {
             self.render_focus_mode(ctx);
         } else {
             self.render_normal_mode(ctx);
@@ -251,7 +256,11 @@ impl Citrine {
                 }
             }
 
-            if ui.button(icons::GEAR).on_hover_text("Settings").clicked() {
+            let gear = ui.button(icons::GEAR).on_hover_text("Settings");
+            if self.ui.update.phase().waiting() {
+                widgets::avatar::status_dot(ui, gear.rect);
+            }
+            if gear.clicked() {
                 self.open_tab(Tab::Settings);
             }
 

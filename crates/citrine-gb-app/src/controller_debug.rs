@@ -319,6 +319,7 @@ pub fn usb_id(vendor: Option<u16>, product: Option<u16>) -> String {
     format!("{}:{}", hex(vendor), hex(product))
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

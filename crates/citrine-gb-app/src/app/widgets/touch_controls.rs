@@ -3,25 +3,45 @@ use crate::app::ui_state::touch::TouchSettings;
 use citrine_gb::gb::joypad::JoypadState;
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
-const DPAD_DEAD_ZONE: f32 = 0.22;
+mod dpad;
 
 const DPAD_ARM: f32 = 1.0 / 3.0;
 
-const FACE_RADIUS: f32 = 0.23;
+const DPAD_SHARE: f32 = 0.42;
+
+const DPAD_START_MARGIN: f32 = 14.0;
+
+const EDGE_CLEAR: f32 = 24.0;
+
+const FACE_RADIUS: f32 = 0.22;
 
 const FACE_SPREAD: f32 = 1.15;
+
+const FACE_REACH: f32 = 1.6;
+
+const BOTH_RADIUS: f32 = 0.5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TouchLayout {
     dpad: Rect,
+    dpad_start: Rect,
     face: Vec<(GbButton, Pos2, f32)>,
+    both: (Pos2, f32),
     pills: Vec<(GbButton, Rect)>,
-    face_slop: f32,
 }
 
 impl TouchLayout {
     fn bar_padding(width: f32) -> f32 {
         (width * 0.03).clamp(4.0, 24.0)
+    }
+
+    fn edge_clear(width: f32) -> f32 {
+        EDGE_CLEAR.min(width * 0.1)
+    }
+
+    fn dpad_size(width: f32, scale: f32) -> f32 {
+        let room = (width - Self::edge_clear(width) * 2.0) / 2.0;
+        (width * DPAD_SHARE * scale).min(room)
     }
 
     fn pill_height(width: f32) -> f32 {
@@ -30,14 +50,14 @@ impl TouchLayout {
 
     pub fn bar_height(width: f32, settings: &TouchSettings) -> f32 {
         let pad = Self::bar_padding(width);
-        let dpad = (width - pad * 2.0) * 0.42 * settings.clamped_scale();
+        let dpad = Self::dpad_size(width, settings.clamped_scale());
         pad * 3.0 + dpad + Self::pill_height(width)
     }
 
     pub fn bar(area: Rect, settings: &TouchSettings) -> Self {
         let scale = settings.clamped_scale();
         let pad = Self::bar_padding(area.width());
-        let usable = area.shrink(pad);
+        let usable = area.shrink2(vec2(Self::edge_clear(area.width()), pad));
 
         let pill_height = Self::pill_height(area.width()).min(usable.height() * 0.4);
         let upper = Rect::from_min_max(
@@ -45,7 +65,7 @@ impl TouchLayout {
             pos2(usable.max.x, usable.max.y - pill_height - pad),
         );
 
-        let dpad_size = (upper.width() * 0.42 * scale).min(upper.height());
+        let dpad_size = Self::dpad_size(area.width(), scale).min(upper.height());
         let face_radius = dpad_size * FACE_RADIUS;
 
         let dpad_centre = pos2(upper.left() + dpad_size / 2.0, upper.center().y);
@@ -84,13 +104,16 @@ impl TouchLayout {
     pub fn columns(left: Rect, right: Rect, settings: &TouchSettings) -> Self {
         let scale = settings.clamped_scale();
         let pad = (left.width() * 0.06).clamp(4.0, 20.0);
-        let dpad_area = left.shrink(pad);
-        let face_area = right.shrink(pad);
+        let side = EDGE_CLEAR.max(pad).min(left.width() * 0.2);
+        let dpad_area = left.shrink2(vec2(side, pad));
+        let face_area = right.shrink2(vec2(side, pad));
 
         let pill_height = (dpad_area.height() * 0.12).clamp(20.0, 48.0);
         let column_height = dpad_area.height() - pill_height - pad;
 
-        let dpad_size = (dpad_area.width() * 0.92 * scale).min(column_height);
+        let dpad_size = (dpad_area.width() * 0.92 * scale)
+            .min(dpad_area.width() + side)
+            .min(column_height);
         let face_radius = dpad_size * FACE_RADIUS;
 
         let upper_y = dpad_area.top() + column_height / 2.0;
@@ -144,40 +167,64 @@ impl TouchLayout {
             (vec2(spread, -spread), vec2(-spread, spread))
         };
 
+        let dpad = Rect::from_center_size(dpad_centre, Vec2::splat(dpad_size));
         Self {
-            dpad: Rect::from_center_size(dpad_centre, Vec2::splat(dpad_size)),
+            dpad,
+            dpad_start: dpad
+                .expand(DPAD_START_MARGIN)
+                .intersect(bounds.shrink2(vec2(Self::edge_clear(bounds.width()), 0.0))),
             face: vec![
                 (GbButton::A, face_centre + a_offset, face_radius),
                 (GbButton::B, face_centre + b_offset, face_radius),
             ],
+            both: (face_centre, face_radius * BOTH_RADIUS),
             pills: pills
                 .into_iter()
                 .map(|(button, centre)| (button, Rect::from_center_size(flip(centre), pill_size)))
                 .collect(),
-            face_slop: face_radius * 0.35,
         }
     }
 
-    pub fn hit(&self, pos: Pos2) -> JoypadState {
-        let mut state = JoypadState::empty();
+    pub fn starts_dpad(&self, pos: Pos2) -> bool {
+        self.dpad_start.contains(pos) && self.dpad.distance_to_pos(pos) <= self.nearest_button(pos)
+    }
 
-        if self.dpad.contains(pos) {
-            state |= dpad_direction(self.dpad, pos);
+    pub fn steer(&self, pos: Pos2, held: JoypadState) -> JoypadState {
+        dpad::direction(pos - self.dpad.center(), self.dpad.width() / 2.0, held)
+    }
+
+    pub fn buttons(&self, pos: Pos2) -> JoypadState {
+        let (centre, radius) = self.both;
+        if centre.distance(pos) <= radius {
+            return JoypadState::A | JoypadState::B;
         }
 
-        for (button, centre, radius) in &self.face {
-            if centre.distance(pos) <= radius + self.face_slop {
-                state |= button.joypad();
-            }
-        }
+        let face = self.face.iter().filter_map(|(button, centre, radius)| {
+            let gap = centre.distance(pos) - radius;
+            (gap <= radius * (FACE_REACH - 1.0)).then_some((button, gap.max(0.0)))
+        });
+        let pills = self
+            .pills
+            .iter()
+            .filter(|(_, rect)| rect.contains(pos))
+            .map(|(button, _)| (button, 0.0));
 
-        for (button, rect) in &self.pills {
-            if rect.contains(pos) {
-                state |= button.joypad();
-            }
-        }
+        face.chain(pills)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(JoypadState::empty(), |(button, _)| button.joypad())
+    }
 
-        state
+    fn nearest_button(&self, pos: Pos2) -> f32 {
+        let face = self
+            .face
+            .iter()
+            .map(|(_, centre, radius)| (centre.distance(pos) - radius).max(0.0));
+        let pills = self.pills.iter().map(|(_, rect)| rect.distance_to_pos(pos));
+        face.chain(pills).fold(f32::INFINITY, f32::min)
+    }
+
+    pub fn reach(&self) -> Rect {
+        self.bounds().union(self.dpad_start)
     }
 
     pub fn bounds(&self) -> Rect {
@@ -232,13 +279,23 @@ impl TouchLayout {
                 edge,
                 egui::StrokeKind::Inside,
             );
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                button.to_string().to_uppercase(),
-                FontId::proportional((rect.height() * 0.42).max(9.0)),
-                ink,
-            );
+            let label = button.to_string().to_uppercase();
+            let font = FontId::proportional(Self::pill_font_size(painter, *rect, &label));
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, font, ink);
+        }
+    }
+
+    fn pill_font_size(painter: &egui::Painter, rect: Rect, label: &str) -> f32 {
+        let size = (rect.height() * 0.42).max(9.0);
+        let room = rect.width() - rect.height() * 0.5;
+        let width = painter
+            .layout_no_wrap(label.to_owned(), FontId::proportional(size), Color32::WHITE)
+            .size()
+            .x;
+        if width > room {
+            (size * room / width).max(6.0)
+        } else {
+            size
         }
     }
 
@@ -315,35 +372,23 @@ impl TouchLayout {
     }
 }
 
-fn dpad_direction(dpad: Rect, pos: Pos2) -> JoypadState {
-    let offset = pos - dpad.center();
-    let radius = dpad.width() / 2.0;
-    if radius <= 0.0 || offset.length() / radius < DPAD_DEAD_ZONE {
-        return JoypadState::empty();
-    }
-
-    let sector = (offset.y.atan2(offset.x) / std::f32::consts::FRAC_PI_4).round() as i32;
-    match sector.rem_euclid(8) {
-        0 => JoypadState::RIGHT,
-        1 => JoypadState::RIGHT | JoypadState::DOWN,
-        2 => JoypadState::DOWN,
-        3 => JoypadState::DOWN | JoypadState::LEFT,
-        4 => JoypadState::LEFT,
-        5 => JoypadState::LEFT | JoypadState::UP,
-        6 => JoypadState::UP,
-        _ => JoypadState::UP | JoypadState::RIGHT,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Contact {
     Finger(u64),
     Pointer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transitions {
+    pub pressed: JoypadState,
+    pub released: JoypadState,
+    pub tick: bool,
+}
+
 #[derive(Default)]
 pub struct TouchInput {
     contacts: Vec<(Contact, JoypadState)>,
+    dpad_owner: Option<Contact>,
     previous: JoypadState,
 }
 
@@ -354,11 +399,16 @@ impl TouchInput {
             (
                 i.events.clone(),
                 i.any_touches(),
-                i.pointer.interact_pos().filter(|_| i.pointer.any_down()),
+                i.pointer
+                    .interact_pos()
+                    .filter(|_| i.pointer.any_down() && !i.has_touch_screen()),
             )
         });
 
         self.forget_stale_fingers(any_touches);
+        if any_touches {
+            self.lift(Contact::Pointer);
+        }
 
         for event in &events {
             let egui::Event::Touch { id, phase, pos, .. } = event else {
@@ -366,23 +416,56 @@ impl TouchInput {
             };
             let contact = Contact::Finger(id.0);
             match phase {
-                egui::TouchPhase::Start | egui::TouchPhase::Move => {
-                    self.set(contact, layout.hit(*pos));
-                }
-                egui::TouchPhase::End | egui::TouchPhase::Cancel => self.clear(contact),
+                egui::TouchPhase::Start => self.press(contact, *pos, layout),
+                egui::TouchPhase::Move => self.slide(contact, *pos, layout),
+                egui::TouchPhase::End | egui::TouchPhase::Cancel => self.lift(contact),
             }
         }
 
-        if any_touches {
-            self.clear(Contact::Pointer);
-        } else {
-            match pointer {
-                Some(pos) => self.set(Contact::Pointer, layout.hit(pos)),
-                None => self.clear(Contact::Pointer),
-            }
+        match pointer.filter(|_| !any_touches) {
+            Some(pos) => self.slide(Contact::Pointer, pos, layout),
+            None => self.lift(Contact::Pointer),
         }
 
         self.combined()
+    }
+
+    fn press(&mut self, contact: Contact, pos: Pos2, layout: &TouchLayout) {
+        self.lift(contact);
+        let state = if self.dpad_owner.is_none() && layout.starts_dpad(pos) {
+            self.dpad_owner = Some(contact);
+            layout.steer(pos, JoypadState::empty())
+        } else {
+            layout.buttons(pos)
+        };
+        self.set(contact, state);
+    }
+
+    fn slide(&mut self, contact: Contact, pos: Pos2, layout: &TouchLayout) {
+        let Some(held) = self.held_by(contact) else {
+            self.press(contact, pos, layout);
+            return;
+        };
+        let state = if self.dpad_owner == Some(contact) {
+            layout.steer(pos, held)
+        } else {
+            layout.buttons(pos)
+        };
+        self.set(contact, state);
+    }
+
+    fn lift(&mut self, contact: Contact) {
+        self.clear(contact);
+        if self.dpad_owner == Some(contact) {
+            self.dpad_owner = None;
+        }
+    }
+
+    fn held_by(&self, contact: Contact) -> Option<JoypadState> {
+        self.contacts
+            .iter()
+            .find(|(c, _)| *c == contact)
+            .map(|(_, state)| *state)
     }
 
     fn combined(&self) -> JoypadState {
@@ -391,16 +474,23 @@ impl TouchInput {
             .fold(JoypadState::empty(), |acc, (_, state)| acc | *state)
     }
 
-    pub fn transitions(&mut self, held: JoypadState) -> (JoypadState, JoypadState) {
+    pub fn transitions(&mut self, held: JoypadState) -> Transitions {
         let pressed = held & !self.previous;
         let released = self.previous & !held;
+        let steer = held & dpad::ALL;
+        let turned = !steer.is_empty() && steer != self.previous & dpad::ALL;
         self.previous = held;
-        (pressed, released)
+        Transitions {
+            pressed,
+            released,
+            tick: !pressed.is_empty() || turned,
+        }
     }
 
     #[must_use = "the buttons that were held still need releasing"]
     pub fn reset(&mut self) -> JoypadState {
         self.contacts.clear();
+        self.dpad_owner = None;
         std::mem::replace(&mut self.previous, JoypadState::empty())
     }
 
@@ -408,6 +498,9 @@ impl TouchInput {
         if !any_touches {
             self.contacts
                 .retain(|(contact, _)| !matches!(contact, Contact::Finger(_)));
+            if matches!(self.dpad_owner, Some(Contact::Finger(_))) {
+                self.dpad_owner = None;
+            }
         }
     }
 
@@ -427,22 +520,17 @@ pub fn claim(ui: &mut Ui, rect: Rect) {
     ui.allocate_rect(rect, Sense::click_and_drag());
 }
 
-pub fn vibrate(_duration_ms: u32) {
-    #[cfg(target_arch = "wasm32")]
-    if let Some(window) = web_sys::window() {
-        let _ = window.navigator().vibrate_with_duration(_duration_ms);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn phone(width: f32) -> Rect {
+        let height = TouchLayout::bar_height(width, &TouchSettings::default()) * 1.15;
+        Rect::from_min_size(pos2(0.0, 600.0), vec2(width, height))
+    }
+
     fn layout() -> TouchLayout {
-        TouchLayout::bar(
-            Rect::from_min_size(Pos2::ZERO, vec2(400.0, 260.0)),
-            &TouchSettings::default(),
-        )
+        TouchLayout::bar(phone(412.0), &TouchSettings::default())
     }
 
     #[track_caller]
@@ -454,61 +542,200 @@ mod tests {
         );
     }
 
+    fn arm(layout: &TouchLayout, degrees: f32, reach: f32) -> Pos2 {
+        let r = degrees.to_radians();
+        layout.dpad.center() + vec2(r.cos(), r.sin()) * layout.dpad.width() / 2.0 * reach
+    }
+
     #[test]
     fn the_dpad_reads_eight_directions() {
         let layout = layout();
-        let c = layout.dpad.center();
-        let reach = layout.dpad.width() * 0.4;
+        let mut input = TouchInput::default();
+        for (degrees, expected) in [
+            (270.0, JoypadState::UP),
+            (90.0, JoypadState::DOWN),
+            (180.0, JoypadState::LEFT),
+            (0.0, JoypadState::RIGHT),
+            (315.0, JoypadState::UP | JoypadState::RIGHT),
+            (135.0, JoypadState::DOWN | JoypadState::LEFT),
+        ] {
+            input.press(Contact::Finger(1), arm(&layout, degrees, 0.7), &layout);
+            assert_buttons(input.combined(), expected, &format!("{degrees} degrees"));
+            input.lift(Contact::Finger(1));
+        }
+    }
 
-        assert_buttons(layout.hit(pos2(c.x, c.y - reach)), JoypadState::UP, "up");
-        assert_buttons(
-            layout.hit(pos2(c.x, c.y + reach)),
-            JoypadState::DOWN,
-            "down",
-        );
-        assert_buttons(
-            layout.hit(pos2(c.x - reach, c.y)),
-            JoypadState::LEFT,
-            "left",
-        );
-        assert_buttons(
-            layout.hit(pos2(c.x + reach, c.y)),
-            JoypadState::RIGHT,
-            "right",
-        );
+    #[test]
+    fn the_dpad_is_42_percent_of_the_width_in_portrait() {
+        for (width, size) in [(412.0, 173.04), (360.0, 151.2)] {
+            let layout = TouchLayout::bar(phone(width), &TouchSettings::default());
+            assert!(
+                (layout.dpad.width() - size).abs() < 0.1,
+                "{width}: d-pad {} wide",
+                layout.dpad.width()
+            );
+        }
+    }
 
-        let diagonal = reach * 0.72;
-        assert_buttons(
-            layout.hit(pos2(c.x + diagonal, c.y - diagonal)),
-            JoypadState::UP | JoypadState::RIGHT,
-            "diagonals matter for most games",
-        );
-        assert_buttons(
-            layout.hit(pos2(c.x - diagonal, c.y + diagonal)),
-            JoypadState::DOWN | JoypadState::LEFT,
-            "down-left",
-        );
+    #[test]
+    fn every_control_stays_24_px_clear_of_the_side_edges() {
+        for width in [360.0, 412.0] {
+            for mirrored in [false, true] {
+                let area = phone(width);
+                let settings = TouchSettings {
+                    mirrored,
+                    ..Default::default()
+                };
+                let layout = TouchLayout::bar(area, &settings);
+                let reach = layout.reach();
+                assert!(
+                    reach.left() >= area.left() + 24.0 - 0.01
+                        && reach.right() <= area.right() - 24.0 + 0.01,
+                    "{width} (mirrored {mirrored}): {reach:?}"
+                );
+            }
+        }
     }
 
     #[test]
     fn the_middle_of_the_dpad_presses_nothing() {
         let layout = layout();
-        assert_buttons(
-            layout.hit(layout.dpad.center()),
-            JoypadState::empty(),
-            "dead zone",
+        let mut input = TouchInput::default();
+        input.press(Contact::Finger(1), layout.dpad.center(), &layout);
+        assert_buttons(input.combined(), JoypadState::empty(), "dead zone");
+    }
+
+    #[test]
+    fn a_press_just_past_the_drawing_starts_the_dpad() {
+        let layout = layout();
+        let c = layout.dpad.center();
+        let mut input = TouchInput::default();
+
+        input.press(
+            Contact::Finger(1),
+            pos2(c.x, layout.dpad.top() - 12.0),
+            &layout,
         );
+        assert_buttons(input.combined(), JoypadState::UP, "12 px above the drawing");
+        input.lift(Contact::Finger(1));
+
+        input.press(
+            Contact::Finger(1),
+            pos2(c.x, layout.dpad.top() - 16.0),
+            &layout,
+        );
+        assert_buttons(input.combined(), JoypadState::empty(), "16 px above it");
+        assert_eq!(input.dpad_owner, None);
+    }
+
+    #[test]
+    fn a_finger_past_the_drawn_edge_keeps_its_direction() {
+        let layout = layout();
+        let mut input = TouchInput::default();
+        input.press(Contact::Finger(1), arm(&layout, 0.0, 0.7), &layout);
+        input.slide(Contact::Finger(1), arm(&layout, 5.0, 1.3), &layout);
+        assert_buttons(input.combined(), JoypadState::RIGHT, "past the arm's tip");
+        input.slide(Contact::Finger(1), arm(&layout, 5.0, 1.6), &layout);
+        assert_buttons(input.combined(), JoypadState::empty(), "out of the ring");
+        input.slide(Contact::Finger(1), arm(&layout, 5.0, 1.0), &layout);
+        assert_buttons(input.combined(), JoypadState::RIGHT, "back in");
+    }
+
+    #[test]
+    fn a_finger_from_the_dpad_never_presses_another_button() {
+        let layout = layout();
+        let mut input = TouchInput::default();
+        input.press(Contact::Finger(1), arm(&layout, 90.0, 0.7), &layout);
+        for (button, rect) in &layout.pills {
+            input.slide(Contact::Finger(1), rect.center(), &layout);
+            assert!(
+                (input.combined() & !dpad::ALL).is_empty(),
+                "slid over {button}"
+            );
+        }
+        for (button, centre, _) in &layout.face {
+            input.slide(Contact::Finger(1), *centre, &layout);
+            assert!(
+                (input.combined() & !dpad::ALL).is_empty(),
+                "slid over {button}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_finger_owns_the_dpad_until_it_lifts() {
+        let layout = layout();
+        let mut input = TouchInput::default();
+        input.press(Contact::Finger(1), arm(&layout, 0.0, 0.7), &layout);
+        input.press(Contact::Finger(2), arm(&layout, 180.0, 0.7), &layout);
+        assert_buttons(input.combined(), JoypadState::RIGHT, "a second finger");
+
+        input.lift(Contact::Finger(1));
+        input.press(Contact::Finger(3), arm(&layout, 180.0, 0.7), &layout);
+        assert_buttons(input.combined(), JoypadState::LEFT, "free again");
+    }
+
+    #[test]
+    fn a_slide_ticks_once_per_direction_change() {
+        let layout = layout();
+        let mut input = TouchInput::default();
+        let mut ticks = 0;
+        let mut seen = Vec::new();
+        input.press(Contact::Finger(1), arm(&layout, 0.0, 0.7), &layout);
+        for step in 0..=90 {
+            input.slide(
+                Contact::Finger(1),
+                arm(&layout, -(step as f32), 0.7),
+                &layout,
+            );
+            let held = input.combined();
+            if input.transitions(held).tick {
+                ticks += 1;
+                seen.push(held);
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                JoypadState::RIGHT,
+                JoypadState::RIGHT | JoypadState::UP,
+                JoypadState::UP
+            ]
+        );
+        assert_eq!(ticks, 3);
+    }
+
+    #[test]
+    fn ticks_come_on_presses_and_turns_never_on_releases() {
+        let mut input = TouchInput::default();
+        for (held, tick) in [
+            (JoypadState::A, true),
+            (JoypadState::A, false),
+            (JoypadState::empty(), false),
+            (JoypadState::RIGHT, true),
+            (JoypadState::RIGHT | JoypadState::UP, true),
+            (JoypadState::UP, true),
+            (JoypadState::UP | JoypadState::B, true),
+            (JoypadState::UP, false),
+            (JoypadState::empty(), false),
+        ] {
+            assert_eq!(input.transitions(held).tick, tick, "{held:?}");
+        }
     }
 
     #[test]
     fn face_and_menu_buttons_are_hit() {
         let layout = layout();
         for (button, centre, _) in &layout.face {
-            assert_buttons(layout.hit(*centre), button.joypad(), &button.to_string());
+            assert_buttons(
+                layout.buttons(*centre),
+                button.joypad(),
+                &button.to_string(),
+            );
         }
         for (button, rect) in &layout.pills {
             assert_buttons(
-                layout.hit(rect.center()),
+                layout.buttons(rect.center()),
                 button.joypad(),
                 &button.to_string(),
             );
@@ -516,22 +743,46 @@ mod tests {
     }
 
     #[test]
-    fn empty_space_presses_nothing() {
+    fn a_and_b_reach_past_their_drawing() {
         let layout = layout();
+        let (_, a, radius) = layout.face[0];
         assert_buttons(
-            layout.hit(pos2(-50.0, -50.0)),
+            layout.buttons(a + vec2(radius * 1.5, 0.0)),
+            JoypadState::A,
+            "1.5 radii out",
+        );
+        assert_buttons(
+            layout.buttons(a + vec2(radius * 1.7, 0.0)),
             JoypadState::empty(),
-            "outside the controls",
+            "1.7 radii out",
         );
     }
 
     #[test]
-    fn a_and_b_do_not_overlap() {
+    fn between_a_and_b_presses_both() {
         let layout = layout();
         let (_, a, _) = layout.face[0];
         let (_, b, _) = layout.face[1];
-        assert_buttons(layout.hit(a), JoypadState::A, "A is unambiguous");
-        assert_buttons(layout.hit(b), JoypadState::B, "B is unambiguous");
+        assert_buttons(
+            layout.buttons(a.lerp(b, 0.5)),
+            JoypadState::A | JoypadState::B,
+            "the A+B zone",
+        );
+        assert_buttons(layout.buttons(a), JoypadState::A, "A alone");
+        assert_buttons(layout.buttons(b), JoypadState::B, "B alone");
+    }
+
+    #[test]
+    fn empty_space_presses_nothing() {
+        let layout = layout();
+        let mut input = TouchInput::default();
+        input.press(Contact::Finger(1), pos2(-50.0, -50.0), &layout);
+        assert_buttons(
+            input.combined(),
+            JoypadState::empty(),
+            "outside the controls",
+        );
+        assert_eq!(input.dpad_owner, None);
     }
 
     #[test]
@@ -585,11 +836,10 @@ mod tests {
     fn several_fingers_hold_several_buttons() {
         let layout = layout();
         let mut input = TouchInput::default();
-        let c = layout.dpad.center();
         let (_, a_centre, _) = layout.face[0];
 
-        input.set(Contact::Finger(1), layout.hit(pos2(c.x - 40.0, c.y)));
-        input.set(Contact::Finger(2), layout.hit(a_centre));
+        input.press(Contact::Finger(1), arm(&layout, 180.0, 0.6), &layout);
+        input.press(Contact::Finger(2), a_centre, &layout);
 
         assert_buttons(
             input.combined(),
@@ -597,7 +847,7 @@ mod tests {
             "two fingers, two buttons",
         );
 
-        input.clear(Contact::Finger(1));
+        input.lift(Contact::Finger(1));
         assert_buttons(
             input.combined(),
             JoypadState::A,
@@ -609,33 +859,33 @@ mod tests {
     fn only_transitions_are_reported() {
         let mut input = TouchInput::default();
 
-        let (pressed, released) = input.transitions(JoypadState::A);
-        assert_buttons(pressed, JoypadState::A, "first press");
-        assert_buttons(released, JoypadState::empty(), "nothing let go yet");
+        let moved = input.transitions(JoypadState::A);
+        assert_buttons(moved.pressed, JoypadState::A, "first press");
+        assert_buttons(moved.released, JoypadState::empty(), "nothing let go yet");
 
-        let (pressed, released) = input.transitions(JoypadState::A);
+        let moved = input.transitions(JoypadState::A);
         assert_buttons(
-            pressed,
+            moved.pressed,
             JoypadState::empty(),
             "still held is not a new press",
         );
         assert_buttons(
-            released,
+            moved.released,
             JoypadState::empty(),
             "still held is not a release",
         );
 
-        let (pressed, released) = input.transitions(JoypadState::B);
-        assert_buttons(pressed, JoypadState::B, "the new button");
-        assert_buttons(released, JoypadState::A, "and the one let go");
+        let moved = input.transitions(JoypadState::B);
+        assert_buttons(moved.pressed, JoypadState::B, "the new button");
+        assert_buttons(moved.released, JoypadState::A, "and the one let go");
     }
 
     #[test]
     fn a_finger_that_never_lifts_does_not_stay_stuck() {
         let layout = layout();
         let mut input = TouchInput::default();
-        input.set(Contact::Finger(1), layout.hit(layout.face[0].1));
-        assert_buttons(input.combined(), JoypadState::A, "held while touching");
+        input.press(Contact::Finger(1), arm(&layout, 0.0, 0.7), &layout);
+        assert_buttons(input.combined(), JoypadState::RIGHT, "held while touching");
 
         input.forget_stale_fingers(false);
 
@@ -644,13 +894,14 @@ mod tests {
             JoypadState::empty(),
             "released once nothing is touching the screen",
         );
+        assert_eq!(input.dpad_owner, None, "and the d-pad is free");
     }
 
     #[test]
     fn a_finger_still_down_is_kept() {
         let layout = layout();
         let mut input = TouchInput::default();
-        input.set(Contact::Finger(1), layout.hit(layout.face[0].1));
+        input.press(Contact::Finger(1), layout.face[0].1, &layout);
 
         input.forget_stale_fingers(true);
 
@@ -658,18 +909,10 @@ mod tests {
     }
 
     #[test]
-    fn a_button_held_elsewhere_is_left_alone() {
-        let mut input = TouchInput::default();
-        let (pressed, released) = input.transitions(JoypadState::empty());
-        assert_buttons(pressed, JoypadState::empty(), "nothing pressed");
-        assert_buttons(released, JoypadState::empty(), "and nothing released");
-    }
-
-    #[test]
     fn resetting_reports_what_it_was_holding() {
         let layout = layout();
         let mut input = TouchInput::default();
-        input.set(Contact::Finger(1), layout.hit(layout.face[0].1));
+        input.press(Contact::Finger(1), layout.face[0].1, &layout);
         let held = input.combined();
         input.transitions(held);
 
@@ -687,8 +930,148 @@ mod tests {
         let layout = TouchLayout::columns(left, right, &TouchSettings::default());
 
         assert!(left.contains(layout.dpad.center()));
+        assert!(layout.reach().left() >= 24.0 - 0.01);
+        assert!(layout.reach().right() <= right.right() - 24.0 + 0.01);
         for (_, centre, _) in &layout.face {
             assert!(right.expand(40.0).contains(*centre));
+        }
+    }
+
+    fn phone_layout() -> TouchLayout {
+        TouchLayout::bar(
+            Rect::from_min_size(pos2(0.0, 622.0), vec2(412.0, 293.0)),
+            &TouchSettings::default(),
+        )
+    }
+
+    fn frame(ctx: &egui::Context, input: &mut TouchInput, events: Vec<egui::Event>) -> JoypadState {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(412.0, 915.0))),
+            events,
+            ..Default::default()
+        };
+        let mut held = JoypadState::empty();
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                held = input.update(ui, &phone_layout());
+            });
+        });
+        held
+    }
+
+    fn press_at(pos: Pos2) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn finger(phase: egui::TouchPhase, pos: Pos2) -> egui::Event {
+        egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(1),
+            phase,
+            pos,
+            force: Some(1.0),
+        }
+    }
+
+    #[test]
+    fn a_finger_takes_the_dpad_from_the_browser_mouse_press_before_it() {
+        let ctx = egui::Context::default();
+        let mut input = TouchInput::default();
+        let pos = arm(&phone_layout(), 0.0, 0.66);
+        let mut ticks = 0;
+        let mut step = |input: &mut TouchInput, events| {
+            let held = frame(&ctx, input, events);
+            if input.transitions(held).tick {
+                ticks += 1;
+            }
+            held
+        };
+
+        assert_buttons(
+            step(&mut input, vec![press_at(pos)]),
+            JoypadState::RIGHT,
+            "the mouse press the browser sends first",
+        );
+        assert_buttons(
+            step(
+                &mut input,
+                vec![press_at(pos), finger(egui::TouchPhase::Start, pos)],
+            ),
+            JoypadState::RIGHT,
+            "the finger itself",
+        );
+        for n in 0..5 {
+            assert_buttons(
+                step(&mut input, Vec::new()),
+                JoypadState::RIGHT,
+                &format!("frame {n} after"),
+            );
+        }
+        assert_eq!(input.dpad_owner, Some(Contact::Finger(1)));
+        let up = arm(&phone_layout(), -80.0, 0.66);
+        assert_buttons(
+            step(&mut input, vec![finger(egui::TouchPhase::Move, up)]),
+            JoypadState::UP,
+            "a slide to Up",
+        );
+        let release = egui::Event::PointerButton {
+            pos: up,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_buttons(
+            step(&mut input, vec![release.clone()]),
+            JoypadState::UP,
+            "the browser's mouse release comes first",
+        );
+        assert_buttons(
+            step(
+                &mut input,
+                vec![
+                    release,
+                    egui::Event::PointerGone,
+                    finger(egui::TouchPhase::End, up),
+                ],
+            ),
+            JoypadState::empty(),
+            "lifted",
+        );
+        drop(step);
+        assert_eq!(ticks, 2, "one for the press, one for the turn to Up");
+    }
+
+    #[test]
+    fn a_cancelled_touch_leaves_nothing_held() {
+        let ctx = egui::Context::default();
+        let mut input = TouchInput::default();
+        let pos = arm(&phone_layout(), 0.0, 0.66);
+        frame(&ctx, &mut input, vec![press_at(pos)]);
+        frame(
+            &ctx,
+            &mut input,
+            vec![press_at(pos), finger(egui::TouchPhase::Start, pos)],
+        );
+        assert_buttons(
+            frame(
+                &ctx,
+                &mut input,
+                vec![finger(egui::TouchPhase::Cancel, pos)],
+            ),
+            JoypadState::empty(),
+            "cancelled",
+        );
+        for n in 0..3 {
+            assert_buttons(
+                frame(&ctx, &mut input, Vec::new()),
+                JoypadState::empty(),
+                &format!("frame {n} after, with the mouse press never released"),
+            );
         }
     }
 }

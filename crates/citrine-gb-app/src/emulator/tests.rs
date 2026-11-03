@@ -773,6 +773,7 @@ fn a_finished_session_hands_its_console_to_the_emulator() {
     let session = pair.host.play.close().unwrap();
     emu.finish_session(session).unwrap();
     assert!(emu.gb.frame().as_slice() == screen.as_slice());
+    assert!(emu.last_frame == screen);
     assert!(emu.linked_frame.is_none());
     assert!(emu.running);
     assert!(!emu.gb.link_plugged());

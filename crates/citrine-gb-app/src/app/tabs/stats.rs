@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 mod cable;
 mod chart;
 mod games;
+mod phone;
 
 pub const PAGE_SIZE: usize = 20;
 const CHART_HEIGHT: f32 = 120.0;
@@ -80,6 +81,7 @@ pub struct StatsUi {
     pub sort: Sort,
     pub search: String,
     pub list_page: usize,
+    pub sort_sheet: bool,
 }
 
 pub fn play_time(ms: u64) -> String {
@@ -138,7 +140,7 @@ fn sessions(n: u64) -> String {
     }
 }
 
-fn capitalized(text: &str) -> String {
+pub fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars
         .next()
@@ -146,7 +148,7 @@ fn capitalized(text: &str) -> String {
         .unwrap_or_default()
 }
 
-fn last_played(unix: u64, today: Date) -> String {
+pub fn last_played(unix: u64, today: Date) -> String {
     let day = crate::stats::local_date(unix);
     if day == today {
         "today".into()
@@ -183,16 +185,26 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                 empty(ui, events);
                 return;
             }
-            match state.page.clone() {
-                Page::Game { rom, .. } => {
+            match (state.page.clone(), mobile) {
+                (Page::Game { rom, .. }, _) => {
                     if let Some(game) = overview.game(&rom) {
-                        game_page(ui, state, &mut range, game, today, mobile);
+                        if mobile {
+                            phone::game_page(ui, &mut range, game, today);
+                        } else {
+                            game_page(ui, state, &mut range, game, today);
+                        }
                     }
                 }
-                Page::Overview => overview_page(ui, state, &mut range, &overview, today),
+                (Page::Overview, true) => {
+                    phone::overview_page(ui, state, &mut range, &overview, today)
+                }
+                (Page::Overview, false) => overview_page(ui, state, &mut range, &overview, today),
             }
             ui.add_space(if mobile { 12.0 } else { 4.0 });
         });
+    if mobile && state.sort_sheet {
+        phone::sort_sheet(ui.ctx(), state);
+    }
     if range != settings.stats_range {
         settings.stats_range = range;
         settings.dirty = true;

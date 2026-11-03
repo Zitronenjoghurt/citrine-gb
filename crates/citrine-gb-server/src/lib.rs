@@ -36,7 +36,6 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
 
-const KEEP_MESSAGES_SECS: u64 = 30 * 86_400;
 const EMPTY_ACCOUNT_SECS: u64 = 30 * 86_400;
 const KEEP_BACKUPS: usize = 14;
 
@@ -152,14 +151,6 @@ async fn tidy(app: &App, now: u64) {
     {
         Ok(0) => {}
         Ok(n) => log::info!("removed {n} friend requests nobody answered"),
-        Err(e) => log::error!("database: {e}"),
-    }
-    match db
-        .purge_messages(now.saturating_sub(KEEP_MESSAGES_SECS))
-        .await
-    {
-        Ok(0) => {}
-        Ok(n) => log::info!("removed {n} chat messages older than 30 days"),
         Err(e) => log::error!("database: {e}"),
     }
     match db.reclaim().await {

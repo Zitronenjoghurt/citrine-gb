@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"count!: i64\", COALESCE(SUM(LENGTH(body)), 0) AS \"bytes!: i64\"\n               FROM messages m WHERE m.to_id = ?1 AND m.from_id = ?2 AND m.receiver_keeps = 1\n                AND NOT EXISTS (SELECT 1 FROM devices v WHERE v.account_id = ?1 AND v.left_at IS NULL\n                                 AND NOT EXISTS (SELECT 1 FROM message_deliveries d\n                                                  WHERE d.device_id = v.id AND d.message_id = m.id))\n                AND (EXISTS (SELECT 1 FROM devices WHERE account_id = ?1 AND left_at IS NULL)\n                     OR m.sent_at > COALESCE((SELECT MAX(left_at) FROM devices WHERE account_id = ?1), 0))",
+  "describe": {
+    "columns": [
+      {
+        "name": "count!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "bytes!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a57542ad8732a80b6dc49b0fd4fe957b36286ac7d14cb9634b44f074e46f26a8"
+}

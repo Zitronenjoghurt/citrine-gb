@@ -1,4 +1,3 @@
-use super::mobile;
 use super::{Citrine, GAME_INFO_DOCK_SHARE};
 use crate::app::tabs::Tab;
 use egui_dock::SurfaceIndex;
@@ -16,8 +15,8 @@ impl Citrine {
                 self.close_game_info();
             }
         }
-        let open = self.dock.find_tab(&Tab::GameInfo).is_some()
-            || self.mobile.sheet == Some(mobile::Sheet::Panel(Tab::GameInfo));
+        let open =
+            self.dock.find_tab(&Tab::GameInfo).is_some() || self.mobile.showing(Tab::GameInfo);
         let now = web_time::Instant::now();
         let read = open && self.game_info.due(now);
         let progress = self.game_info.progress_due(now);
@@ -61,7 +60,7 @@ impl Citrine {
         if let Some(location) = self.dock.find_tab(&Tab::GameInfo) {
             self.dock.remove_tab(location);
         }
-        if self.mobile.sheet == Some(mobile::Sheet::Panel(Tab::GameInfo)) {
+        if self.mobile.showing(Tab::GameInfo) {
             self.mobile.close();
         }
     }

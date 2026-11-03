@@ -1,11 +1,12 @@
 # Features
 
 - Full Game Boy and Game Boy Color video and audio
-- Support for Windows, MacOS, Linux and Web
+- Support for Windows, MacOS, Linux, Android and Web
+- In-app updates on desktop and Android
 - MBC1, MBC2, MBC3 with real-time clock and MBC5 cartridges
 - (M-)Cycle-accurate instruction and memory timing
 - Bundled open source homebrew games, and real game names from MAME's game list
-- Touch layout for phones with adjustable on-screen controls
+- Phone layout with adjustable on-screen controls, 3x fast forward and a full-screen mode
 - Controller support, including on the web
 - Remappable keys, controller buttons and shortcuts
 - Battery saves other emulators can read, and unlimited named snapshots per game
@@ -32,4 +33,3 @@
 - Accuracy improvements
 - More debugging tools
 - Core library (documentation) improvements (DX)
-- Native Android build

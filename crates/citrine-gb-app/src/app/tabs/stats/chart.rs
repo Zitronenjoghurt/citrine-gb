@@ -150,8 +150,6 @@ pub(super) fn bars(ui: &mut Ui, id: &str, days: &BTreeMap<String, u64>, today: D
                 egui::FontId::proportional(11.0),
                 if lit {
                     ui.visuals().strong_text_color()
-                } else if bar.future {
-                    toward_panel(ui, ui.visuals().weak_text_color(), 0.6)
                 } else {
                     ui.visuals().weak_text_color()
                 },

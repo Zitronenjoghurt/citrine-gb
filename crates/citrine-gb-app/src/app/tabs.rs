@@ -30,7 +30,7 @@ pub mod playing;
 mod registers;
 mod rom_info;
 pub mod saves;
-mod settings;
+pub(crate) mod settings;
 pub mod stats;
 mod time_control;
 

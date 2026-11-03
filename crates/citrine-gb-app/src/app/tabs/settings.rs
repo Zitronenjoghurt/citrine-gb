@@ -9,6 +9,7 @@ use egui::Widget;
 const SIDEBAR_MIN_WIDTH: f32 = 420.0;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
+    crate::app::widgets::update::card(ui, &mut viewer.ui.update);
     if ui.available_width() < SIDEBAR_MIN_WIDTH {
         stacked(viewer, ui);
     } else {
@@ -61,7 +62,7 @@ fn stacked(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     });
 }
 
-fn content(viewer: &mut TabViewer, ui: &mut egui::Ui, top_space: f32) {
+pub(crate) fn content(viewer: &mut TabViewer, ui: &mut egui::Ui, top_space: f32) {
     let gb = &viewer.emulator.gb;
     let header = rom_header(gb);
     let game = viewer.emulator.rom_key().map(|rom_key| LoadedGame {
@@ -73,7 +74,7 @@ fn content(viewer: &mut TabViewer, ui: &mut egui::Ui, top_space: f32) {
         own_colors: gb.ppu.cgb_mode(),
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     let discord = (
         crate::discord::game_now(viewer.emulator, viewer.stats, viewer.game_info),
         viewer.emulator.screen_texture(),
@@ -90,7 +91,7 @@ fn content(viewer: &mut TabViewer, ui: &mut egui::Ui, top_space: f32) {
     .online(viewer.online, &mut viewer.ui.join)
     .your_data(&mut viewer.ui.your_data)
     .top_space(top_space);
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     let content = content.discord(discord.0, discord.1, discord.2);
     content.ui(ui);
 }

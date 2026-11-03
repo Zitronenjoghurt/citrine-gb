@@ -19,7 +19,12 @@ pub fn icon_button(icon: impl Into<String>, side: f32) -> Button<'static> {
 }
 
 pub fn main_button(ui: &Ui, text: impl Into<WidgetText>) -> Button<'static> {
-    Button::new(text).fill(ui.visuals().selection.bg_fill)
+    let fill = ui.visuals().selection.bg_fill;
+    Button::new(
+        text.into()
+            .color(crate::app::ui_state::ui_theme::ink_on(fill)),
+    )
+    .fill(fill)
 }
 
 pub fn quiet_button(ui: &Ui, text: impl Into<WidgetText>) -> Button<'static> {

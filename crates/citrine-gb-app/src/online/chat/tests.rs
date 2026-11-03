@@ -387,3 +387,76 @@ fn another_device_gets_my_chats_as_mine_with_their_changes() {
         4
     );
 }
+
+#[test]
+fn reading_the_newest_message_on_one_device_clears_the_unread_count_on_the_other() {
+    use crate::play::tests::{Pair, homebrew};
+    let mut pair = Pair::new(false, 0, 0, homebrew());
+    let (host, guest) = (pair.host.id(), pair.guest.id());
+    let mut phone = second_device(&mut pair);
+    with_phone(
+        &mut pair,
+        &mut phone,
+        "the phone is signed in",
+        |_, phone| phone.friend(guest).is_some(),
+    );
+    assert!(pair.guest.online.send_text(host, "one"));
+    assert!(pair.guest.online.send_text(host, "two"));
+    with_phone(
+        &mut pair,
+        &mut phone,
+        "both devices get both",
+        |p, phone| phone.unread(guest) == 2 && p.host.online.unread(guest) == 2,
+    );
+    let newest = pair.host.online.conversation(guest).unwrap().entries[1].id;
+    pair.host.online.mark_seen(guest, &[newest]);
+    pair.host.online.mark_read(guest);
+    with_phone(
+        &mut pair,
+        &mut phone,
+        "the phone shows nothing unread",
+        |_, phone| phone.unread(guest) == 0,
+    );
+}
+
+#[test]
+fn typing_crosses_the_relay_and_ends_on_empty_send_or_off() {
+    use crate::online::typing::SHOW_FOR;
+    use crate::play::tests::{Pair, homebrew};
+    let mut pair = Pair::new(false, 0, 0, homebrew());
+    let (host, guest) = (pair.host.id(), pair.guest.id());
+    let typing = |p: &Pair| p.guest.online.is_typing(host, Instant::now());
+
+    pair.host.online.compose(Some((guest, "")), Instant::now());
+    pair.host.online.compose(Some((guest, "h")), Instant::now());
+    pair.until("the friend sees the typing", typing);
+    let emptied = Instant::now();
+    pair.host.online.compose(Some((guest, "")), Instant::now());
+    pair.until("the stop arrives", |p| !typing(p));
+    assert!(emptied.elapsed() < SHOW_FOR);
+
+    pair.host
+        .online
+        .compose(Some((guest, "hi")), Instant::now());
+    pair.until("typing again", typing);
+    assert!(pair.host.online.send_text(guest, "hi"));
+    pair.host.online.compose(Some((guest, "")), Instant::now());
+    pair.until("the message replaces the typing", |p| {
+        !typing(p) && texts(&p.guest.online, host) == [(false, "hi".to_owned())]
+    });
+
+    pair.host.online.compose(Some((guest, "x")), Instant::now());
+    pair.until("typing once more", typing);
+    pair.guest
+        .online
+        .set_typing_indicators(false, Instant::now());
+    assert!(!typing(&pair));
+    pair.host.online.compose(None, Instant::now());
+    pair.host.online.compose(Some((guest, "x")), Instant::now());
+    pair.host
+        .online
+        .compose(Some((guest, "xy")), Instant::now());
+    let start = Instant::now();
+    pair.until("a moment passes", |_| start.elapsed() > SHOW_FOR / 5);
+    assert!(!typing(&pair));
+}

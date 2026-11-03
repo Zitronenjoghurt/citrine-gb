@@ -38,22 +38,18 @@ pub fn paint(ui: &Ui, rect: Rect, name: &str, seed: u64, seen: Option<Seen>) {
             0.46
         },
     );
-    let shadow = Color32::from_black_alpha(70);
+    let ink = crate::app::ui_state::ui_theme::ink_on(lerp(from, to, 0.5));
     let center = rect.center();
-    painter.text(
-        center + vec2(0.0, size * 0.025),
-        egui::Align2::CENTER_CENTER,
-        &initials,
-        font.clone(),
-        shadow,
-    );
-    painter.text(
-        center,
-        egui::Align2::CENTER_CENTER,
-        &initials,
-        font,
-        Color32::WHITE,
-    );
+    if ink == Color32::WHITE {
+        painter.text(
+            center + vec2(0.0, size * 0.025),
+            egui::Align2::CENTER_CENTER,
+            &initials,
+            font.clone(),
+            Color32::from_black_alpha(70),
+        );
+    }
+    painter.text(center, egui::Align2::CENTER_CENTER, &initials, font, ink);
 
     let color = match seen {
         Some(Seen::Online) => ONLINE,
@@ -134,11 +130,15 @@ fn hsl(hue: u16, saturation: f32, lightness: f32) -> Color32 {
 }
 
 pub fn status_dot(ui: &Ui, rect: Rect) {
+    dot_in(ui, rect, DOT);
+}
+
+pub fn dot_in(ui: &Ui, rect: Rect, color: Color32) {
     let radius = 4.0;
     let center = pos2(rect.right() - radius, rect.top() + radius);
     ui.painter()
         .circle_filled(center, radius + 1.5, ui.visuals().panel_fill);
-    ui.painter().circle_filled(center, radius, DOT);
+    ui.painter().circle_filled(center, radius, color);
 }
 
 #[cfg(test)]

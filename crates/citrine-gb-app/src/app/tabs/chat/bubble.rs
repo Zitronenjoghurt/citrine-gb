@@ -84,6 +84,12 @@ pub(super) fn entry_ui(
             .corner_radius(10.0)
             .inner_margin(margin)
             .show(ui, |ui| {
+                if entry.mine && big.is_none() {
+                    let ink = crate::app::ui_state::ui_theme::ink_on(fill);
+                    let visuals = ui.visuals_mut();
+                    visuals.widgets.active.fg_stroke.color = ink;
+                    visuals.widgets.noninteractive.fg_stroke.color = ink;
+                }
                 let content =
                     ui.with_layout(Layout::top_down(Align::Min), |ui| match &entry.body {
                         Body::Text(text) => text_body(ui, text, big.as_ref(), entry, clock),

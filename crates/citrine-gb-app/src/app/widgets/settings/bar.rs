@@ -23,18 +23,20 @@ impl<'a> SettingsBar<'a> {
 impl Widget for SettingsBar<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         ui.vertical(|ui| {
-            ScrollArea::vertical().show(ui, |ui| {
-                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                    for tab in SettingsTab::iter_with_dev_mode(self.settings.dev_mode) {
-                        ui.selectable_value(
-                            &mut self.settings.current_tab,
-                            tab,
-                            format!("{} {}", tab.icon(), tab.title()),
-                        );
-                        ui.add_space(self.spacing);
-                    }
+            ScrollArea::vertical()
+                .id_salt("settings_bar_scroll")
+                .show(ui, |ui| {
+                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                        for tab in SettingsTab::iter_with_dev_mode(self.settings.dev_mode) {
+                            ui.selectable_value(
+                                &mut self.settings.current_tab,
+                                tab,
+                                format!("{} {}", tab.icon(), tab.title()),
+                            );
+                            ui.add_space(self.spacing);
+                        }
+                    });
                 });
-            });
         })
         .response
     }

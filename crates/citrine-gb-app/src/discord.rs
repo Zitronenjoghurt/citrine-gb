@@ -1,7 +1,7 @@
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod rpc;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub use rpc::Rpc;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumIter;
@@ -54,7 +54,7 @@ impl Default for DiscordSettings {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GameNow {
     pub name: String,
@@ -63,7 +63,7 @@ pub struct GameNow {
     pub started_at: u64,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Presence {
     pub details: String,
@@ -74,43 +74,92 @@ pub struct Presence {
     pub hover: Option<String>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 #[derive(Debug, Clone, Default)]
 pub struct Shots {
+    game: Option<String>,
     checked: Option<std::time::Instant>,
     frame: Option<u64>,
+    running_since: Option<std::time::Instant>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+const FIRST_SHOT_AFTER: u64 = 10;
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shot {
+    Wait,
+    Take,
+    Forget,
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub struct Unit<'a> {
+    pub game: String,
+    pub running: bool,
+    pub frame: &'a [u8],
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn my_unit<'a>(
+    session: Option<&'a crate::play::PlaySession>,
+    solo: Option<Unit<'a>>,
+) -> Option<Unit<'a>> {
+    match session.filter(|s| s.is_live()) {
+        Some(s) if s.runs_engine() => s.console(true).map(|gb| Unit {
+            game: format!("together {}", gb.cartridge.header.sha256_hex_string()),
+            running: true,
+            frame: gb.frame().as_slice(),
+        }),
+        Some(s) if s.holds_my_game() || s.watching_only() => None,
+        _ => solo,
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 impl Shots {
     pub fn due(
         &mut self,
         now: std::time::Instant,
         every: ShotInterval,
-        running: bool,
+        unit: Option<(&str, bool)>,
         frame: impl FnOnce() -> u64,
-    ) -> bool {
-        if !running
+    ) -> Shot {
+        let game = unit.map(|(game, _)| game);
+        if self.game.as_deref() != game {
+            *self = Self {
+                game: game.map(str::to_string),
+                ..Self::default()
+            };
+            return Shot::Forget;
+        }
+        if !unit.is_some_and(|(_, running)| running) {
+            self.running_since = None;
+            return Shot::Wait;
+        }
+        let since = *self.running_since.get_or_insert(now);
+        if now.duration_since(since).as_secs() < FIRST_SHOT_AFTER
             || self
                 .checked
                 .is_some_and(|at| now.duration_since(at).as_secs() < every.seconds())
         {
-            return false;
+            return Shot::Wait;
         }
         self.checked = Some(now);
         let frame = frame();
         if self.frame == Some(frame) {
-            return false;
+            return Shot::Wait;
         }
         self.frame = Some(frame);
-        true
+        Shot::Take
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub const SHOT_SCALE: usize = 3;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn frame_key(pixels: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -118,12 +167,12 @@ pub fn frame_key(pixels: &[u8]) -> u64 {
     hasher.finish()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn screen_url(address: &crate::online::ServerAddress, path: &str, version: u64) -> String {
     address.web_url(&format!("{path}?v={version}"))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn game_now(
     emulator: &crate::emulator::Emulator,
     stats: &crate::stats::Stats,
@@ -140,7 +189,7 @@ pub fn game_now(
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn presence(
     settings: &DiscordSettings,
     game: Option<&GameNow>,
@@ -170,7 +219,7 @@ pub fn presence(
     })
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, not(any(target_arch = "wasm32", target_os = "android"))))]
 mod tests {
     use super::*;
 
@@ -259,17 +308,78 @@ mod tests {
         let start = std::time::Instant::now();
         let every = ShotInterval::Minute;
         let later = |secs| start + std::time::Duration::from_secs(secs);
+        let paused = Some(("red", false));
+        let on = Some(("red", true));
         let mut shots = Shots::default();
-        assert!(!shots.due(start, every, false, || 1));
-        assert!(shots.due(start, every, true, || 1));
-        assert!(!shots.due(later(30), every, true, || 2));
-        assert!(!shots.due(later(60), every, true, || 1));
-        assert!(!shots.due(later(90), every, true, || 2));
-        assert!(shots.due(later(120), every, true, || 2));
-        assert!(!shots.due(later(500), every, false, || 3));
-        assert!(shots.due(later(500), every, true, || 3));
-        let mut paused = Shots::default();
-        assert!(!paused.due(start, every, false, || unreachable!()));
+        assert_eq!(shots.due(start, every, paused, || 1), Shot::Forget);
+        assert_eq!(shots.due(start, every, paused, || 1), Shot::Wait);
+        assert_eq!(shots.due(start, every, on, || unreachable!()), Shot::Wait);
+        assert_eq!(
+            shots.due(later(9), every, on, || unreachable!()),
+            Shot::Wait
+        );
+        assert_eq!(shots.due(later(10), every, on, || 1), Shot::Take);
+        assert_eq!(shots.due(later(40), every, on, || 2), Shot::Wait);
+        assert_eq!(shots.due(later(70), every, on, || 1), Shot::Wait);
+        assert_eq!(shots.due(later(100), every, on, || 2), Shot::Wait);
+        assert_eq!(shots.due(later(130), every, on, || 2), Shot::Take);
+        assert_eq!(shots.due(later(500), every, paused, || 3), Shot::Wait);
+        assert_eq!(
+            shots.due(later(500), every, on, || unreachable!()),
+            Shot::Wait
+        );
+        assert_eq!(shots.due(later(510), every, on, || 3), Shot::Take);
+    }
+
+    #[test]
+    fn a_pause_keeps_the_picture() {
+        let start = std::time::Instant::now();
+        let every = ShotInterval::Minute;
+        let mut shots = Shots::default();
+        shots.due(start, every, Some(("red", true)), || 1);
+        for at in [0, 10, 300, 3000] {
+            let now = start + std::time::Duration::from_secs(at);
+            assert_eq!(
+                shots.due(now, every, Some(("red", false)), || unreachable!()),
+                Shot::Wait
+            );
+        }
+    }
+
+    #[test]
+    fn another_game_forgets_the_picture_and_shoots_after_ten_seconds() {
+        let start = std::time::Instant::now();
+        let every = ShotInterval::FiveMinutes;
+        let later = |secs| start + std::time::Duration::from_secs(secs);
+        let mut shots = Shots::default();
+        shots.due(start, every, Some(("red", true)), || 1);
+        shots.due(start, every, Some(("red", true)), || 1);
+        assert_eq!(
+            shots.due(later(10), every, Some(("red", true)), || 1),
+            Shot::Take
+        );
+        let blue = Some(("blue", true));
+        assert_eq!(shots.due(later(20), every, blue, || 1), Shot::Forget);
+        assert_eq!(shots.due(later(21), every, blue, || 1), Shot::Wait);
+        assert_eq!(shots.due(later(31), every, blue, || 1), Shot::Take);
+    }
+
+    #[test]
+    fn a_session_starting_or_ending_forgets_the_picture() {
+        let start = std::time::Instant::now();
+        let every = ShotInterval::Minute;
+        let mut shots = Shots::default();
+        shots.due(start, every, Some(("red", true)), || 1);
+        assert_eq!(
+            shots.due(start, every, Some(("together red", true)), || 1),
+            Shot::Forget
+        );
+        assert_eq!(shots.due(start, every, None, || 1), Shot::Forget);
+        assert_eq!(shots.due(start, every, None, || unreachable!()), Shot::Wait);
+        assert_eq!(
+            shots.due(start, every, Some(("red", true)), || 1),
+            Shot::Forget
+        );
     }
 
     #[test]

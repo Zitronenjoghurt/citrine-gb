@@ -1,3 +1,4 @@
+use crate::app::mobile::kit;
 use crate::app::tabs::chat::{self, ChatUi};
 use crate::app::tabs::playing::{self, PlayButton};
 use crate::app::tabs::{Tab, TabViewer};
@@ -12,6 +13,7 @@ use crate::app::widgets::field::row_field;
 use crate::app::widgets::problem::problem_text;
 use crate::app::widgets::row::row_highlight;
 use crate::app::widgets::settings::online::{connection_line, my_seen, retry_row};
+use crate::app::widgets::typing;
 use crate::icons;
 use crate::online::{Online, RelayEntry, Seen, game_title, seen};
 use crate::play::Stage;
@@ -20,6 +22,7 @@ use egui::{Align, CursorIcon, Label, Layout, RichText, Sense, TextStyle, Ui};
 use web_time::Instant;
 
 const ROW_AVATAR: f32 = 34.0;
+const PHONE_AVATAR: f32 = 40.0;
 const INVITE_ROW_MIN: f32 = 330.0;
 const FOLD_BELOW: f32 = 280.0;
 
@@ -32,7 +35,18 @@ pub struct FriendsUi {
     ask: Option<(Ask, OnlineId, String)>,
     show_blocked: bool,
     copied_at: Option<Instant>,
+    show_add: bool,
     pub chat: ChatUi,
+}
+
+impl FriendsUi {
+    pub fn toggle_adding(&mut self) {
+        self.show_add = !self.show_add;
+    }
+
+    pub fn show_profile(&mut self, id: OnlineId) {
+        self.profile = Some(id);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -128,13 +142,20 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
         .id_salt("friends_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if me_row(ui, online, stored.as_ref(), now) {
-                ui_state.settings.current_tab = SettingsTab::Online;
-                viewer.events.open_tab(Tab::Settings);
+            if !touch {
+                if me_row(ui, online, stored.as_ref(), now) {
+                    ui_state.settings.current_tab = SettingsTab::Online;
+                    viewer.events.open_tab(Tab::Settings);
+                }
+                ui.add_space(8.0);
             }
-            ui.add_space(8.0);
-            add_row(ui, online, state);
-            ui.add_space(6.0);
+            if touch && (state.show_add || online.friends().is_empty()) {
+                phone_add_card(ui, online, state);
+                ui.add_space(6.0);
+            } else if !touch {
+                add_row(ui, online, state);
+                ui.add_space(6.0);
+            }
 
             let connected = online.is_connected();
             let incoming: Vec<Friend> = online
@@ -142,7 +163,29 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                 .into_iter()
                 .cloned()
                 .collect();
-            if !incoming.is_empty() {
+            if !incoming.is_empty() && touch {
+                kit::section_label(ui, "Wants to be your friend");
+                kit::list(ui, |list| {
+                    for person in &incoming {
+                        let id = person.online_id;
+                        let row = list.custom(|ui| {
+                            phone_row(ui, person, None, 0, RowMode::Plain, "", |ui| {
+                                ui.add_enabled_ui(connected, |ui| {
+                                    if kit::pill(ui, "Accept", true).clicked() {
+                                        online.answer(id, true);
+                                    }
+                                    if kit::pill(ui, "Decline", false).clicked() {
+                                        online.answer(id, false);
+                                    }
+                                });
+                            })
+                        });
+                        if row.face || row.open {
+                            state.profile = Some(id);
+                        }
+                    }
+                });
+            } else if !incoming.is_empty() {
                 heading(ui, &format!("Requests ({})", incoming.len()));
                 for person in &incoming {
                     let row = person_row(
@@ -187,87 +230,136 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
             }
 
             let friends: Vec<Friend> = online.friends().into_iter().cloned().collect();
-            heading(ui, "Friends");
-            if friends.is_empty() {
-                empty_state(ui, online, state, now);
+            if touch {
+                kit::section_label(ui, "Friends");
+            } else {
+                heading(ui, "Friends");
             }
-            for person in &friends {
-                let id = person.online_id;
-                let presence = online.presence(person);
-                let live = playing::play_subtitle(play, id);
-                let in_session = live.is_some();
-                let subtitle = live.unwrap_or_else(|| subtitle(online, person, unix_now));
-                let unread = online.unread(id);
-                let invite = play.invites().iter().find(|i| i.from == id).cloned();
-                let sent = play.session().is_some_and(|s| {
-                    s.is_live() && s.friend() == id && s.stage() == Stage::Inviting
-                });
-                let button = playing::play_button(play, online, id);
-                let watches = playing::can_watch(play, online, id, game_open);
-                let below = invite.is_some() && ui.available_width() < INVITE_ROW_MIN;
-                let subtitle = match unread {
-                    1.. if !in_session => last_message(online, id).unwrap_or(subtitle),
-                    _ => subtitle,
-                };
-                let mode =
-                    if !touch && !sent && invite.is_none() && ui.available_width() < FOLD_BELOW {
+            if friends.is_empty() {
+                if touch {
+                    kit::card(ui, |ui| {
+                        kit::padded(ui, |ui| empty_state(ui, online, state, now))
+                    });
+                } else {
+                    empty_state(ui, online, state, now);
+                }
+            }
+            let mut friend_rows = |ui: &mut Ui| {
+                for (index, person) in friends.iter().enumerate() {
+                    if touch && index > 0 {
+                        kit::divider(ui);
+                    }
+                    let id = person.online_id;
+                    let presence = online.presence(person);
+                    let live = playing::play_subtitle(play, id);
+                    let in_session = live.is_some();
+                    let subtitle = live.unwrap_or_else(|| subtitle(online, person, unix_now));
+                    let unread = online.unread(id);
+                    let invite = play.invites().iter().find(|i| i.from == id).cloned();
+                    let sent = play.session().is_some_and(|s| {
+                        s.is_live() && s.friend() == id && s.stage() == Stage::Inviting
+                    });
+                    let button = playing::play_button(play, online, id);
+                    let watches = playing::can_watch(play, online, id, game_open);
+                    let row_width = ui.available_width() - if touch { 24.0 } else { 0.0 };
+                    let below = invite.is_some() && row_width < INVITE_ROW_MIN;
+                    let subtitle = match unread {
+                        1.. if !in_session => last_message(online, id).unwrap_or(subtitle),
+                        _ => subtitle,
+                    };
+                    let subtitle = if online.is_typing(id, now) {
+                        Line::Typing
+                    } else {
+                        Line::Text(&subtitle)
+                    };
+                    let mode = if !touch && !sent && invite.is_none() && row_width < FOLD_BELOW {
                         RowMode::Folded
                     } else {
                         RowMode::Chat
                     };
-                let row = person_row(ui, person, presence, unread, mode, &subtitle, |ui| {
-                    if let Some(invite) = &invite {
-                        if !below {
-                            invite_buttons(ui, invite, connected, None, &mut actions);
+                    let row_actions = |ui: &mut Ui| {
+                        if let Some(invite) = &invite {
+                            if !below {
+                                invite_buttons(ui, invite, connected, None, &mut actions);
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    if ui.button(icons::DOTS_THREE).on_hover_text("More").clicked() {
-                        state.profile = Some(id);
-                    }
-                    if sent {
-                        if ui
-                            .button(icons::ARROW_U_UP_LEFT)
-                            .on_hover_text("Take back")
-                            .clicked()
-                        {
-                            actions.push(PlayAction::Cancel);
+                        if !touch && ui.button(icons::DOTS_THREE).on_hover_text("More").clicked() {
+                            state.profile = Some(id);
                         }
-                    } else if watches {
-                        let eye = if touch { "Watch" } else { icons::EYE };
-                        if ui.button(eye).on_hover_text("Watch").clicked() {
-                            actions.push(PlayAction::Watch(id));
-                        }
-                    } else if button.is_some()
-                        && play_together(
-                            ui,
-                            if touch {
-                                PlayStyle::Text
+                        if sent {
+                            let back = if touch {
+                                kit::pill(ui, "Take back", false)
                             } else {
-                                PlayStyle::Icon
-                            },
-                        )
-                    {
-                        actions.push(PlayAction::Invite(id));
+                                ui.button(icons::ARROW_U_UP_LEFT).on_hover_text("Take back")
+                            };
+                            if back.clicked() {
+                                actions.push(PlayAction::Cancel);
+                            }
+                        } else if watches {
+                            let watch = if touch {
+                                kit::pill(ui, "Watch", false)
+                            } else {
+                                ui.button(icons::EYE).on_hover_text("Watch")
+                            };
+                            if watch.clicked() {
+                                actions.push(PlayAction::Watch(id));
+                            }
+                        } else if button.is_some() {
+                            let asked = if touch {
+                                kit::pill(ui, "Play", false).clicked()
+                            } else {
+                                play_together(ui, PlayStyle::Icon)
+                            };
+                            if asked {
+                                actions.push(PlayAction::Invite(id));
+                            }
+                        }
+                    };
+                    let row = if touch {
+                        phone_row(ui, person, presence, unread, mode, subtitle, row_actions)
+                    } else {
+                        person_row(ui, person, presence, unread, mode, subtitle, row_actions)
+                    };
+                    if let (true, Some(invite)) = (below, &invite) {
+                        let margin = if touch { 12 } else { 0 };
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin {
+                                left: margin,
+                                right: margin,
+                                top: 0,
+                                bottom: margin,
+                            })
+                            .show(ui, |ui| {
+                                ui.columns(2, |columns| {
+                                    let size = egui::vec2(
+                                        columns[0].available_width(),
+                                        columns[0].spacing().interact_size.y,
+                                    );
+                                    let (left, right) = columns.split_at_mut(1);
+                                    join_button(
+                                        &mut left[0],
+                                        invite,
+                                        connected,
+                                        Some(size),
+                                        &mut actions,
+                                    );
+                                    decline_button(&mut right[0], invite, Some(size), &mut actions);
+                                });
+                            });
+                        ui.add_space(4.0);
                     }
-                });
-                if let (true, Some(invite)) = (below, &invite) {
-                    ui.columns(2, |columns| {
-                        let size = egui::vec2(
-                            columns[0].available_width(),
-                            columns[0].spacing().interact_size.y,
-                        );
-                        let (left, right) = columns.split_at_mut(1);
-                        join_button(&mut left[0], invite, connected, Some(size), &mut actions);
-                        decline_button(&mut right[0], invite, Some(size), &mut actions);
-                    });
-                    ui.add_space(4.0);
+                    if row.face || row.menu {
+                        state.profile = Some(id);
+                    } else if row.open {
+                        state.chat.open(id);
+                    }
                 }
-                if row.face || row.menu {
-                    state.profile = Some(id);
-                } else if row.open {
-                    state.chat.open(id);
-                }
+            };
+            if touch && !friends.is_empty() {
+                kit::card(ui, friend_rows);
+            } else {
+                friend_rows(ui);
             }
 
             let outgoing: Vec<Friend> = online
@@ -276,29 +368,44 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                 .cloned()
                 .collect();
             if !outgoing.is_empty() {
-                ui.add_space(6.0);
-                heading(ui, "Sent");
-                for person in &outgoing {
-                    let row = person_row(
-                        ui,
-                        person,
-                        None,
-                        0,
-                        RowMode::Plain,
-                        "Waiting for an answer",
-                        |ui| {
-                            if ui
-                                .add_enabled(connected, egui::Button::new(icons::X))
-                                .on_hover_text("Cancel request")
-                                .clicked()
-                            {
+                if touch {
+                    kit::section_label(ui, "Sent");
+                } else {
+                    ui.add_space(6.0);
+                    heading(ui, "Sent");
+                }
+                let mut sent_rows = |ui: &mut Ui| {
+                    for (index, person) in outgoing.iter().enumerate() {
+                        if touch && index > 0 {
+                            kit::divider(ui);
+                        }
+                        let cancel = |ui: &mut Ui| {
+                            let response = if touch {
+                                ui.add_enabled_ui(connected, |ui| kit::pill(ui, "Cancel", false))
+                                    .inner
+                            } else {
+                                ui.add_enabled(connected, egui::Button::new(icons::X))
+                                    .on_hover_text("Cancel request")
+                            };
+                            if response.clicked() {
                                 online.remove_friend(person.online_id);
                             }
-                        },
-                    );
-                    if row.face || row.open {
-                        state.profile = Some(person.online_id);
+                        };
+                        let waiting = "Waiting for an answer";
+                        let row = if touch {
+                            phone_row(ui, person, None, 0, RowMode::Plain, waiting, cancel)
+                        } else {
+                            person_row(ui, person, None, 0, RowMode::Plain, waiting, cancel)
+                        };
+                        if row.face || row.open {
+                            state.profile = Some(person.online_id);
+                        }
                     }
+                };
+                if touch {
+                    kit::card(ui, sent_rows);
+                } else {
+                    sent_rows(ui);
                 }
             }
 
@@ -308,42 +415,63 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                 .cloned()
                 .collect();
             if !blocked.is_empty() {
-                ui.add_space(10.0);
+                ui.add_space(if touch { 16.0 } else { 10.0 });
                 let arrow = if state.show_blocked {
                     icons::CARET_DOWN
                 } else {
                     icons::CARET_RIGHT
                 };
-                if ui
-                    .add(
-                        Label::new(
-                            RichText::new(format!("{arrow} Blocked ({})", blocked.len())).weak(),
+                let toggle = ui
+                    .horizontal(|ui| {
+                        if touch {
+                            ui.add_space(6.0);
+                        }
+                        ui.add(
+                            Label::new(
+                                RichText::new(format!("{arrow} Blocked ({})", blocked.len()))
+                                    .weak(),
+                            )
+                            .sense(Sense::click()),
                         )
-                        .sense(Sense::click()),
-                    )
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    })
+                    .inner;
+                if toggle {
                     state.show_blocked = !state.show_blocked;
                 }
                 if state.show_blocked {
-                    for person in &blocked {
-                        person_row(
-                            ui,
-                            person,
-                            None,
-                            0,
-                            RowMode::Plain,
-                            &person.online_id.to_string(),
-                            |ui| {
-                                if ui
-                                    .add_enabled(connected, egui::Button::new("Unblock"))
-                                    .clicked()
-                                {
+                    let mut blocked_rows = |ui: &mut Ui| {
+                        for (index, person) in blocked.iter().enumerate() {
+                            if touch && index > 0 {
+                                kit::divider(ui);
+                            }
+                            let unblock = |ui: &mut Ui| {
+                                let response = if touch {
+                                    ui.add_enabled_ui(connected, |ui| {
+                                        kit::pill(ui, "Unblock", false)
+                                    })
+                                    .inner
+                                } else {
+                                    ui.add_enabled(connected, egui::Button::new("Unblock"))
+                                };
+                                if response.clicked() {
                                     online.unblock(person.online_id);
                                 }
-                            },
-                        );
+                            };
+                            if touch {
+                                phone_row(ui, person, None, 0, RowMode::Plain, "", unblock);
+                            } else {
+                                let id = person.online_id.to_string();
+                                person_row(ui, person, None, 0, RowMode::Plain, &id, unblock);
+                            }
+                        }
+                    };
+                    if touch {
+                        ui.add_space(4.0);
+                        kit::card(ui, blocked_rows);
+                    } else {
+                        blocked_rows(ui);
                     }
                 }
             }
@@ -397,7 +525,6 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
 
 enum PlayStyle {
     Icon,
-    Text,
     Wide(egui::Vec2),
 }
 
@@ -405,7 +532,6 @@ fn play_together(ui: &mut Ui, style: PlayStyle) -> bool {
     let label = format!("{}  Play together", icons::GAME_CONTROLLER);
     let response = match style {
         PlayStyle::Icon => ui.add(egui::Button::new(icons::GAME_CONTROLLER)),
-        PlayStyle::Text => ui.add(egui::Button::new("Play together")),
         PlayStyle::Wide(size) => ui.add_sized(size, main_button(ui, label)),
     };
     response.on_hover_text("Play together").clicked()
@@ -465,6 +591,7 @@ fn track_add(online: &mut Online, state: &mut FriendsUi) {
     };
     if online.friend(id).is_some() {
         state.adding = None;
+        state.show_add = false;
         state.add.clear();
         state.add_error = None;
     } else if let Some(error) = online.request_error() {
@@ -576,7 +703,52 @@ fn add_row(ui: &mut Ui, online: &mut Online, state: &mut FriendsUi) {
     if let Some(error) = &state.add_error {
         ui.label(problem_text(ui, error).small());
     }
-    if !add || state.add.trim().is_empty() {
+    if add {
+        submit_add(online, state);
+    }
+}
+
+fn phone_add_card(ui: &mut Ui, online: &mut Online, state: &mut FriendsUi) {
+    let connected = online.is_connected();
+    let mut add = false;
+    kit::card(ui, |ui| {
+        kit::padded(ui, |ui| {
+            ui.horizontal(|ui| {
+                let pill = ui.spacing().interact_size.y.max(36.0) * 1.8;
+                let width = ui.available_width() - pill - ui.spacing().item_spacing.x;
+                let response = ui
+                    .add_enabled_ui(connected, |ui| {
+                        ui.set_max_width(width.max(0.0));
+                        crate::app::mobile::kit::field(
+                            ui,
+                            egui::TextEdit::singleline(&mut state.add)
+                                .hint_text("Online ID")
+                                .char_limit(12),
+                        )
+                    })
+                    .inner;
+                if response.changed() {
+                    state.add_error = None;
+                }
+                add |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let ready = connected && !state.add.trim().is_empty();
+                add |= ui
+                    .add_enabled_ui(ready, |ui| kit::pill(ui, "Add", true))
+                    .inner
+                    .clicked();
+            });
+            if let Some(error) = &state.add_error {
+                ui.label(problem_text(ui, error).small());
+            }
+        })
+    });
+    if add {
+        submit_add(online, state);
+    }
+}
+
+fn submit_add(online: &mut Online, state: &mut FriendsUi) {
+    if state.add.trim().is_empty() {
         return;
     }
     match state.add.trim().parse::<OnlineId>() {
@@ -620,19 +792,84 @@ struct RowClicks {
     menu: bool,
 }
 
-fn person_row(
+#[derive(Clone, Copy)]
+enum Line<'a> {
+    Text(&'a str),
+    Typing,
+}
+
+impl Line<'_> {
+    fn is_empty(&self) -> bool {
+        matches!(self, Line::Text(""))
+    }
+}
+
+impl<'a> From<&'a str> for Line<'a> {
+    fn from(text: &'a str) -> Self {
+        Line::Text(text)
+    }
+}
+
+impl<'a> From<&'a String> for Line<'a> {
+    fn from(text: &'a String) -> Self {
+        Line::Text(text)
+    }
+}
+
+fn person_row<'a>(
     ui: &mut Ui,
     person: &Friend,
     presence: Option<Seen>,
     unread: usize,
     mode: RowMode,
-    subtitle: &str,
+    subtitle: impl Into<Line<'a>>,
+    actions: impl FnOnce(&mut Ui),
+) -> RowClicks {
+    let subtitle = subtitle.into();
+    let clicks = person_row_sized(
+        ui, ROW_AVATAR, person, presence, unread, mode, subtitle, actions,
+    );
+    ui.add_space(2.0);
+    clicks
+}
+
+fn phone_row<'a>(
+    ui: &mut Ui,
+    person: &Friend,
+    presence: Option<Seen>,
+    unread: usize,
+    mode: RowMode,
+    subtitle: impl Into<Line<'a>>,
+    actions: impl FnOnce(&mut Ui),
+) -> RowClicks {
+    let subtitle = subtitle.into();
+    let size = PHONE_AVATAR;
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            let styles = &mut ui.style_mut().text_styles;
+            styles.insert(TextStyle::Small, egui::FontId::proportional(13.0));
+            styles.insert(TextStyle::Body, egui::FontId::proportional(16.0));
+            person_row_sized(ui, size, person, presence, unread, mode, subtitle, actions)
+        })
+        .inner
+}
+
+#[allow(clippy::too_many_arguments)]
+fn person_row_sized(
+    ui: &mut Ui,
+    size: f32,
+    person: &Friend,
+    presence: Option<Seen>,
+    unread: usize,
+    mode: RowMode,
+    subtitle: Line<'_>,
     actions: impl FnOnce(&mut Ui),
 ) -> RowClicks {
     let mut clicks = RowClicks::default();
     let chat = mode != RowMode::Plain;
     let fold = mode == RowMode::Folded;
-    let height = ROW_AVATAR.max(ui.spacing().interact_size.y);
+    let height = size.max(ui.spacing().interact_size.y);
     let area = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), height));
     let background = ui.painter().add(egui::Shape::Noop);
     let back = chat.then(|| {
@@ -653,7 +890,7 @@ fn person_row(
                 ui,
                 &person.display_name,
                 person.online_id.value(),
-                ROW_AVATAR,
+                size,
                 presence,
             )
             .on_hover_cursor(CursorIcon::PointingHand);
@@ -670,6 +907,11 @@ fn person_row(
                 }
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
+                    let mut block = ui.text_style_height(&TextStyle::Body);
+                    if !subtitle.is_empty() {
+                        block += 1.0 + ui.text_style_height(&TextStyle::Small);
+                    }
+                    ui.add_space(((height - block) / 2.0).max(0.0));
                     let strong = ui.visuals().strong_text_color();
                     let name = emoji::line(ui, &person.display_name, TextStyle::Body, strong)
                         .on_hover_cursor(CursorIcon::PointingHand);
@@ -678,9 +920,18 @@ fn person_row(
                     } else {
                         ui.visuals().weak_text_color()
                     };
-                    let line = emoji::line(ui, subtitle, TextStyle::Small, color)
-                        .on_hover_cursor(CursorIcon::PointingHand);
-                    clicks.open |= name.clicked() || line.clicked();
+                    clicks.open |= name.clicked();
+                    let line = match subtitle {
+                        Line::Text("") => None,
+                        Line::Text(text) => Some(emoji::line(ui, text, TextStyle::Small, color)),
+                        Line::Typing => {
+                            let accent = crate::app::ui_state::ui_theme::brand_mark(ui.visuals());
+                            Some(typing::line(ui, "typing", TextStyle::Small, accent))
+                        }
+                    };
+                    if let Some(line) = line {
+                        clicks.open |= line.on_hover_cursor(CursorIcon::PointingHand).clicked();
+                    }
                 });
             });
         },
@@ -692,7 +943,6 @@ fn person_row(
         clicks.open |= back.clicked();
         clicks.menu = pointed && ui.input(|i| i.pointer.secondary_clicked());
     }
-    ui.add_space(2.0);
     clicks
 }
 

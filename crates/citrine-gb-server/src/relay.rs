@@ -586,6 +586,7 @@ impl Client {
                 }
                 Ok(())
             }
+            ClientMsg::Typing { to, typing } => self.typing(to, typing).await,
             ClientMsg::ListSaves => {
                 let saves = db(self.app.db.saves_of(self.me()?.id).await)?;
                 self.send(ServerMsg::Saves(saves)).await;

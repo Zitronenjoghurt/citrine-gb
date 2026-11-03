@@ -1,5 +1,10 @@
+#[cfg(not(target_os = "android"))]
 use rfd::AsyncFileDialog;
+#[cfg(not(target_os = "android"))]
 use std::sync::mpsc::Sender;
+
+#[cfg(target_os = "android")]
+pub use crate::platform::android::files::{FileLoader, FolderPicker};
 
 pub struct PickedFile {
     pub name: String,
@@ -33,11 +38,13 @@ impl PickedFile {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Default)]
 pub struct FileLoader {
     dialog: AsyncFileDialog,
 }
 
+#[cfg(not(target_os = "android"))]
 impl FileLoader {
     pub fn new() -> Self {
         Self::default()
@@ -86,13 +93,13 @@ impl FileLoader {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 #[derive(Default)]
 pub struct FolderPicker {
     dialog: AsyncFileDialog,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 impl FolderPicker {
     pub fn new() -> Self {
         Self::default()

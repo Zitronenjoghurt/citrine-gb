@@ -2,6 +2,7 @@ use crate::app::events::AppEvent;
 use crate::app::tabs::friends::subtitle;
 use crate::app::tabs::media::Browse;
 use crate::app::tabs::{Tab, TabViewer};
+use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::app::viewer::{ItemKey, Source};
 use crate::app::widgets::action::wide_button;
 use crate::app::widgets::row::row_highlight;
@@ -39,6 +40,7 @@ const BIG_EMOJI_MAX: usize = 6;
 const BIG_EMOJI_GAP: f32 = 2.0;
 const STAMP_GAP: f32 = 6.0;
 const TEXT_STAMP_GAP: f32 = 8.0;
+const MESSAGES_PER_PAGE: usize = 200;
 const BUBBLE_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
 const PICKER_EMOJI: f32 = 28.0;
 const PICKER_HEIGHT: f32 = 176.0;
@@ -86,6 +88,7 @@ pub struct ChatUi {
     from_media: bool,
     media: Browse,
     jump: bool,
+    older: usize,
     reading: usize,
     tx: Sender<Loaded>,
     rx: Receiver<Loaded>,
@@ -98,6 +101,7 @@ pub struct ChatUi {
     held: Option<u64>,
     editing: Option<Editing>,
     focus_draft: bool,
+    leave_draft: bool,
     deleting: Option<u64>,
 }
 
@@ -111,6 +115,7 @@ impl Default for ChatUi {
             from_media: false,
             media: Browse::default(),
             jump: false,
+            older: 0,
             reading: 0,
             tx,
             rx,
@@ -123,6 +128,7 @@ impl Default for ChatUi {
             held: None,
             editing: None,
             focus_draft: false,
+            leave_draft: false,
             deleting: None,
         }
     }
@@ -132,6 +138,7 @@ impl ChatUi {
     pub fn open(&mut self, friend: OnlineId) {
         if self.open != Some(friend) {
             self.end_edit();
+            self.older = 0;
         }
         self.open = Some(friend);
         self.picker = false;
@@ -149,6 +156,27 @@ impl ChatUi {
 
     pub fn current(&self) -> Option<OnlineId> {
         self.open
+    }
+
+    pub fn focus(&mut self) {
+        self.focus_draft = self.open.is_some();
+    }
+
+    pub fn leave_field(&mut self) {
+        self.leave_draft = true;
+    }
+
+    pub fn leaves_on_escape(&self) -> bool {
+        !self.picker && self.composing().is_some()
+    }
+
+    pub fn field(&self) -> Option<egui::Id> {
+        self.open.map(draft_id)
+    }
+
+    pub fn composing(&self) -> Option<(OnlineId, &str)> {
+        let friend = self.open.filter(|_| self.editing.is_none())?;
+        Some((friend, self.drafts.get(&friend).map_or("", String::as_str)))
     }
 
     pub fn escape(&mut self) -> bool {
@@ -241,6 +269,10 @@ impl ChatUi {
     }
 }
 
+pub fn draft_id(friend: OnlineId) -> egui::Id {
+    egui::Id::new(("chat_draft", friend))
+}
+
 pub fn take_escape(ctx: &egui::Context) -> bool {
     let free = !ctx.wants_keyboard_input()
         && ctx.memory(|m| m.top_modal_layer().is_none())
@@ -326,12 +358,46 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) -> bool {
     viewer.online.mark_read(friend);
 
     let mut profile = false;
-    match header(ui, viewer.online, &person, !mobile) {
+    let chip = if mobile {
+        chip(viewer.play, viewer.online, friend)
+    } else {
+        None
+    };
+    match header(ui, viewer.online, &person, mobile, chip.as_ref()) {
         Some(Header::Back) => {
             viewer.ui.friends.chat.close();
             return false;
         }
         Some(Header::Profile) => profile = true,
+        Some(Header::Chip) => match chip {
+            Some(Chip::Play) => {
+                let sent = crate::app::tabs::playing::invite(
+                    viewer.play,
+                    viewer.online,
+                    viewer.emulator,
+                    &mut viewer.ui.playing,
+                    &viewer.ui.recent,
+                    friend,
+                );
+                if !sent {
+                    viewer.events.notify_error("Couldn't send the invite");
+                }
+            }
+            Some(Chip::Join(invite)) => {
+                if !crate::app::tabs::playing::join(
+                    viewer.play,
+                    viewer.online,
+                    viewer.emulator,
+                    &mut viewer.ui.playing,
+                    &viewer.ui.recent,
+                    &invite,
+                ) {
+                    viewer.events.notify_error("Couldn't join the game");
+                }
+            }
+            Some(Chip::Playing) => viewer.events.open_tab(crate::app::tabs::Tab::GameBoy),
+            None => {}
+        },
         None => {}
     }
     ui.separator();
@@ -345,6 +411,21 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) -> bool {
         .show_separator_line(false)
         .resizable(false)
         .show_inside(ui, |ui| {
+            if can_chat {
+                let typing = viewer.online.is_typing(friend, web_time::Instant::now());
+                let typing = typing.then_some(person.display_name.as_str());
+                let to_game =
+                    !viewer.ui.friends.chat.touch && viewer.emulator.open_game().is_some();
+                let field = if viewer.ui.friends.chat.editing(friend).is_some() {
+                    Field::Editing
+                } else if ui.memory(|m| m.has_focus(draft_id(friend))) {
+                    Field::Focused
+                } else {
+                    Field::Away
+                };
+                let key = viewer.ui.settings.hotkeys.key_name(HotkeyAction::FocusChat);
+                typing_slot(ui, slot(typing, to_game, field, key.as_deref()), to_game);
+            }
             if can_chat && viewer.ui.friends.chat.picker {
                 picker(ui, viewer, friend);
             }
@@ -415,57 +496,178 @@ fn delete_question(entry: &ChatEntry, name: &str) -> String {
 enum Header {
     Back,
     Profile,
+    Chip,
 }
 
-fn header(ui: &mut Ui, online: &Online, person: &Friend, back: bool) -> Option<Header> {
+#[derive(Debug, Clone)]
+pub enum Chip {
+    Play,
+    Join(crate::play::IncomingInvite),
+    Playing,
+}
+
+impl Chip {
+    fn label(&self) -> &'static str {
+        match self {
+            Chip::Play => "Play",
+            Chip::Join(_) => "Join",
+            Chip::Playing => "Playing",
+        }
+    }
+}
+
+pub fn chip(play: &crate::play::Play, online: &Online, friend: OnlineId) -> Option<Chip> {
+    if play
+        .session()
+        .is_some_and(|session| session.is_live() && session.friend() == friend)
+    {
+        return Some(Chip::Playing);
+    }
+    if let Some(invite) = play.invites().iter().find(|invite| invite.from == friend) {
+        return Some(Chip::Join(invite.clone()));
+    }
+    match crate::app::tabs::playing::play_button(play, online, friend) {
+        Some(crate::app::tabs::playing::PlayButton::Ready) => Some(Chip::Play),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Field {
+    Away,
+    Focused,
+    Editing,
+}
+
+#[derive(Debug, PartialEq)]
+enum Slot {
+    Typing(String),
+    Tip(String),
+}
+
+fn slot(typing: Option<&str>, to_game: bool, field: Field, key: Option<&str>) -> Option<Slot> {
+    if let Some(text) = typing.and_then(|name| crate::app::widgets::typing::chat_line(&[name])) {
+        return Some(Slot::Typing(text));
+    }
+    if !to_game {
+        return None;
+    }
+    match (field, key) {
+        (Field::Away, Some(key)) => Some(Slot::Tip(format!("{key} to chat"))),
+        (Field::Focused, Some(key)) => {
+            Some(Slot::Tip(format!("{key} or Esc to go back to the game")))
+        }
+        (Field::Focused, None) => Some(Slot::Tip("Esc to go back to the game".to_owned())),
+        _ => None,
+    }
+}
+
+fn typing_slot(ui: &mut Ui, slot: Option<Slot>, keep: bool) {
+    if slot.is_none() && !keep {
+        return;
+    }
+    let style = egui::TextStyle::Small;
+    ui.add_space(2.0);
+    match slot {
+        Some(Slot::Typing(text)) => {
+            let color = ui.visuals().text_color();
+            crate::app::widgets::typing::line(ui, &text, style, color);
+        }
+        tip => {
+            let size = vec2(ui.available_width(), ui.text_style_height(&style));
+            ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+                if let Some(Slot::Tip(text)) = tip {
+                    ui.add(Label::new(RichText::new(text).text_style(style).weak()).truncate());
+                }
+            });
+        }
+    }
+}
+
+fn header(
+    ui: &mut Ui,
+    online: &Online,
+    person: &Friend,
+    mobile: bool,
+    chip: Option<&Chip>,
+) -> Option<Header> {
     let mut action = None;
     let unix_now = crate::storage::now_unix();
     let height = HEADER_AVATAR.max(ui.spacing().interact_size.y);
+    let side = ui.spacing().interact_size.y;
     ui.allocate_ui_with_layout(
         vec2(ui.available_width(), height),
         Layout::left_to_right(Align::Center),
         |ui| {
-            if back
-                && ui
-                    .button(icons::ARROW_LEFT)
-                    .on_hover_text("Back to friends")
-                    .clicked()
-            {
+            let back = if mobile {
+                crate::app::mobile::kit::header_button(icons::ARROW_LEFT, side)
+            } else {
+                egui::Button::new(icons::ARROW_LEFT)
+            };
+            if ui.add(back).on_hover_text("Back to friends").clicked() {
                 action = Some(Header::Back);
             }
-            let presence = online.presence(person);
-            if avatar::avatar(
-                ui,
-                &person.display_name,
-                person.online_id.value(),
-                HEADER_AVATAR,
-                presence,
-            )
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .clicked()
-            {
-                action = Some(Header::Profile);
+            if let Some(chip) = chip {
+                let room = ui.available_width();
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    let button = crate::app::widgets::action::main_button(ui, chip.label())
+                        .corner_radius(egui::CornerRadius::same(18))
+                        .min_size(vec2(72.0, 36.0));
+                    if ui.add(button).clicked() {
+                        action = Some(Header::Chip);
+                    }
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width().min(room), height),
+                        Layout::left_to_right(Align::Center),
+                        |ui| person_line(ui, online, person, unix_now, &mut action),
+                    );
+                });
+                return;
             }
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                let strong = ui.visuals().strong_text_color();
-                let name = emoji::line(ui, &person.display_name, egui::TextStyle::Body, strong)
-                    .on_hover_cursor(CursorIcon::PointingHand);
-                let weak = ui.visuals().weak_text_color();
-                let line = emoji::line(
-                    ui,
-                    &subtitle(online, person, unix_now),
-                    egui::TextStyle::Small,
-                    weak,
-                )
-                .on_hover_cursor(CursorIcon::PointingHand);
-                if name.clicked() || line.clicked() {
-                    action = Some(Header::Profile);
-                }
-            });
+            person_line(ui, online, person, unix_now, &mut action);
         },
     );
     action
+}
+
+fn person_line(
+    ui: &mut Ui,
+    online: &Online,
+    person: &Friend,
+    unix_now: u64,
+    action: &mut Option<Header>,
+) {
+    let presence = online.presence(person);
+    if avatar::avatar(
+        ui,
+        &person.display_name,
+        person.online_id.value(),
+        HEADER_AVATAR,
+        presence,
+    )
+    .on_hover_cursor(CursorIcon::PointingHand)
+    .clicked()
+    {
+        *action = Some(Header::Profile);
+    }
+    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let strong = ui.visuals().strong_text_color();
+        let name = emoji::line(ui, &person.display_name, egui::TextStyle::Body, strong)
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let weak = ui.visuals().weak_text_color();
+        let line = emoji::line(
+            ui,
+            &subtitle(online, person, unix_now),
+            egui::TextStyle::Small,
+            weak,
+        )
+        .on_hover_cursor(CursorIcon::PointingHand);
+        if name.clicked() || line.clicked() {
+            *action = Some(Header::Profile);
+        }
+    });
 }
 
 fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
@@ -495,14 +697,27 @@ fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let entries = online
+            let all = online
                 .conversation(friend)
                 .map(|c| c.entries.as_slice())
                 .unwrap_or_default();
-            if entries.is_empty() {
+            if all.is_empty() {
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| ui.label(RichText::new("No messages yet").weak()));
             }
+            let start = all
+                .len()
+                .saturating_sub(MESSAGES_PER_PAGE * (state.older + 1));
+            if start > 0 {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    if ui.button("Show older messages").clicked() {
+                        state.older += 1;
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            let entries = &all[start..];
             let mut last_day = None;
             for entry in entries {
                 let day = clock.day(entry.at);

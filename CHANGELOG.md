@@ -1,3 +1,35 @@
+# 0.10.0 - 2026-11-03
+
+## Added
+
+- Android app
+- In-app updates on Windows, macOS, Linux and Android
+- New phone layout with a bar for Games, Friends, Media, Settings and You
+- Phone game strip with 3x fast forward, pause and save states
+- Hide the phone UI for a full-screen game, with touch buttons that hide while you use a controller
+- Switch between several accounts on one device
+- Typing indicators in chat
+- Recent ROMs on Android and the web, and a ROM folder on Android
+- Tab jumps between the game and the open chat
+- Download links in About
+
+## Changed
+
+- Full chat history on every device, with Show older messages
+- Bigger touch d-pad with a spot that presses A and B
+- Games pause while you're on another phone screen
+
+## Fixed
+
+- Touch d-pad slips into diagonals far less
+- Discord status no longer shows the start-up screen or your friend's game
+- A lost connection pauses your game
+- Settings side bar and page scroll separately
+- Reading a chat on one device clears its unread count on the others
+- Signing out keeps the server address and password
+- Touch controls stay out of the phone's back swipe
+- Vibration on press lasts long enough to feel
+
 # 0.9.0 - 2026-11-02
 
 ## Added

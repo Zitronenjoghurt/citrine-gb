@@ -4,11 +4,14 @@ use crate::app::widgets;
 use crate::app::widgets::action::more_button;
 use crate::icons;
 use crate::media::{Frame, MediaId, MediaItem, MediaKind, format_length, format_size, local_stamp};
-use egui::{ColorImage, Context, TextureHandle, TextureOptions, Ui, vec2};
+use egui::{ColorImage, Context, RichText, TextureHandle, TextureOptions, Ui, vec2};
 use std::collections::HashMap;
 
 pub const PAGE_SIZE: usize = 20;
 const ROW_THUMB: egui::Vec2 = egui::Vec2::new(80.0, 72.0);
+const TILE_MIN: f32 = 104.0;
+const TILE_GAP: f32 = 4.0;
+const TILE_RADIUS: u8 = 8;
 const HIGHLIGHT_SECS: f64 = 2.0;
 const HIGHLIGHT_FADE_SECS: f64 = 0.6;
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,6 +22,7 @@ pub struct Browse {
     pub kind: Option<MediaKind>,
     pub game: Option<String>,
     pub page: usize,
+    pub bar_hidden: bool,
 }
 
 #[derive(Default)]
@@ -151,7 +155,8 @@ pub fn empty_line(
 ) -> String {
     if mobile {
         return format!(
-            "Tap {} Screenshot or {} Record video in the menu.",
+            "While playing, tap {} More, then {} Screenshot or {} Record video.",
+            icons::DOTS_THREE_VERTICAL,
             icons::CAMERA,
             icons::RECORD
         );
@@ -170,7 +175,7 @@ pub fn empty_line(
 enum Action {
     Pass(MediaId, crate::media::clipboard::Way),
     Export(MediaId),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     Reveal(MediaId),
     AskDelete(MediaId),
     Preview(MediaId),
@@ -198,7 +203,13 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
 
     let mut action = None;
     let mut browse = std::mem::take(&mut state.browse);
+    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
+    browse.bar_hidden = touch;
     browse.show(ui, "media", items, None, |ui, page| {
+        if touch {
+            action = grid(ui, state, &page);
+            return;
+        }
         for item in page {
             if let Some(chosen) = row(ui, state, item, can_send) {
                 action = Some(chosen);
@@ -270,7 +281,9 @@ impl Browse {
         if self.game.as_ref().is_some_and(|game| !games.contains(game)) {
             self.game = None;
         }
-        filter_bar(ui, self, id, &games);
+        if !self.bar_hidden {
+            filter_bar(ui, self, id, &games);
+        }
 
         let shown: Vec<&MediaItem> = items
             .iter()
@@ -279,7 +292,9 @@ impl Browse {
         let pages = page_count(shown.len());
         self.page = self.page.min(pages - 1);
 
-        ui.separator();
+        if !self.bar_hidden {
+            ui.separator();
+        }
         if shown.is_empty() {
             ui.small("Nothing matches this filter.");
         }
@@ -309,15 +324,142 @@ impl Browse {
 
 const FILTER_WIDTH: f32 = 200.0;
 
+pub fn filter_button(ui: &mut Ui, browse: &Browse) -> bool {
+    let mut text = RichText::new(icons::FUNNEL).size(20.0);
+    if browse.kind.is_some() || browse.game.is_some() {
+        text = text.color(crate::app::ui_state::ui_theme::brand(ui.visuals()));
+    }
+    let side = ui.spacing().interact_size.y;
+    ui.add(
+        egui::Button::new(text)
+            .frame(false)
+            .min_size(egui::Vec2::splat(side)),
+    )
+    .on_hover_text("Filter")
+    .clicked()
+}
+
+pub fn kind_label(kind: Option<MediaKind>) -> &'static str {
+    match kind {
+        None => "All kinds",
+        Some(MediaKind::Screenshot) => "Screenshots",
+        Some(MediaKind::Recording) => "Recordings",
+    }
+}
+
+pub fn day_label(day: jiff::civil::Date, today: jiff::civil::Date) -> String {
+    if day == today {
+        "Today".into()
+    } else if today.yesterday().ok() == Some(day) {
+        "Yesterday".into()
+    } else if day.year() == today.year() {
+        day.strftime("%-d %B").to_string()
+    } else {
+        day.strftime("%-d %B %Y").to_string()
+    }
+}
+
+fn local_day(unix: u64) -> Option<jiff::civil::Date> {
+    let timestamp = jiff::Timestamp::from_second(unix as i64).ok()?;
+    Some(timestamp.to_zoned(jiff::tz::TimeZone::system()).date())
+}
+
+pub fn grid_columns(width: f32) -> usize {
+    (((width + TILE_GAP) / (TILE_MIN + TILE_GAP)).floor() as usize).max(2)
+}
+
+fn grid(ui: &mut Ui, state: &mut MediaTabState, page: &[&MediaItem]) -> Option<Action> {
+    let mut action = None;
+    let today = jiff::Zoned::now().date();
+    let columns = grid_columns(ui.available_width());
+    let side = (ui.available_width() - TILE_GAP * (columns as f32 - 1.0)) / columns as f32;
+    let size = vec2(side, (side * 0.9).round());
+    ui.spacing_mut().item_spacing = vec2(TILE_GAP, 0.0);
+    for day in page.chunk_by(|a, b| local_day(a.info.created_at) == local_day(b.info.created_at)) {
+        let label = local_day(day[0].info.created_at)
+            .map(|date| day_label(date, today))
+            .unwrap_or_default();
+        crate::app::mobile::kit::section_label(ui, &label);
+        ui.add_space(4.0);
+        for line in day.chunks(columns) {
+            ui.horizontal(|ui| {
+                for item in line {
+                    if tile(ui, state, item, size) {
+                        action = Some(Action::Preview(item.id.clone()));
+                    }
+                }
+            });
+            ui.add_space(TILE_GAP);
+        }
+    }
+    ui.add_space(12.0);
+    action
+}
+
+fn tile(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, size: egui::Vec2) -> bool {
+    let texture = state.texture(ui.ctx(), item);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    let radius = egui::CornerRadius::same(TILE_RADIUS);
+    painter.rect_filled(rect, radius, ui.visuals().extreme_bg_color);
+    match (texture, &item.thumbnail) {
+        (Some(texture), Some(thumb)) => {
+            let picture = vec2(thumb.width as f32, thumb.height as f32);
+            let scale = (rect.width() / picture.x).min(rect.height() / picture.y);
+            let shown = egui::Rect::from_center_size(rect.center(), picture * scale);
+            egui::Image::new((texture, shown.size()))
+                .corner_radius(radius)
+                .paint_at(ui, shown);
+        }
+        _ => {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                kind_icon(item.info.kind),
+                egui::FontId::proportional(size.y * 0.3),
+                ui.visuals().weak_text_color(),
+            );
+        }
+    }
+    if let Some(length) = item.info.length_ms {
+        let text = format!("{} {}", icons::PLAY, format_length(length));
+        let galley =
+            painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
+        let pad = vec2(6.0, 3.0);
+        let pill_size = galley.size() + pad * 2.0;
+        let pill =
+            egui::Rect::from_min_size(rect.right_bottom() - pill_size - vec2(6.0, 6.0), pill_size);
+        painter.rect_filled(
+            pill,
+            pill_size.y / 2.0,
+            egui::Color32::from_black_alpha(160),
+        );
+        painter.galley(pill.min + pad, galley, egui::Color32::WHITE);
+    }
+    let now = ui.input(|i| i.time);
+    if let Some((alpha, first)) = state.highlight_row(&item.id, now) {
+        let selection = ui.visuals().selection.bg_fill;
+        painter.rect_stroke(
+            rect.shrink(1.5),
+            radius,
+            egui::Stroke::new(3.0_f32, selection.gamma_multiply(alpha)),
+            egui::StrokeKind::Inside,
+        );
+        if first {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
+        ui.ctx().request_repaint();
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
 fn filter_bar(ui: &mut Ui, state: &mut Browse, id: &str, games: &[String]) {
     let before = (state.kind, state.game.clone());
     ui.horizontal(|ui| {
         let width = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).min(FILTER_WIDTH);
-        let kind_text = match state.kind {
-            None => "All kinds",
-            Some(MediaKind::Screenshot) => "Screenshots",
-            Some(MediaKind::Recording) => "Recordings",
-        };
+        let kind_text = kind_label(state.kind);
         egui::ComboBox::from_id_salt((id, "kind"))
             .selected_text(kind_text)
             .width(width)
@@ -485,7 +627,7 @@ fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool)
                     Action::Send(item.id.clone()),
                 ));
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             buttons.push((
                 icons::FOLDER_OPEN,
                 crate::media::reveal::LABEL,
@@ -556,7 +698,7 @@ fn apply(viewer: &mut TabViewer, action: Action) {
             crate::media::clipboard::run(way, viewer.media, &id, viewer.files.copy_tx.clone())
         }
         Action::Export(id) => crate::media::export(viewer.media, &id, viewer.files.save_tx.clone()),
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         Action::Reveal(id) => {
             if let Err(err) = crate::media::reveal::reveal(&viewer.media.path(&id)) {
                 viewer
@@ -699,6 +841,7 @@ mod tests {
                 kind: Some(MediaKind::Screenshot),
                 game: None,
                 page: 3,
+                bar_hidden: false,
             },
             ..Default::default()
         };
@@ -743,8 +886,35 @@ mod tests {
         assert!(line.ends_with(" to record."));
         let phone = empty_line(true, Some("F12".to_string()), Some("Shift+F12".to_string()));
         assert!(phone.contains(" Screenshot or "), "got {phone}");
-        assert!(phone.ends_with(" Record video in the menu."), "got {phone}");
+        assert!(phone.contains(" More, then "), "got {phone}");
+        assert!(phone.ends_with(" Record video."), "got {phone}");
         assert!(!phone.contains("F12"));
+    }
+
+    #[test]
+    fn days_read_today_yesterday_then_the_date() {
+        let today = jiff::civil::date(2026, 11, 2);
+        assert_eq!(day_label(today, today), "Today");
+        assert_eq!(
+            day_label(jiff::civil::date(2026, 11, 1), today),
+            "Yesterday"
+        );
+        assert_eq!(
+            day_label(jiff::civil::date(2026, 10, 28), today),
+            "28 October"
+        );
+        assert_eq!(
+            day_label(jiff::civil::date(2025, 12, 31), today),
+            "31 December 2025"
+        );
+    }
+
+    #[test]
+    fn the_grid_keeps_three_tiles_on_a_phone() {
+        assert_eq!(grid_columns(332.0), 3);
+        assert_eq!(grid_columns(384.0), 3);
+        assert_eq!(grid_columns(560.0), 5);
+        assert_eq!(grid_columns(150.0), 2);
     }
 
     #[test]

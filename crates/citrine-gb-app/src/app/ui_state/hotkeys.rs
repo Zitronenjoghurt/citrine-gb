@@ -56,6 +56,10 @@ impl Hotkey {
         }
     }
 
+    pub fn types_text(&self) -> bool {
+        !self.ctrl && !self.alt && self.key.name().chars().count() == 1
+    }
+
     pub fn matches(&self, key: egui::Key, modifiers: egui::Modifiers) -> bool {
         self.key == key && *self == Self::from_event(key, modifiers)
     }
@@ -95,6 +99,7 @@ pub enum HotkeyAction {
     LeaveFocusMode,
     ToggleTouchControls,
     SwitchGame,
+    FocusChat,
 }
 
 impl HotkeyAction {
@@ -112,6 +117,7 @@ impl HotkeyAction {
             Self::LeaveFocusMode => "Leave focus mode",
             Self::ToggleTouchControls => "On-screen buttons",
             Self::SwitchGame => "Switch game",
+            Self::FocusChat => "Type in chat",
         }
     }
 
@@ -129,6 +135,7 @@ impl HotkeyAction {
             Self::LeaveFocusMode => "Show everything again when only the screen shows",
             Self::ToggleTouchControls => "Show or hide the on-screen buttons",
             Self::SwitchGame => "Play the other linked game with the same controls",
+            Self::FocusChat => "Move into the open chat and back to the game",
         }
     }
 
@@ -151,6 +158,7 @@ impl HotkeyAction {
             Self::LeaveFocusMode => Hotkey::plain(Key::Escape),
             Self::ToggleTouchControls => return None,
             Self::SwitchGame => Hotkey::plain(Key::F6),
+            Self::FocusChat => Hotkey::plain(Key::Tab),
         })
     }
 }

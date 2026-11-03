@@ -1,15 +1,13 @@
-use super::storage::trash;
+use super::accounts;
 use super::{CODE_HINT, Choice, JoinForm, KEY_ABOUT, Step, busy, key_card, primary};
 use crate::app::ui_state::settings::Settings;
-use crate::app::widgets::avatar;
-use crate::app::widgets::confirm;
 use crate::app::widgets::field::{code_field, row_field};
 use crate::app::widgets::problem::problem_line;
 use crate::app::widgets::settings::form::Form;
 use crate::icons;
 use crate::online::address::relay_key_in;
 use crate::online::{Online, Phase, Problem, ServerAddress, Trust};
-use citrine_gb_net::{DISPLAY_NAME_MAX_CHARS, InviteCode, OnlineId, RelayId, display_name};
+use citrine_gb_net::{DISPLAY_NAME_MAX_CHARS, InviteCode, RelayId, display_name};
 use egui::{RichText, Ui};
 use web_time::Instant;
 
@@ -22,6 +20,7 @@ pub(super) fn address_step(
 ) {
     let phase = online.phase();
     let mut connect = false;
+    let mut back = false;
     if let Some(host) = &form.signed_out {
         problem_line(
             ui,
@@ -30,7 +29,7 @@ pub(super) fn address_step(
         ui.add_space(6.0);
     }
     if past_servers(ui, s, online, form, now) {
-        ui.label(RichText::new("Another server").strong());
+        ui.label(RichText::new("Another account").strong());
         ui.add_space(2.0);
     }
     Form::show(ui, "online_join", |f| {
@@ -49,10 +48,19 @@ pub(super) fn address_step(
         if let Some(error) = &form.address_error {
             f.hint(RichText::new(error).color(f.ctx().style().visuals.warn_fg_color));
         }
+        let saved_password = ServerAddress::parse(&s.online.address)
+            .ok()
+            .and_then(|address| s.online.entry(&address))
+            .is_some_and(|entry| !entry.password.is_empty());
         f.row("Relay password", |ui| {
             let response = ui.add(
                 row_field(ui, &mut form.password)
                     .password(true)
+                    .hint_text(if saved_password {
+                        "Saved for this server"
+                    } else {
+                        ""
+                    })
                     .desired_width(ui.available_width()),
             );
             connect |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -61,6 +69,9 @@ pub(super) fn address_step(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         connect |= primary(ui, "Connect", !busy(phase));
+        if accounts::can_back_out(s, form) && ui.button("Cancel").clicked() {
+            back = true;
+        }
         if busy(phase) {
             ui.spinner();
             if let Some(address) = online.address() {
@@ -70,12 +81,17 @@ pub(super) fn address_step(
             problem_line(ui, &problem.text());
         }
     });
+    if back {
+        accounts::back_out(s, online, form, now);
+        return;
+    }
     if phase == Phase::Stopped(Problem::KeyChanged) {
         ui.add_space(4.0);
         key_card(ui, online, form, now);
     }
     if connect && !busy(phase) {
         form.signed_out = None;
+        form.new_account = true;
         let typed = s.online.address.clone();
         match ServerAddress::parse(&typed).and_then(|a| Ok((a, relay_key_in(&typed)?))) {
             Ok((address, expected)) => {
@@ -111,89 +127,36 @@ pub(super) fn past_servers(
     form: &mut JoinForm,
     now: Instant,
 ) -> bool {
-    if s.online.relays.is_empty() {
+    let saved = accounts::all_saved(s);
+    if saved.is_empty() {
         return false;
     }
     let busy = busy(online.phase());
-    let mut join = None;
-    ui.label(RichText::new("Your servers").strong());
+    let mut pick = None;
+    ui.label(RichText::new("Your accounts").strong());
     ui.add_space(2.0);
-    for (key, entry) in &s.online.relays {
-        let name = entry.display_name.clone().unwrap_or_default();
-        let seed = entry
-            .online_id
-            .as_deref()
-            .and_then(|id| id.parse::<OnlineId>().ok())
-            .map(|id| id.value())
-            .unwrap_or_default();
-        let height = 40.0_f32.max(ui.spacing().interact_size.y);
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), height),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                let side = ui.spacing().interact_size.y.max(36.0);
-                if ui
-                    .add(egui::Button::new(trash(ui, side)).min_size(egui::vec2(side, side)))
-                    .on_hover_text("Forget this server")
-                    .clicked()
-                {
-                    form.forget = Some(key.clone());
-                }
-                if ui
-                    .add_enabled(
-                        !busy,
-                        egui::Button::new("Join").min_size(egui::vec2(0.0, side)),
-                    )
-                    .clicked()
-                {
-                    join = Some(key.clone());
-                }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    avatar::avatar(ui, &name, seed, 40.0, None);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        if name.is_empty() {
-                            ui.add(egui::Label::new(RichText::new(key).strong()).truncate());
-                        } else {
-                            ui.add(egui::Label::new(RichText::new(&name).strong()).truncate());
-                            ui.add(egui::Label::new(RichText::new(key).weak()).truncate());
-                        }
-                    });
-                });
-            },
-        );
+    let many_servers = accounts::spans_servers(&saved);
+    for (key, account) in &saved {
+        let detail = accounts::detail(account, key, many_servers);
+        let answer = ui
+            .add_enabled_ui(!busy, |ui| {
+                accounts::account_row(ui, account, &detail, false, true, accounts::Look::PAGE)
+            })
+            .inner;
+        if answer.picked {
+            pick = Some((key.clone(), account.relay_id.clone()));
+        }
+        if answer.remove {
+            accounts::ask_remove(form, key, account);
+        }
         ui.add_space(2.0);
     }
     ui.add_space(12.0);
-    if let Some(key) = join
-        && let Ok(address) = ServerAddress::parse(&key)
-    {
-        let entry = s.online.entry(&address);
-        let password = entry.map(|e| e.password.clone()).unwrap_or_default();
-        let trust = entry.map(|e| e.trust()).unwrap_or_default();
-        form.address_error = None;
-        s.online.address = key;
-        s.dirty = true;
-        online.probe(address, password, trust, now);
+    if let Some((key, relay_id)) = pick {
+        form.signed_out = None;
+        accounts::switch_to(s, online, &key, &relay_id, now);
     }
-    if let Some(key) = form.forget.clone() {
-        let question = format!(
-            "Forget {}? Citrine deletes the relay ID and password it keeps for this server. Without the relay ID you can't sign in to this account again.",
-            s.online
-                .relays
-                .get(&key)
-                .and_then(|entry| entry.display_name.as_deref())
-                .filter(|name| !name.is_empty())
-                .map_or_else(|| key.clone(), |name| format!("{name} on {key}"))
-        );
-        if let Some(yes) = confirm::confirm(ui.ctx(), "online_forget", &question, "Forget") {
-            form.forget = None;
-            if yes {
-                s.online.forget(&key);
-                s.dirty = true;
-            }
-        }
-    }
+    accounts::remove_dialog(ui, s, online, form);
     true
 }
 
@@ -208,8 +171,15 @@ pub(super) fn server_line(ui: &mut Ui, online: &Online) {
     ui.add_space(4.0);
 }
 
-pub(super) fn account_step(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: Instant) {
+pub(super) fn account_step(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    now: Instant,
+) {
     let phase = online.phase();
+    let mut back = false;
     let sign_ups = online.info().is_none_or(|i| i.sign_ups_open);
     server_line(ui, online);
     if let Some(key) = online.relay_key() {
@@ -259,10 +229,14 @@ pub(super) fn account_step(ui: &mut Ui, online: &mut Online, form: &mut JoinForm
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         if ui.button(format!("{} Back", icons::ARROW_LEFT)).clicked() {
-            online.leave();
-            form.step = Step::Address;
-            form.code_asked = false;
-            form.code.clear();
+            if accounts::can_back_out(s, form) {
+                back = true;
+            } else {
+                online.leave();
+                form.step = Step::Address;
+                form.code_asked = false;
+                form.code.clear();
+            }
         }
         let label = match form.choice {
             Choice::New => "Next",
@@ -274,6 +248,10 @@ pub(super) fn account_step(ui: &mut Ui, online: &mut Online, form: &mut JoinForm
             ui.spinner();
         }
     });
+    if back {
+        accounts::back_out(s, online, form, now);
+        return;
+    }
     if !go {
         return;
     }

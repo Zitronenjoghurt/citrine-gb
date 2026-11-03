@@ -1,5 +1,10 @@
+#[cfg(not(target_os = "android"))]
 use rfd::AsyncFileDialog;
+#[cfg(not(target_os = "android"))]
 use std::sync::mpsc::Sender;
+
+#[cfg(target_os = "android")]
+pub use crate::platform::android::files::FileSaver;
 
 pub enum SaveOutcome {
     Saved(String),
@@ -8,12 +13,14 @@ pub enum SaveOutcome {
     Cancelled,
 }
 
+#[cfg(not(target_os = "android"))]
 pub struct FileSaver {
     dialog: AsyncFileDialog,
     #[cfg(target_arch = "wasm32")]
     name: String,
 }
 
+#[cfg(not(target_os = "android"))]
 impl FileSaver {
     pub fn new(file_name: &str) -> Self {
         Self {
@@ -121,7 +128,7 @@ impl FileSaver {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn copy_unless_same(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
     let same = match (source.canonicalize(), target.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,

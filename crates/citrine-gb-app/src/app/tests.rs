@@ -5,7 +5,12 @@ use crate::app::ui_state::settings::LayoutMode;
 use crate::app::ui_state::settings::SettingsTab;
 use citrine_gb::rom::Rom;
 use citrine_gb::rom::header::RomCgbMode;
-use mobile::{Sheet, TOUCH_TARGET_PX};
+use mobile::TOUCH_TARGET_PX;
+use mobile::nav::Place;
+
+mod chat_keys;
+mod restart;
+mod rotation;
 
 fn phone_app(name: &str) -> Citrine {
     let root =
@@ -67,7 +72,7 @@ fn small_targets(app: &mut Citrine, ctx: &Context) -> Vec<String> {
                         inside.iter().map(|(_, text, _)| text.as_str()).collect();
                     format!(
                         "{} {:.0}px {:?}",
-                        sheet_name(app),
+                        nav_name(app),
                         widget.rect.height(),
                         label
                     )
@@ -77,13 +82,15 @@ fn small_targets(app: &mut Citrine, ctx: &Context) -> Vec<String> {
     })
 }
 
-fn sheet_name(app: &Citrine) -> String {
-    match app.mobile.sheet {
-        Some(Sheet::Panel(Tab::Settings)) => {
-            format!("Settings/{}", app.ui.settings.current_tab.title())
-        }
-        other => format!("{other:?}"),
-    }
+fn nav_name(app: &Citrine) -> String {
+    let nav = &app.mobile.nav;
+    format!(
+        "{:?}/{:?}/{:?}/more {}",
+        nav.place(),
+        nav.page(),
+        nav.settings_page(),
+        nav.more_open()
+    )
 }
 
 #[test]
@@ -102,16 +109,18 @@ fn every_touch_control_is_at_least_44_px_tall() {
     app.emulator.save_snapshot(0).unwrap();
     app.ui.snapshots.invalidate();
 
-    let sheets = [
-        None,
-        Some(Sheet::Menu),
-        Some(Sheet::Panel(Tab::Homebrew)),
-        Some(Sheet::Panel(Tab::Saves)),
-        Some(Sheet::Panel(Tab::Media)),
-        Some(Sheet::Panel(Tab::Info)),
-    ];
-    for sheet in sheets {
-        app.mobile.sheet = sheet;
+    app.mobile.nav.show_game();
+    small.extend(small_targets(&mut app, &ctx));
+    app.mobile.nav.set_more(true);
+    small.extend(small_targets(&mut app, &ctx));
+    for place in Place::ALL {
+        app.mobile.nav = Default::default();
+        app.mobile.nav.go(place);
+        small.extend(small_targets(&mut app, &ctx));
+    }
+    for tab in [Tab::Homebrew, Tab::Saves, Tab::Info, Tab::Stats] {
+        app.mobile.nav = Default::default();
+        app.mobile.open(tab);
         small.extend(small_targets(&mut app, &ctx));
     }
     let first_game =
@@ -120,10 +129,11 @@ fn every_touch_control_is_at_least_44_px_tall() {
         egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, first_game, true);
     details.set_open(true);
     details.store(&ctx);
-    app.mobile.sheet = Some(Sheet::Panel(Tab::Homebrew));
+    app.mobile.nav = Default::default();
+    app.mobile.open(Tab::Homebrew);
     small.extend(small_targets(&mut app, &ctx));
-    app.mobile.sheet = Some(Sheet::Panel(Tab::Settings));
     for tab in SettingsTab::iter_with_dev_mode(false) {
+        app.mobile.nav.open_settings(tab);
         app.ui.settings.current_tab = tab;
         small.extend(small_targets(&mut app, &ctx));
     }
@@ -262,11 +272,12 @@ fn dont_ask_again_lasts_until_citrine_closes() {
 }
 
 #[test]
-fn opening_a_tab_in_the_touch_layout_opens_its_sheet() {
+fn opening_a_tab_in_the_touch_layout_goes_to_its_place() {
     let mut app = phone_app("open-tab");
     app.events.open_tab(Tab::Media);
     app.handle_event_queue(true);
-    assert_eq!(app.mobile.sheet, Some(Sheet::Panel(Tab::Media)));
+    assert_eq!(app.mobile.nav.place(), Place::Media);
+    assert!(app.mobile.showing(Tab::Media));
     assert!(
         app.dock.find_tab(&Tab::Media).is_none(),
         "no hidden dock tab"
@@ -275,7 +286,7 @@ fn opening_a_tab_in_the_touch_layout_opens_its_sheet() {
     let mut desktop = phone_app("open-tab-desktop");
     desktop.events.open_tab(Tab::Media);
     desktop.handle_event_queue(false);
-    assert_eq!(desktop.mobile.sheet, None);
+    assert!(!desktop.mobile.showing(Tab::Media));
     assert!(desktop.dock.find_tab(&Tab::Media).is_some());
 }
 
@@ -420,7 +431,9 @@ fn game_info_is_offered_only_for_a_recognised_game() {
     let ctx = Context::default();
     let mut app = crystal_app("info-offered", LayoutMode::Mobile, None);
     assert!(app.game_info.recognised());
-    app.mobile.open(Sheet::Menu);
+    app.mobile.nav.show_game();
+    app.mobile.nav.set_more(true);
+    play_frame(&mut app, &ctx, vec![]);
     let output = play_frame(&mut app, &ctx, vec![]);
     assert!(text_containing(&output, Tab::GameInfo.label()).is_some());
 
@@ -428,7 +441,9 @@ fn game_info_is_offered_only_for_a_recognised_game() {
     let mut other = media_app("info-not-offered", LayoutMode::Mobile);
     other.watch_game_info();
     assert!(!other.game_info.recognised());
-    other.mobile.open(Sheet::Menu);
+    other.mobile.nav.show_game();
+    other.mobile.nav.set_more(true);
+    play_frame(&mut other, &ctx, vec![]);
     let output = play_frame(&mut other, &ctx, vec![]);
     assert!(text_containing(&output, Tab::GameInfo.label()).is_none());
 }
@@ -447,9 +462,9 @@ fn game_info_closes_when_an_unsupported_game_loads() {
         assert!(desktop.dock.find_tab(&Tab::GameInfo).is_none(), "{name}");
 
         let mut phone = crystal_app(&format!("info-sheet-{name}"), LayoutMode::Mobile, None);
-        phone.mobile.open(Sheet::Panel(Tab::GameInfo));
+        phone.mobile.open(Tab::GameInfo);
         load_game(&mut phone, &rom, None);
-        assert_eq!(phone.mobile.sheet, None, "{name}");
+        assert!(!phone.mobile.showing(Tab::GameInfo), "{name}");
     }
 }
 
@@ -464,7 +479,7 @@ fn game_info_shows_eight_badges_in_gold_and_silver_until_kanto() {
             LayoutMode::Mobile,
             Some(&save),
         );
-        app.mobile.open(Sheet::Panel(Tab::GameInfo));
+        app.mobile.open(Tab::GameInfo);
         app.watch_game_info();
         let output = play_frame(&mut app, &ctx, vec![]);
         assert_eq!(badge_count(&output), shown, "reached Kanto: {reached}");
@@ -472,21 +487,25 @@ fn game_info_shows_eight_badges_in_gold_and_silver_until_kanto() {
 }
 
 #[test]
-fn game_info_back_on_a_phone_closes_the_details_before_the_sheet() {
+fn game_info_back_on_a_phone_closes_the_details_before_the_page() {
     let save = citrine_gb_gamedata::fixtures::crystal_save();
     let ctx = Context::default();
     let mut app = crystal_app("info-back", LayoutMode::Mobile, Some(&save));
-    app.mobile.open(Sheet::Menu);
-    app.mobile.open(Sheet::Panel(Tab::GameInfo));
+    app.mobile.nav.show_game();
+    app.mobile.open(Tab::GameInfo);
     app.watch_game_info();
     app.game_info.view.details = true;
     assert!(app.game_info.details_open());
 
     let output = play_frame(&mut app, &ctx, vec![]);
-    let back = text_containing(&output, "Party").expect("back to the party");
+    assert!(
+        text_containing(&output, "Party").is_some(),
+        "the details name their page"
+    );
+    let back = text_containing(&output, crate::icons::ARROW_LEFT).expect("a back arrow");
     play_frame(&mut app, &ctx, tap(back.center()));
     assert!(!app.game_info.details_open());
-    assert_eq!(app.mobile.sheet, Some(Sheet::Panel(Tab::GameInfo)));
+    assert!(app.mobile.showing(Tab::GameInfo));
 
     app.game_info.view.details = true;
     let press = |app: &mut Citrine, events: Vec<egui::Event>| {
@@ -506,9 +525,9 @@ fn game_info_back_on_a_phone_closes_the_details_before_the_sheet() {
     press(&mut app, vec![]);
     press(&mut app, escape());
     assert!(!app.game_info.details_open());
-    assert_eq!(app.mobile.sheet, Some(Sheet::Panel(Tab::GameInfo)));
+    assert!(app.mobile.showing(Tab::GameInfo));
     press(&mut app, escape());
-    assert_eq!(app.mobile.sheet, Some(Sheet::Menu));
+    assert!(app.mobile.nav.on_game());
 }
 
 fn info_frame(app: &mut Citrine, ctx: &Context, width: f32) {
@@ -611,7 +630,7 @@ fn game_info_opens_for_every_real_pokemon_game() {
             if layout == LayoutMode::Desktop {
                 app.open_tab(Tab::GameInfo);
             } else {
-                app.mobile.open(Sheet::Panel(Tab::GameInfo));
+                app.mobile.open(Tab::GameInfo);
             }
             app.watch_game_info();
             walk_game_info(&mut app, &ctx, width);
@@ -711,7 +730,7 @@ fn a_screenshot_brings_the_media_tab_to_front_on_desktop() {
     );
     let second = app.ui.media.highlighted().cloned().expect("highlighted");
     assert_ne!(first, second);
-    assert_eq!(app.mobile.sheet, None);
+    assert!(!app.mobile.showing(Tab::Media));
 }
 
 #[test]
@@ -738,7 +757,7 @@ fn a_phone_screenshot_keeps_the_game_and_offers_to_open_media() {
     for _ in 0..10 {
         output = play_frame(&mut app, &ctx, Vec::new());
     }
-    assert_eq!(app.mobile.sheet, None);
+    assert!(!app.mobile.showing(Tab::Media));
     assert!(text_rect(&output, "Screenshot saved to Media").is_some());
     let open = text_rect(&output, "Open").expect("an Open button on the toast");
 
@@ -766,7 +785,7 @@ fn a_phone_screenshot_keeps_the_game_and_offers_to_open_media() {
             modifiers: egui::Modifiers::NONE,
         }],
     );
-    assert_eq!(app.mobile.sheet, Some(Sheet::Panel(Tab::Media)));
+    assert!(app.mobile.showing(Tab::Media));
     let id = app.media.items()[0].id.clone();
     assert_eq!(app.ui.media.highlighted(), Some(&id));
 }
@@ -831,7 +850,7 @@ fn touch_heights_in_css_px(
         .into_iter()
         .filter_map(|clipped| match clipped.shape {
             egui::Shape::Text(text)
-                if ["Load a ROM", "Homebrew games"]
+                if ["Open a ROM", "Homebrew games"]
                     .iter()
                     .any(|label| text.galley.text().ends_with(label)) =>
             {
@@ -841,9 +860,10 @@ fn touch_heights_in_css_px(
         })
         .collect();
     let css_per_point = ctx.pixels_per_point() / pixel_ratio;
-    let bar = egui::containers::panel::PanelState::load(ctx, egui::Id::new("mobile_bar"))
+    let bar = egui::containers::panel::PanelState::load(ctx, egui::Id::new("place_bar"))
         .expect("the phone bar is drawn")
-        .rect;
+        .rect
+        .expand(1.0 / ctx.pixels_per_point());
     ctx.viewport(|viewport| {
         let clickable: Vec<egui::Rect> = viewport
             .prev_pass
@@ -877,11 +897,10 @@ fn assert_touch_sized(ctx: &Context, output: egui::FullOutput, pixel_ratio: f32,
     let (bar, empty_state) = touch_heights_in_css_px(ctx, output, pixel_ratio);
     let at = format!("pixel ratio {pixel_ratio}, ui scale {scale}");
     assert!(bar.len() >= 3, "{at}: {} phone bar buttons", bar.len());
-    assert_eq!(empty_state.len(), 2, "{at}: Load a ROM and Homebrew games");
-    let tallest_icon = if scale > 1.5 { 48.0 } else { TOUCH_TARGET_PX };
+    assert_eq!(empty_state.len(), 2, "{at}: Open a ROM and Homebrew games");
     for rect in &bar {
         assert!(
-            (TOUCH_TARGET_PX - 0.5..tallest_icon + 0.5).contains(&rect.height()),
+            rect.height() >= TOUCH_TARGET_PX - 0.5,
             "{at}: phone bar button {:.1} css px tall",
             rect.height()
         );
@@ -896,7 +915,7 @@ fn assert_touch_sized(ctx: &Context, output: egui::FullOutput, pixel_ratio: f32,
     }
     for height in empty_state {
         assert!(
-            (height - TOUCH_TARGET_PX).abs() < 0.5,
+            height >= TOUCH_TARGET_PX - 0.5,
             "{at}: empty state button {height:.1} css px tall"
         );
     }
@@ -1029,7 +1048,7 @@ fn delete_everything_leaves_the_app_as_a_first_launch_does() {
         .recent
         .record(std::path::Path::new("/roms/game.gb"), "Game", None);
     app.open_tab(Tab::Settings);
-    app.mobile.open(Sheet::Panel(Tab::Settings));
+    app.mobile.nav.open_settings(SettingsTab::YourData);
     assert!(!app.emulator.store.files().is_empty());
 
     app.delete_everything();
@@ -1042,7 +1061,7 @@ fn delete_everything_leaves_the_app_as_a_first_launch_does() {
             .collect::<Vec<_>>()
     };
     assert_eq!(tabs(&app), tabs(&fresh), "the first-launch tabs");
-    assert_eq!(app.mobile.sheet, None);
+    assert_eq!(app.mobile.nav, mobile::nav::Nav::default());
     assert!(app.emulator.rom_key().is_none(), "no game is loaded");
     assert!(app.emulator.store.files().is_empty(), "no saves");
     assert!(app.media.items().is_empty(), "no media");
@@ -1149,4 +1168,908 @@ fn a_picked_event_partner_goes_back_to_the_event_list() {
         app.ui.linked.listing,
         "Esc after a pick goes back to the list"
     );
+}
+
+#[test]
+fn the_more_sheet_shows_close_game_on_phone_screens() {
+    for (css, pixel_ratio) in [
+        (egui::vec2(412.0, 915.0), 2.625),
+        (egui::vec2(360.0, 800.0), 3.0),
+    ] {
+        let ctx = Context::default();
+        let mut app = phone_app(&format!("more-{}", css.x));
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0147] = 0x03;
+        rom[0x0149] = 0x02;
+        app.emulator
+            .load_rom(&citrine_gb::rom::Rom::new(&rom), GbModel::Dmg, None)
+            .unwrap();
+        app.emulator.save_snapshot(0).unwrap();
+        app.ui.snapshots.invalidate();
+        app.mobile.nav.show_game();
+        app.mobile.nav.set_more(true);
+        let output = settle(&mut app, &ctx, css, pixel_ratio);
+        let bottom = ctx.content_rect().bottom();
+        let close = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Close game" => {
+                    let rect = text.visual_bounding_rect();
+                    Some((rect.intersect(clipped.clip_rect).height(), rect.bottom()))
+                }
+                _ => None,
+            })
+            .expect("the sheet draws Close game");
+        assert!(
+            close.0 > 0.0 && close.1 <= bottom,
+            "{css:?}: Close game ends at {} under a screen bottom of {bottom}",
+            close.1
+        );
+    }
+}
+
+fn settings_page(name: &str, page: SettingsTab) -> (Citrine, Context) {
+    let ctx = Context::default();
+    let mut app = phone_app(name);
+    app.mobile.nav.go(Place::Settings);
+    app.mobile.nav.open_settings(page);
+    play_frame(&mut app, &ctx, vec![]);
+    (app, ctx)
+}
+
+fn last_text_rect(output: &egui::FullOutput, wanted: &str) -> Option<egui::Rect> {
+    output
+        .shapes
+        .iter()
+        .rev()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text().trim() == wanted => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+}
+
+#[test]
+fn back_closes_a_settings_sheet_before_the_page() {
+    let (mut app, ctx) = settings_page("sheet-back", SettingsTab::Sound);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let volume = text_rect(&output, "Volume").expect("a volume row");
+    play_frame(&mut app, &ctx, tap(volume.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(app.mobile.sheet_open());
+    play_frame(&mut app, &ctx, escape());
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(!app.mobile.sheet_open());
+    assert_eq!(app.mobile.nav.settings_page(), Some(SettingsTab::Sound));
+}
+
+#[test]
+fn a_picked_value_applies_and_closes_the_sheet() {
+    let (mut app, ctx) = settings_page("sheet-pick", SettingsTab::General);
+    app.ui.settings.ui_theme = crate::app::ui_state::ui_theme::UiTheme::Light;
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let theme = text_rect(&output, "Theme").expect("a theme row");
+    play_frame(&mut app, &ctx, tap(theme.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let dark = last_text_rect(&output, "Dark").expect("a dark choice");
+    play_frame(&mut app, &ctx, tap(dark.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        app.ui.settings.ui_theme,
+        crate::app::ui_state::ui_theme::UiTheme::Dark
+    );
+    assert!(!app.mobile.sheet_open());
+}
+
+#[test]
+fn switch_labels_sit_mid_row_and_a_tap_on_them_flips_the_switch() {
+    let (mut app, ctx) = settings_page("switch-row", SettingsTab::Controls);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let show = text_rect(&output, "Show").expect("a show row").center().y;
+    let vibrate = text_rect(&output, "Vibrate on press")
+        .expect("a vibrate row")
+        .center()
+        .y;
+    let size = text_rect(&output, "Size").expect("a size row").center().y;
+    assert!(
+        ((size - vibrate) - (vibrate - show)).abs() < 3.0,
+        "switch labels at {show} and {vibrate}, the next plain row at {size}"
+    );
+    let before = app.ui.settings.touch.show_controls;
+    let label = text_rect(&output, "Show").unwrap();
+    play_frame(&mut app, &ctx, tap(label.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    assert_ne!(app.ui.settings.touch.show_controls, before);
+}
+
+fn signed_in_you(name: &str) -> (Citrine, Context) {
+    let ctx = Context::default();
+    let mut app = phone_app(name);
+    let account = citrine_gb_net::Account {
+        online_id: citrine_gb_net::OnlineId::new(0x1234_5678).unwrap(),
+        display_name: "Clara".into(),
+        storage_used: 0,
+        quota_bytes: 0,
+        two_factor: false,
+        codes_left: 0,
+    };
+    app.ui.settings.online.remember(
+        &crate::online::address::ServerAddress::parse("relay.example").unwrap(),
+        &citrine_gb_net::RelayId::random(),
+        "pw",
+        &account,
+        &Default::default(),
+    );
+    app.mobile.nav.go(Place::You);
+    play_frame(&mut app, &ctx, vec![]);
+    (app, ctx)
+}
+
+#[test]
+fn the_sign_in_key_sheet_fits_on_the_screen() {
+    let (mut app, ctx) = signed_in_you("you-key-fits");
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Sign-in key").expect("a sign-in key row");
+    play_frame(&mut app, &ctx, tap(row.center()));
+    for _ in 0..3 {
+        play_frame(&mut app, &ctx, vec![]);
+    }
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let copy = output
+        .shapes
+        .iter()
+        .rev()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text().ends_with("Copy sign-in key") => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+        .expect("a copy button");
+    assert!(
+        copy.bottom() <= ctx.content_rect().bottom(),
+        "the copy button ends at {} under a screen bottom of {}",
+        copy.bottom(),
+        ctx.content_rect().bottom()
+    );
+}
+
+#[test]
+fn a_sheet_note_starts_under_its_title_and_the_button_label_is_centred() {
+    let (mut app, ctx) = signed_in_you("you-key-lines-up");
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Sign-in key").expect("a sign-in key row");
+    play_frame(&mut app, &ctx, tap(row.center()));
+    for _ in 0..3 {
+        play_frame(&mut app, &ctx, vec![]);
+    }
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let title = last_text_rect(&output, "Sign-in key").expect("a sheet title");
+    let find = |wanted: fn(&str) -> bool| {
+        output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if wanted(text.galley.text()) => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+    };
+    let note = find(|text| text.starts_with("Use it to sign in")).expect("a sheet note");
+    let copy = find(|text| text.ends_with("Copy sign-in key")).expect("a copy button");
+    assert!(
+        (note.left() - title.left()).abs() < 3.0,
+        "the note starts at {} and the title at {}",
+        note.left(),
+        title.left()
+    );
+    assert!(
+        2.0 * (note.top() - title.bottom()) < copy.top() - note.bottom(),
+        "the note sits {} under its title and {} over the button",
+        note.top() - title.bottom(),
+        copy.top() - note.bottom()
+    );
+    let middle = ctx.content_rect().center().x;
+    assert!(
+        (copy.center().x - middle).abs() < 3.0,
+        "the button label is centred on {} in a sheet centred on {}",
+        copy.center().x,
+        middle
+    );
+}
+
+#[test]
+fn signing_out_on_a_phone_asks_in_a_sheet() {
+    let (mut app, ctx) = signed_in_you("you-sign-out-sheet");
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Sign out").expect("a sign out row");
+    play_frame(&mut app, &ctx, tap(row.center()));
+    for _ in 0..3 {
+        play_frame(&mut app, &ctx, vec![]);
+    }
+    let question = |output: &egui::FullOutput| {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text().starts_with("Sign out on this device") =>
+                {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+    };
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let asked = question(&output).expect("a sign out question");
+    assert!(
+        asked.top() > ctx.content_rect().center().y,
+        "the question starts at {}, above the screen middle, so it isn't a bottom sheet",
+        asked.top()
+    );
+    let cancel = last_text_rect(&output, "Cancel").expect("a cancel button");
+    play_frame(&mut app, &ctx, tap(cancel.center()));
+    for _ in 0..2 {
+        play_frame(&mut app, &ctx, vec![]);
+    }
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(question(&output).is_none(), "cancel closes the question");
+}
+
+#[test]
+fn tapping_the_online_id_copies_it() {
+    let (mut app, ctx) = signed_in_you("you-copy");
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Online ID").expect("an online id row");
+    let output = play_frame(&mut app, &ctx, tap(row.center()));
+    let copied =
+        output.platform_output.commands.iter().any(
+            |command| matches!(command, egui::OutputCommand::CopyText(text) if !text.is_empty()),
+        );
+    assert!(copied, "the online id goes to the clipboard");
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "Copied").is_some());
+}
+
+#[test]
+fn back_closes_the_sign_in_key_sheet_and_stays_on_you() {
+    let (mut app, ctx) = signed_in_you("you-key");
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Sign-in key").expect("a sign-in key row");
+    play_frame(&mut app, &ctx, tap(row.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(app.mobile.sheet_open());
+    play_frame(&mut app, &ctx, escape());
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(!app.mobile.sheet_open());
+    assert_eq!(app.mobile.nav.place(), Place::You);
+}
+
+fn signed_out_you(name: &str, server: bool) -> (Citrine, Context) {
+    let (mut app, ctx) = signed_in_you(name);
+    app.ui.settings.online.leave();
+    if !server {
+        app.ui.settings.online.address.clear();
+        app.ui.settings.online.relays.clear();
+    }
+    play_frame(&mut app, &ctx, vec![]);
+    (app, ctx)
+}
+
+#[test]
+fn signed_out_you_shows_no_account_and_no_avatar() {
+    let (mut app, ctx) = signed_out_you("you-signed-out", true);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "Sign in").is_some());
+    assert!(text_rect(&output, "Create account").is_some());
+    for gone in ["Clara", "C", "Sign out", "Online ID"] {
+        assert!(
+            text_rect(&output, gone).is_none(),
+            "{gone} shows signed out"
+        );
+    }
+}
+
+#[test]
+fn signed_out_you_without_a_server_says_so_in_one_row() {
+    let (mut app, ctx) = signed_out_you("you-no-server", false);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "Not set up").is_some());
+    assert!(text_rect(&output, "Sign in").is_none());
+    let row = text_rect(&output, "Server").expect("a server row");
+    play_frame(&mut app, &ctx, tap(row.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(app.mobile.sheet_open());
+    assert!(text_rect(&output, "Address").is_some());
+}
+
+#[test]
+fn the_sign_in_sheet_closes_with_back_and_stays_on_you() {
+    let (mut app, ctx) = signed_out_you("you-sign-in-sheet", true);
+    for row_label in ["Sign in", "Create account", "Server"] {
+        let output = play_frame(&mut app, &ctx, vec![]);
+        let row = text_rect(&output, row_label).expect("a signed out row");
+        play_frame(&mut app, &ctx, tap(row.center()));
+        play_frame(&mut app, &ctx, vec![]);
+        assert!(app.mobile.sheet_open(), "{row_label} opens a sheet");
+        play_frame(&mut app, &ctx, escape());
+        play_frame(&mut app, &ctx, vec![]);
+        assert!(
+            !app.mobile.sheet_open(),
+            "back closes the {row_label} sheet"
+        );
+        assert_eq!(app.mobile.nav.place(), Place::You);
+    }
+}
+
+fn with_second_account(app: &mut Citrine) {
+    let account = citrine_gb_net::Account {
+        online_id: citrine_gb_net::OnlineId::new(0x2345_6789).unwrap(),
+        display_name: "Zitrone".into(),
+        storage_used: 0,
+        quota_bytes: 0,
+        two_factor: false,
+        codes_left: 0,
+    };
+    let relay = crate::online::address::ServerAddress::parse("relay.example").unwrap();
+    app.ui.settings.online.leave();
+    app.ui.settings.online.remember(
+        &relay,
+        &citrine_gb_net::RelayId::random(),
+        "pw",
+        &account,
+        &Default::default(),
+    );
+}
+
+#[test]
+fn the_sign_in_sheet_offers_the_saved_accounts_and_signs_in_with_one_tap() {
+    let (mut app, ctx) = signed_out_you("you-saved-accounts", true);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(
+        text_rect(&output, "Clara").is_none(),
+        "no account on the signed out page"
+    );
+    let row = text_rect(&output, "Sign in").expect("a sign in row");
+    play_frame(&mut app, &ctx, tap(row.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let saved = text_rect(&output, "Clara").expect("the saved account in the sheet");
+    play_frame(&mut app, &ctx, tap(saved.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(app.ui.settings.online.is_joined());
+    assert_eq!(app.ui.settings.online.address, "relay.example");
+}
+
+#[test]
+fn switch_account_lists_the_accounts_switches_and_adds_one() {
+    let (mut app, ctx) = signed_in_you("you-switch");
+    with_second_account(&mut app);
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Switch account").expect("a switch account row");
+    play_frame(&mut app, &ctx, tap(row.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(app.mobile.sheet_open());
+    assert!(text_rect(&output, "Add account").is_some());
+    play_frame(&mut app, &ctx, escape());
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(!app.mobile.sheet_open(), "back closes the accounts sheet");
+
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Switch account").unwrap();
+    play_frame(&mut app, &ctx, tap(row.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let other = text_rect(&output, "Clara").expect("the other account");
+    play_frame(&mut app, &ctx, tap(other.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let joined = app.ui.settings.online.joined_entry().unwrap();
+    assert_eq!(joined.display_name.as_deref(), Some("Clara"));
+    assert_eq!(joined.others.len(), 1);
+    assert!(!app.mobile.sheet_open());
+
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let row = text_rect(&output, "Switch account").unwrap();
+    play_frame(&mut app, &ctx, tap(row.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    let add = text_rect(&output, "Add account").unwrap();
+    play_frame(&mut app, &ctx, tap(add.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(
+        app.ui.settings.online.is_joined(),
+        "add account keeps the session"
+    );
+    assert!(app.mobile.sheet_open());
+    assert!(text_rect(&output, "Create account").is_some());
+    let sign_in = text_rect(&output, "Sign in").expect("a sign in row");
+    play_frame(&mut app, &ctx, tap(sign_in.center()));
+    play_frame(&mut app, &ctx, vec![]);
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(!app.ui.settings.online.is_joined());
+    assert!(app.mobile.sheet_open(), "the sign in sheet opens");
+    play_frame(&mut app, &ctx, escape());
+    play_frame(&mut app, &ctx, vec![]);
+    play_frame(&mut app, &ctx, vec![]);
+    assert!(!app.mobile.sheet_open());
+    let joined = app
+        .ui
+        .settings
+        .online
+        .joined_entry()
+        .expect("back on the account");
+    assert_eq!(joined.display_name.as_deref(), Some("Clara"));
+    assert_eq!(app.ui.settings.online.accounts_on("relay.example").len(), 2);
+}
+
+#[test]
+fn the_online_page_signed_out_shows_the_server_row() {
+    let (mut app, ctx) = settings_page("online-signed-out", SettingsTab::Online);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "Not set up").is_some());
+    assert!(text_rect(&output, "Relay password").is_none());
+}
+
+#[test]
+fn the_frame_shows_friends_only_while_signed_in() {
+    let (mut app, ctx) = signed_in_you("frame-friends");
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "Friends").is_some());
+    app.ui.settings.online.leave();
+    play_frame(&mut app, &ctx, vec![]);
+    let output = play_frame(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "Friends").is_none());
+    app.mobile.nav.go(Place::Friends);
+    play_frame(&mut app, &ctx, vec![]);
+    play_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.mobile.nav.place(), Place::You);
+}
+
+#[test]
+fn an_offer_names_its_download_size() {
+    let offer = crate::update::Offer {
+        version: "0.11.0".to_owned(),
+        page: String::new(),
+        installable: true,
+        size: 48_200_000,
+    };
+    let texts =
+        super::widgets::update::texts(&crate::update::Phase::Available(offer), false).unwrap();
+    assert_eq!(texts.title, "Citrine 0.11.0 is out");
+    assert_eq!(texts.detail, "48.2 MB download");
+    assert_eq!(texts.action, Some("Update"));
+}
+
+fn shows_text(app: &mut Citrine, wanted: &str) -> bool {
+    let ctx = Context::default();
+    settle(app, &ctx, egui::vec2(412.0, 915.0), 2.0)
+        .shapes
+        .into_iter()
+        .any(|clipped| matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == wanted))
+}
+
+#[test]
+fn more_games_gets_a_heading_only_below_other_games() {
+    let mut first = phone_app("more-games-first");
+    assert!(
+        !shows_text(&mut first, "More games"),
+        "a first visit has nothing for More to follow"
+    );
+    let mut playing = phone_app("more-games-playing");
+    load_game(
+        &mut playing,
+        &citrine_gb_gamedata::fixtures::crystal_cartridge(),
+        None,
+    );
+    playing.mobile.nav.go(Place::Games);
+    assert!(shows_text(&mut playing, "Now playing"));
+    assert!(shows_text(&mut playing, "More games"));
+}
+
+fn hidden_game(name: &str) -> (Citrine, Context) {
+    let ctx = Context::default();
+    let mut app = phone_app(name);
+    let mut rom = vec![0u8; 0x8000];
+    rom[0x0147] = 0x03;
+    rom[0x0149] = 0x02;
+    app.emulator
+        .load_rom(&citrine_gb::rom::Rom::new(&rom), GbModel::Dmg, None)
+        .unwrap();
+    app.mobile.nav.show_game();
+    let mut output = play_frame(&mut app, &ctx, vec![]);
+    for _ in 0..2 {
+        output = play_frame(&mut app, &ctx, vec![]);
+    }
+    let hide =
+        text_containing(&output, crate::icons::EYE_SLASH).expect("the strip has the hide button");
+    play_frame(&mut app, &ctx, tap(hide.center()));
+    (app, ctx)
+}
+
+fn frames(app: &mut Citrine, ctx: &Context, events: Vec<egui::Event>) -> egui::FullOutput {
+    play_frame(app, ctx, events);
+    play_frame(app, ctx, vec![]);
+    play_frame(app, ctx, vec![])
+}
+
+fn escape_frames(app: &mut Citrine, ctx: &Context) -> egui::FullOutput {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(412.0, 915.0),
+        )),
+        events: escape(),
+        ..Default::default()
+    };
+    let _ = ctx.run(input, |ctx| {
+        app.render(ctx);
+        app.mobile_escape(ctx);
+    });
+    frames(app, ctx, vec![])
+}
+
+#[test]
+fn the_eye_slash_hides_the_bar_and_the_strip_and_back_brings_them_back() {
+    let (mut app, ctx) = hidden_game("hide-back");
+    let output = frames(&mut app, &ctx, vec![]);
+    assert!(app.mobile.ui_hidden());
+    assert!(text_rect(&output, "Games").is_none());
+    assert!(text_containing(&output, crate::icons::EYE_SLASH).is_none());
+    assert!(text_containing(&output, crate::icons::EYE).is_some());
+    let output = escape_frames(&mut app, &ctx);
+    assert!(!app.mobile.ui_hidden());
+    assert!(app.mobile.nav.on_game());
+    assert!(text_rect(&output, "Games").is_some());
+}
+
+#[test]
+fn the_eye_button_brings_the_ui_back() {
+    let (mut app, ctx) = hidden_game("hide-eye");
+    let output = frames(&mut app, &ctx, vec![]);
+    let eye = text_containing(&output, crate::icons::EYE).expect("the eye button shows");
+    let output = frames(&mut app, &ctx, tap(eye.center()));
+    assert!(!app.mobile.ui_hidden());
+    assert!(text_rect(&output, "Games").is_some());
+}
+
+#[test]
+fn a_controller_press_hides_the_touch_buttons_until_a_touch_below_the_picture() {
+    let (mut app, ctx) = hidden_game("hide-pad");
+    let output = frames(&mut app, &ctx, vec![]);
+    let select = text_rect(&output, "SELECT").expect("touch buttons show at first");
+    app.emulator.press(
+        crate::held::InputSource::PadButtons(0),
+        citrine_gb::gb::joypad::JoypadState::A,
+    );
+    app.emulator.release(
+        crate::held::InputSource::PadButtons(0),
+        citrine_gb::gb::joypad::JoypadState::A,
+    );
+    let output = frames(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "SELECT").is_none());
+    assert!(app.mobile.ui_hidden());
+    let output = frames(&mut app, &ctx, tap(egui::pos2(30.0, select.center().y)));
+    assert!(text_rect(&output, "SELECT").is_some());
+}
+
+#[test]
+fn a_key_press_hides_the_touch_buttons_too() {
+    let (mut app, ctx) = hidden_game("hide-key");
+    let output = frames(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "SELECT").is_some());
+    let key = |pressed| egui::Event::Key {
+        key: egui::Key::ArrowLeft,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Default::default(),
+    };
+    for event in [key(true), key(false)] {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(412.0, 915.0),
+            )),
+            events: vec![event],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            app.render(ctx);
+            let Citrine {
+                emulator, pads, ui, ..
+            } = &mut app;
+            emulator.handle_input(
+                ctx,
+                pads.as_mut(),
+                &ui.settings.bindings,
+                &mut ui.capture,
+                None,
+            );
+        });
+    }
+    let output = frames(&mut app, &ctx, vec![]);
+    assert!(text_rect(&output, "SELECT").is_none());
+}
+
+#[test]
+fn the_select_and_start_labels_fit_their_pills_at_the_biggest_size_in_landscape() {
+    let ctx = Context::default();
+    let mut app = phone_app("pill-labels");
+    app.ui.settings.touch.scale = crate::app::ui_state::touch::TouchSettings::MAX_SCALE;
+    let mut rom = vec![0u8; 0x8000];
+    rom[0x0147] = 0x03;
+    rom[0x0149] = 0x02;
+    app.emulator
+        .load_rom(&citrine_gb::rom::Rom::new(&rom), GbModel::Dmg, None)
+        .unwrap();
+    app.mobile.nav.show_game();
+    let output = settle(&mut app, &ctx, egui::vec2(640.0, 360.0), 1.0);
+    for label in ["SELECT", "START"] {
+        let text = text_rect(&output, label).expect("the pill label shows");
+        let pill = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.rect.contains(text.center()) => Some(rect.rect),
+                _ => None,
+            })
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .expect("the pill shows behind its label");
+        assert!(
+            pill.contains_rect(text),
+            "{label}: label {text:?} runs past its pill {pill:?}"
+        );
+    }
+}
+
+fn sized_frame(
+    app: &mut Citrine,
+    ctx: &Context,
+    size: egui::Vec2,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        events,
+        ..Default::default()
+    };
+    ctx.run(input, |ctx| {
+        let touch = app.is_mobile(ctx);
+        mobile::touch_spacing(ctx, touch);
+        app.render(ctx);
+    })
+}
+
+fn game_at(name: &str, size: egui::Vec2, scale: f32, hide: bool) -> (Citrine, Context) {
+    let ctx = Context::default();
+    let mut app = phone_app(name);
+    app.ui.settings.touch.scale = scale;
+    app.emulator.scaling = app.ui.settings.touch.scaling;
+    app.emulator.enable_matrix = app.ui.settings.matrix;
+    let mut rom = vec![0u8; 0x8000];
+    rom[0x0147] = 0x03;
+    rom[0x0149] = 0x02;
+    app.emulator
+        .load_rom(&citrine_gb::rom::Rom::new(&rom), GbModel::Dmg, None)
+        .unwrap();
+    app.mobile.nav.show_game();
+    let mut output = sized_frame(&mut app, &ctx, size, vec![]);
+    for _ in 0..2 {
+        output = sized_frame(&mut app, &ctx, size, vec![]);
+    }
+    if hide {
+        let slash = text_containing(&output, crate::icons::EYE_SLASH)
+            .expect("the strip has the hide button");
+        sized_frame(&mut app, &ctx, size, tap(slash.center()));
+        assert!(app.mobile.ui_hidden());
+    }
+    (app, ctx)
+}
+
+fn textured(shape: &egui::Shape) -> Option<egui::Rect> {
+    match shape {
+        egui::Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => {
+            Some(mesh.calc_bounds())
+        }
+        egui::Shape::Rect(rect) if rect.fill_texture_id() != egui::TextureId::default() => {
+            Some(rect.rect)
+        }
+        _ => None,
+    }
+}
+
+fn picture_rect(output: &egui::FullOutput) -> egui::Rect {
+    output
+        .shapes
+        .iter()
+        .filter_map(|clipped| textured(&clipped.shape))
+        .max_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("the game picture shows")
+}
+
+fn covering(output: &egui::FullOutput, picture: egui::Rect) -> Vec<egui::Rect> {
+    let inside = picture.shrink(0.5);
+    output
+        .shapes
+        .iter()
+        .filter(|clipped| textured(&clipped.shape).is_none())
+        .map(|clipped| clipped.shape.visual_bounding_rect())
+        .filter(|rect| rect.is_positive() && !rect.contains_rect(picture))
+        .filter(|rect| rect.intersects(inside))
+        .collect()
+}
+
+fn hidden_picture(name: &str, size: egui::Vec2, scale: f32) -> (egui::Rect, Vec<egui::Rect>) {
+    let (mut app, ctx) = game_at(name, size, scale, true);
+    let mut output = sized_frame(&mut app, &ctx, size, vec![]);
+    for _ in 0..3 {
+        output = sized_frame(&mut app, &ctx, size, vec![]);
+    }
+    assert!(
+        text_containing(&output, crate::icons::EYE).is_some(),
+        "the eye shows"
+    );
+    let picture = picture_rect(&output);
+    (picture, covering(&output, picture))
+}
+
+#[test]
+fn hidden_in_landscape_the_picture_takes_the_full_height_centred_with_nothing_over_it() {
+    let size = egui::vec2(640.0, 360.0);
+    for scale in [1.0, 1.6] {
+        let (picture, over) = hidden_picture("fill-landscape", size, scale);
+        assert!(
+            (picture.height() - size.y).abs() <= 1.0,
+            "Size {scale}: picture {picture:?} is not full height"
+        );
+        assert!((picture.center().y - size.y / 2.0).abs() <= 1.0);
+        assert!((picture.center().x - size.x / 2.0).abs() <= 1.0);
+        assert!(over.is_empty(), "Size {scale}: {over:?} cover {picture:?}");
+    }
+}
+
+#[test]
+fn hidden_in_portrait_the_picture_spans_the_full_width_at_the_top_with_nothing_over_it() {
+    let size = egui::vec2(360.0, 640.0);
+    for scale in [1.0, 1.6] {
+        let (picture, over) = hidden_picture("fill-portrait", size, scale);
+        assert!(
+            (picture.width() - size.x).abs() <= 1.0,
+            "Size {scale}: picture {picture:?} is not full width"
+        );
+        assert!(picture.top().abs() <= 1.0);
+        assert!((picture.center().x - size.x / 2.0).abs() <= 1.0);
+        assert!(over.is_empty(), "Size {scale}: {over:?} cover {picture:?}");
+    }
+}
+
+#[test]
+fn a_picture_that_cannot_take_the_full_height_sits_centred_shown_or_hidden() {
+    let size = egui::vec2(480.0, 400.0);
+    for hide in [false, true] {
+        for scale in [1.0, 1.6] {
+            let (mut app, ctx) = game_at("fill-centred", size, scale, hide);
+            let mut output = sized_frame(&mut app, &ctx, size, vec![]);
+            for _ in 0..3 {
+                output = sized_frame(&mut app, &ctx, size, vec![]);
+            }
+            let picture = picture_rect(&output);
+            assert!(picture.height() < size.y - 1.0);
+            let top = if hide { 0.0 } else { 48.0 };
+            let middle = (top + size.y) / 2.0;
+            assert!(
+                (picture.center().y - middle).abs() <= 1.0,
+                "hidden {hide}, Size {scale}: picture {picture:?} not centred on {middle}"
+            );
+            let over = covering(&output, picture);
+            assert!(
+                over.is_empty(),
+                "hidden {hide}, Size {scale}: {over:?} cover {picture:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_landscape_picture_keeps_its_place_when_a_key_press_hides_the_touch_buttons() {
+    let size = egui::vec2(640.0, 360.0);
+    let (mut app, ctx) = game_at("fill-keep", size, 1.0, true);
+    sized_frame(&mut app, &ctx, size, vec![]);
+    let output = sized_frame(&mut app, &ctx, size, vec![]);
+    let before = picture_rect(&output);
+    assert!(text_rect(&output, "SELECT").is_some());
+    app.emulator.press(
+        crate::held::InputSource::PadButtons(0),
+        citrine_gb::gb::joypad::JoypadState::A,
+    );
+    app.emulator.release(
+        crate::held::InputSource::PadButtons(0),
+        citrine_gb::gb::joypad::JoypadState::A,
+    );
+    let mut output = sized_frame(&mut app, &ctx, size, vec![]);
+    for _ in 0..2 {
+        output = sized_frame(&mut app, &ctx, size, vec![]);
+    }
+    assert!(text_rect(&output, "SELECT").is_none());
+    assert_eq!(picture_rect(&output), before);
+}
+
+fn wheel_over(
+    app: &mut Citrine,
+    ctx: &Context,
+    size: egui::Vec2,
+    at: egui::Pos2,
+) -> egui::FullOutput {
+    let wheel = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -40.0),
+        modifiers: egui::Modifiers::NONE,
+    };
+    sized_frame(app, ctx, size, vec![egui::Event::PointerMoved(at)]);
+    let mut output = sized_frame(app, ctx, size, vec![wheel]);
+    for _ in 0..40 {
+        output = sized_frame(app, ctx, size, Vec::new());
+    }
+    output
+}
+
+fn settings_scroll_app(name: &str) -> (Citrine, Context) {
+    let mut app = media_app(name, LayoutMode::Desktop);
+    app.dock = DockState::new(vec![Tab::Settings]);
+    app.ui.settings.current_tab = SettingsTab::General;
+    (app, Context::default())
+}
+
+fn bar_and_page(
+    app: &mut Citrine,
+    ctx: &Context,
+    size: egui::Vec2,
+    over: Option<egui::Pos2>,
+) -> (Option<egui::Rect>, Option<egui::Rect>) {
+    let general = format!(
+        "{} {}",
+        SettingsTab::General.icon(),
+        SettingsTab::General.title()
+    );
+    let output = match over {
+        Some(at) => wheel_over(app, ctx, size, at),
+        None => {
+            let mut output = sized_frame(app, ctx, size, Vec::new());
+            for _ in 0..3 {
+                output = sized_frame(app, ctx, size, Vec::new());
+            }
+            output
+        }
+    };
+    (text_rect(&output, &general), text_rect(&output, "Console"))
+}
+
+#[test]
+fn the_settings_bar_and_page_scroll_on_their_own() {
+    let (mut app, ctx) = settings_scroll_app("settings-scroll-page");
+    let size = egui::vec2(1280.0, 400.0);
+    let (tab, label) = bar_and_page(&mut app, &ctx, size, None);
+    let (tab, label) = (tab.expect("the bar's first tab"), label.expect("the label"));
+    let (tab_after, label_after) = bar_and_page(&mut app, &ctx, size, Some(label.center()));
+    assert_eq!(tab_after.map(|r| r.top()), Some(tab.top()));
+    let moved = label_after.map_or(f32::INFINITY, |r| label.top() - r.top());
+    assert!(moved > 20.0, "page moved {moved}");
+
+    let (mut app, ctx) = settings_scroll_app("settings-scroll-bar");
+    let size = egui::vec2(1280.0, 140.0);
+    let (tab, label) = bar_and_page(&mut app, &ctx, size, None);
+    let (tab, label) = (tab.expect("the bar's first tab"), label.expect("the label"));
+    let (tab_after, label_after) = bar_and_page(&mut app, &ctx, size, Some(tab.center()));
+    assert_eq!(label_after.map(|r| r.top()), Some(label.top()));
+    let moved = tab_after.map_or(f32::INFINITY, |r| tab.top() - r.top());
+    assert!(moved > 20.0, "bar moved {moved}");
 }

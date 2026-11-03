@@ -45,8 +45,12 @@ pub struct GilrsPads {
 
 impl GilrsPads {
     pub fn new() -> Self {
+        let gil = match Gilrs::new() {
+            Ok(gil) | Err(gilrs::Error::NotImplemented(gil)) => gil,
+            Err(err) => panic!("could not open the gamepads: {err}"),
+        };
         Self {
-            gil: Gilrs::new().unwrap(),
+            gil,
             ids: Vec::new(),
         }
     }

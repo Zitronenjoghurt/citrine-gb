@@ -1,5 +1,4 @@
 use crate::app::Citrine;
-use crate::app::mobile::Sheet;
 use crate::app::tabs::Tab;
 use crate::app::ui_state::settings::SettingsTab;
 use crate::local_link::Game;
@@ -51,7 +50,10 @@ impl Citrine {
                 &header.title,
                 header.cgb_mode.is_cgb(),
             );
-            self.ui.recent.record(path, &name, None);
+            let dropped = self.ui.recent.record(path, &name, None);
+            self.files
+                .rom_copies
+                .drop_copies(dropped.iter().map(|entry| entry.path.as_path()));
         }
         self.link_game(file.data, Some(file.name));
     }
@@ -82,7 +84,7 @@ impl Citrine {
         self.ui.linked.picking = false;
         self.ui.linked.listing = false;
         self.ui.linked.from_list = true;
-        if self.mobile.sheet.is_some() {
+        if self.mobile.phone {
             self.close_mobile_sheet();
         } else {
             self.open_tab(Tab::Playing);
@@ -113,7 +115,7 @@ impl Citrine {
         if let Some(link) = &mut self.emulator.link {
             link.set_settings(&self.ui.settings.local_link);
         }
-        if self.mobile.sheet.is_some() {
+        if self.mobile.phone {
             self.close_mobile_sheet();
         } else {
             self.open_tab(Tab::Playing);
@@ -133,14 +135,19 @@ impl Citrine {
         {
             self.dock.remove_tab(location);
         }
-        if self.mobile.sheet == Some(Sheet::Panel(Tab::Playing)) {
+        if self.mobile.showing(Tab::Playing) {
             self.close_mobile_sheet();
         }
     }
 
     pub(super) fn open_settings(&mut self, tab: SettingsTab, touch: bool) {
         self.ui.settings.current_tab = tab;
-        self.show_tab(Tab::Settings, touch);
+        if touch {
+            self.mobile.nav.open_settings(tab);
+            self.release_touch();
+        } else {
+            self.open_tab(Tab::Settings);
+        }
     }
 
     pub(super) fn keeps_link_tab(&self) -> bool {

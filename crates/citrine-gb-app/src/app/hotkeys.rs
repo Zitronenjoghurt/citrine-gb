@@ -62,6 +62,83 @@ impl Citrine {
         }
     }
 
+    pub(super) fn raw_keys(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
+        drop_stray_repeats(ctx, raw);
+        self.chat_key(ctx, raw);
+    }
+
+    fn chat_key(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
+        let Some(field) = self.ui.friends.chat.field() else {
+            return;
+        };
+        let focused = ctx.memory(|m| m.focused());
+        let in_field = focused == Some(field);
+        if self.ui.capture.is_waiting()
+            || in_field && self.leave_field_on_escape(ctx, raw)
+            || focused.is_some() && !in_field
+        {
+            return;
+        }
+        let Some(hotkey) = self
+            .ui
+            .settings
+            .hotkeys
+            .keys_for(HotkeyAction::FocusChat)
+            .first()
+            .copied()
+        else {
+            return;
+        };
+        if in_field && hotkey.types_text() {
+            return;
+        }
+        let mut hit = false;
+        raw.events.retain(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed,
+                repeat,
+                modifiers,
+                ..
+            } if *key == hotkey.key => {
+                hit |= *pressed && !*repeat && hotkey.matches(*key, *modifiers);
+                false
+            }
+            _ => true,
+        });
+        if !hit {
+            return;
+        }
+        if in_field {
+            self.ui.friends.chat.leave_field();
+        } else {
+            self.run_hotkey(HotkeyAction::FocusChat);
+        }
+    }
+
+    fn leave_field_on_escape(&mut self, ctx: &Context, raw: &mut egui::RawInput) -> bool {
+        if !self.ui.friends.chat.leaves_on_escape() || egui::Popup::is_any_open(ctx) {
+            return false;
+        }
+        let mut hit = false;
+        raw.events.retain(|event| match event {
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                pressed,
+                modifiers,
+                ..
+            } if modifiers.is_none() => {
+                hit |= *pressed;
+                false
+            }
+            _ => true,
+        });
+        if hit {
+            self.ui.friends.chat.leave_field();
+        }
+        hit
+    }
+
     pub fn run_hotkey(&mut self, action: HotkeyAction) {
         let needs_rom = matches!(
             action,
@@ -122,6 +199,10 @@ impl Citrine {
                 self.ui.settings.dirty = true;
             }
             HotkeyAction::SwitchGame => self.switch_game(),
+            HotkeyAction::FocusChat => {
+                self.ui.friends.chat.focus();
+                self.events.open_tab(crate::app::tabs::Tab::Friends);
+            }
         }
     }
 
@@ -135,4 +216,19 @@ impl Citrine {
         };
         self.ui.snapshots.invalidate();
     }
+}
+
+fn drop_stray_repeats(ctx: &Context, raw: &mut egui::RawInput) {
+    let down = ctx.input(|i| i.keys_down.clone());
+    raw.events.retain(|event| {
+        !matches!(
+            event,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: true,
+                ..
+            } if !down.contains(key)
+        )
+    });
 }

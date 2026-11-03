@@ -67,6 +67,7 @@ pub struct InfoPanel<'a> {
     state: &'a mut InfoState,
     commonmark: &'a mut egui_commonmark::CommonMarkCache,
     controls: Controls<'a>,
+    tabs: bool,
 }
 
 impl<'a> InfoPanel<'a> {
@@ -79,7 +80,13 @@ impl<'a> InfoPanel<'a> {
             state,
             commonmark,
             controls,
+            tabs: true,
         }
+    }
+
+    pub fn without_tabs(mut self) -> Self {
+        self.tabs = false;
+        self
     }
 }
 
@@ -87,9 +94,10 @@ impl Widget for InfoPanel<'_> {
     fn ui(mut self, ui: &mut Ui) -> Response {
         ui.style_mut().url_in_tooltip = true;
         ui.vertical_centered(|ui| {
-            self.tab_bar(ui);
-
-            ui.separator();
+            if self.tabs {
+                self.tab_bar(ui);
+                ui.separator();
+            }
 
             let markdown = self.state.tab.build_md(&self.controls);
             for (index, block) in blocks(&markdown).into_iter().enumerate() {
@@ -451,6 +459,20 @@ mod tests {
 
     fn welcome(controls: &Controls) -> String {
         InfoTab::Welcome.build_md(controls)
+    }
+
+    #[test]
+    fn about_links_every_download_and_android_only_updates() {
+        let desktop = welcome::downloads(false);
+        assert!(desktop.contains("Desktop version: [GitHub]"), "{desktop}");
+        assert!(desktop.contains("Android version: [GitHub]"), "{desktop}");
+        assert!(desktop.contains("Web version"), "{desktop}");
+        let android = welcome::downloads(true);
+        assert!(android.contains("Updates: [GitHub]"), "{android}");
+        assert!(!android.contains("Android version"), "{android}");
+        assert!(android.contains("Web version"), "{android}");
+        let about = welcome(&Controls::Touch);
+        assert!(about.contains("releases/latest)\\\n"), "{about}");
     }
 
     #[test]

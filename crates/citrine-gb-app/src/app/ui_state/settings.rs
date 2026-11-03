@@ -54,8 +54,34 @@ impl LayoutMode {
 }
 
 fn device_size(ctx: &egui::Context) -> egui::Vec2 {
-    let physical = ctx.content_rect().size() * ctx.pixels_per_point();
-    physical / ctx.native_pixels_per_point().unwrap_or(1.0)
+    window_pixels(ctx) / ctx.native_pixels_per_point().unwrap_or(1.0)
+}
+
+#[derive(Clone, Copy)]
+struct WindowPixels(egui::Vec2);
+
+fn window_id() -> egui::Id {
+    egui::Id::new("window_pixels")
+}
+
+pub fn note_window(ctx: &egui::Context, raw_input: &egui::RawInput) {
+    let Some(screen) = raw_input.screen_rect else {
+        return;
+    };
+    let native = raw_input
+        .viewports
+        .get(&raw_input.viewport_id)
+        .and_then(|viewport| viewport.native_pixels_per_point)
+        .or_else(|| ctx.native_pixels_per_point())
+        .unwrap_or(1.0);
+    let pixels = screen.size() * ctx.zoom_factor() * native;
+    ctx.data_mut(|d| d.insert_temp(window_id(), WindowPixels(pixels)));
+}
+
+pub fn window_pixels(ctx: &egui::Context) -> egui::Vec2 {
+    ctx.data(|d| d.get_temp::<WindowPixels>(window_id()))
+        .map(|window| window.0)
+        .unwrap_or_else(|| ctx.viewport_rect().size() * ctx.pixels_per_point())
 }
 
 impl Display for LayoutMode {
@@ -177,6 +203,7 @@ pub struct Settings {
     pub recording_scale: usize,
     pub randomized_ram: bool,
     pub dev_mode: bool,
+    pub check_updates: bool,
     pub focus_mode: bool,
     pub focus_place: crate::app::focus::ScreenPlace,
     pub track_pc: bool,
@@ -187,6 +214,8 @@ pub struct Settings {
     pub unsaved: bool,
     #[serde(skip, default)]
     pub scale_drag: bool,
+    #[serde(skip, default)]
+    pub themed_for_phone: Option<bool>,
 }
 
 impl Default for Settings {
@@ -232,6 +261,7 @@ impl Default for Settings {
             recording_scale: recording::DEFAULT_SCALE,
             randomized_ram: false,
             dev_mode: false,
+            check_updates: true,
             focus_mode: false,
             focus_place: Default::default(),
             track_pc: false,
@@ -239,6 +269,7 @@ impl Default for Settings {
             dirty: default_dirty(),
             unsaved: false,
             scale_drag: false,
+            themed_for_phone: None,
             local_link: crate::local_link::LinkSettings::default(),
             discord: crate::discord::DiscordSettings::default(),
             stats_range: Default::default(),
@@ -490,7 +521,7 @@ impl Settings {
             return self.desktop_pixels_per_point(desktop_pixel_ratio(ctx));
         }
 
-        let physical = ctx.content_rect().size() * ctx.pixels_per_point();
+        let physical = window_pixels(ctx);
         let short_edge = physical.x.min(physical.y);
         if short_edge <= 0.0 {
             return ctx.native_pixels_per_point().unwrap_or(1.0);
@@ -527,13 +558,17 @@ impl Settings {
             self.scaling
         };
 
+        if self.themed_for_phone != Some(mobile) {
+            self.themed_for_phone = Some(mobile);
+            self.ui_theme.apply(ctx, mobile);
+        }
         if !self.dirty {
             return None;
         }
         self.dirty = false;
         self.unsaved = true;
 
-        self.ui_theme.apply(ctx);
+        self.ui_theme.apply(ctx, mobile);
 
         let rom_key = emulator.rom_key().map(str::to_owned);
         self.apply_colors(&mut emulator.gb, rom_key.as_deref());

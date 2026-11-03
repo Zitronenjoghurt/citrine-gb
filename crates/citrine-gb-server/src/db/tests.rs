@@ -257,7 +257,9 @@ async fn deleted_messages_give_their_space_back() {
     let full = pages(&db).await;
     let full_bytes = std::fs::metadata(dir.path().join("t.db")).unwrap().len();
     assert!(full > empty + 200, "{empty} then {full} pages");
-    assert_eq!(db.purge_messages(u64::MAX).await.unwrap(), ids.len());
+    assert_eq!(db.stored_messages().await.unwrap().0, ids.len() as u64);
+    db.delete_account(a.id).await.unwrap();
+    assert_eq!(db.stored_messages().await.unwrap().0, 0);
     let freed = db.reclaim().await.unwrap();
     assert!(freed >= 1 << 20, "{freed} bytes freed");
     assert!(pages(&db).await < empty + 10);

@@ -1,7 +1,7 @@
 pub mod bar;
 pub mod content;
 pub mod controls;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub mod discord;
 pub mod form;
 pub mod online;

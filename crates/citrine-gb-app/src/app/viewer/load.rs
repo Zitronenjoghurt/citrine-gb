@@ -85,7 +85,7 @@ pub(super) fn read_local(viewer: &mut TabViewer, key: &ItemKey, id: &MediaId) {
 }
 
 pub(super) fn begin(viewer: &mut TabViewer, ctx: &Context, source: Source, key: &ItemKey) {
-    let mut shown = Shown {
+    let mut shown = Box::new(Shown {
         key: key.clone(),
         texture: None,
         player: None,
@@ -93,7 +93,7 @@ pub(super) fn begin(viewer: &mut TabViewer, ctx: &Context, source: Source, key: 
         pending: None,
         status: Status::Loading(None),
         fetching: None,
-    };
+    });
     match (source, key) {
         (Source::Media, ItemKey::Media(id)) => {
             if let Some(item) = media_item(viewer, id) {

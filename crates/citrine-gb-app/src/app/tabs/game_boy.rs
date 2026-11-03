@@ -44,6 +44,10 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
                     viewer.events.notify_error("Couldn't send the invite");
                 }
             }
+            Some(BannerAction::Resume) => {
+                viewer.emulator.running = true;
+                viewer.ui.playing.ended = None;
+            }
             Some(BannerAction::Dismiss) => viewer.ui.playing.ended = None,
             None => {}
         }

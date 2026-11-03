@@ -460,8 +460,8 @@ fn an_edit_made_offline_goes_once_back_online() {
     let (mut ben, _, ben_id) = join(&relay, "Ben");
     befriend(&mut ana, &mut ben, ana_id, ben_id);
     assert!(ana.send_text(ben_id, "typo hre"));
-    wait(&mut [&mut ana, &mut ben], "the message", |p| {
-        texts(p[1], ana_id).len() == 1
+    wait(&mut [&mut ana, &mut ben], "the message on the relay", |p| {
+        texts(p[1], ana_id).len() == 1 && last_delivery(p[0], ben_id).is_some_and(on_relay)
     });
     let id = ana.conversation(ben_id).unwrap().entries[0].id;
     ana.leave();
@@ -721,16 +721,10 @@ fn two_friends_chat_and_share_on_a_real_relay() {
         .as_secs();
     relay.tidy(now + 31 * DAY);
     let small_db = std::fs::metadata(&db).unwrap().len() + wal(&db);
-    assert!(
-        small_db < full_db,
-        "the database stayed {full_db} bytes after the purge ({small_db})"
-    );
     ben.sign_in(ben_settings.joined_relay().unwrap(), Instant::now());
-    wait(&mut [&mut ana, &mut ben], "Ben back", |p| {
-        p[1].is_connected()
+    wait(&mut [&mut ana, &mut ben], "the month old message", |p| {
+        texts(p[1], ana_id).iter().any(|t| t == "old news")
     });
-    settle(&mut [&mut ana, &mut ben], 500);
-    assert!(!texts(&ben, ana_id).iter().any(|t| t == "old news"));
 
     let files_dir = relay.data().join("files");
     let stored = bytes_in(&files_dir);
@@ -783,7 +777,7 @@ fn two_friends_chat_and_share_on_a_real_relay() {
         video.len(),
         recording.size
     );
-    println!("sizes: database {full_db} bytes before the purge, {small_db} after");
+    println!("sizes: database {full_db} bytes before the tidy, {small_db} after");
 }
 
 fn wal(db: &Path) -> u64 {

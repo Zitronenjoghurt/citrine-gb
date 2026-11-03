@@ -4,7 +4,7 @@ use crate::audio::mix::{Mixer, SoundLevels, level};
 use crate::audio::pacer::{AudioFeed, FrameClock};
 use crate::autosave::{AutosaveInterval, LastGood, PlayClock};
 use crate::controller_debug::PadLog;
-use crate::held::{Change, HeldButtons};
+use crate::held::{Change, HeldButtons, InputSource};
 use crate::local_link::LocalLink;
 use crate::media::recording::ScreenRecorder;
 use crate::online::OnlineSettings;
@@ -67,12 +67,15 @@ pub struct SaveStatus {
     #[cfg(not(target_arch = "wasm32"))]
     pub legacy_path: Option<std::path::PathBuf>,
 }
+const FAST_FORWARD: usize = 3;
+
 const GB_WIDTH: usize = 160;
 const GB_HEIGHT: usize = 144;
 
 pub struct Emulator {
     pub gb: GameBoy,
     pub running: bool,
+    pub fast_forward: bool,
     audio_feed: Option<AudioFeed>,
     pub enable_matrix: bool,
     /// 0.0 to 1.0 (e.g., 0.85 = 15% darker)
@@ -84,6 +87,7 @@ pub struct Emulator {
     pub ghosting_blend: f32,
     pub scaling: ScalingMode,
     held: HeldButtons,
+    pressed_by: Option<InputSource>,
     texture: Option<egui::TextureHandle>,
     upscale_buffer: Vec<u8>,
     last_update: Option<web_time::Instant>,
@@ -127,6 +131,7 @@ impl Default for Emulator {
         Self {
             gb: GameBoy::new_empty(GbModel::Dmg),
             running: true,
+            fast_forward: false,
             audio_feed: None,
             enable_matrix: true,
             matrix_edge_brightness: 0.85,
@@ -135,6 +140,7 @@ impl Default for Emulator {
             ghosting_blend: 0.7,
             scaling: ScalingMode::default(),
             held: HeldButtons::default(),
+            pressed_by: None,
             texture: None,
             upscale_buffer: Vec::new(),
             last_update: None,
@@ -263,7 +269,13 @@ impl Emulator {
 
         let mut ran_frame = false;
         let mut heard = self.gb.apu.audio_buffer.len();
-        for _ in 0..self.clock.advance(dt) {
+        let due = self.clock.advance(dt);
+        let frames = if self.fast_forward {
+            due * FAST_FORWARD
+        } else {
+            due
+        };
+        for _ in 0..frames {
             if let Some(session) = cable.as_deref_mut() {
                 session.pump_link(&mut self.gb);
             }
@@ -311,6 +323,7 @@ impl Emulator {
             log::error!("could not autosave before switching games: {err:?}");
         }
         self.running = false;
+        self.fast_forward = false;
         self.save_loaded = false;
         self.imported_legacy_save = false;
         self.console_switched = None;

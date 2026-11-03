@@ -8,9 +8,13 @@ use crate::online::Online;
 use citrine_gb_net::{DeviceId, DeviceInfo};
 use egui::{Align, Layout, RichText, Sense, TextStyle, Ui, vec2};
 
-const ABOUT: &str = "Every device signed in with your relay ID. Signing one out removes your relay ID and chats from it.";
+const ABOUT: &str = "Every device signed in with your sign-in key. Signing one out removes the key and your chats from it.";
 const TWO_FACTOR_OFF: &str =
-    "Anyone with your relay ID can still sign in. Two-factor sign-in stops that.";
+    "Anyone with your sign-in key can still sign in. Two-factor sign-in stops that.";
+
+pub(super) fn any(online: &Online) -> bool {
+    !online.devices().0.is_empty()
+}
 
 pub(super) fn devices(ui: &mut Ui, online: &mut Online, form: &mut JoinForm) {
     let (list, this) = online.devices();
@@ -20,7 +24,6 @@ pub(super) fn devices(ui: &mut Ui, online: &mut Online, form: &mut JoinForm) {
     let list = in_order(list, this);
     let connected = online.is_connected();
     let unix_now = jiff::Timestamp::now().as_second().max(0) as u64;
-    ui.add_space(ui.spacing().interact_size.y.max(20.0));
     ui.horizontal(|ui| {
         ui.label("Devices");
         info_mark(ui, ABOUT);

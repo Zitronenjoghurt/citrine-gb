@@ -139,17 +139,18 @@ impl Emulator {
         }
     }
 
-    pub fn finish_session(&mut self, mut session: PlaySession) -> GbResult<()> {
+    pub fn finish_session(&mut self, mut session: PlaySession) -> GbResult<bool> {
         let saves = session.finish_saves();
         self.store_saves(saves)?;
         let Some(back) = session.finish() else {
             if self.gb.link_plugged() {
                 self.gb.unplug_link();
             }
-            return Ok(());
+            return Ok(false);
         };
+        let paused = back.paused;
         self.adopt(back);
-        Ok(())
+        Ok(paused)
     }
 
     pub(super) fn adopt(&mut self, back: Returned) {
@@ -161,6 +162,10 @@ impl Emulator {
         let same_game = key == self.rom_key;
         self.gb = back.console;
         self.linked_frame = None;
+        self.last_frame.clear();
+        self.last_frame
+            .extend_from_slice(self.gb.frame().as_slice());
+        self.texture = None;
         self.rom_key = key;
         if !same_game {
             #[cfg(not(target_arch = "wasm32"))]
@@ -170,7 +175,7 @@ impl Emulator {
             self.name_game(None);
         }
         self.sync_joypad();
-        self.running = true;
+        self.running = !back.paused;
         self.save_loaded = true;
         self.last_save = None;
         self.started_at = Some(web_time::Instant::now());

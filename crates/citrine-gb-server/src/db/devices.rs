@@ -29,34 +29,6 @@ async fn copy_chats(conn: &mut SqliteConnection, account: i64, device: i64) -> R
     Ok(())
 }
 
-async fn drop_side_if_last(conn: &mut SqliteConnection, account: i64) -> Result<()> {
-    let left = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM devices WHERE account_id = ?1 AND left_at IS NULL"#,
-        account,
-    )
-    .fetch_one(&mut *conn)
-    .await?;
-    if left > 0 {
-        return Ok(());
-    }
-    sqlx::query!(
-        "UPDATE messages SET sender_keeps = 0 WHERE from_id = ?1",
-        account
-    )
-    .execute(&mut *conn)
-    .await?;
-    sqlx::query!(
-        "UPDATE messages SET receiver_keeps = 0 WHERE to_id = ?1",
-        account
-    )
-    .execute(&mut *conn)
-    .await?;
-    sqlx::query!("DELETE FROM messages WHERE sender_keeps = 0 AND receiver_keeps = 0")
-        .execute(&mut *conn)
-        .await?;
-    Ok(())
-}
-
 impl Db {
     pub async fn add_device(
         &self,
@@ -184,7 +156,6 @@ impl Db {
         sqlx::query!("DELETE FROM devices WHERE id = ?1", device)
             .execute(&mut *tx)
             .await?;
-        drop_side_if_last(&mut tx, account).await?;
         tx.commit().await?;
         Ok(true)
     }
@@ -209,7 +180,6 @@ impl Db {
         )
         .execute(&mut *tx)
         .await?;
-        drop_side_if_last(&mut tx, account).await?;
         tx.commit().await?;
         Ok(true)
     }
@@ -320,7 +290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_last_device_leaving_drops_only_its_side() {
+    async fn the_last_device_leaving_keeps_the_whole_history() {
         let (_dir, db) = db().await;
         let me = account(&db, 1, "me").await.id;
         let friend = account(&db, 2, "friend").await.id;
@@ -338,21 +308,50 @@ mod tests {
             .await
             .unwrap();
         assert!(db.leave_device(me, phone, 13).await.unwrap());
-        let again = db.add_device(me, &[5; 32], "Linux PC", 14).await.unwrap();
-        assert!(db.pending_messages(again, 0, 10).await.unwrap().is_empty());
-        let new_mac = db.add_device(friend, &[6; 32], "iPad", 15).await.unwrap();
-        let ids: Vec<_> = db
-            .pending_messages(new_mac, 0, 10)
+        assert!(db.sign_out_device(friend, theirs, 14).await.unwrap());
+        let ids = |list: Vec<crate::db::messages::StoredMessage>| {
+            list.iter().map(|m| m.id).collect::<Vec<_>>()
+        };
+        let again = db
+            .add_device(me, &[5; 32], "Linux PC", 400 * 86_400)
             .await
-            .unwrap()
-            .iter()
-            .map(|m| m.id)
-            .collect();
-        assert_eq!(ids, vec![to_me, from_me]);
-        assert!(db.leave_device(me, again, 16).await.unwrap());
-        assert!(db.sign_out_device(friend, theirs, 17).await.unwrap());
-        assert!(db.leave_device(friend, new_mac, 18).await.unwrap());
-        assert_eq!(db.waiting_messages().await.unwrap(), (0, 0));
-        assert_eq!(db.stored_messages().await.unwrap(), (0, 0));
+            .unwrap();
+        assert_eq!(
+            ids(db.pending_messages(again, 0, 10).await.unwrap()),
+            [to_me, from_me]
+        );
+        let new_mac = db.add_device(friend, &[6; 32], "iPad", 15).await.unwrap();
+        assert_eq!(
+            ids(db.pending_messages(new_mac, 0, 10).await.unwrap()),
+            [to_me, from_me]
+        );
+        assert_eq!(db.stored_messages().await.unwrap(), (2, 6));
+    }
+
+    #[tokio::test]
+    async fn only_messages_no_device_got_yet_fill_the_inbox() {
+        let (_dir, db) = db().await;
+        let me = account(&db, 1, "me").await.id;
+        let friend = account(&db, 2, "friend").await.id;
+        let phone = db
+            .add_device(me, &[7; 32], "Android phone", 10)
+            .await
+            .unwrap();
+        let old = db
+            .insert_message(friend, me, None, 11, &sealed(1))
+            .await
+            .unwrap();
+        db.ack_messages(phone, &[old]).await.unwrap();
+        assert_eq!(db.waiting_between(friend, me).await.unwrap(), (0, 0));
+        let pc = db.add_device(me, &[8; 32], "Linux PC", 12).await.unwrap();
+        assert_eq!(db.pending_messages(pc, 0, 10).await.unwrap().len(), 1);
+        assert_eq!(db.waiting_between(friend, me).await.unwrap(), (0, 0));
+        assert!(db.leave_device(me, phone, 13).await.unwrap());
+        assert!(db.leave_device(me, pc, 14).await.unwrap());
+        assert_eq!(db.waiting_between(friend, me).await.unwrap(), (0, 0));
+        db.insert_message(friend, me, None, 15, &sealed(2))
+            .await
+            .unwrap();
+        assert_eq!(db.waiting_between(friend, me).await.unwrap(), (1, 3));
     }
 }

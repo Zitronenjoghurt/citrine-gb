@@ -2,11 +2,11 @@ use super::{
     MediaId, MediaInfo, MediaItem, NewMedia, decode_png, encode_thumbnail, sort_newest_first,
     unique_file_name,
 };
+use crate::utils::idb::{finished, wait};
 use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use web_sys::wasm_bindgen::closure::Closure;
 use web_sys::wasm_bindgen::{JsCast, JsValue};
-use web_sys::{IdbDatabase, IdbRequest, IdbTransaction, IdbTransactionMode};
+use web_sys::{IdbDatabase, IdbTransaction, IdbTransactionMode};
 
 const DB_NAME: &str = "citrine-media";
 const DB_VERSION: u32 = 1;
@@ -292,64 +292,5 @@ fn readwrite(db: &IdbDatabase) -> Result<IdbTransaction, JsValue> {
 }
 
 async fn open() -> Result<IdbDatabase, JsValue> {
-    let factory = web_sys::window()
-        .ok_or("no window")?
-        .indexed_db()?
-        .ok_or("no IndexedDB")?;
-    let request = factory.open_with_u32(DB_NAME, DB_VERSION)?;
-    let target = request.clone();
-    let upgrade = Closure::once_into_js(move || {
-        if let Ok(db) = target.result() {
-            let db: IdbDatabase = db.unchecked_into();
-            let names = db.object_store_names();
-            for name in [ITEMS, FILES] {
-                if !names.contains(name) {
-                    let _ = db.create_object_store(name);
-                }
-            }
-        }
-    });
-    request.set_onupgradeneeded(Some(upgrade.unchecked_ref()));
-    Ok(wait(&request).await?.unchecked_into())
-}
-
-async fn wait(request: &IdbRequest) -> Result<JsValue, JsValue> {
-    let request = request.clone();
-    let promise = js_sys::Promise::new(&mut |resolve, reject| {
-        let done = request.clone();
-        let failed = request.clone();
-        let on_success = Closure::once_into_js(move || {
-            let _ = resolve.call1(&JsValue::NULL, &done.result().unwrap_or(JsValue::UNDEFINED));
-        });
-        let on_error = Closure::once_into_js(move || {
-            let error = failed
-                .error()
-                .ok()
-                .flatten()
-                .map_or(JsValue::UNDEFINED, JsValue::from);
-            let _ = reject.call1(&JsValue::NULL, &error);
-        });
-        request.set_onsuccess(Some(on_success.unchecked_ref()));
-        request.set_onerror(Some(on_error.unchecked_ref()));
-    });
-    wasm_bindgen_futures::JsFuture::from(promise).await
-}
-
-async fn finished(tx: &IdbTransaction) -> Result<(), JsValue> {
-    let tx = tx.clone();
-    let promise = js_sys::Promise::new(&mut |resolve, reject| {
-        let on_complete = Closure::once_into_js(move || {
-            let _ = resolve.call0(&JsValue::NULL);
-        });
-        let failed = tx.clone();
-        let on_error = Closure::once_into_js(move || {
-            let error = failed.error().map_or(JsValue::UNDEFINED, JsValue::from);
-            let _ = reject.call1(&JsValue::NULL, &error);
-        });
-        tx.set_oncomplete(Some(on_complete.unchecked_ref()));
-        tx.set_onabort(Some(on_error.unchecked_ref()));
-    });
-    wasm_bindgen_futures::JsFuture::from(promise)
-        .await
-        .map(drop)
+    crate::utils::idb::open(DB_NAME, DB_VERSION, &[ITEMS, FILES]).await
 }

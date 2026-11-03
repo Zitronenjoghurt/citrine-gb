@@ -21,9 +21,13 @@ use citrine_gb::rom::header::RomCgbMode;
 use egui::{Response, ScrollArea, Ui, Widget};
 
 #[cfg(not(target_arch = "wasm32"))]
+const UPDATES_NOTE: &str = "Citrine asks GitHub for the newest release when it starts and once a day. Updates install only when you choose to.";
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 const AUTOSAVE_NOTE: &str = "Citrine also autosaves when you close it or switch games, and after a crash. Autosaves show in the Saves tab, apart from your snapshots.";
 #[cfg(target_arch = "wasm32")]
 const AUTOSAVE_NOTE: &str = "Citrine also autosaves when you leave the page or switch games, and after a crash. Autosaves show in the Saves tab, apart from your snapshots.";
+#[cfg(target_os = "android")]
+const AUTOSAVE_NOTE: &str = "Citrine also autosaves when you leave the app or switch games, and after a crash. Autosaves show in the Saves tab, apart from your snapshots.";
 
 pub struct SettingsContent<'a> {
     settings: &'a mut Settings,
@@ -35,7 +39,7 @@ pub struct SettingsContent<'a> {
     online: Option<(&'a mut crate::online::Online, &'a mut online::JoinForm)>,
     your_data: Option<&'a mut your_data::YourDataUi>,
     top_space: f32,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     discord: Option<(
         Option<crate::discord::GameNow>,
         Option<egui::TextureId>,
@@ -72,7 +76,7 @@ impl<'a> SettingsContent<'a> {
             online: None,
             your_data: None,
             top_space: 0.0,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             discord: None,
         }
     }
@@ -87,7 +91,7 @@ impl<'a> SettingsContent<'a> {
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     pub fn discord(
         mut self,
         game: Option<crate::discord::GameNow>,
@@ -114,6 +118,7 @@ impl Widget for SettingsContent<'_> {
         ui.scope(|ui| {
             ui.visuals_mut().clip_rect_margin = 0.0;
             ScrollArea::vertical()
+                .id_salt("settings_content_scroll")
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.visuals_mut().clip_rect_margin = margin;
@@ -142,7 +147,7 @@ impl SettingsContent<'_> {
     fn general(self, ui: &mut Ui) {
         let s = self.settings;
         let game = self.game;
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let discord = self.discord;
         let touch = s.layout.is_touch(ui.ctx());
 
@@ -215,6 +220,11 @@ impl SettingsContent<'_> {
                     .changed();
             });
 
+            #[cfg(not(target_arch = "wasm32"))]
+            form.row_with_hint("Check for updates", UPDATES_NOTE, |ui| {
+                s.dirty |= ui.checkbox(&mut s.check_updates, "").changed();
+            });
+
             form.row("Dev tools", |ui| {
                 s.dirty |= ui.checkbox(&mut s.dev_mode, "").changed();
             });
@@ -280,10 +290,13 @@ impl SettingsContent<'_> {
                 }
             });
         });
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         if let Some((now, screen, pictures_off)) = discord {
             ui.add_space(10.0);
             super::discord::section(ui, s, now.as_ref(), screen, pictures_off);
+        }
+        if crate::app::mobile::touch_square(ui) > 0.0 {
+            return;
         }
         ui.separator();
         let where_kept = format!(
@@ -345,13 +358,16 @@ impl SettingsContent<'_> {
         });
 
         if let Some(audio) = self.audio {
+            let phone = crate::app::mobile::touch_square(ui) > 0.0;
             ui.add_space(8.0);
             if audio.is_running() {
-                ui.small(format!(
-                    "Playing at {} Hz on {}.",
-                    audio.get_sample_rate(),
-                    audio.device_name().unwrap_or("the default device")
-                ));
+                if !phone {
+                    ui.small(format!(
+                        "Playing at {} Hz on {}.",
+                        audio.get_sample_rate(),
+                        audio.device_name().unwrap_or("the default device")
+                    ));
+                }
             } else {
                 ui.small("Sound starts when you load a game or tap the screen.");
             }
@@ -447,10 +463,17 @@ impl SettingsContent<'_> {
 
     fn online_page(self, ui: &mut Ui) {
         let mut spare = online::JoinForm::default();
+        let part = if self.settings.layout.is_touch(ui.ctx()) {
+            online::Part::Relay
+        } else {
+            online::Part::All
+        };
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
             match self.online {
-                Some((client, form)) => online::show(ui, self.settings, Some(client), form),
-                None => online::show(ui, self.settings, None, &mut spare),
+                Some((client, form)) => {
+                    online::show_part(ui, self.settings, Some(client), form, part)
+                }
+                None => online::show_part(ui, self.settings, None, &mut spare, part),
             }
         });
     }
@@ -744,7 +767,7 @@ mod tests {
         assert!(joined.iter().any(|(_, text)| text == "Relay ID"));
         for (_, text) in joined {
             assert!(
-                !text.contains("Anyone with your relay ID"),
+                !text.contains("Anyone with your sign-in key"),
                 "Online shows {text:?} on the page"
             );
         }

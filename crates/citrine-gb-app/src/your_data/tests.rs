@@ -95,6 +95,7 @@ fn sign_in(settings: &mut Settings) {
             display_name: Some("Clara".into()),
             relay_key: None,
             device: None,
+            others: Vec::new(),
         },
     );
 }

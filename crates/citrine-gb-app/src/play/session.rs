@@ -205,6 +205,18 @@ impl PlaySession {
     }
 
     #[cfg(test)]
+    pub(crate) fn cable_transfers(&self) -> u64 {
+        self.round
+            .rollback()
+            .map_or(0, |r| r.cable_transfers().iter().sum())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirmed_frame(&self) -> u32 {
+        self.round.rollback().map_or(0, Rollback::confirmed_frame)
+    }
+
+    #[cfg(test)]
     pub(crate) fn start(&self) -> Option<citrine_gb_net::Start> {
         self.round.start
     }

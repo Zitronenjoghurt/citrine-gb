@@ -3,7 +3,7 @@ use crate::app::ui_state::keybinds::{
     BindingCapture, BindingKind, BindingTarget, Captured, GbButton, KeyBindings, key_label,
 };
 use crate::app::ui_state::settings::{ScalingMode, Settings};
-use crate::app::ui_state::touch::{LandscapeControls, TouchSettings};
+use crate::app::ui_state::touch::{HiddenButtons, LandscapeControls, TouchSettings};
 use crate::app::widgets;
 use crate::app::widgets::chip::{CHIP_HEIGHT, chip_text};
 use crate::app::widgets::generic_select::GenericSelect;
@@ -17,12 +17,28 @@ use crate::local_link::Half;
 use egui::{Response, RichText, Ui, Widget};
 use strum::IntoEnumIterator;
 
+#[cfg(target_arch = "wasm32")]
+pub const RINGER_HINT: &str = "Chrome on Android vibrates only while the ringer is on.";
+
 pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) -> bool {
+    let debug = bindings(ui, settings, capture);
+    section_with_hint(
+        ui,
+        icons::DEVICE_MOBILE,
+        "On-screen buttons",
+        "The touch layout shows these on phones and small windows.",
+        |ui| {
+            touch_grid(ui, settings);
+        },
+    );
+    debug
+}
+
+pub fn bindings(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) -> bool {
     capture.mark_shown();
     apply_capture(settings, capture);
     capture_banner(ui, capture);
     let mut debug = false;
-
     section(ui, icons::GAME_CONTROLLER, "Game Boy buttons", |ui| {
         let unbound = settings.bindings.unbound();
         if !unbound.is_empty() {
@@ -109,15 +125,6 @@ pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) 
         },
     );
 
-    section_with_hint(
-        ui,
-        icons::DEVICE_MOBILE,
-        "On-screen buttons",
-        "The touch layout shows these on phones and small windows.",
-        |ui| {
-            touch_grid(ui, settings);
-        },
-    );
     debug
 }
 
@@ -497,10 +504,25 @@ fn touch_grid(ui: &mut Ui, settings: &mut Settings) -> Response {
                         .changed();
                 });
 
+                form.row_with_hint("With the UI hidden", HiddenButtons::NOTE, |ui| {
+                    dirty |= GenericSelect::from_enum(
+                        &mut s.hidden_buttons,
+                        "touch_hidden_buttons_select",
+                    )
+                    .default_value(HiddenButtons::default())
+                    .ui(ui)
+                    .changed();
+                });
+
                 form.row_with_hint("Left-handed", "Puts the d-pad on the right.", |ui| {
                     dirty |= ui.checkbox(&mut s.mirrored, "").changed();
                 });
 
+                #[cfg(target_arch = "wasm32")]
+                form.row_with_hint("Vibrate on press", RINGER_HINT, |ui| {
+                    dirty |= ui.checkbox(&mut s.haptics, "").changed();
+                });
+                #[cfg(not(target_arch = "wasm32"))]
                 form.row("Vibrate on press", |ui| {
                     dirty |= ui.checkbox(&mut s.haptics, "").changed();
                 });

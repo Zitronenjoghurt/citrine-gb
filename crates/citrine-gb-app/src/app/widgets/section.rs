@@ -27,6 +27,10 @@ fn section_with(
     hint: Option<&str>,
     body: impl FnOnce(&mut Ui),
 ) {
+    if crate::app::mobile::touch_square(ui) > 0.0 {
+        phone_section(ui, title, hint, body);
+        return;
+    }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         heading(ui, icon, title);
@@ -38,4 +42,30 @@ fn section_with(
     ui.add_space(2.0);
     body(ui);
     ui.add_space(14.0);
+}
+
+fn phone_section(ui: &mut Ui, title: &str, hint: Option<&str>, body: impl FnOnce(&mut Ui)) {
+    use crate::app::mobile::kit;
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(title)
+                .size(13.0)
+                .color(ui.visuals().weak_text_color()),
+        );
+        if let Some(hint) = hint {
+            info_mark(ui, hint);
+        }
+    });
+    ui.add_space(2.0);
+    egui::Frame::new()
+        .fill(kit::card_fill(ui.visuals()))
+        .corner_radius(egui::CornerRadius::same(kit::RADIUS))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui);
+        });
+    ui.add_space(6.0);
 }

@@ -21,6 +21,7 @@ pub struct FileChannels {
     pub save_rx: Receiver<SaveOutcome>,
     pub copy_tx: Sender<Result<String, String>>,
     pub copy_rx: Receiver<Result<String, String>>,
+    pub rom_copies: crate::app::ui_state::recent::copies::RomCopies,
 }
 
 impl Default for FileChannels {
@@ -53,6 +54,7 @@ impl Default for FileChannels {
             save_rx,
             copy_tx,
             copy_rx,
+            rom_copies: Default::default(),
         }
     }
 }

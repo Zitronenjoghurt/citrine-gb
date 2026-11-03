@@ -13,7 +13,6 @@ use web_time::Instant;
 
 pub mod history;
 
-pub const KEEP_PER_FRIEND: usize = 300;
 const NAMESPACE: &str = "chats";
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 const RECEIPT_EVERY: Duration = Duration::from_secs(1);
@@ -295,6 +294,17 @@ impl ChatState {
                 self.dirty = true;
             }
         }
+        if chat.unread > 0
+            && chat
+                .entries
+                .iter()
+                .rev()
+                .find(|e| !e.mine)
+                .is_some_and(|e| e.delivery == Delivery::Seen)
+        {
+            chat.unread = 0;
+            self.dirty = true;
+        }
         if let Some(owed) = self.receipts.get_mut(&friend) {
             owed.delivered.retain(|id| !receipt.read.contains(id));
             owed.read.retain(|id| !receipt.read.contains(id));
@@ -352,13 +362,6 @@ impl ChatState {
     fn push(&mut self, friend: OnlineId, entry: ChatEntry) {
         let chat = self.chats.entry(friend).or_default();
         chat.entries.push(entry);
-        if chat.entries.len() > KEEP_PER_FRIEND {
-            let extra = chat.entries.len() - KEEP_PER_FRIEND;
-            for old in chat.entries.drain(..extra) {
-                chat.relayed.remove(&old.id);
-                self.held.remove(&old.id);
-            }
-        }
         self.dirty = true;
     }
 
@@ -689,6 +692,7 @@ impl Online {
             _ => {}
         }
         self.chat.owe(from, envelope.id, false);
+        self.typing.gone(from);
         let chat = self.chat.chats.entry(from).or_default();
         if chat.entries.iter().any(|e| e.id == envelope.id) {
             return;
@@ -793,6 +797,18 @@ impl Online {
             if let Some(store) = &self.chat.store {
                 let _ = store.delete(NAMESPACE, &history_name(&owner));
             }
+        }
+    }
+
+    pub fn forget_chats(&mut self, owner: &str) {
+        if self.chat.owner.as_deref() == Some(owner) {
+            self.chat.owner = None;
+            self.chat.chats.clear();
+            self.chat.held.clear();
+            self.chat.dirty = false;
+        }
+        if let Some(store) = &self.chat.store {
+            let _ = store.delete(NAMESPACE, &history_name(owner));
         }
     }
 

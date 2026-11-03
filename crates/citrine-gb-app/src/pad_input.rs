@@ -4,7 +4,9 @@ use crate::app::ui_state::keybinds::{
 use crate::controller_debug::PadInfo;
 use std::fmt::{Display, Formatter};
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "android", test))]
+pub mod android_map;
+#[cfg(not(any(windows, target_os = "android")))]
 mod gilrs_source;
 #[cfg(any(windows, test))]
 mod sdl_map;
@@ -91,9 +93,14 @@ pub trait PadSource {
     fn api(&self) -> String;
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn open_source() -> Box<dyn PadSource> {
     Box::new(gilrs_source::GilrsPads::new())
+}
+
+#[cfg(target_os = "android")]
+pub fn open_source() -> Box<dyn PadSource> {
+    Box::new(crate::platform::android::pads::AndroidPads)
 }
 
 #[cfg(windows)]

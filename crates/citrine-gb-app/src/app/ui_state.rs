@@ -10,6 +10,8 @@ pub mod hotkeys;
 pub mod keybinds;
 pub mod palette;
 pub mod recent;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod rom_folder;
 pub mod settings;
 pub mod synced;
 pub mod touch;
@@ -21,6 +23,8 @@ pub struct UiState {
     pub e2e: E2E,
     pub info: InfoState,
     pub recent: RecentRoms,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub rom_folder: rom_folder::RomFolder,
     pub registers: RegistersState,
     #[serde(skip_serializing)]
     pub settings: Settings,
@@ -35,6 +39,8 @@ pub struct UiState {
     pub update_avg_timer: AvgTimer,
     #[serde(skip, default)]
     pub capture: keybinds::BindingCapture,
+    #[serde(skip, default)]
+    pub update: crate::update::Updater,
     #[serde(skip, default)]
     pub palette_editor: crate::app::widgets::settings::palette::PaletteEditorState,
     #[serde(skip, default)]

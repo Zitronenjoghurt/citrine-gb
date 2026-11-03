@@ -226,6 +226,20 @@ impl Audio {
         }
     }
 
+    #[cfg(target_os = "android")]
+    pub fn pause(&mut self) {
+        if !self.resumed {
+            return;
+        }
+        let Some(stream) = &self.stream else {
+            return;
+        };
+        match stream.pause() {
+            Ok(()) => self.resumed = false,
+            Err(err) => log::warn!("Failed to pause audio: {err}"),
+        }
+    }
+
     pub fn latency_ms(&self) -> u32 {
         self.latency_ms
     }

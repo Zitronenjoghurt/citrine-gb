@@ -122,18 +122,115 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ env.ARCHIVE_FILE }}
 
-  release:
-    needs: build
+  android:
     runs-on: ubuntu-latest
+
+    env:
+      SIGNED: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;36.1.0" "ndk;29.0.14206865"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Write release key
+        if: env.SIGNED == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "CITRINE_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build
+        working-directory: android
+        env:
+          CITRINE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CITRINE_KEY_ALIAS: citrine
+          CITRINE_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Package
+        if: env.SIGNED == 'true'
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          APK_FILE="citrine-${TAG}-android.apk"
+          mv android/app/build/outputs/apk/release/app-release.apk "$APK_FILE"
+          echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
+
+      - name: Skip unsigned upload
+        if: env.SIGNED != 'true'
+        run: |
+          ls -l android/app/build/outputs/apk/release/
+          echo "The ANDROID_KEYSTORE secrets are not set, so the APK is unsigned and stays off the release." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/attest-build-provenance@v4
+        if: env.SIGNED == 'true'
+        with:
+          subject-path: ${{ env.APK_FILE }}
+
+      - uses: actions/upload-artifact@v7
+        if: env.SIGNED == 'true'
+        with:
+          name: android
+          path: ${{ env.APK_FILE }}
+
+      - uses: actions/upload-artifact@v7
+        if: env.SIGNED == 'true'
+        with:
+          name: android-mapping
+          path: android/app/build/outputs/mapping/release/mapping.txt
+
+  release:
+    needs: [build, android]
+    runs-on: ubuntu-latest
+
+    env:
+      SIGN_UPDATES: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
 
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: '!android-mapping'
           merge-multiple: true
 
       - name: Generate checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt
+
+      - name: Sign checksums
+        if: env.SIGN_UPDATES == 'true'
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/update.key"
+          minisign -S -s "$RUNNER_TEMP/update.key" -m dist/SHA256SUMS.txt -t "citrine $TAG"
+          rm "$RUNNER_TEMP/update.key"
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -147,6 +244,8 @@ jobs:
             Citrine is not signed with an Apple Developer ID, so macOS blocks the first launch. Open **System Settings → Privacy & Security**, scroll to the message about Citrine, and click **Open Anyway**. You only need to do this once.
 
             **Windows.** Download the `.zip`, extract it, and run `citrine.exe`. SmartScreen may warn because the binary is not code-signed. Verify the checksum below, then choose "More info" → "Run anyway".
+
+            **Android.** Download the `.apk` on your phone and open it. Android asks once to allow installs from your browser or file manager. Android 8 or newer, 64-bit ARM.
 
             **Linux.** Download the `.tar.gz` for your architecture and extract it. Run `./install.sh` to add Citrine to your applications menu, or run `./citrine` directly.
 

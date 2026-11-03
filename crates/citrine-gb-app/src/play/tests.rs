@@ -37,10 +37,13 @@ impl Rng {
 }
 
 type Meter = std::rc::Rc<std::cell::RefCell<Vec<(Instant, usize)>>>;
+type Cut = std::rc::Rc<std::cell::Cell<bool>>;
 
 struct Lag {
     inner: Box<dyn Transport>,
     meter: Meter,
+    cut: Cut,
+    closed: bool,
     half: Duration,
     jitter_ms: u64,
     rng: Rng,
@@ -59,6 +62,9 @@ impl Lag {
 
 impl Transport for Lag {
     fn send(&mut self, bytes: Vec<u8>) {
+        if self.closed {
+            return;
+        }
         let now = Instant::now();
         if let Ok(ClientMsg::Play { sealed, .. } | ClientMsg::Game { sealed, .. }) =
             ClientMsg::decode(&bytes)
@@ -71,6 +77,13 @@ impl Transport for Lag {
     }
 
     fn poll(&mut self) -> Option<TransportEvent> {
+        if self.closed {
+            return None;
+        }
+        if self.cut.replace(false) {
+            self.closed = true;
+            return Some(TransportEvent::Closed);
+        }
         let now = Instant::now();
         while self.out.front().is_some_and(|(due, _)| *due <= now) {
             if let Some((_, bytes)) = self.out.pop_front() {
@@ -92,7 +105,7 @@ impl Transport for Lag {
     }
 }
 
-fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64, meter: Meter) -> Connector {
+fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64, meter: Meter, cut: Cut) -> Connector {
     let mut websocket = transport::websocket();
     let mut opened = 0;
     Box::new(move |url| {
@@ -101,6 +114,8 @@ fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64, meter: Meter) -> Connector
         Box::new(Lag {
             inner: websocket(url),
             meter: meter.clone(),
+            cut: cut.clone(),
+            closed: false,
             half: Duration::from_millis(one_way_ms) / 2,
             jitter_ms: jitter_ms / 2,
             rng: Rng(seed + opened),
@@ -195,6 +210,7 @@ impl Shelf for Nothing {
 pub(crate) struct Side {
     pub(crate) online: Online,
     meter: Meter,
+    cut: Cut,
     pub(crate) play: Play,
     rng: Rng,
     held: JoypadState,
@@ -206,14 +222,19 @@ pub(crate) struct Side {
     presses_start: bool,
     own: Option<GameBoy>,
     gave: Option<Vec<u8>>,
+    runs_own: bool,
+    start_only: bool,
+    stop_at: Option<u32>,
 }
 
 impl Side {
     fn new(lag: (u64, u64), seed: u64, shelf: Box<dyn Shelf>) -> Self {
         let meter = Meter::default();
+        let cut = Cut::default();
         Self {
-            online: Online::new(lagged(lag.0, lag.1, seed, meter.clone())),
+            online: Online::new(lagged(lag.0, lag.1, seed, meter.clone(), cut.clone())),
             meter,
+            cut,
             play: Play::new(shelf),
             rng: Rng(seed),
             held: JoypadState::empty(),
@@ -225,6 +246,9 @@ impl Side {
             presses_start: false,
             own: None,
             gave: None,
+            runs_own: false,
+            start_only: false,
+            stop_at: None,
         }
     }
 
@@ -263,6 +287,12 @@ impl Side {
 
     fn buttons(&mut self) -> JoypadState {
         self.pressed += 1;
+        if self.start_only {
+            return match self.presses_start && (30..35).contains(&(self.frame() % 60)) {
+                true => JoypadState::START,
+                false => JoypadState::empty(),
+            };
+        }
         if self.presses_start && self.pressed % 90 < 5 {
             return JoypadState::START;
         }
@@ -290,8 +320,17 @@ impl Side {
             }
         }
         let buttons = self.buttons();
+        if self.runs_own
+            && !self.play.is_live()
+            && let Some(gb) = &mut self.own
+        {
+            gb.release_button(buttons.complement());
+            gb.press_button(buttons);
+            gb.run_frame();
+        }
         if let Some(play) = self.play.session_mut()
             && play.stage() == Stage::Playing
+            && self.stop_at.is_none_or(|at| play.frame() < at)
         {
             match play.mode() {
                 Some(Mode::Rollback) => {
@@ -656,6 +695,101 @@ fn either_player_plugs_and_pulls_the_cable() {
         0
     );
     assert_matches_reference(pair.host.session(), [SNAKE, SNAKE]);
+}
+
+fn transfers_over(pair: &mut Pair, frames: u32) -> [u64; 2] {
+    let before = [pair.host.session(), pair.guest.session()].map(PlaySession::cable_transfers);
+    pair.play_frames(frames);
+    let after = [pair.host.session(), pair.guest.session()].map(PlaySession::cable_transfers);
+    [after[0] - before[0], after[1] - before[1]]
+}
+
+fn linked_snakes() -> Pair {
+    let mut pair = Pair::new(false, 30, 10, homebrew());
+    for side in [&mut pair.host, &mut pair.guest] {
+        side.runs_own = true;
+        side.start_only = true;
+    }
+    let session = pair.invite(snake());
+    pair.accept(session, MyGame::Own(snake()));
+    pair
+}
+
+fn dropped_after(frames: u32) -> (Pair, [Returned; 2]) {
+    let mut pair = linked_snakes();
+    let linked = transfers_over(&mut pair, frames);
+    assert!(
+        linked.iter().all(|&n| n >= 20),
+        "before the drop: {linked:?}"
+    );
+    let at = pair.host.frame().max(pair.guest.frame()) + 1;
+    for side in [&mut pair.host, &mut pair.guest] {
+        side.stop_at = Some(at);
+    }
+    pair.until("both confirmed the same frame", |p| {
+        [&p.host, &p.guest]
+            .iter()
+            .all(|side| side.frame() == at && side.session().confirmed_frame() == at)
+    });
+    pair.guest.cut.set(true);
+    pair.until("both lost the session", |p| {
+        !p.host.play.is_live() && !p.guest.play.is_live()
+    });
+    for side in [&mut pair.host, &mut pair.guest] {
+        side.stop_at = None;
+    }
+    let returned = [&mut pair.host, &mut pair.guest].map(|side| {
+        assert_eq!(side.stage(), Some(Stage::Ended(Ending::Dropped)));
+        side.play.close().and_then(PlaySession::finish).unwrap()
+    });
+    (pair, returned)
+}
+
+fn running_snake() -> GameFile {
+    GameFile {
+        running: true,
+        ..snake()
+    }
+}
+
+#[test]
+fn a_dropped_snake_pair_links_again_when_both_come_back() {
+    for frames in [300, 900] {
+        let (mut pair, returned) = dropped_after(frames);
+        for (side, back) in [&mut pair.host, &mut pair.guest].into_iter().zip(returned) {
+            side.runs_own = !back.paused;
+            side.own = Some(back.console);
+        }
+        pair.until("the guest is back", |p| p.guest.online.is_connected());
+        let session = pair.invite(running_snake());
+        pair.accept(session, MyGame::Own(running_snake()));
+        let moved = transfers_over(&mut pair, 600);
+        assert!(
+            moved.iter().all(|&n| n >= 30),
+            "after {frames} frames: {moved:?}"
+        );
+        let (host, guest) = (pair.host.session(), pair.guest.session());
+        assert_eq!(host.resyncs() + guest.resyncs(), 0);
+        assert_same_inputs(host, guest);
+    }
+}
+
+#[test]
+fn leaving_hands_back_a_running_console_and_a_drop_a_paused_one() {
+    let mut pair = Pair::new(false, 30, 10, homebrew());
+    let session = pair.invite(snake());
+    pair.accept(session, MyGame::Own(snake()));
+    pair.play_frames(60);
+    pair.host.play.leave(&mut pair.host.online);
+    pair.until("the friend sees it", |p| {
+        p.guest.stage() == Some(Stage::Ended(Ending::FriendLeft))
+    });
+    for side in [&mut pair.host, &mut pair.guest] {
+        let back = side.play.close().and_then(PlaySession::finish).unwrap();
+        assert!(!back.paused);
+    }
+    let (_, returned) = dropped_after(300);
+    assert!(returned.iter().all(|back| back.paused));
 }
 
 #[test]
@@ -1232,7 +1366,12 @@ fn every_ending_keeps_both_games_where_they_were() {
                 back.cpu.pc,
                 back.cycle_counter,
             );
-            assert!(now == was, "{close:?} changed the game");
+            match close {
+                Close::Leave => assert!(now == was, "{close:?} changed the game"),
+                Close::Drop | Close::Timeout => {
+                    assert!(now.2 <= was.2, "{close:?} moved the game on")
+                }
+            }
             assert!(!back.link_plugged());
         }
     }
@@ -1316,4 +1455,67 @@ fn a_link_session_stays_inside_the_relay_play_budget() {
         assert!(s.lowest_room > 0.0);
         assert!((s.bytes as f64 / s.seconds) < per_second);
     }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn solo(frame: &[u8]) -> Option<crate::discord::Unit<'_>> {
+    Some(crate::discord::Unit {
+        game: "solo".into(),
+        running: true,
+        frame,
+    })
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[test]
+fn the_discord_picture_in_a_session_is_my_own_unit_and_keeps_moving() {
+    use crate::discord::{frame_key, my_unit};
+    let (mut pair, _, _) = joined_pair(true);
+    pair.host.presses_start = true;
+    pair.play_frames(60);
+    let before = [&pair.host, &pair.guest]
+        .map(|side| frame_key(my_unit(Some(side.session()), None).unwrap().frame));
+    pair.play_frames(300);
+    for (side, before) in [&pair.host, &pair.guest].into_iter().zip(before) {
+        let session = side.session();
+        let mine = session.console(true).unwrap();
+        let unit = my_unit(Some(session), solo(&[1, 2, 3])).unwrap();
+        assert!(std::ptr::eq(unit.frame, mine.frame().as_slice()));
+        assert!(unit.running);
+        assert_eq!(
+            unit.game,
+            format!("together {}", mine.cartridge.header.sha256_hex_string())
+        );
+        assert_ne!(frame_key(unit.frame), before);
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[test]
+fn a_watcher_sends_no_discord_picture_of_the_player() {
+    let mut pair = watching_pair(false, homebrew(), snake());
+    pair.play_frames(120);
+    let watcher = pair.host.session();
+    assert!(watcher.console(false).is_some());
+    assert!(crate::discord::my_unit(Some(watcher), solo(&[1])).is_none());
+    let player = pair.guest.session();
+    let unit = crate::discord::my_unit(Some(player), solo(&[1])).unwrap();
+    assert!(std::ptr::eq(
+        unit.frame,
+        player.console(true).unwrap().frame().as_slice()
+    ));
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[test]
+fn after_a_session_the_discord_picture_is_the_solo_game_again() {
+    let mut pair = Pair::new(false, 30, 10, homebrew());
+    let session = pair.invite(snake());
+    pair.accept(session, MyGame::Own(snake()));
+    pair.play_frames(60);
+    pair.host.play.leave(&mut pair.host.online);
+    let frame = [7];
+    let unit = crate::discord::my_unit(pair.host.play.session(), solo(&frame)).unwrap();
+    assert_eq!(unit.game, "solo");
+    assert!(crate::discord::my_unit(None, solo(&frame)).is_some_and(|u| u.game == "solo"));
 }

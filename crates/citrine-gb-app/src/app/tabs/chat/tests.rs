@@ -714,7 +714,7 @@ fn the_header_shows_the_name_in_a_thin_dock() {
                     egui::SidePanel::left("dock")
                         .exact_width(width)
                         .show(ctx, |ui| {
-                            header(ui, &online, &person, true);
+                            header(ui, &online, &person, false, None);
                         });
                 })
                 .shapes;
@@ -825,4 +825,27 @@ fn a_shared_screenshot_names_its_game_as_this_device_does() {
         "{shown:?}"
     );
     assert!(!shown.iter().any(|t| t.contains("POKEMON")), "{shown:?}");
+}
+
+#[test]
+fn the_typing_slot_shows_a_friend_typing_first_then_the_tab_tip() {
+    let tip = |text: &str| Some(Slot::Tip(text.to_owned()));
+    let typing = Some(Slot::Typing("Mia is typing".to_owned()));
+    let key = Some("Tab");
+    assert_eq!(slot(None, true, Field::Away, key), tip("Tab to chat"));
+    assert_eq!(
+        slot(None, true, Field::Focused, key),
+        tip("Tab or Esc to go back to the game")
+    );
+    assert_eq!(slot(None, true, Field::Editing, key), None);
+    assert_eq!(slot(Some("Mia"), true, Field::Away, key), typing);
+    assert_eq!(slot(Some("Mia"), true, Field::Focused, key), typing);
+    assert_eq!(slot(Some("Mia"), false, Field::Away, key), typing);
+    assert_eq!(slot(None, false, Field::Away, key), None);
+    assert_eq!(slot(None, false, Field::Focused, key), None);
+    assert_eq!(slot(None, true, Field::Away, None), None);
+    assert_eq!(
+        slot(None, true, Field::Focused, None),
+        tip("Esc to go back to the game")
+    );
 }

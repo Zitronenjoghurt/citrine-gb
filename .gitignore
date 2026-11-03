@@ -31,3 +31,5 @@ crates/citrine-gb-app/dist
 crates/citrine-gb-server/data
 crates/citrine-gb-server/static
 crates/citrine-gb-server/docker/data
+keystore.properties
+*.jks

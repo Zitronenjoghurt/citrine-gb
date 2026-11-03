@@ -68,13 +68,13 @@ pub enum Act {
     Delete,
     PlayReplay,
     DownloadCodec,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     Reveal,
 }
 
 pub struct ViewerState {
     open: Option<(Source, ItemKey)>,
-    shown: Option<Shown>,
+    shown: Option<Box<Shown>>,
     tx: Sender<(ItemKey, Option<Vec<u8>>)>,
     rx: Receiver<(ItemKey, Option<Vec<u8>>)>,
     drag: Vec2,

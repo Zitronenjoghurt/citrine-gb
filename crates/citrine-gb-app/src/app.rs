@@ -55,9 +55,9 @@ mod your_data;
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Citrine {
     pub dock: DockState<Tab>,
-    pub ui: UiState,
+    pub ui: Box<UiState>,
     #[serde(skip, default)]
-    pub emulator: Emulator,
+    pub emulator: Box<Emulator>,
     #[serde(skip, default)]
     pub files: FileChannels,
     #[serde(skip, default = "crate::pad_input::open_source")]
@@ -97,7 +97,7 @@ pub struct Citrine {
     #[serde(skip, default)]
     pub online: Online,
     #[serde(skip, default)]
-    pub play: Play,
+    pub play: Box<Play>,
     #[serde(skip, default)]
     activity: Activity,
     #[serde(skip, default)]
@@ -108,10 +108,10 @@ pub struct Citrine {
     cloud_hold: Option<CloudHold>,
     #[serde(skip, default)]
     pub stats: crate::stats::Stats,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     #[serde(skip, default)]
     discord: crate::discord::Rpc,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     #[serde(skip, default)]
     shots: crate::discord::Shots,
 }
@@ -163,8 +163,8 @@ impl Default for Citrine {
         let dock = DockState::new(vec![Tab::GameBoy]);
         let mut app = Self {
             dock,
-            ui: UiState::default(),
-            emulator: Emulator::default(),
+            ui: Box::default(),
+            emulator: Box::default(),
             files: FileChannels::default(),
             pads: crate::pad_input::open_source(),
             toasts: Toasts::default(),
@@ -184,15 +184,15 @@ impl Default for Citrine {
             pending_console: None,
             media: MediaStore::default(),
             online: Online::default(),
-            play: Play::default(),
+            play: Box::default(),
             activity: Activity::default(),
             cloud_rom: None,
             cloud_hold: None,
             game_info: Default::default(),
             stats: crate::stats::Stats::default(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             discord: crate::discord::Rpc::default(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             shots: crate::discord::Shots::default(),
         };
         app.open_tab(Tab::Info);
@@ -208,10 +208,7 @@ impl Citrine {
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
 
-        let mut app = cc
-            .storage
-            .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
-            .unwrap_or_default();
+        let mut app = Self::restore(cc.storage);
 
         if let Some(settings) = app.settings_store.load::<Settings>() {
             app.ui.settings = settings;
@@ -230,8 +227,16 @@ impl Citrine {
         crate::autosave::install_panic_hook(app.emulator.last_good.clone());
         #[cfg(target_arch = "wasm32")]
         crate::autosave::save_when_hidden(app.emulator.last_good.clone());
+        #[cfg(target_os = "android")]
+        crate::platform::android::lifecycle::save_on_pause(app.emulator.last_good.clone());
 
         app
+    }
+
+    fn restore(storage: Option<&dyn Storage>) -> Self {
+        storage
+            .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
+            .unwrap_or_default()
     }
 
     fn setup_fonts(ctx: &Context) {
@@ -245,6 +250,10 @@ impl Citrine {
 impl eframe::App for Citrine {
     fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
         self.ui.update_avg_timer.start();
+        #[cfg(target_os = "android")]
+        if let Some(audio) = &mut self.audio {
+            crate::platform::android::lifecycle::follow_visibility(audio);
+        }
 
         // ToDo: Handle this more efficiently => e.g. pause emulator if not visible
         ctx.request_repaint();
@@ -259,6 +268,7 @@ impl eframe::App for Citrine {
         mobile::touch_spacing(ctx, self.is_mobile(ctx));
         self.name_games();
         self.update_online(ctx);
+        self.ui.update.tick(self.ui.settings.check_updates);
         self.count_your_data();
         self.render(ctx);
         if self.ui.settings.focus_mode
@@ -275,6 +285,7 @@ impl eframe::App for Citrine {
         self.import_confirm(ctx);
         self.codec_confirm(ctx);
         self.reset_confirm(ctx);
+        self.load_state_confirm(ctx);
         self.console_confirm(ctx);
         self.cloud_conflict(ctx);
         self.handle_your_data(ctx);
@@ -290,7 +301,7 @@ impl eframe::App for Citrine {
         self.mobile_escape(ctx);
         self.ui.capture.end_frame();
         let debug_open = self.dock.find_tab(&Tab::ControllerDebug).is_some()
-            || self.mobile.sheet == Some(mobile::Sheet::Panel(Tab::ControllerDebug));
+            || self.mobile.showing(Tab::ControllerDebug);
         let now = web_time::Instant::now();
         self.ui.controller_debug.set_open(debug_open, now);
         self.ui
@@ -324,7 +335,7 @@ impl eframe::App for Citrine {
         self.run_pad_shortcuts(presses);
         self.play.flush(&mut self.online);
         self.record_stats();
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             let game = crate::discord::game_now(&self.emulator, &self.stats, &self.game_info);
             let image = self.discord_screen();
@@ -360,12 +371,18 @@ impl eframe::App for Citrine {
         }
 
         self.flush_settings(false);
+        #[cfg(target_os = "android")]
+        crate::platform::android::frame_end(ctx);
 
         self.ui.update_avg_timer.stop();
     }
 
     fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
         canvas::fit(ctx, raw_input);
+        self.raw_keys(ctx, raw_input);
+        #[cfg(target_os = "android")]
+        crate::platform::android::input(ctx, raw_input);
+        crate::app::ui_state::settings::note_window(ctx, raw_input);
         for _ in 0..self.browser_backs() {
             for pressed in [true, false] {
                 raw_input.events.push(egui::Event::Key {
@@ -379,7 +396,16 @@ impl eframe::App for Citrine {
         }
     }
 
+    #[cfg(target_os = "android")]
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn save(&mut self, storage: &mut dyn Storage) {
+        #[cfg(target_os = "android")]
+        if let Some(audio) = &mut self.audio {
+            crate::platform::android::lifecycle::follow_visibility(audio);
+        }
         if let Err(err) = self.emulator.flush_save() {
             log::error!("failed to flush save: {err:?}");
         }
@@ -406,11 +432,14 @@ impl eframe::App for Citrine {
                 log::error!("failed to save the recording: {err}");
             }
         }
+        if self.ui.update.take_restart() {
+            crate::update::relaunch();
+        }
     }
 }
 
 impl Citrine {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     fn discord_screen(&mut self) -> Option<String> {
         let settings = &self.ui.settings.discord;
         if !settings.enabled
@@ -422,19 +451,33 @@ impl Citrine {
             return None;
         }
         let emulator = &self.emulator;
-        let running = emulator.running && emulator.gb.cartridge.has_rom_loaded;
-        if self
-            .shots
-            .due(std::time::Instant::now(), settings.every, running, || {
-                crate::discord::frame_key(emulator.gb.frame().as_slice())
-            })
-        {
-            let (width, height, rgba) = emulator.screenshot(crate::discord::SHOT_SCALE);
-            if let Some(png) = crate::utils::screenshot::encode_png(width, height, &rgba)
-                .filter(|png| png.len() <= citrine_gb_net::MAX_SCREEN_BYTES)
-            {
-                self.online.send_screen(png);
+        let solo = emulator.rom_key().map(|key| crate::discord::Unit {
+            game: key.to_string(),
+            running: emulator.running && emulator.gb.cartridge.has_rom_loaded,
+            frame: emulator.gb.frame().as_slice(),
+        });
+        let unit = crate::discord::my_unit(self.play.session(), solo);
+        let shot = self.shots.due(
+            std::time::Instant::now(),
+            settings.every,
+            unit.as_ref().map(|u| (u.game.as_str(), u.running)),
+            || {
+                unit.as_ref()
+                    .map_or(0, |u| crate::discord::frame_key(u.frame))
+            },
+        );
+        match (shot, &unit) {
+            (crate::discord::Shot::Forget, _) => self.online.forget_screen(),
+            (crate::discord::Shot::Take, Some(unit)) => {
+                let (width, height, rgba) =
+                    emulator.screenshot_of(unit.frame, crate::discord::SHOT_SCALE);
+                if let Some(png) = crate::utils::screenshot::encode_png(width, height, &rgba)
+                    .filter(|png| png.len() <= citrine_gb_net::MAX_SCREEN_BYTES)
+                {
+                    self.online.send_screen(png);
+                }
             }
+            _ => {}
         }
         let (path, version) = self.online.screen()?;
         let address = self.online.address()?;
@@ -457,7 +500,7 @@ impl Citrine {
             let activity = crate::stats::Activity {
                 linked: self.emulator.link.is_some(),
                 together,
-                fast_forward: false,
+                fast_forward: self.emulator.fast_forward,
             };
             let rom = self.emulator.rom_key().map(str::to_string);
             let name = self.emulator.game_name().to_string();
@@ -581,6 +624,7 @@ impl Citrine {
             events::AppEvent::EndLink => self.end_link(),
             events::AppEvent::StartPartner { event } => self.start_partner(event),
             events::AppEvent::OpenSettings { tab } => self.open_settings(tab, touch),
+            events::AppEvent::UndoSnapshot { rom_key, slot } => self.undo_snapshot(&rom_key, slot),
         }
     }
 }

@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+
+pub mod copies;
+
 const MAX_ENTRIES: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -31,7 +34,7 @@ pub struct RecentRoms {
 }
 
 impl RecentRoms {
-    pub fn record(&mut self, path: &Path, title: &str, rom_key: Option<String>) {
+    pub fn record(&mut self, path: &Path, title: &str, rom_key: Option<String>) -> Vec<RecentRom> {
         self.entries.retain(|e| e.path != path);
         self.entries.insert(
             0,
@@ -42,7 +45,7 @@ impl RecentRoms {
                 rom_key,
             },
         );
-        self.entries.truncate(MAX_ENTRIES);
+        self.entries.split_off(MAX_ENTRIES.min(self.entries.len()))
     }
 
     pub fn prune(&mut self) -> usize {
@@ -113,9 +116,9 @@ impl RecentRoms {
         self.named = false;
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn clear(&mut self) {
-        self.replace(Vec::new());
+        self.entries.clear();
+        self.named = false;
     }
 }
 
@@ -183,6 +186,36 @@ mod tests {
         assert_eq!(recent.prune(), 1);
         assert_eq!(recent.entries().len(), 1);
         assert_eq!(recent.entries()[0].path, kept);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recording_past_the_cap_hands_back_the_oldest() {
+        let mut recent = RecentRoms::default();
+        for i in 0..MAX_ENTRIES {
+            assert!(
+                recent
+                    .record(Path::new(&format!("/rom{i}.gb")), "R", None)
+                    .is_empty()
+            );
+        }
+        let dropped = recent.record(Path::new("/new.gb"), "N", None);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].path, PathBuf::from("/rom0.gb"));
+    }
+
+    #[test]
+    fn copies_keep_one_file_per_game_and_drop_only_their_own() {
+        let dir = temp_dir("copies");
+        let copies = copies::RomCopies::at(dir.join("roms"));
+        let first = copies.keep("abc", "Game.GBC", b"rom").expect("keep");
+        let again = copies.keep("abc", "Game.GBC", b"rom").expect("keep");
+        assert_eq!(first, again);
+        assert_eq!(first.extension().and_then(|e| e.to_str()), Some("gbc"));
+        let outside = touch(&dir, "outside.gb");
+        copies.drop_copies([first.as_path(), outside.as_path()]);
+        assert!(!first.exists());
+        assert!(outside.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

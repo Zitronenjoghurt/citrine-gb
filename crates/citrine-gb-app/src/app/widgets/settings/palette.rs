@@ -13,13 +13,13 @@ use egui::{Align, Layout, RichText, Ui};
 #[derive(Default)]
 pub struct PaletteEditorState {
     editing: Option<String>,
-    name_buffer: String,
-    code_buffer: String,
-    code_error: bool,
+    pub(crate) name_buffer: String,
+    pub(crate) code_buffer: String,
+    pub(crate) code_error: bool,
 }
 
 impl PaletteEditorState {
-    fn focus(&mut self, name: &str, palette: &CustomPalette) {
+    pub(crate) fn focus(&mut self, name: &str, palette: &CustomPalette) {
         if self.editing.as_deref() == Some(name) {
             return;
         }
@@ -29,7 +29,7 @@ impl PaletteEditorState {
         self.code_error = false;
     }
 
-    fn forget(&mut self) {
+    pub(crate) fn forget(&mut self) {
         self.editing = None;
         self.name_buffer.clear();
         self.code_buffer.clear();
@@ -37,7 +37,7 @@ impl PaletteEditorState {
     }
 }
 
-enum Action {
+pub(crate) enum Action {
     Create(CustomPalette),
     Delete(String),
     Rename {
@@ -140,7 +140,7 @@ pub fn show(
     }
 }
 
-fn choice_label(choice: &PaletteChoice) -> String {
+pub(crate) fn choice_label(choice: &PaletteChoice) -> String {
     match choice {
         PaletteChoice::Builtin(theme) => theme.to_string(),
         PaletteChoice::Custom(name) => name.clone(),
@@ -148,7 +148,11 @@ fn choice_label(choice: &PaletteChoice) -> String {
     }
 }
 
-fn choice_colors(settings: &Settings, choice: &PaletteChoice, header: &[u8]) -> Vec<[RGBA; 4]> {
+pub(crate) fn choice_colors(
+    settings: &Settings,
+    choice: &PaletteChoice,
+    header: &[u8],
+) -> Vec<[RGBA; 4]> {
     let theme = match choice {
         PaletteChoice::Builtin(theme) => *theme,
         PaletteChoice::Custom(name) => settings
@@ -159,6 +163,25 @@ fn choice_colors(settings: &Settings, choice: &PaletteChoice, header: &[u8]) -> 
         PaletteChoice::Gbc(palette) => return palette.colors(header).to_vec(),
     };
     vec![*theme.palette()]
+}
+
+pub(crate) fn all_choices(settings: &Settings) -> Vec<PaletteChoice> {
+    DmgTheme::SELECTABLE
+        .iter()
+        .map(|theme| PaletteChoice::Builtin(*theme))
+        .chain(
+            CompatPalette::SELECTABLE
+                .iter()
+                .map(|palette| PaletteChoice::Gbc(*palette)),
+        )
+        .chain(
+            settings
+                .palettes
+                .entries()
+                .iter()
+                .map(|entry| PaletteChoice::Custom(entry.name.clone())),
+        )
+        .collect()
 }
 
 fn picker(
@@ -353,11 +376,11 @@ fn editor(
     });
 }
 
-const SHARE_HINT: &str = "Paste a code from someone else, or copy yours to share it.";
+pub(crate) const SHARE_HINT: &str = "Paste a code from someone else, or copy yours to share it.";
 
-const SHADE_NAMES: [&str; 4] = ["Lightest", "Light", "Dark", "Darkest"];
+pub(crate) const SHADE_NAMES: [&str; 4] = ["Lightest", "Light", "Dark", "Darkest"];
 
-fn apply(action: Action, settings: &mut Settings, state: &mut PaletteEditorState) {
+pub(crate) fn apply(action: Action, settings: &mut Settings, state: &mut PaletteEditorState) {
     match action {
         Action::Create(palette) => {
             settings.custom_palette = Some(palette.name.clone());

@@ -1,3 +1,4 @@
+use crate::app::mobile::kit::{self, Row};
 use crate::app::ui_state::settings::Settings;
 use crate::app::widgets;
 use crate::app::widgets::avatar;
@@ -11,16 +12,22 @@ use crate::online::{Online, Phase, Problem, Seen};
 use citrine_gb_net::{DISPLAY_NAME_MAX_CHARS, FileId, display_name};
 use egui::{RichText, Ui};
 use join::{account_step, address_step, name_step};
+pub use phone_join::{JoinSheet, join_dialogs, join_sheet, open_sheet, signed_out_rows};
 use std::time::Duration;
 use storage::storage;
 use web_time::Instant;
 
+pub mod accounts;
 mod devices;
 mod join;
-mod storage;
+mod phone_join;
+pub mod storage;
 mod two_factor;
 
 const KEY_ABOUT: &str = "Citrine remembers this key and warns you if the relay shows a different one. The relay's owner sees it in the admin panel.";
+pub const SHOW_PLAYING: &str = "Show friends what I'm playing";
+pub const TYPING: &str = "Typing indicators";
+pub const TYPING_HINT: &str = "Friends see when you're writing to them, and you see when they write to you. Off means neither.";
 const CODE_HINT: &str = "From your app, or a recovery code";
 
 #[derive(Default)]
@@ -36,6 +43,7 @@ pub struct JoinForm {
     invite_error: Option<String>,
     invite_needed: bool,
     address_error: Option<String>,
+    phone_address: String,
     last_phase: Option<Phase>,
     name_draft: Option<String>,
     new_password: String,
@@ -46,7 +54,10 @@ pub struct JoinForm {
     delete: Option<(FileId, String)>,
     show_cloud: bool,
     delete_cloud: Option<(citrine_gb_net::GameKey, String)>,
-    forget: Option<String>,
+    forget: Option<(String, String)>,
+    forget_server: Option<String>,
+    new_account: bool,
+    back_to: Option<(String, String)>,
     setup_code: String,
     ask: Option<two_factor::Ask>,
     ask_code: String,
@@ -56,6 +67,7 @@ pub struct JoinForm {
     trusting: bool,
     signed_out: Option<String>,
     signing_out: Option<(citrine_gb_net::DeviceId, String)>,
+    phone_connect: bool,
 }
 
 impl JoinForm {
@@ -84,26 +96,48 @@ enum Choice {
 
 const LIST_AGAIN: Duration = Duration::from_secs(5);
 
-pub fn show(ui: &mut Ui, s: &mut Settings, online: Option<&mut Online>, form: &mut JoinForm) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    All,
+    Relay,
+}
+
+pub fn show_part(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: Option<&mut Online>,
+    form: &mut JoinForm,
+    part: Part,
+) {
     let mut idle = Online::offline();
     let online = match online {
         Some(online) => online,
         None => &mut idle,
     };
     let now = Instant::now();
+    track(s, online, form, now);
+    if s.online.is_joined() {
+        match part {
+            Part::All => joined(ui, s, online, form, now),
+            Part::Relay => relay(ui, s, online, form, now),
+        }
+    } else {
+        match form.step {
+            Step::Address => address_step(ui, s, online, form, now),
+            Step::Account => account_step(ui, s, online, form, now),
+            Step::Name => name_step(ui, online, form, now),
+        }
+    }
+}
+
+pub fn track(s: &mut Settings, online: &mut Online, form: &mut JoinForm, now: Instant) {
+    if s.online.is_joined() {
+        form.back_to = None;
+    }
     let phase = online.phase();
     if form.last_phase != Some(phase) {
         form.last_phase = Some(phase);
         follow(form, s, online, phase, now);
-    }
-    if s.online.is_joined() {
-        joined(ui, s, online, form, now);
-    } else {
-        match form.step {
-            Step::Address => address_step(ui, s, online, form, now),
-            Step::Account => account_step(ui, online, form, now),
-            Step::Name => name_step(ui, online, form, now),
-        }
     }
 }
 
@@ -118,7 +152,7 @@ fn follow(form: &mut JoinForm, s: &Settings, online: &mut Online, phase: Phase, 
                 .address()
                 .and_then(|address| s.online.entry(address))
                 .and_then(|entry| entry.relay_id());
-            match stored {
+            match stored.filter(|_| !form.new_account) {
                 Some(relay_id) => online.use_relay_id(relay_id, None, now),
                 None => {
                     form.step = Step::Account;
@@ -320,10 +354,15 @@ fn code_row(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: Instant)
     }
 }
 
-fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinForm, now: Instant) {
-    let Some(relay) = s.online.joined_relay() else {
-        return;
-    };
+struct Joined {
+    relay: crate::online::JoinedRelay,
+    account_name: String,
+    online_id: String,
+    seed: u64,
+}
+
+fn joined_facts(s: &Settings, online: &Online) -> Option<Joined> {
+    let relay = s.online.joined_relay()?;
     let entry = s.online.joined_entry().cloned();
     let account_name = online
         .account()
@@ -339,15 +378,151 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
         .parse::<citrine_gb_net::OnlineId>()
         .map(|id| id.value())
         .unwrap_or_default();
+    Some(Joined {
+        relay,
+        account_name,
+        online_id,
+        seed,
+    })
+}
 
+fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinForm, now: Instant) {
+    let Some(facts) = joined_facts(s, online) else {
+        return;
+    };
     ui.horizontal(|ui| {
-        avatar::avatar(ui, &account_name, seed, 44.0, Some(my_seen(online)));
+        avatar::avatar(
+            ui,
+            &facts.account_name,
+            facts.seed,
+            44.0,
+            Some(my_seen(online)),
+        );
         ui.vertical(|ui| {
-            ui.add(egui::Label::new(RichText::new(&account_name).strong().size(16.0)).truncate());
-            ui.add(egui::Label::new(RichText::new(relay.address.key()).weak()).truncate());
+            ui.add(
+                egui::Label::new(RichText::new(&facts.account_name).strong().size(16.0)).truncate(),
+            );
+            ui.add(egui::Label::new(RichText::new(facts.relay.address.key()).weak()).truncate());
             connection_line(ui, online, now);
         });
     });
+    switcher(ui, s, online, form, &facts, now);
+    problems(ui, s, online, form, now);
+    ui.add_space(10.0);
+    Form::show(ui, "online_joined", |f| {
+        relay_id_row(f, form, &facts, now, true);
+        online_id_row(f, form, &facts, now);
+        relay_key_row(f, online, &facts);
+        display_name_row(f, online, form, &facts);
+    });
+    ui.add_space(4.0);
+    show_playing(ui, s);
+    typing(ui, s);
+    cloud(ui, s, online);
+    ui.add_space(ui.spacing().interact_size.y.max(20.0));
+    two_factor::two_factor(
+        ui,
+        online,
+        form,
+        &facts.account_name,
+        &facts.relay.address.key(),
+        now,
+    );
+    if devices::any(online) {
+        ui.add_space(ui.spacing().interact_size.y.max(20.0));
+        devices::devices(ui, online, form);
+    }
+    storage(ui, online, form, now);
+    ui.add_space(ui.spacing().interact_size.y.max(20.0));
+    leave_and_delete(ui, s, online, form, &facts, false);
+}
+
+fn switcher(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    facts: &Joined,
+    now: Instant,
+) {
+    let key = facts.relay.address.key();
+    let saved = s.online.accounts_on(&key);
+    let mut pick = None;
+    let mut add = false;
+    ui.add_space(8.0);
+    ui.menu_button(format!("{} Switch account", icons::USER_SWITCH), |ui| {
+        ui.set_width(280.0);
+        for (index, account) in saved.iter().enumerate() {
+            let detail = accounts::detail(account, &key, false);
+            let answer = accounts::account_row(
+                ui,
+                account,
+                &detail,
+                index == 0,
+                index > 0,
+                accounts::Look::PAGE,
+            );
+            if answer.picked {
+                pick = Some(account.relay_id.clone());
+                ui.close();
+            }
+            if answer.remove {
+                accounts::ask_remove(form, &key, account);
+                ui.close();
+            }
+        }
+        ui.add_space(2.0);
+        ui.separator();
+        if accounts::action_row(ui, icons::USER_PLUS, "Add account", accounts::Look::PAGE) {
+            add = true;
+            ui.close();
+        }
+    });
+    if let Some(relay_id) = pick {
+        accounts::switch_to(s, online, &key, &relay_id, now);
+    }
+    if add {
+        accounts::add_account(s, online, form, now);
+    }
+    accounts::remove_dialog(ui, s, online, form);
+}
+
+pub fn relay(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    now: Instant,
+) {
+    let Some(facts) = joined_facts(s, online) else {
+        return;
+    };
+    if s.dev_mode {
+        Form::show(ui, "online_relay", |f| {
+            f.row("Server", |ui| {
+                ui.add(egui::Label::new(facts.relay.address.key()).truncate());
+            });
+            relay_key_row(f, online, &facts);
+        });
+        connection_line(ui, online, now);
+    } else if online.is_connected() {
+        ui.label("Connected");
+    } else {
+        connection_line(ui, online, now);
+    }
+    retry_row(ui, online, now);
+    ui.add_space(4.0);
+    cloud(ui, s, online);
+    storage(ui, online, form, now);
+}
+
+pub fn problems(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    now: Instant,
+) {
     match online.phase() {
         Phase::Stopped(problem) if problem.needs_password() => {
             ui.horizontal(|ui| {
@@ -372,63 +547,89 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
         }
         _ => retry_row(ui, online, now),
     }
+}
 
-    ui.add_space(10.0);
-    let relay_text = relay.relay_id.to_string();
-    Form::show(ui, "online_joined", |f| {
-        f.row_with_hint(
-            "Relay ID",
-            "Don't share it. Anyone with your relay ID can sign in as you.",
-            |ui| {
-                copy_button(ui, form, "relay", &relay_text, now);
+fn relay_id_row(f: &mut Form, form: &mut JoinForm, facts: &Joined, now: Instant, shown: bool) {
+    let relay_text = facts.relay.relay_id.to_string();
+    let label = if shown { "Relay ID" } else { "Sign-in key" };
+    f.row_with_hint(
+        label,
+        "Don't share it. Anyone with it can sign in as you.",
+        |ui| {
+            copy_button(ui, form, "relay", &relay_text, now);
+            if shown {
                 ui.add(egui::Label::new(RichText::new(&relay_text).monospace().weak()).truncate());
-            },
-        );
-        f.row_with_hint("Online ID", "Friends add you with this", |ui| {
-            copy_button(ui, form, "online", &online_id, now);
-            ui.add(egui::Label::new(RichText::new(&online_id).monospace()).truncate());
-        });
-        if let Some(key) = relay
-            .trust
-            .relay_key
-            .or(online.pinned_key())
-            .filter(|_| online.offered_key().is_none())
-        {
-            f.row_with_hint("Relay key", KEY_ABOUT, |ui| {
-                let text = key.fingerprint().to_string();
-                ui.add(egui::Label::new(RichText::new(text).monospace()).truncate());
-            });
-        }
-        f.row("Display name", |ui| {
-            let editing = form.name_draft.get_or_insert_with(|| account_name.clone());
-            let response = ui.add_enabled(
-                online.is_connected(),
-                row_field(ui, editing)
-                    .char_limit(DISPLAY_NAME_MAX_CHARS)
-                    .desired_width(ui.available_width()),
-            );
-            if response.lost_focus() {
-                match display_name(editing) {
-                    Ok(name) if name != account_name => {
-                        online.set_display_name(&name);
-                        *editing = name;
-                    }
-                    _ => form.name_draft = None,
-                }
-            } else if !response.has_focus()
-                && form.name_draft.as_deref() == Some(account_name.as_str())
-            {
-                form.name_draft = None;
             }
+        },
+    );
+}
+
+fn online_id_row(f: &mut Form, form: &mut JoinForm, facts: &Joined, now: Instant) {
+    f.row_with_hint("Online ID", "Friends add you with this", |ui| {
+        copy_button(ui, form, "online", &facts.online_id, now);
+        ui.add(egui::Label::new(RichText::new(&facts.online_id).monospace()).truncate());
+    });
+}
+
+fn relay_key_row(f: &mut Form, online: &Online, facts: &Joined) {
+    if let Some(key) = facts
+        .relay
+        .trust
+        .relay_key
+        .or(online.pinned_key())
+        .filter(|_| online.offered_key().is_none())
+    {
+        f.row_with_hint("Relay key", KEY_ABOUT, |ui| {
+            let text = key.fingerprint().to_string();
+            ui.add(egui::Label::new(RichText::new(text).monospace()).truncate());
         });
-        if online.request_error() == Some(citrine_gb_net::ErrorCode::BadName) {
-            f.hint(Problem::BadName.text());
+    }
+}
+
+fn display_name_row(f: &mut Form, online: &mut Online, form: &mut JoinForm, facts: &Joined) {
+    let account_name = &facts.account_name;
+    f.row("Display name", |ui| {
+        let editing = form.name_draft.get_or_insert_with(|| account_name.clone());
+        let response = ui.add_enabled(
+            online.is_connected(),
+            row_field(ui, editing)
+                .char_limit(DISPLAY_NAME_MAX_CHARS)
+                .desired_width(ui.available_width()),
+        );
+        if response.lost_focus() {
+            match display_name(editing) {
+                Ok(name) if name != *account_name => {
+                    online.set_display_name(&name);
+                    *editing = name;
+                }
+                _ => form.name_draft = None,
+            }
+        } else if !response.has_focus() && form.name_draft.as_deref() == Some(account_name.as_str())
+        {
+            form.name_draft = None;
         }
     });
-    ui.add_space(4.0);
+    if online.request_error() == Some(citrine_gb_net::ErrorCode::BadName) {
+        f.hint(Problem::BadName.text());
+    }
+}
+
+fn show_playing(ui: &mut Ui, s: &mut Settings) {
     s.dirty |= ui
-        .checkbox(&mut s.online.show_playing, "Show friends what I'm playing")
+        .checkbox(&mut s.online.show_playing, SHOW_PLAYING)
         .changed();
+}
+
+fn typing(ui: &mut Ui, s: &mut Settings) {
+    ui.horizontal(|ui| {
+        s.dirty |= ui
+            .checkbox(&mut s.online.typing_indicators, TYPING)
+            .changed();
+        info_mark(ui, TYPING_HINT);
+    });
+}
+
+fn cloud(ui: &mut Ui, s: &mut Settings, online: &mut Online) {
     let note = |ui: &mut Ui, indent: f32, text: &str| {
         let left = indent + ui.spacing().icon_width + ui.spacing().icon_spacing;
         egui::Frame::NONE
@@ -439,18 +640,12 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
             .show(ui, |ui| ui.label(RichText::new(text).weak()));
     };
     ui.horizontal(|ui| {
-        s.dirty |= ui.checkbox(&mut s.online.cloud_saves, "Cloud saves").changed();
-        info_mark(
-            ui,
-            "Keeps your saves on the relay so your other devices can load them. They're encrypted, so only your devices can read them.",
-        );
+        s.dirty |= ui
+            .checkbox(&mut s.online.cloud_saves, "Cloud saves")
+            .changed();
+        info_mark(ui, CLOUD_HINT);
     });
-    if s.online.cloud_saves && online.account().is_some_and(|a| a.quota_bytes == 0) {
-        let text = if online.info().is_some_and(|i| i.quota_bytes > 0) {
-            "Your account on this relay has no storage, so saves and settings stay on this device."
-        } else {
-            "This relay doesn't store files, so saves and settings stay on this device."
-        };
+    if let Some(text) = no_storage(s, online) {
         note(ui, 0.0, text);
     }
     let indent = ui.spacing().indent;
@@ -462,32 +657,53 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
             s.online.sync_settings = on;
             s.dirty = true;
         }
-        info_mark(
-            ui,
-            "Your theme, palettes, key bindings and screen effects copy to your other devices on this relay ID, encrypted like your saves. The latest change wins. Volume, controllers, touch controls and the UI size stay on each device. Needs Cloud saves.",
-        );
+        info_mark(ui, SYNC_HINT);
     });
-    if s.online.cloud_saves {
-        let settings = if s.online.sync_settings {
-            online.settings_problem()
-        } else {
-            None
-        };
-        for problem in sync_problems(settings, online.stats_problem()) {
-            note(ui, indent, problem);
-        }
+    for problem in cloud_problems(s, online) {
+        note(ui, indent, problem);
     }
+}
 
-    let host = relay.address.key();
-    two_factor::two_factor(ui, online, form, &account_name, &host, now);
-    devices::devices(ui, online, form);
-    storage(ui, online, form, now);
+pub const CLOUD_HINT: &str = "Keeps your saves on the relay so your other devices can load them. They're encrypted, so only your devices can read them.";
+pub const SYNC_HINT: &str = "Your theme, palettes, key bindings and screen effects copy to your other devices on this relay ID, encrypted like your saves. The latest change wins. Volume, controllers, touch controls and the UI size stay on each device. Needs Cloud saves.";
 
-    ui.add_space(ui.spacing().interact_size.y.max(20.0));
-    if ui
-        .button(format!("{} Leave this relay", icons::SIGN_OUT))
-        .clicked()
-    {
+pub fn no_storage(s: &Settings, online: &Online) -> Option<&'static str> {
+    if !s.online.cloud_saves || !online.account().is_some_and(|a| a.quota_bytes == 0) {
+        return None;
+    }
+    Some(if online.info().is_some_and(|i| i.quota_bytes > 0) {
+        "Your account on this relay has no storage, so saves and settings stay on this device."
+    } else {
+        "This relay doesn't store files, so saves and settings stay on this device."
+    })
+}
+
+pub fn cloud_problems(s: &Settings, online: &Online) -> Vec<&'static str> {
+    if !s.online.cloud_saves {
+        return Vec::new();
+    }
+    let settings = if s.online.sync_settings {
+        online.settings_problem()
+    } else {
+        None
+    };
+    sync_problems(settings, online.stats_problem())
+}
+
+fn leave_and_delete(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    facts: &Joined,
+    sign_out: bool,
+) {
+    let label = if sign_out {
+        "Sign out"
+    } else {
+        "Leave this relay"
+    };
+    if ui.button(format!("{} {label}", icons::SIGN_OUT)).clicked() {
         form.leaving = true;
     }
     let delete = RichText::new(format!("{} Delete account", icons::TRASH))
@@ -498,13 +714,35 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
     {
         two_factor::open(form, two_factor::Ask::Delete);
     }
-    two_factor::ask_dialog(ui, online, form, &host);
+    leave_dialogs(ui, s, online, form, facts, sign_out);
+}
+
+fn leave_dialogs(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    facts: &Joined,
+    sign_out: bool,
+) {
+    two_factor::ask_dialog(ui, online, form, &facts.relay.address.key());
     if form.leaving {
-        let question = format!(
-            "Leave {} on this device? Citrine keeps your relay ID for this server, so you can join again.",
-            relay.address.key()
-        );
-        if let Some(leave) = confirm::confirm(ui.ctx(), "online_leave", &question, "Leave") {
+        let (question, button) = if sign_out {
+            (
+                "Sign out on this device? Citrine keeps your sign-in key, so you can sign in again."
+                    .to_owned(),
+                "Sign out",
+            )
+        } else {
+            (
+                format!(
+                    "Leave {} on this device? Citrine keeps your relay ID for this server, so you can join again.",
+                    facts.relay.address.key()
+                ),
+                "Leave",
+            )
+        };
+        if let Some(leave) = confirm::confirm(ui.ctx(), "online_leave", &question, button) {
             form.leaving = false;
             if leave {
                 online.sign_out_here();
@@ -516,6 +754,203 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
             }
         }
     }
+}
+
+pub struct Account {
+    pub name: String,
+    pub online_id: String,
+    pub sign_in_key: String,
+    pub two_factor: Option<bool>,
+    pub devices: usize,
+}
+
+pub fn joined_account(s: &Settings, online: &Online) -> Option<Account> {
+    let facts = joined_facts(s, online)?;
+    Some(Account {
+        sign_in_key: facts.relay.relay_id.to_string(),
+        two_factor: online.account().map(|a| a.two_factor),
+        devices: online.devices().0.len(),
+        name: facts.account_name,
+        online_id: facts.online_id,
+    })
+}
+
+pub fn copy_now(
+    ctx: &egui::Context,
+    form: &mut JoinForm,
+    what: &'static str,
+    text: &str,
+    now: Instant,
+) {
+    ctx.copy_text(text.to_owned());
+    ctx.request_repaint_after(widgets::copy::COPIED_FOR);
+    form.copied = Some((what, now));
+}
+
+pub fn just_copied(form: &JoinForm, what: &'static str, now: Instant) -> bool {
+    widgets::copy::recently(
+        form.copied
+            .filter(|(which, _)| *which == what)
+            .map(|(_, at)| at),
+        now,
+    )
+}
+
+pub fn name_editor(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, current: &str) -> bool {
+    let draft = form.name_draft.get_or_insert_with(|| current.to_owned());
+    let response =
+        crate::app::mobile::kit::field(ui, row_field(ui, draft).char_limit(DISPLAY_NAME_MAX_CHARS));
+    let checked = display_name(draft);
+    if online.request_error() == Some(citrine_gb_net::ErrorCode::BadName) {
+        widgets::problem::problem_line(ui, &Problem::BadName.text());
+    }
+    let ready = online.is_connected() && checked.is_ok();
+    ui.add_space(12.0);
+    let pressed = ui
+        .add_enabled_ui(ready, |ui| {
+            crate::app::mobile::kit::primary_button(ui, "Save")
+        })
+        .inner;
+    let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let Ok(name) = checked else {
+        return false;
+    };
+    if !(ready && (pressed || entered)) {
+        return false;
+    }
+    if name != current {
+        online.set_display_name(&name);
+    }
+    form.name_draft = None;
+    true
+}
+
+pub fn forget_name_draft(form: &mut JoinForm) {
+    form.name_draft = None;
+}
+
+pub fn two_factor_phone(
+    ui: &mut Ui,
+    s: &Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    now: Instant,
+) {
+    let Some(facts) = joined_facts(s, online) else {
+        return;
+    };
+    two_factor::phone(
+        ui,
+        online,
+        form,
+        &facts.account_name,
+        &facts.relay.address.key(),
+        now,
+    );
+}
+
+pub fn devices_body(ui: &mut Ui, online: &mut Online, form: &mut JoinForm) {
+    devices::devices(ui, online, form);
+}
+
+pub fn ask_sign_out(form: &mut JoinForm) {
+    form.leaving = true;
+}
+
+pub fn ask_delete(form: &mut JoinForm) {
+    two_factor::open(form, two_factor::Ask::Delete);
+}
+
+pub fn account_dialogs(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinForm) {
+    if let Some(facts) = joined_facts(s, online) {
+        leave_dialogs(ui, s, online, form, &facts, true);
+    }
+    accounts::remove_dialog(ui, s, online, form);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AccountsChoice {
+    Stay,
+    Done,
+    Add,
+}
+
+pub fn accounts_body(
+    ui: &mut Ui,
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    now: Instant,
+) -> AccountsChoice {
+    let Some(key) = s.online.joined.clone() else {
+        return AccountsChoice::Done;
+    };
+    let saved = s.online.accounts_on(&key);
+    let mut pick = None;
+    let mut add = false;
+    ui.add_space(6.0);
+    kit::list(ui, |list| {
+        for (index, account) in saved.iter().enumerate() {
+            let detail = accounts::detail(account, &key, false);
+            let answer = list.custom(|ui| {
+                accounts::account_row(
+                    ui,
+                    account,
+                    &detail,
+                    index == 0,
+                    index > 0,
+                    accounts::Look::CARD,
+                )
+            });
+            if answer.picked {
+                pick = Some(account.relay_id.clone());
+            }
+            if answer.remove {
+                accounts::ask_remove(form, &key, account);
+            }
+        }
+        add = list
+            .row(Row::new("Add account").icon(icons::USER_PLUS))
+            .clicked();
+    });
+    if let Some(relay_id) = pick {
+        accounts::switch_to(s, online, &key, &relay_id, now);
+        return AccountsChoice::Done;
+    }
+    if add {
+        return AccountsChoice::Add;
+    }
+    AccountsChoice::Stay
+}
+
+pub fn add_account_body(ui: &mut Ui) -> Option<JoinSheet> {
+    ui.add_space(6.0);
+    match kit::rows(
+        ui,
+        vec![
+            Row::new("Sign in").icon(icons::SIGN_IN),
+            Row::new("Create account").icon(icons::USER_PLUS),
+        ],
+    ) {
+        Some(0) => Some(JoinSheet::SignIn),
+        Some(_) => Some(JoinSheet::Create),
+        None => None,
+    }
+}
+
+pub fn start_add(
+    s: &mut Settings,
+    online: &mut Online,
+    form: &mut JoinForm,
+    sheet: JoinSheet,
+    now: Instant,
+) {
+    accounts::add_account(s, online, form, now);
+    open_sheet(s, online, form, sheet, now);
+}
+
+pub fn back_out(s: &mut Settings, online: &mut Online, form: &mut JoinForm, now: Instant) {
+    accounts::back_out(s, online, form, now);
 }
 
 fn sync_problems(settings: Option<SyncState>, stats: Option<SyncState>) -> Vec<&'static str> {

@@ -16,6 +16,10 @@ mod native {
     }
 
     pub fn data_dir() -> PathBuf {
+        #[cfg(target_os = "android")]
+        if let Some(dir) = crate::platform::android::data_dir() {
+            return dir;
+        }
         match ProjectDirs::from("", "", "citrine") {
             Some(dirs) => dirs.data_dir().to_path_buf(),
             None => PathBuf::from(FALLBACK_DIR),

@@ -1,4 +1,3 @@
-use super::bubble::measure;
 use super::share::replay_share;
 use super::{COMPOSER_ROWS, FIELD_MARGIN, PICKER_EMOJI, PICKER_HEIGHT};
 use crate::app::events::AppEvent;
@@ -13,7 +12,7 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
     let row = ui.text_style_height(&egui::TextStyle::Body);
     let side = ui.spacing().interact_size.y.max(row + FIELD_MARGIN.sum().y);
     let gap = ui.spacing().item_spacing.x / 2.0;
-    let id = egui::Id::new(("chat_draft", friend));
+    let id = super::draft_id(friend);
     let height_id = egui::Id::new(("chat_field_height", friend));
     let tall = ui
         .data(|d| d.get_temp::<f32>(height_id))
@@ -32,15 +31,26 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
         viewer.ui.friends.chat.end_edit();
         return;
     }
+    let focused = ui.memory(|m| m.has_focus(id));
+    let leave = std::mem::take(&mut viewer.ui.friends.chat.leave_draft);
+    if leave
+        || editing.is_none()
+            && focused
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+    {
+        ui.memory_mut(|m| m.surrender_focus(id));
+    }
     if std::mem::take(&mut viewer.ui.friends.chat.focus_draft) {
         ui.memory_mut(|m| m.request_focus(id));
     }
+    let to_game = !viewer.ui.friends.chat.touch && viewer.emulator.open_game().is_some();
+    let mut enter = false;
     ui.add_space(2.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
         at_foot(ui, side, tall, |ui| attach_menu(ui, viewer, friend, side));
         let state = &mut viewer.ui.friends.chat;
-        let enter = ui.memory(|m| m.has_focus(id)) && ui.input_mut(enter_sends);
+        enter = ui.memory(|m| m.has_focus(id)) && ui.input_mut(enter_sends);
         send |= enter;
         let draft = state.drafts.entry(friend).or_default();
         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -67,13 +77,7 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
             }
             let bar = ui.spacing().scroll.allocated_width();
             let width = (ui.available_width() - bar).max(side);
-            let hint = "Message";
-            let hint = if measure(ui, RichText::new(hint)) + FIELD_MARGIN.sum().x <= width {
-                hint
-            } else {
-                ""
-            };
-            let (field, shown) = draft_field(ui, draft, id, width, side, hint);
+            let (field, shown) = draft_field(ui, draft, id, width, side, "Message");
             if (shown - tall).abs() >= 0.5 {
                 ui.data_mut(|d| d.insert_temp(height_id, shown));
                 ui.ctx().request_discard("chat field height");
@@ -101,7 +105,11 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
             }
         }
     }
-    ui.memory_mut(|m| m.request_focus(id));
+    if to_game && enter {
+        ui.memory_mut(|m| m.surrender_focus(id));
+    } else {
+        ui.memory_mut(|m| m.request_focus(id));
+    }
 }
 
 fn edit_bar(ui: &mut Ui) -> bool {

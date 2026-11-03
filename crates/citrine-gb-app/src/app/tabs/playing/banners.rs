@@ -9,6 +9,7 @@ use egui::{Label, Ui};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BannerAction {
     PlayAgain,
+    Resume,
     Dismiss,
 }
 
@@ -53,7 +54,15 @@ pub fn banner(ui: &mut Ui, ended: &Ended, can_play_again: bool) -> Option<Banner
             ui.label(&ended.line);
         },
         |ui| {
-            if ui.add(dismiss_button()).on_hover_text("Dismiss").clicked() {
+            if ended.paused {
+                if ui
+                    .add(main_button(ui, "Resume"))
+                    .on_hover_text("Play on alone")
+                    .clicked()
+                {
+                    action = Some(BannerAction::Resume);
+                }
+            } else if ui.add(dismiss_button()).on_hover_text("Dismiss").clicked() {
                 action = Some(BannerAction::Dismiss);
             }
             if can_play_again && ui.button("Play again").clicked() {

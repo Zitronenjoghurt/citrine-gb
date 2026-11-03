@@ -5,7 +5,7 @@ pub mod file_saver;
 pub mod save_files;
 pub mod screenshot;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn spawn(future: impl std::future::Future<Output = ()> + Send + 'static) {
     std::thread::spawn(|| pollster::block_on(future));
 }
@@ -27,3 +27,5 @@ pub fn reduced_motion() -> bool {
         .flatten()
         .is_some_and(|query| query.matches())
 }
+#[cfg(target_arch = "wasm32")]
+pub mod idb;

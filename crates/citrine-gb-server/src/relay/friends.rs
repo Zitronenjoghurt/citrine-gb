@@ -238,4 +238,19 @@ impl Client {
         self.app.hub.send(other.id, ServerMsg::Chat(message));
         Ok(())
     }
+
+    pub(super) async fn typing(&self, to: OnlineId, typing: bool) -> Result<(), ErrorCode> {
+        let me = self.me()?;
+        let from = me.online_id;
+        let me = me.id;
+        let Ok(other) = self.user(to).await else {
+            return Ok(());
+        };
+        if db(self.app.db.are_friends(me, other.id).await)? {
+            self.app
+                .hub
+                .send(other.id, ServerMsg::Typing { from, typing });
+        }
+        Ok(())
+    }
 }

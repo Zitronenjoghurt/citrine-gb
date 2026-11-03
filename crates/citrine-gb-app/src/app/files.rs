@@ -1,6 +1,5 @@
 use super::{Citrine, PendingImport, QUICK_LOAD_HOLD};
 use super::{tabs, widgets};
-#[cfg(not(target_arch = "wasm32"))]
 use crate::app::ui_state::settings::plays_on_both;
 use crate::emulator::SaveImport;
 use crate::utils::file_loader::PickedFile;
@@ -124,14 +123,7 @@ impl Citrine {
             self.ui.settings.dirty = true;
             self.close_mobile_sheet();
 
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(path) = file.path.as_deref() {
-                let title = self.emulator.game_name().to_string();
-                let header = &self.emulator.gb.cartridge.header;
-                let both = plays_on_both(header.cgb_mode);
-                let key = both.then(|| header.sha256_hex_string());
-                self.ui.recent.record(path, &title, key);
-            }
+            self.remember_rom(&file);
 
             if self.emulator.imported_legacy_save {
                 self.toasts
@@ -140,6 +132,30 @@ impl Citrine {
                 self.toasts.success("Loaded save data");
             }
         }
+    }
+
+    fn remember_rom(&mut self, file: &PickedFile) {
+        let copies = &self.files.rom_copies;
+        let header = &self.emulator.gb.cartridge.header;
+        let sha = header.sha256_hex_string();
+        #[cfg(not(target_arch = "wasm32"))]
+        let picked = file.path.clone();
+        #[cfg(target_arch = "wasm32")]
+        let picked: Option<std::path::PathBuf> = None;
+        let path = match picked {
+            Some(path) => path,
+            None => match copies.keep(&sha, &file.name, &file.data) {
+                Ok(path) => path,
+                Err(err) => {
+                    log::warn!("couldn't keep a copy of {}: {err}", file.name);
+                    return;
+                }
+            },
+        };
+        let title = self.emulator.game_name().to_string();
+        let key = plays_on_both(header.cgb_mode).then_some(sha);
+        let dropped = self.ui.recent.record(&path, &title, key);
+        copies.drop_copies(dropped.iter().map(|entry| entry.path.as_path()));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
