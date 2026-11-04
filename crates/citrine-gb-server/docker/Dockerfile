@@ -11,7 +11,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /citrine/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --bin citrine-gb-server
 COPY . .
 RUN cargo build --release --bin citrine-gb-server
 RUN mkdir -p /citrine/empty

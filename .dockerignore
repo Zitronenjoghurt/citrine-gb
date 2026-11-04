@@ -10,11 +10,6 @@
 !crates/citrine-gb-net
 !crates/citrine-gb-partner
 !crates/citrine-gb-server
-!crates/citrine-gb-lab/Cargo.toml
-!crates/citrine-gb-lab/src
-!crates/sameboy-sys/Cargo.toml
-!crates/sameboy-sys/build.rs
-!crates/sameboy-sys/src
 
 crates/citrine-gb-app/dist
 crates/citrine-gb-server/data
