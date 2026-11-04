@@ -1,5 +1,5 @@
 use super::sdl_map::{self, AXIS_COUNT, BUTTON_COUNT, SdlInput, Translator};
-use super::{PadEvent, PadSource};
+use super::{PadEvent, PadMotion, PadSource};
 use crate::controller_debug::{AxisState, ButtonState, PadInfo, usb_id, yes_no};
 use sdl3_sys::error::SDL_GetError;
 use sdl3_sys::events::{
@@ -9,11 +9,12 @@ use sdl3_sys::events::{
 };
 use sdl3_sys::gamepad::{
     SDL_CloseGamepad, SDL_Gamepad, SDL_GamepadAxis, SDL_GamepadButton, SDL_GamepadConnected,
-    SDL_GamepadHasAxis, SDL_GamepadHasButton, SDL_GetGamepadAxis, SDL_GetGamepadButton,
-    SDL_GetGamepadConnectionState, SDL_GetGamepadGUIDForID, SDL_GetGamepadMapping,
-    SDL_GetGamepadName, SDL_GetGamepadPowerInfo, SDL_GetGamepadProduct, SDL_GetGamepadProperties,
-    SDL_GetGamepadSerial, SDL_GetGamepadType, SDL_GetGamepadVendor, SDL_OpenGamepad,
-    SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN,
+    SDL_GamepadHasAxis, SDL_GamepadHasButton, SDL_GamepadHasSensor, SDL_GetGamepadAxis,
+    SDL_GetGamepadButton, SDL_GetGamepadConnectionState, SDL_GetGamepadGUIDForID,
+    SDL_GetGamepadMapping, SDL_GetGamepadName, SDL_GetGamepadPowerInfo, SDL_GetGamepadProduct,
+    SDL_GetGamepadProperties, SDL_GetGamepadSensorData, SDL_GetGamepadSerial, SDL_GetGamepadType,
+    SDL_GetGamepadVendor, SDL_OpenGamepad, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, SDL_RumbleGamepad,
+    SDL_SetGamepadSensorEnabled,
 };
 use sdl3_sys::hints::{
     SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, SDL_HINT_JOYSTICK_ENHANCED_REPORTS,
@@ -23,10 +24,13 @@ use sdl3_sys::hints::{
 use sdl3_sys::init::{SDL_INIT_GAMEPAD, SDL_Init, SDL_QuitSubSystem};
 use sdl3_sys::joystick::SDL_JoystickID;
 use sdl3_sys::properties::SDL_GetBooleanProperty;
+use sdl3_sys::sensor::{SDL_SENSOR_ACCEL, SDL_SENSOR_GYRO};
 use sdl3_sys::stdinc::SDL_free;
 use sdl3_sys::version::SDL_GetVersion;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{CStr, c_char};
+
+const RUMBLE_MS: u32 = 0xFFFF;
 
 const HINTS: [(*const c_char, &CStr); 7] = [
     (SDL_HINT_JOYSTICK_HIDAPI, c"1"),
@@ -77,6 +81,13 @@ impl SdlPads {
         }
         let pad = unsafe { SDL_OpenGamepad(SDL_JoystickID(id)) };
         if !pad.is_null() {
+            for sensor in [SDL_SENSOR_ACCEL, SDL_SENSOR_GYRO] {
+                unsafe {
+                    if SDL_GamepadHasSensor(pad, sensor) {
+                        SDL_SetGamepadSensorEnabled(pad, sensor, true);
+                    }
+                }
+            }
             self.gone.remove(&id);
             self.open.insert(id, pad);
         }
@@ -112,6 +123,30 @@ impl Drop for SdlPads {
 }
 
 impl PadSource for SdlPads {
+    fn rumble(&mut self, strength: f32) {
+        let level = (strength.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
+        let length = if level == 0 { 0 } else { RUMBLE_MS };
+        for &pad in self.open.values() {
+            unsafe { SDL_RumbleGamepad(pad, level, level, length) };
+        }
+    }
+
+    fn motion(&mut self) -> Option<PadMotion> {
+        self.open.values().find_map(|&pad| unsafe {
+            if !SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) {
+                return None;
+            }
+            let mut motion = PadMotion::default();
+            if !SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, motion.accel.as_mut_ptr(), 3) {
+                return None;
+            }
+            if SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) {
+                SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, motion.gyro.as_mut_ptr(), 3);
+            }
+            Some(motion)
+        })
+    }
+
     fn next_event(&mut self) -> Option<PadEvent> {
         while self.queue.is_empty() {
             if !self.started {

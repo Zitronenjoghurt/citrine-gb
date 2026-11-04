@@ -1,8 +1,8 @@
 use super::tables::crystal_rom_with_pictures;
 use super::*;
-use crate::{Dvs, Gender, GrowthRate, Mon, Pokerus, RomTables, Side, Stats};
+use crate::{Dvs, Gender, Genes, GrowthRate, Mon, Pokerus, RomTables, Side, Stats};
 
-fn mon(species: u8, level: u8, exp: u32, dvs: Dvs, stat_exp: [u16; 5]) -> Mon {
+fn mon(species: u16, level: u8, exp: u32, dvs: Dvs, stat_exp: [u16; 5]) -> Mon {
     Mon {
         species,
         nickname: String::new(),
@@ -12,8 +12,7 @@ fn mon(species: u8, level: u8, exp: u32, dvs: Dvs, stat_exp: [u16; 5]) -> Mon {
         exp,
         moves: Vec::new(),
         held_item: None,
-        dvs,
-        stat_exp,
+        genes: Genes::Gb { dvs, stat_exp },
         hp: None,
         stats: None,
         status: None,
@@ -90,7 +89,7 @@ fn gender_compares_attack_and_speed_dvs_with_the_ratio() {
         &crystal_rom_with_pictures(),
     )
     .expect("tables");
-    let gender = |species: u8, high: u8, low: u8| {
+    let gender = |species: u16, high: u8, low: u8| {
         tables.mon_gender(&mon(species, 5, 0, Dvs::from_bytes(high, low), [0; 5]))
     };
     assert_eq!(gender(25, 0x00, 0x00), Some(Gender::Male));
@@ -108,11 +107,11 @@ fn shiny_mons_get_the_shiny_palette_and_unown_its_letter() {
     let tables = RomTables::load(game(Version::Crystal, Language::English), &rom).expect("tables");
     let plain = mon(25, 5, 0, Dvs::from_bytes(0xAA, 0xAB), [0; 5]);
     let shiny = mon(25, 5, 0, Dvs::from_bytes(0xAA, 0xAA), [0; 5]);
-    assert!(shiny.dvs.shiny() && !plain.dvs.shiny());
+    assert!(shiny.shiny() && !plain.shiny());
     assert_eq!(tables.mon_palette(&plain), tables.palette(25, false));
     assert_eq!(tables.mon_palette(&shiny), tables.palette(25, true));
     let unown = mon(201, 5, 0, Dvs::from_bytes(0x00, 0x44), [0; 5]);
-    assert_eq!(unown.dvs.unown_letter(), 'B');
+    assert_eq!(unown.dvs().map(Dvs::unown_letter), Some('B'));
     let sprite = tables.mon_sprite(&rom, &unown, Side::Front).expect("unown");
     assert!(sprite.pixels.iter().all(|&p| p == 3 || p == 0));
     assert_eq!(sprite.pixel(0, 0), 3);

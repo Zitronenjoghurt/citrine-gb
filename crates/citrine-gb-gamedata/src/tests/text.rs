@@ -7,6 +7,7 @@ fn gen1_english_has_contractions_and_the_poke_glyph() {
     assert_eq!(decode(game, &[0x8B, 0xBB, 0x50]), "L'd");
     assert_eq!(decode(game, &[0x8B, 0xBF, 0x50]), "L'v");
     assert_eq!(decode(game, &[0x54, 0x50]), "POKé");
+    assert_eq!(decode(game, &[0x4A, 0x7F, 0x8C, 0x50]), "PKMN M");
     assert_eq!(decode(game, &[0x91, 0x84, 0x83, 0x50, 0x80]), "RED");
 }
 

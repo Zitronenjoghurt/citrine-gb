@@ -38,6 +38,7 @@ cargo test --release -p citrine-gb                 # unit and e2e tests
 make ledger-check                                  # fails if a ROM in passing.txt stopped passing
 make ledger                                        # also adds new passes to passing.txt
 cargo test --release --test ledger -- --failures   # also prints why each ROM failed
+cargo test --release --test ledger -- --only timer # runs only the lines that contain timer
 ```
 
 The e2e tests in [tests/e2e](tests/e2e) run a ROM and compare the frame with a saved PNG. They
@@ -46,20 +47,33 @@ need the `tests/cpu-adtennant` submodule (2.2 GB). A test whose ROMs or data are
 `skipped ...` with how to get them instead of failing.
 
 The test ledger runs freely licensed test ROM suites (mooneye, blargg, SameSuite, AGE, dmg-acid2,
-cgb-acid2, rtc3test and Mealybug Tearoom) on DMG and CGB.
+cgb-acid2, rtc3test and Mealybug Tearoom) on DMG and CGB, and the GBA test ROMs of jsmolka and
+alyosha-tas on GBA.
 [tests/ledger/manifest.toml](tests/ledger/manifest.toml) pins every archive and ROM by SHA-256
-with the models it has to pass on, and [tests/ledger/passing.txt](tests/ledger/passing.txt) lists
-every ROM and model that passes. The archives are downloaded on the first run into
+with the consoles it has to pass on, and [tests/ledger/passing.txt](tests/ledger/passing.txt) lists
+every ROM and console that passes. The archives are downloaded on the first run into
 `~/.cache/citrine-gb/ledger` (or `$LEDGER_CACHE`) and never committed.
 
 Each ROM is judged the way its suite says: the Fibonacci registers at `LD B, B` for mooneye,
 SameSuite and AGE, the serial text or the result code at `$A000` for blargg, the reference image
 at `LD B, B` for acid2 and Mealybug Tearoom, and the reference image after pressing the subtest's
-buttons and waiting a fixed time for rtc3test. Images are compared as DMG shades or 15-bit CGB
-colours.
+buttons and waiting a fixed time for rtc3test. A GBA test ends in a one-instruction loop with the
+number of its first failed test in a register (`r12` for most, 0 when all passed). Images are
+compared as DMG shades or 15-bit colours on CGB and GBA. The GBA lines run with the `gba` feature,
+which `make ledger` turns on; without it they fail with "no GBA core to run it on". With no BIOS
+yet, a GBA test that calls the BIOS stops at its first SWI.
+
+`make ledger-bios GBA_BIOS=<file>` runs the GBA lines again on a BIOS dump of your own, booting
+through its intro, and keeps the passes in
+[tests/ledger/passing-bios.txt](tests/ledger/passing-bios.txt); `make ledger-bios-check` checks
+them. Without the file both print a skip and pass.
 
 The ledger only grows: `make ledger-check` fails as soon as a line in passing.txt stops passing.
 To drop a line, delete it by hand and say why in the commit.
+
+A ROM that can't pass on any hardware gets `unpassable = "<why>"` in the manifest. It still runs,
+but it stays out of the score and passing.txt and prints on its own line with the reason. If it
+ever passes, the ledger fails until the mark comes off.
 
 # Server
 

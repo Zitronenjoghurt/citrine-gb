@@ -1,3 +1,4 @@
+use citrine_gb::console::ConsoleKind;
 use std::path::{Path, PathBuf};
 
 pub mod copies;
@@ -11,9 +12,22 @@ pub struct RecentRom {
     pub last_played: u64,
     #[serde(default)]
     pub rom_key: Option<String>,
+    #[serde(default)]
+    pub console: Option<ConsoleKind>,
 }
 
 impl RecentRom {
+    pub fn is_gba(&self) -> bool {
+        self.console.map_or_else(
+            || {
+                self.path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("gba"))
+            },
+            |console| console == ConsoleKind::Gba,
+        )
+    }
+
     pub fn display_name(&self) -> String {
         if self.title.is_empty() {
             self.path
@@ -35,6 +49,16 @@ pub struct RecentRoms {
 
 impl RecentRoms {
     pub fn record(&mut self, path: &Path, title: &str, rom_key: Option<String>) -> Vec<RecentRom> {
+        self.record_on(path, title, rom_key, None)
+    }
+
+    pub fn record_on(
+        &mut self,
+        path: &Path,
+        title: &str,
+        rom_key: Option<String>,
+        console: Option<ConsoleKind>,
+    ) -> Vec<RecentRom> {
         self.entries.retain(|e| e.path != path);
         self.entries.insert(
             0,
@@ -43,6 +67,7 @@ impl RecentRoms {
                 title: title.trim().to_string(),
                 last_played: now_unix(),
                 rom_key,
+                console,
             },
         );
         self.entries.split_off(MAX_ENTRIES.min(self.entries.len()))
@@ -69,8 +94,7 @@ impl RecentRoms {
             entry.title = crate::game_name::game_name(
                 &header.sha1,
                 file_name.as_deref(),
-                &header.title,
-                header.cgb_mode.is_cgb(),
+                header.short_title(),
             );
         }
     }
@@ -145,6 +169,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         dir
+    }
+
+    #[test]
+    fn an_entry_is_a_gba_game_by_its_console_or_else_its_extension() {
+        let entry = |path: &str, console| RecentRom {
+            path: PathBuf::from(path),
+            title: String::new(),
+            last_played: 0,
+            rom_key: None,
+            console,
+        };
+        assert!(entry("/roms/Emerald.GBA", None).is_gba());
+        assert!(!entry("/roms/Silver.gbc", None).is_gba());
+        assert!(entry("/roms/game.bin", Some(ConsoleKind::Gba)).is_gba());
+        assert!(!entry("/roms/game.gba", Some(ConsoleKind::Gb)).is_gba());
     }
 
     #[test]

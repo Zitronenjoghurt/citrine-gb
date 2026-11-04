@@ -9,6 +9,14 @@ use egui::{Align, Layout, RichText, Ui, vec2};
 pub const STRIP_HEIGHT: f32 = 48.0;
 pub const STRIP_INSET: f32 = 10.0;
 const STRIP_AVATAR: f32 = 28.0;
+const STRIP_BUTTON: f32 = 40.0;
+const STRIP_GAP: f32 = 8.0;
+
+pub fn strip_height(buttons: usize, width: f32) -> f32 {
+    let per_row = ((width - 4.0 + STRIP_GAP) / (STRIP_BUTTON + STRIP_GAP)).floor();
+    let per_row = (per_row as usize).max(1);
+    STRIP_HEIGHT * buttons.div_ceil(per_row).max(1) as f32
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripButton {
@@ -37,6 +45,7 @@ pub struct StripPlan {
 pub struct StripFacts {
     pub title: String,
     pub session: bool,
+    pub room: bool,
     pub watching_only: bool,
     pub linked: bool,
     pub recording: bool,
@@ -48,7 +57,18 @@ pub fn plan(facts: &StripFacts) -> StripPlan {
     if facts.recording {
         buttons.push(StripButton::StopRecording);
     }
-    let lead = if facts.session {
+    let lead = if facts.room {
+        if !facts.watching_only {
+            buttons.push(StripButton::Pause);
+        }
+        if facts.session && facts.linked {
+            StripLead::Friend {
+                watching: facts.watching_only,
+            }
+        } else {
+            StripLead::Title(facts.title.clone())
+        }
+    } else if facts.session {
         buttons.push(StripButton::Chat);
         if !facts.watching_only {
             buttons.push(StripButton::Pause);
@@ -74,7 +94,16 @@ pub fn plan(facts: &StripFacts) -> StripPlan {
 }
 
 impl Citrine {
-    fn strip_facts(&self) -> StripFacts {
+    fn room_linked(&self) -> bool {
+        let me = self.online.account().map(|a| a.online_id);
+        self.play.room().zip(me).is_some_and(|(room, me)| {
+            room.links()
+                .group_of(me)
+                .is_some_and(|g| g.members().len() > 1)
+        })
+    }
+
+    pub(super) fn strip_facts(&self) -> StripFacts {
         let session = self.play.session();
         let title = match self.link_control() {
             Some(crate::local_link::Game::Second) => linked::title(&self.emulator, false),
@@ -83,8 +112,12 @@ impl Citrine {
         StripFacts {
             title,
             session: session.is_some(),
+            room: self
+                .play
+                .room()
+                .is_some_and(|r| r.is_live() && r.members().len() > 1),
             watching_only: session.is_some_and(|s| s.watching_only()),
-            linked: self.emulator.link.is_some(),
+            linked: self.emulator.link.is_some() || self.room_linked(),
             recording: self.emulator.screen_recorder.is_recording(),
             can_save: self.emulator.rom_key().is_some() && self.emulator.partner.is_none(),
         }
@@ -141,7 +174,7 @@ impl Citrine {
             return false;
         };
         let friend = session.friend();
-        let full = self.online.display_name(friend);
+        let full = playing::full_name(&self.play, &self.online, friend);
         let name = playing::short_name(&full).to_owned();
         let tapped = avatar::avatar(
             ui,
@@ -160,13 +193,42 @@ impl Citrine {
             );
             return tapped;
         }
-        ui.add(egui::Label::new(RichText::new(&name).size(16.0).color(strong)).truncate());
-        if session.stage() == Stage::Inviting {
-            ui.label(RichText::new("Invite sent").weak());
-        } else if let Some(ms) = session.round_trip_ms() {
+        let group = playing::group_link(&self.play, &self.online);
+        let (name, ms) = match group {
+            Some((partners, slowest)) => (partners, slowest.map(u32::from)),
+            None => (name, session.round_trip_ms()),
+        };
+        let inviting = session.stage() == Stage::Inviting;
+        let link = ms.filter(|_| !inviting).map(|ms| {
             let (word, color) = playing::quality(ms, ui.visuals().dark_mode);
-            ui.label(RichText::new(word).color(color))
-                .on_hover_text(format!("{ms} ms"));
+            let measure = |text: &str, font: egui::FontId| {
+                ui.painter()
+                    .layout_no_wrap(text.to_owned(), font, strong)
+                    .size()
+                    .x
+            };
+            let name_width = measure(&name, egui::FontId::proportional(16.0));
+            let room = ui.available_width() - name_width - ui.spacing().item_spacing.x;
+            let body = egui::TextStyle::Body.resolve(ui.style());
+            let (link, time) = link_parts(word, ms, room, |text| measure(text, body.clone()));
+            (link, time, color, ms)
+        });
+        ui.add(egui::Label::new(RichText::new(&name).size(16.0).color(strong)).truncate());
+        if inviting {
+            ui.label(RichText::new("Invite sent").weak());
+        } else if let Some((link, time, color, ms)) = link {
+            let body = egui::TextStyle::Body.resolve(ui.style());
+            let format = |color: egui::Color32| egui::TextFormat {
+                font_id: body.clone(),
+                color,
+                ..Default::default()
+            };
+            let mut job = egui::text::LayoutJob::default();
+            job.append(&link, 0.0, format(color));
+            if let Some(time) = time {
+                job.append(&time, 0.0, format(ui.visuals().text_color()));
+            }
+            ui.label(job).on_hover_text(format!("{ms} ms"));
         } else {
             ui.label(RichText::new("Connecting").weak());
         }
@@ -174,7 +236,7 @@ impl Citrine {
     }
 
     fn strip_button(&self, ui: &mut Ui, button: StripButton) -> bool {
-        let side = ui.spacing().interact_size.y.max(40.0);
+        let side = ui.spacing().interact_size.y.max(STRIP_BUTTON);
         let (icon, hint) = match button {
             StripButton::Hide => (icons::EYE_SLASH, "Hide the UI"),
             StripButton::FastForward => (icons::FAST_FORWARD, "Fast forward"),
@@ -234,6 +296,18 @@ impl Citrine {
         }
         self.release_touch();
     }
+}
+
+fn link_parts(
+    word: &str,
+    ms: u32,
+    room: f32,
+    width: impl Fn(&str) -> f32,
+) -> (String, Option<String>) {
+    let link = format!("{word} link");
+    let time = format!(" \u{b7} {ms} ms");
+    let fits = width(&format!("{link}{time}")) <= room;
+    (link, fits.then_some(time))
 }
 
 #[cfg(test)]

@@ -3,6 +3,10 @@ use crate::game::{Language, Version};
 use crate::gen2::checksum;
 use crate::layout::{CRYSTAL_INTERNATIONAL, Gen2Layout};
 
+pub mod gen3;
+pub mod gen3_game;
+pub mod gen3_rom;
+
 pub fn game(version: Version, language: Language) -> Game {
     Game {
         version,

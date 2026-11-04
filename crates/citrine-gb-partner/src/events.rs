@@ -46,9 +46,10 @@ impl Event {
 
     pub fn fits(&self, game: Game) -> bool {
         let generation_fits = match (self.generation, game.generation()) {
-            (Generation::Two, Generation::One) => false,
+            (Generation::One, Generation::One) | (Generation::Two, Generation::Two) => true,
             (Generation::One, Generation::Two) => !self.egg,
-            _ => true,
+            (Generation::Two, Generation::One) => false,
+            (Generation::Three, _) | (_, Generation::Three) => false,
         };
         generation_fits && self.trainers_for(game.language).next().is_some()
     }

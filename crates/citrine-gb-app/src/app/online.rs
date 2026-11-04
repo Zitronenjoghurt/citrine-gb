@@ -3,6 +3,7 @@ use super::tabs;
 use crate::app::tabs::Tab;
 use crate::app::ui_state::synced;
 use crate::play::{MyGame, Stage};
+use crate::utils::save_files::ROM_FILTER;
 use egui::Context;
 
 impl Citrine {
@@ -15,10 +16,18 @@ impl Citrine {
         }
         self.activity.held = held;
         let away = now.duration_since(self.activity.last_input) >= crate::online::AWAY_AFTER;
-        let cartridge = &self.emulator.gb.cartridge;
-        let game = (self.ui.settings.online.show_playing && cartridge.has_rom_loaded)
-            .then_some(cartridge.header.sha1);
+        let game = self
+            .emulator
+            .open_game()
+            .filter(|_| self.ui.settings.online.show_playing);
         self.online.set_activity(away, game);
+        let hidden = self.is_mobile(ctx) && ctx.input(|i| i.viewport().focused) == Some(false);
+        let paused = self.emulator.has_game() && !self.emulator.is_running();
+        self.play.set_status(paused, hidden);
+        self.play.tick_watch(now);
+        if self.play.room().is_some_and(|r| r.watching().is_some()) {
+            ctx.request_repaint();
+        }
         let settings = &self.ui.settings.online;
         self.online
             .set_cloud(settings.cloud_owner(), settings.cloud_saves);
@@ -36,6 +45,8 @@ impl Citrine {
             self.ui.settings.unsaved = true;
         }
         self.settle_cloud_game(now);
+        self.play
+            .set_input_delay(self.ui.settings.online.input_delay.frames());
         self.play.update(&mut self.online, now);
 
         if let Some(joined) = self.online.take_joined() {
@@ -84,6 +95,7 @@ impl Citrine {
     }
 
     pub(super) fn settle_play(&mut self, ctx: &Context) {
+        self.settle_room();
         if let Some(ended) = &self.ui.playing.ended
             && match ended.paused {
                 true => self.emulator.running,
@@ -123,7 +135,7 @@ impl Citrine {
                     }
                 }
                 if let Some(ending) = ending {
-                    let name = tabs::playing::friend_name(&self.online, friend);
+                    let name = tabs::playing::member_name(&self.play, &self.online, friend);
                     self.ui.playing.ended =
                         tabs::playing::ending_line(&name, ending, played).map(|line| {
                             tabs::playing::Ended {
@@ -137,6 +149,10 @@ impl Citrine {
                 self.ui.playing.shown = false;
                 if let Some(next) = self.ui.playing.switch_to.take() {
                     self.play_again(next);
+                    return;
+                }
+                if let Some(invite) = self.ui.playing.join_after.take() {
+                    self.answer_ask(&invite);
                     return;
                 }
             }
@@ -153,13 +169,33 @@ impl Citrine {
         }
     }
 
+    fn settle_room(&mut self) {
+        if self
+            .play
+            .room()
+            .is_some_and(|r| r.members().len() > 1 && r.is_live())
+        {
+            return;
+        }
+        let playing = &mut self.ui.playing;
+        playing.room_sheet = None;
+        playing.relinking = None;
+        if self.play.room().is_none() {
+            playing.room_seen = 0;
+            playing.room_draft.clear();
+        }
+        if let Some(location) = self.dock.find_tab(&Tab::RoomChat) {
+            self.dock.remove_tab(location);
+        }
+    }
+
     pub(super) fn play_picker(&mut self, ctx: &Context) {
         if std::mem::take(&mut self.ui.playing.wants_copy) {
             self.ui.playing.copy_for = true;
             self.try_start_audio();
             crate::utils::file_loader::FileLoader::new()
                 .title("Open your copy of the game")
-                .add_filter("Game Boy ROMs", &["gb", "gbc"])
+                .add_filter(ROM_FILTER.0, ROM_FILTER.1)
                 .dispatch(self.files.play_rom_tx.clone());
         }
         let Some((target, pick)) = tabs::playing::picker(
@@ -173,7 +209,7 @@ impl Citrine {
         };
         match pick {
             tabs::playing::Pick::Homebrew(game) => {
-                self.picked_for(target, |app| app.handle_load_rom_data(game.data()));
+                self.picked_for(target, |app| app.play_shelf_game(game));
             }
             #[cfg(not(target_arch = "wasm32"))]
             tabs::playing::Pick::Recent(path) => {
@@ -184,7 +220,7 @@ impl Citrine {
                 self.try_start_audio();
                 crate::utils::file_loader::FileLoader::new()
                     .title("Open a game to play together")
-                    .add_filter("Game Boy ROMs", &["gb", "gbc"])
+                    .add_filter(ROM_FILTER.0, ROM_FILTER.1)
                     .dispatch(self.files.play_rom_tx.clone());
             }
             tabs::playing::Pick::Theirs => {
@@ -224,9 +260,8 @@ impl Citrine {
                 }
                 self.put_my_game_away();
                 load(self);
-                let file = self.emulator.game_file();
-                if let (Some(session), Some(file)) = (self.play.session_mut(), file)
-                    && !session.bring(MyGame::Own(file))
+                if let Some(file) = self.emulator.game_file()
+                    && !self.play.bring(MyGame::Own(file))
                 {
                     self.toasts.error("Couldn't change the game");
                 }
@@ -234,14 +269,46 @@ impl Citrine {
         }
     }
 
-    pub(super) fn put_my_game_away(&mut self) {
-        let Some(session) = self.play.session_mut() else {
+    pub(super) fn unlink_load_confirm(&mut self, ctx: &Context) {
+        let Some(slot) = self.ui.playing.unlink_load else {
             return;
         };
-        if session.my_game().is_none() || !session.bring(MyGame::Nothing) {
+        let Some(partners) = tabs::playing::group_partners(&self.play, &self.online) else {
+            self.ui.playing.unlink_load = None;
+            return;
+        };
+        let choice = super::widgets::confirm::confirm_with_detail(
+            ctx,
+            "unlink_load_confirm",
+            &format!("Load this state? You'll unlink from {partners}."),
+            Some("Unsaved progress is lost."),
+            "Load",
+        );
+        let Some(confirmed) = choice else {
+            return;
+        };
+        self.ui.playing.unlink_load = None;
+        if !confirmed {
             return;
         }
-        if let Some(back) = session.take_returned() {
+        tabs::playing::unlink_group(&mut self.play, &mut self.emulator);
+        let name = self.emulator.snapshot_name(slot);
+        match self.emulator.load_snapshot(slot) {
+            Ok(_) => self.toasts.success(format!("Loaded {name}")),
+            Err(err) => self
+                .toasts
+                .error(format!("Couldn't load the state: {err:?}")),
+        };
+        self.ui.snapshots.invalidate();
+    }
+
+    pub(super) fn put_my_game_away(&mut self) {
+        tabs::playing::unlink_group(&mut self.play, &mut self.emulator);
+        let holds = self.play.session().is_some_and(|s| s.my_game().is_some());
+        if !holds || !self.play.bring(MyGame::Nothing) {
+            return;
+        }
+        if let Some(back) = self.play.session_mut().and_then(|s| s.take_returned()) {
             self.emulator.keep_returned(back);
         }
     }

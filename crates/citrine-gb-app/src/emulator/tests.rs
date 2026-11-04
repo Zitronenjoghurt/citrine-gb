@@ -3,6 +3,7 @@ use crate::app::ui_state::keybinds::{BindingKind, BindingTarget, Captured, GbBut
 use crate::held::InputSource;
 use crate::pad_input::PadEvent;
 use crate::pad_input::{PadAxis, PadInput, PadKey};
+use citrine_gb::console::ConsoleKind;
 use strum::IntoEnumIterator;
 
 const RAM_LEN: usize = 0x2000;
@@ -35,7 +36,7 @@ fn running(emulator: &mut Emulator, cartridge_type: u8) {
     emulator
         .load_rom(&rom(cartridge_type), GbModel::Dmg, None)
         .expect("load");
-    emulator.gb.run_cycles(100_000);
+    emulator.gb_mut().run_cycles(100_000);
 }
 
 fn played(emulator: &mut Emulator, seconds: f64) {
@@ -50,8 +51,8 @@ fn played(emulator: &mut Emulator, seconds: f64) {
 
 fn write_sram(emulator: &mut Emulator, value: u8) {
     use citrine_gb::WriteMemory;
-    emulator.gb.cartridge.write_naive(0x0000, 0x0A);
-    emulator.gb.cartridge.write_naive(0xA000, value);
+    emulator.gb_mut().cartridge.write_naive(0x0000, 0x0A);
+    emulator.gb_mut().cartridge.write_naive(0xA000, value);
 }
 
 fn autosaves(emulator: &Emulator) -> Vec<usize> {
@@ -60,39 +61,39 @@ fn autosaves(emulator: &Emulator) -> Vec<usize> {
         .autosave_ids(emulator.rom_key().expect("key"))
 }
 
-fn gb_held(emulator: &mut Emulator) -> u8 {
+fn gb_held(emulator: &mut Emulator) -> u16 {
     use citrine_gb::{ReadMemory, WriteMemory};
-    let joypad = &mut emulator.gb.joypad;
+    let joypad = &mut emulator.gb_mut().joypad;
     joypad.write_naive(0xFF00, 0x10);
     let buttons = !joypad.read_naive(0xFF00) & 0x0F;
     joypad.write_naive(0xFF00, 0x20);
     let dpad = !joypad.read_naive(0xFF00) & 0x0F;
-    buttons | (dpad << 4)
+    u16::from(buttons | (dpad << 4))
 }
 
 #[test]
 fn the_game_boy_sees_what_is_held_after_a_load() {
     let mut emulator = emulator("held-sync");
     running(&mut emulator, 0x03);
-    emulator.press(KEYS, JoypadState::A);
+    emulator.press(KEYS, Keys::A);
     emulator.save_snapshot(0).expect("save");
-    emulator.release(KEYS, JoypadState::A);
-    emulator.press(KEYS, JoypadState::RIGHT);
+    emulator.release(KEYS, Keys::A);
+    emulator.press(KEYS, Keys::RIGHT);
 
     assert!(emulator.load_snapshot(0).expect("load"));
     assert_eq!(
         gb_held(&mut emulator),
-        JoypadState::RIGHT.bits(),
+        Keys::RIGHT.bits(),
         "A was let go before the load and Right is still down"
     );
-    assert!(emulator.release(KEYS, JoypadState::RIGHT));
+    assert!(emulator.release(KEYS, Keys::RIGHT));
     assert_eq!(gb_held(&mut emulator), 0);
 
-    emulator.press(KEYS, JoypadState::START);
+    emulator.press(KEYS, Keys::START);
     running(&mut emulator, 0x03);
-    assert_eq!(gb_held(&mut emulator), JoypadState::START.bits());
+    assert_eq!(gb_held(&mut emulator), Keys::START.bits());
     assert!(
-        emulator.release(KEYS, JoypadState::START),
+        emulator.release(KEYS, Keys::START),
         "the release reaches the game"
     );
     assert_eq!(gb_held(&mut emulator), 0);
@@ -113,6 +114,23 @@ fn paused_time_does_not_count() {
     emulator.play.play(std::time::Duration::from_secs(60));
     assert_eq!(emulator.autosave_if_due().expect("autosave"), Some(0));
     assert_eq!(emulator.autosave_if_due().expect("autosave"), None);
+}
+
+#[test]
+fn a_hidden_page_autosave_counts_as_saved() {
+    let mut emulator = emulator("auto-hidden");
+    running(&mut emulator, 0x03);
+    played(&mut emulator, 1.5);
+    emulator.running = false;
+    played(&mut emulator, 0.2);
+    assert_eq!(emulator.last_good.write_out(), Ok(Some(0)));
+    played(&mut emulator, 0.2);
+    assert_eq!(emulator.autosave_if_played().expect("autosave"), None);
+    assert_eq!(autosaves(&emulator), vec![0]);
+
+    emulator.running = true;
+    played(&mut emulator, 1.5);
+    assert_eq!(emulator.autosave_if_played().expect("autosave"), Some(1));
 }
 
 #[test]
@@ -172,7 +190,7 @@ fn an_autosave_loads_back_without_touching_snapshots() {
     write_sram(&mut emulator, 0x22);
     assert!(emulator.load_autosave(id).expect("load"));
 
-    assert_eq!(emulator.gb.cartridge.battery_ram()[0], 0x11);
+    assert_eq!(emulator.gb().cartridge.battery_ram()[0], 0x11);
     assert_eq!(emulator.autosave_if_played().expect("autosave"), None);
     assert_eq!(emulator.store.load_snapshot(&key, 0), snapshot);
     assert_eq!(emulator.store.used_slots(&key), vec![0]);
@@ -184,7 +202,7 @@ fn dual(emulator: &mut Emulator, model: GbModel) {
     emulator
         .load_rom(&Rom::new(&data), model, None)
         .expect("load");
-    emulator.gb.run_cycles(100_000);
+    emulator.gb_mut().run_cycles(100_000);
 }
 
 #[test]
@@ -194,12 +212,12 @@ fn switching_consoles_keeps_the_battery_save() {
     write_sram(&mut emulator, 0x5A);
     emulator.restart_on(GbModel::Dmg).expect("switch");
     assert_eq!(emulator.console(), GbModel::Dmg);
-    assert_eq!(emulator.gb.cartridge.battery_ram()[0], 0x5A);
+    assert_eq!(emulator.gb().cartridge.battery_ram()[0], 0x5A);
 
     write_sram(&mut emulator, 0x6B);
     emulator.restart_on(GbModel::Cgb).expect("switch back");
     assert_eq!(emulator.console(), GbModel::Cgb);
-    assert_eq!(emulator.gb.cartridge.battery_ram()[0], 0x6B);
+    assert_eq!(emulator.gb().cartridge.battery_ram()[0], 0x6B);
     assert_eq!(
         emulator.take_console_switch(),
         None,
@@ -227,7 +245,7 @@ fn a_known_game_names_its_battery_save_by_its_proper_name() {
         .expect("load");
     emulator.name_game(Some("libbet.gb"));
     assert_ne!(
-        emulator.gb.cartridge.header.title.trim(),
+        emulator.gb().cartridge.header.title.trim(),
         "Libbet and the Magic Floor"
     );
     assert_eq!(emulator.game_name(), "Libbet and the Magic Floor");
@@ -241,7 +259,7 @@ fn a_snapshot_loads_on_the_console_it_was_made_on() {
     emulator.save_snapshot(0).expect("snapshot");
     let key = emulator.rom_key().expect("key").to_owned();
     let info = emulator.store.snapshot_info(&key, 0).expect("info");
-    assert_eq!(info.console, Some(GbModel::Dmg));
+    assert_eq!(info.console, Some(ConsoleKind::Gb));
 
     emulator.restart_on(GbModel::Cgb).expect("switch");
     assert!(emulator.load_snapshot(0).expect("load"));
@@ -265,7 +283,7 @@ fn an_autosave_records_its_console() {
     let id = emulator.autosave().expect("autosave").expect("id");
     let key = emulator.rom_key().expect("key").to_owned();
     let infos = emulator.store.autosave_infos(&key);
-    assert_eq!(infos[0].console, Some(GbModel::Cgb));
+    assert_eq!(infos[0].console, Some(ConsoleKind::Gbc));
 
     emulator.restart_on(GbModel::Dmg).expect("switch");
     assert!(emulator.load_autosave(id).expect("load"));
@@ -289,12 +307,16 @@ fn a_snapshot_from_before_consoles_were_recorded_still_loads() {
 
     let info = emulator.store.snapshot_info(&key, 0).expect("info");
     assert_eq!(info.saved_at, 1_700_000_000);
-    assert_eq!(info.console, Some(GbModel::Dmg), "read from the snapshot");
+    assert_eq!(
+        info.console,
+        Some(ConsoleKind::Gb),
+        "read from the snapshot"
+    );
     assert_eq!(std::fs::read(&meta).expect("meta").len(), 9, "noted once");
 
     write_sram(&mut emulator, 0x44);
     assert!(emulator.load_snapshot(0).expect("load"));
-    assert_eq!(emulator.gb.cartridge.battery_ram()[0], 0x33);
+    assert_eq!(emulator.gb().cartridge.battery_ram()[0], 0x33);
     assert_eq!(emulator.console(), GbModel::Dmg);
 }
 
@@ -310,9 +332,9 @@ fn a_crash_saves_the_last_frame_boundary() {
     assert_eq!(emulator.last_good.write_out(), Ok(Some(0)));
     let key = emulator.rom_key().expect("key").to_owned();
     let state = emulator.store.load_autosave(&key, 0).expect("autosave");
-    let rom = Rom::new(&emulator.gb.cartridge.rom_bytes());
+    let rom = Rom::new(&emulator.gb().cartridge.rom_bytes());
     let restored = GameBoy::from_dump(&state, &rom, now_unix()).expect("restores");
-    assert_eq!(restored.cpu.pc, emulator.gb.cpu.pc);
+    assert_eq!(restored.cpu.pc, emulator.gb().cpu.pc);
     assert_eq!(restored.cartridge.battery_ram()[0], 0x42);
     let battery = emulator.store.load_battery(&key).expect("battery");
     assert_eq!(battery[0], 0x42);
@@ -324,14 +346,14 @@ fn an_imported_save_survives_the_restart() {
     running(&mut emulator, 0x03);
     emulator.import_save(Some(&bytes(1)), None).expect("first");
     emulator.restart();
-    emulator.gb.run_cycles(100_000);
+    emulator.gb_mut().run_cycles(100_000);
 
     let result = emulator.import_save(Some(&bytes(2)), None).expect("second");
     assert_eq!(result, SaveImport::Imported);
     emulator.restart();
-    emulator.gb.run_cycles(100_000);
+    emulator.gb_mut().run_cycles(100_000);
 
-    assert_eq!(emulator.gb.cartridge.battery_ram(), bytes(2));
+    assert_eq!(emulator.gb().cartridge.battery_ram(), bytes(2));
     let key = emulator.rom_key().expect("key").to_owned();
     assert_eq!(emulator.store.load_battery(&key), Some(bytes(2)));
     assert!(emulator.running);
@@ -342,7 +364,11 @@ fn an_imported_save_survives_the_restart() {
 fn an_imported_clock_survives_the_restart() {
     let mut emulator = emulator("clock");
     running(&mut emulator, 0x10);
-    let mut footer = emulator.gb.cartridge.rtc_footer(now_unix()).expect("clock");
+    let mut footer = emulator
+        .gb()
+        .cartridge
+        .rtc_footer(now_unix())
+        .expect("clock");
     footer.real.seconds = 12;
     footer.real.minutes = 34;
     footer.real.hours = 5;
@@ -355,10 +381,14 @@ fn an_imported_clock_survives_the_restart() {
         .expect("import");
     assert_eq!(result, SaveImport::Imported);
     emulator.restart();
-    emulator.gb.run_cycles(100_000);
+    emulator.gb_mut().run_cycles(100_000);
 
-    assert_eq!(emulator.gb.cartridge.battery_ram(), bytes(3));
-    let clock = emulator.gb.cartridge.rtc_footer(now_unix()).expect("clock");
+    assert_eq!(emulator.gb().cartridge.battery_ram(), bytes(3));
+    let clock = emulator
+        .gb()
+        .cartridge
+        .rtc_footer(now_unix())
+        .expect("clock");
     assert_eq!(clock.real, footer.real);
 }
 
@@ -432,8 +462,8 @@ fn any_pad_source_drives_the_bindings() {
         (3, PadInput::Moved(PadAxis::LeftStickX, -0.9)),
     ]);
     emulator.handle_pads(&mut pads, &bindings, &mut capture, Some(&mut log));
-    assert!(emulator.is_held(GbButton::A.joypad()));
-    assert!(emulator.is_held(GbButton::Left.joypad()));
+    assert!(emulator.is_held(GbButton::A.key()));
+    assert!(emulator.is_held(GbButton::Left.key()));
     assert_eq!(log.len(), 3);
     assert_eq!(log.seen(), &[3]);
 
@@ -442,8 +472,8 @@ fn any_pad_source_drives_the_bindings() {
         (3, PadInput::Moved(PadAxis::LeftStickX, 0.0)),
     ]);
     emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
-    assert!(!emulator.is_held(GbButton::A.joypad()));
-    assert!(!emulator.is_held(GbButton::Left.joypad()));
+    assert!(!emulator.is_held(GbButton::A.key()));
+    assert!(!emulator.is_held(GbButton::Left.key()));
 }
 
 #[test]
@@ -464,7 +494,7 @@ fn any_pad_source_feeds_a_waiting_binding() {
             Captured::Pad(PadButton::RightTrigger2)
         ))
     );
-    assert!(!emulator.is_held(GbButton::B.joypad()));
+    assert!(!emulator.is_held(GbButton::B.key()));
 }
 
 fn d_pad(button: PadButton, pressed: bool) -> PadInput {
@@ -514,7 +544,7 @@ fn play_a_frame(emulator: &mut Emulator) {
 }
 
 fn holds(emulator: &Emulator, button: GbButton) -> bool {
-    emulator.is_held(button.joypad())
+    emulator.is_held(button.key())
 }
 
 #[test]
@@ -525,7 +555,7 @@ fn stick_noise_never_lets_go_of_a_held_d_pad() {
     pads_in(&mut emulator, &noise(50));
     assert!(holds(&emulator, GbButton::Left));
     play_a_frame(&mut emulator);
-    assert_eq!(gb_held(&mut emulator), JoypadState::LEFT.bits());
+    assert_eq!(gb_held(&mut emulator), Keys::LEFT.bits());
 }
 
 #[test]
@@ -539,7 +569,7 @@ fn a_d_pad_tap_reaches_the_game_for_a_frame() {
     assert!(!holds(&emulator, GbButton::Left), "the player let go");
     assert_eq!(
         gb_held(&mut emulator),
-        JoypadState::LEFT.bits(),
+        Keys::LEFT.bits(),
         "the game still sees the tap until a frame runs"
     );
     play_a_frame(&mut emulator);
@@ -555,7 +585,7 @@ fn a_stick_flick_reaches_the_game_for_a_frame() {
         &[(0, stick_x(0.95)), (0, stick_x(0.3)), (0, stick_x(0.01))],
     );
     assert!(!holds(&emulator, GbButton::Right));
-    assert_eq!(gb_held(&mut emulator), JoypadState::RIGHT.bits());
+    assert_eq!(gb_held(&mut emulator), Keys::RIGHT.bits());
     play_a_frame(&mut emulator);
     assert_eq!(gb_held(&mut emulator), 0);
 }
@@ -572,7 +602,7 @@ fn a_centred_stick_lets_go_of_only_what_it_held() {
     pads_in(&mut emulator, &[(0, stick_x(0.0))]);
     assert!(!holds(&emulator, GbButton::Left));
     assert!(holds(&emulator, GbButton::Up));
-    assert_eq!(gb_held(&mut emulator), JoypadState::UP.bits());
+    assert_eq!(gb_held(&mut emulator), Keys::UP.bits());
 }
 
 #[test]
@@ -590,7 +620,7 @@ fn the_d_pad_and_the_stick_hold_the_same_button_together() {
     play_a_frame(&mut emulator);
     pads_in(&mut emulator, &[(0, d_pad(PadButton::DPadLeft, false))]);
     assert!(holds(&emulator, GbButton::Left), "the stick still holds it");
-    assert_eq!(gb_held(&mut emulator), JoypadState::LEFT.bits());
+    assert_eq!(gb_held(&mut emulator), Keys::LEFT.bits());
     pads_in(&mut emulator, &[(0, stick_x(0.0))]);
     assert!(!holds(&emulator, GbButton::Left));
     assert_eq!(gb_held(&mut emulator), 0);
@@ -600,13 +630,13 @@ fn the_d_pad_and_the_stick_hold_the_same_button_together() {
 fn the_keyboard_and_a_pad_do_not_let_go_of_each_other() {
     let mut emulator = emulator("pad-keys");
     running(&mut emulator, 0x03);
-    emulator.press(KEYS, JoypadState::A);
+    emulator.press(KEYS, Keys::A);
     pads_in(&mut emulator, &[(0, d_pad(PadButton::East, true))]);
     play_a_frame(&mut emulator);
     pads_in(&mut emulator, &[(0, d_pad(PadButton::East, false))]);
     assert!(holds(&emulator, GbButton::A));
     pads_in(&mut emulator, &[(0, d_pad(PadButton::East, true))]);
-    emulator.release(KEYS, JoypadState::A);
+    emulator.release(KEYS, Keys::A);
     assert!(holds(&emulator, GbButton::A));
 }
 
@@ -670,7 +700,7 @@ fn the_dead_zone_setting_moves_where_the_stick_presses() {
 fn an_unplugged_pad_lets_go_of_what_it_held() {
     let mut emulator = emulator("pad-unplug");
     running(&mut emulator, 0x03);
-    emulator.press(KEYS, JoypadState::A);
+    emulator.press(KEYS, Keys::A);
     pads_in(
         &mut emulator,
         &[
@@ -686,18 +716,15 @@ fn an_unplugged_pad_lets_go_of_what_it_held() {
     assert!(holds(&emulator, GbButton::B), "pad 1 still holds it");
     assert!(!holds(&emulator, GbButton::Start));
     assert!(!holds(&emulator, GbButton::Left));
-    assert_eq!(
-        gb_held(&mut emulator),
-        (JoypadState::A | JoypadState::B).bits()
-    );
+    assert_eq!(gb_held(&mut emulator), (Keys::A | Keys::B).bits());
 }
 
 #[test]
 fn letting_go_of_everything_clears_every_source() {
     let mut emulator = emulator("pad-release-all");
     running(&mut emulator, 0x03);
-    emulator.press(KEYS, JoypadState::A);
-    emulator.press(InputSource::Touch, JoypadState::B);
+    emulator.press(KEYS, Keys::A);
+    emulator.press(InputSource::Touch, Keys::B);
     pads_in(
         &mut emulator,
         &[(0, d_pad(PadButton::DPadUp, true)), (0, stick_x(0.9))],
@@ -758,24 +785,43 @@ fn a_finished_session_hands_its_console_to_the_emulator() {
     emu.last_update = Some(now - std::time::Duration::from_millis(50));
     let session = pair.host.play.session_mut().unwrap();
     emu.advance_rollback(now, session);
-    let shown = session.console(true).unwrap().frame().as_slice().to_vec();
+    let shown = session.console(true).unwrap().frame().to_vec();
     assert!(emu.linked_frame.as_deref() == Some(shown.as_slice()));
 
     pair.host.play.leave(&mut pair.host.online);
-    let screen = pair
-        .host
-        .session()
-        .console(true)
-        .unwrap()
-        .frame()
-        .as_slice()
-        .to_vec();
+    let screen = pair.host.session().console(true).unwrap().frame().to_vec();
     let session = pair.host.play.close().unwrap();
     emu.finish_session(session).unwrap();
-    assert!(emu.gb.frame().as_slice() == screen.as_slice());
+    assert!(emu.gb().frame().as_slice() == screen.as_slice());
     assert!(emu.last_frame == screen);
     assert!(emu.linked_frame.is_none());
     assert!(emu.running);
-    assert!(!emu.gb.link_plugged());
+    assert!(!emu.gb().link_plugged());
     assert_eq!(emu.game_name(), name);
 }
+
+#[test]
+fn resetting_to_a_cycle_count_keeps_the_frame_position() {
+    let mut emulator = emulator("reset-to");
+    running(&mut emulator, 0x03);
+
+    emulator.reset_to(&egui::Context::default(), 100_000);
+
+    let counter = emulator.gb().cycle_counter;
+    assert!((12_220..12_230).contains(&counter), "counter {counter}");
+}
+
+#[test]
+fn resetting_to_a_cycle_count_stops_at_a_breakpoint() {
+    let mut emulator = emulator("reset-to-breakpoint");
+    running(&mut emulator, 0x03);
+    let target = emulator.gb().code_address(0x0200).expect("rom");
+    emulator.gb_mut().debugger.breakpoints.insert(target);
+
+    emulator.reset_to(&egui::Context::default(), 100_000);
+
+    assert_eq!(emulator.gb().cpu.pc.wrapping_sub(1), 0x0200);
+}
+
+#[cfg(feature = "gba")]
+mod gba;

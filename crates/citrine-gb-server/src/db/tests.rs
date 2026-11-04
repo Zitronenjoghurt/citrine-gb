@@ -248,7 +248,7 @@ async fn deleted_messages_give_their_space_back() {
     let mut ids = Vec::new();
     for i in 0..64 {
         ids.push(
-            db.insert_message(a.id, b.id, None, i, &sealed)
+            db.insert_message(a.id, b.id, None, i, None, &sealed)
                 .await
                 .unwrap(),
         );
@@ -324,10 +324,10 @@ async fn deleting_an_account_removes_its_rows_everywhere() {
     db.add_request(a.id, c.id, 10).await.unwrap();
     db.block(c.id, a.id).await.unwrap();
     db.add_device(b.id, &[9; 32], "Mac", 10).await.unwrap();
-    db.insert_message(a.id, b.id, None, 10, &sealed())
+    db.insert_message(a.id, b.id, None, 10, None, &sealed())
         .await
         .unwrap();
-    db.insert_message(b.id, a.id, None, 10, &sealed())
+    db.insert_message(b.id, a.id, None, 10, None, &sealed())
         .await
         .unwrap();
     db.insert_file(FileId([7; 16]), a.id, 10, 10).await.unwrap();

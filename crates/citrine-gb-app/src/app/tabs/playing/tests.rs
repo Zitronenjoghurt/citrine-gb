@@ -1,5 +1,5 @@
 use super::bar::{LineWidths, MIN_NAME, Tail, bar_line, fixed_label, line_widths};
-use super::lines::{other_game_line, quality, short_name, size_line};
+use super::lines::{other_game_line, quality, short_name};
 use super::*;
 use crate::play::Ending;
 
@@ -49,6 +49,27 @@ fn an_ending_says_only_what_happened() {
     assert_eq!(
         ending_line("Mia", Ending::Declined, false).as_deref(),
         Some("Mia declined your invite.")
+    );
+}
+
+#[test]
+fn a_console_handed_back_in_a_room_shows_the_resume_banner() {
+    let mut playing = PlayingUi::default();
+    let jonas = OnlineId::random();
+    playing.ended = Some(Ended {
+        friend: jonas,
+        line: "Jonas left.".into(),
+        paused: false,
+    });
+    let mia = OnlineId::random();
+    playing.handed_back(mia, "Mia");
+    assert_eq!(
+        playing.ended,
+        Some(Ended {
+            friend: mia,
+            line: "Lost the connection to Mia.".into(),
+            paused: true,
+        })
     );
 }
 
@@ -188,10 +209,4 @@ fn the_friends_mute_toggles_and_a_silent_slider_comes_back_at_half() {
             muted: false
         }
     );
-}
-
-#[test]
-fn sizes_read_in_kb_or_mb() {
-    assert_eq!(size_line(1_600_000, 2_500_000), "1.6 of 2.5 MB");
-    assert_eq!(size_line(40_000, 65_536), "40 of 66 KB");
 }

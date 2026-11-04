@@ -1,6 +1,6 @@
 use crate::connections::{Refusal, Slot};
 use crate::db::AccountRow;
-use crate::hub::{Outbox, Queued};
+use crate::hub::{Outbox, Queued, ROOM_PROTOCOL};
 use crate::limit::{Bucket, ConnLimit};
 use crate::stats::Refused;
 use crate::storage::Reservation;
@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use citrine_gb_net::Sealer;
 use citrine_gb_net::{
     ClientMsg, ErrorCode, FileId, GameKey, MAX_FRAME_BYTES, MessageId, Notice, OnlineId,
-    PROTOCOL_VERSION, Presence, ServerInfo, ServerMsg, Tag,
+    PROTOCOL_VERSION, Presence, ServerInfo, ServerMsg, Tag, speaks_protocol,
 };
 use futures_util::{SinkExt, StreamExt};
 use handshake::handshake;
@@ -30,6 +30,7 @@ const PING_EVERY: Duration = Duration::from_secs(25);
 const MAX_UPLOADS: usize = 4;
 const MAX_ACKS: usize = 1000;
 const MESSAGE_PAGE: u32 = 200;
+const MAX_OLD_CHATS: usize = 500;
 const SCREEN_EVERY_SECS: f64 = 30.0;
 const SEAL_ROOM: usize = 1024;
 
@@ -322,6 +323,13 @@ impl Client {
     }
 
     async fn error(&self, code: ErrorCode) {
+        let old = self.hello.is_none_or(|v| v < ROOM_PROTOCOL);
+        let code = match code {
+            ErrorCode::RoomFull | ErrorCode::CantJoin | ErrorCode::NeedsUpdate if old => {
+                ErrorCode::UnknownSession
+            }
+            code => code,
+        };
         self.send(ServerMsg::Error(code)).await;
     }
 
@@ -352,7 +360,9 @@ impl Client {
         self.refused(Refused::Messages);
         let error = ErrorCode::RateLimited;
         let refusal = match msg {
-            ClientMsg::Chat { tag, .. } => ServerMsg::ChatFailed { tag, error },
+            ClientMsg::Chat { tag, .. } | ClientMsg::ChatOnce { tag, .. } => {
+                ServerMsg::ChatFailed { tag, error }
+            }
             ClientMsg::Upload { tag, .. } => ServerMsg::UploadFailed { tag, error },
             ClientMsg::Download(file) => ServerMsg::DownloadFailed { file, error },
             ClientMsg::PutSave { tag, .. } | ClientMsg::DeleteSave { tag, .. } => {
@@ -392,7 +402,7 @@ impl Client {
             ClientMsg::Hello { protocol, .. } => {
                 self.hello = Some(protocol);
                 self.send(ServerMsg::Info(info(&self.app))).await;
-                if protocol != PROTOCOL_VERSION {
+                if !speaks_protocol(protocol) {
                     return Err(ErrorCode::Protocol {
                         server: PROTOCOL_VERSION,
                     });
@@ -442,7 +452,11 @@ impl Client {
         let me = self.me()?.id;
         let streamed = matches!(
             msg,
-            ClientMsg::Play { .. } | ClientMsg::Game { .. } | ClientMsg::UploadChunk { .. }
+            ClientMsg::Play { .. }
+                | ClientMsg::Game { .. }
+                | ClientMsg::RoomPlay { .. }
+                | ClientMsg::RoomGame { .. }
+                | ClientMsg::UploadChunk { .. }
         );
         if !streamed && !self.app.rates.messages.take(me, 1.0) {
             self.refuse(msg).await;
@@ -472,7 +486,18 @@ impl Client {
                 Ok(())
             }
             ClientMsg::Chat { tag, to, sealed } => {
-                if let Err(error) = self.chat(tag, to, sealed).await {
+                if let Err(error) = self.chat(tag, to, None, sealed).await {
+                    self.send(ServerMsg::ChatFailed { tag, error }).await;
+                }
+                Ok(())
+            }
+            ClientMsg::ChatOnce {
+                tag,
+                to,
+                key,
+                sealed,
+            } => {
+                if let Err(error) = self.chat(tag, to, Some(key), sealed).await {
                     self.send(ServerMsg::ChatFailed { tag, error }).await;
                 }
                 Ok(())
@@ -493,6 +518,28 @@ impl Client {
                 Ok(())
             }
             ClientMsg::SignOutDevice(device) => self.sign_out_device(device).await,
+            ClientMsg::RoomInvite { room, to, sealed } => self.room_invite(room, to, sealed).await,
+            ClientMsg::MemberUpdate {
+                room,
+                shows_screen,
+                playing,
+            } => {
+                let max = self.app.config.limits.room_players;
+                let me = self.me()?.id;
+                let out =
+                    self.app
+                        .hub
+                        .update(room, me, self.conn_id, shows_screen, playing, max)?;
+                self.app.hub.deliver(out);
+                Ok(())
+            }
+            ClientMsg::RoomPlay { room, to, sealed } => {
+                self.room_play(room, to, sealed, false).await
+            }
+            ClientMsg::RoomGame { room, to, sealed } => {
+                self.room_play(room, to, sealed, true).await
+            }
+            ClientMsg::RoomChat { room, copies } => self.room_chat(room, copies).await,
             ClientMsg::Upload { tag, size } => {
                 if let Err(error) = self.upload(tag, size).await {
                     self.send(ServerMsg::UploadFailed { tag, error }).await;
@@ -534,16 +581,16 @@ impl Client {
             }
             ClientMsg::Leave(session) => {
                 let me = self.me()?.id;
-                let other = self
+                let out = self
                     .app
                     .hub
                     .end(session, me, self.conn_id)
                     .ok_or(ErrorCode::UnknownSession)?;
+                self.app.hub.deliver(out);
                 let ended = ServerMsg::SessionEnded {
                     session,
                     reason: citrine_gb_net::EndReason::Left,
                 };
-                self.app.hub.send_to(other, ended.clone());
                 self.app.hub.send_others(me, self.conn_id, ended);
                 Ok(())
             }
@@ -587,6 +634,7 @@ impl Client {
                 Ok(())
             }
             ClientMsg::Typing { to, typing } => self.typing(to, typing).await,
+            ClientMsg::KeepOldChats { chats, done } => self.keep_old_chats(chats, done).await,
             ClientMsg::ListSaves => {
                 let saves = db(self.app.db.saves_of(self.me()?.id).await)?;
                 self.send(ServerMsg::Saves(saves)).await;
@@ -708,14 +756,17 @@ impl Client {
             }
             let _ = self.send_devices().await;
         }
-        for (session, other) in left.ended {
-            self.app.hub.send_to(
-                other,
-                ServerMsg::SessionEnded {
-                    session,
-                    reason: citrine_gb_net::EndReason::Disconnected,
-                },
-            );
+        self.app.hub.deliver(left.out);
+        let grace = self.app.config.limits.room_grace;
+        for (room, drops) in left.dropped {
+            let app = Arc::downgrade(&self.app);
+            tokio::spawn(async move {
+                tokio::time::sleep(grace).await;
+                if let Some(app) = app.upgrade() {
+                    let out = app.hub.expire(room, me, drops);
+                    app.hub.deliver(out);
+                }
+            });
         }
     }
 }

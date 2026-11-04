@@ -3,6 +3,7 @@ use super::{Action, ChatUi, NO_FILE, PREVIEW_MAX, UNREADABLE, Want};
 use crate::app::tabs::TabViewer;
 use crate::app::tabs::media::{game_name, thumbnail};
 use crate::app::widgets::action::wide_button;
+use crate::app::widgets::progress::ProgressBar;
 use crate::app::widgets::text::faint;
 use crate::emulator::Emulator;
 use crate::game_name::GameNames;
@@ -10,6 +11,7 @@ use crate::icons;
 use crate::media::{self, Frame, MediaItem, MediaKind, MediaStore, NewMedia};
 use crate::online::chat::{ChatEntry, Fetch, NewShare};
 use crate::online::{Online, chat_media};
+use crate::progress::Progress;
 use crate::replay::ReplayError;
 use citrine_gb_net::{Body, OnlineId, Share, ShareKind};
 use egui::{CursorIcon, Label, RichText, Ui, vec2};
@@ -52,10 +54,10 @@ pub(super) fn share_card(
 
     if entry.mine {
         if let Some((sent, total)) = online.uploading(friend, entry.id) {
-            ui.label(faint(format!(
-                "Sending {}%",
-                percent(sent as u64, total as u64)
-            )));
+            ui.add(ProgressBar::new(
+                "Sending",
+                Progress::bytes(sent as u64, total as u64),
+            ));
         }
         return own_tip;
     }
@@ -63,12 +65,15 @@ pub(super) fn share_card(
         return own_tip;
     }
     let loading = match online.fetched(share.file) {
-        Some(Fetch::Loading { done, total }) => Some(percent(*done, *total)),
-        _ => state.wanted.contains_key(&share.file).then_some(0),
+        Some(Fetch::Loading { done, total }) => Some(Progress::bytes(*done, *total)),
+        _ => state
+            .wanted
+            .contains_key(&share.file)
+            .then(Progress::unknown),
     };
     ui.add_space(2.0);
-    if let Some(done) = loading {
-        ui.label(faint(format!("Downloading {done}%")));
+    if let Some(progress) = loading {
+        ui.add(ProgressBar::new("Downloading", progress));
         return own_tip;
     }
     match share.kind {
@@ -173,7 +178,7 @@ pub(super) fn share_entry(online: &Online, friend: OnlineId, id: u64) -> Option<
 pub(super) fn share_item(item: &MediaItem, bytes: Vec<u8>) -> Option<NewShare> {
     let info = &item.info;
     let (kind, data, width, height, preview) = match info.kind {
-        MediaKind::Screenshot => {
+        MediaKind::Screenshot | MediaKind::Print => {
             let packed = chat_media::pack_screenshot(&bytes)?;
             (
                 ShareKind::Screenshot,
@@ -210,10 +215,11 @@ pub(super) fn share_item(item: &MediaItem, bytes: Vec<u8>) -> Option<NewShare> {
 pub(super) fn replay_share(emulator: &Emulator) -> Option<NewShare> {
     let json = emulator.recorder.export_json()?;
     let recording = crate::replay::parse(json.as_bytes()).ok()?;
+    let video = emulator.video();
     let frame = Frame {
-        width: media::THUMB_WIDTH,
-        height: media::THUMB_HEIGHT,
-        rgba: emulator.gb.frame().as_slice().to_vec(),
+        width: video.width as u32,
+        height: video.height as u32,
+        rgba: emulator.frame().to_vec(),
     };
     Some(NewShare {
         kind: ShareKind::Replay,
@@ -275,6 +281,7 @@ pub(super) fn kind_word(item: &MediaItem) -> &'static str {
     match item.info.kind {
         MediaKind::Screenshot => "screenshot",
         MediaKind::Recording => "recording",
+        MediaKind::Print => "print",
     }
 }
 
@@ -303,8 +310,4 @@ pub fn share_facts(share: &Share) -> String {
         facts.push(media::format_size(share.size));
     }
     facts.join(" · ")
-}
-
-pub(super) fn percent(done: u64, total: u64) -> u64 {
-    (done * 100).checked_div(total).unwrap_or(0).min(100)
 }

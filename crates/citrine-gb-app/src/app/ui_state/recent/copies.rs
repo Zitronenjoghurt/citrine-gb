@@ -9,8 +9,9 @@ pub fn copy_name(key: &str, name: &str) -> String {
     let extension = Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
-        .filter(|e| e.eq_ignore_ascii_case("gbc"))
-        .map_or("gb", |_| "gbc");
+        .map(str::to_ascii_lowercase)
+        .filter(|e| e == "gbc" || e == "gba")
+        .unwrap_or_else(|| "gb".to_owned());
     format!("{key}.{extension}")
 }
 
@@ -220,5 +221,18 @@ mod web {
             .dyn_into::<js_sys::Uint8Array>()
             .ok()
             .map(|bytes| bytes.to_vec()))
+    }
+}
+
+#[cfg(all(test, feature = "gba"))]
+mod tests {
+    use super::copy_name;
+
+    #[test]
+    fn a_gba_copy_keeps_its_extension() {
+        assert_eq!(copy_name("KEY", "Game.GBA"), "KEY.gba");
+        assert_eq!(copy_name("KEY", "Game.gbc"), "KEY.gbc");
+        assert_eq!(copy_name("KEY", "Game.gb"), "KEY.gb");
+        assert_eq!(copy_name("KEY", "Game"), "KEY.gb");
     }
 }

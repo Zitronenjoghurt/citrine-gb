@@ -179,6 +179,8 @@ pub struct Mbc3 {
     pub latch_armed: bool,
     #[cfg_attr(feature = "serde", serde(default))]
     pub rtc: Rtc,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mbc30: bool,
 }
 
 impl Mbc3 {
@@ -192,6 +194,7 @@ impl Mbc3 {
             ram_rtc_select: 0,
             latch_armed: false,
             rtc: Rtc::default(),
+            mbc30: rom_bank_count > 128 || ram_bank_count > 4,
         }
     }
 
@@ -216,7 +219,7 @@ impl Mbc3 {
     }
 
     fn write_rom_bank_number(&mut self, value: u8) {
-        self.rom_bank_register = value & 0x7F;
+        self.rom_bank_register = if self.mbc30 { value } else { value & 0x7F };
     }
 
     fn write_ram_rtc_select(&mut self, value: u8) {
@@ -267,15 +270,16 @@ impl MbcInterface for Mbc3 {
     }
 
     fn rom_bank_high(&self) -> usize {
-        mask_bank_number(self.rom_bank_register as usize, self.rom_bank_count)
+        mask_bank_number(self.rom_bank_register.max(1) as usize, self.rom_bank_count)
     }
 
     fn ram_bank(&self) -> Option<usize> {
+        let bank_mask = if self.mbc30 { 0x07 } else { 0x03 };
         if !self.ram_rtc_enabled || self.ram_rtc_select > 7 {
             None
         } else {
             Some(mask_bank_number(
-                self.ram_rtc_select as usize,
+                (self.ram_rtc_select & bank_mask) as usize,
                 self.ram_bank_count,
             ))
         }
@@ -329,6 +333,36 @@ mod tests {
         for _ in 0..seconds * RTC_CYCLES_PER_SECOND {
             mbc.cycle();
         }
+    }
+
+    #[test]
+    fn bank_zero_maps_bank_one() {
+        let mut mbc = Mbc3::new(128, 4, false);
+        assert_eq!(mbc.rom_bank_high(), 1);
+        mbc.on_write(0x2000, 0x00);
+        assert_eq!(mbc.rom_bank_high(), 1);
+        mbc.on_write(0x2000, 0xFF);
+        assert_eq!(mbc.rom_bank_high(), 0x7F);
+    }
+
+    #[test]
+    fn mbc30_uses_eight_rom_bits_and_eight_ram_banks() {
+        let mut mbc = Mbc3::new(256, 8, true);
+        assert!(mbc.mbc30);
+        mbc.on_write(0x2000, 0xC3);
+        assert_eq!(mbc.rom_bank_high(), 0xC3);
+        mbc.on_write(0x0000, 0x0A);
+        mbc.on_write(0x4000, 0x06);
+        assert_eq!(mbc.ram_bank(), Some(6));
+    }
+
+    #[test]
+    fn plain_mbc3_selects_four_ram_banks() {
+        let mut mbc = Mbc3::new(128, 4, false);
+        assert!(!mbc.mbc30);
+        mbc.on_write(0x0000, 0x0A);
+        mbc.on_write(0x4000, 0x06);
+        assert_eq!(mbc.ram_bank(), Some(2));
     }
 
     #[test]

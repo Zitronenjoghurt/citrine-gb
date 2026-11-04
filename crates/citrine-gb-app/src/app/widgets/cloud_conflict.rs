@@ -1,7 +1,7 @@
 use crate::app::widgets::snapshots::relative_time;
 use crate::app::widgets::text::faint;
 use crate::online::cloud::{Choice, Conflict, ConflictSide};
-use crate::storage::{THUMB_HEIGHT, THUMB_WIDTH};
+use crate::storage::thumb_size_of;
 use egui::{ColorImage, Context, RichText, TextureHandle, TextureOptions, Ui};
 
 pub enum Answer {
@@ -11,14 +11,12 @@ pub enum Answer {
 
 fn thumb(ctx: &Context, key: String, side: &ConflictSide) -> Option<TextureHandle> {
     let pixels = side.thumb.as_ref()?;
-    if pixels.len() != THUMB_WIDTH * THUMB_HEIGHT * 4 {
-        return None;
-    }
+    let size = thumb_size_of(pixels)?;
     let id = egui::Id::new(("cloud_thumb", &key));
     if let Some(texture) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
         return Some(texture);
     }
-    let image = ColorImage::from_rgba_unmultiplied([THUMB_WIDTH, THUMB_HEIGHT], pixels);
+    let image = ColorImage::from_rgba_unmultiplied(size, pixels);
     let texture = ctx.load_texture(key, image, TextureOptions::NEAREST);
     ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
     Some(texture)
@@ -40,7 +38,7 @@ fn card(
             if let Some(texture) = &texture {
                 ui.image(egui::load::SizedTexture::new(
                     texture.id(),
-                    egui::vec2(THUMB_WIDTH as f32, THUMB_HEIGHT as f32),
+                    texture.size_vec2(),
                 ));
             }
             match side {
@@ -112,10 +110,10 @@ pub fn show(ctx: &Context, conflict: &Conflict) -> Option<Answer> {
             }
         });
         if !conflict.ready() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(faint("Getting the cloud's copy"));
-            });
+            ui.add(super::progress::ProgressBar::new(
+                "Getting the cloud's copy",
+                crate::progress::Progress::unknown(),
+            ));
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {

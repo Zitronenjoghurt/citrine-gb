@@ -7,6 +7,11 @@ pub enum Version {
     Gold,
     Silver,
     Crystal,
+    Ruby,
+    Sapphire,
+    Emerald,
+    FireRed,
+    LeafGreen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +29,16 @@ pub enum Language {
 pub enum Generation {
     One,
     Two,
+    Three,
+}
+
+impl Generation {
+    pub fn box_size(self) -> usize {
+        match self {
+            Generation::One | Generation::Two => 20,
+            Generation::Three => 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,6 +53,11 @@ impl Version {
         match self {
             Version::Red | Version::Green | Version::Blue | Version::Yellow => Generation::One,
             Version::Gold | Version::Silver | Version::Crystal => Generation::Two,
+            Version::Ruby
+            | Version::Sapphire
+            | Version::Emerald
+            | Version::FireRed
+            | Version::LeafGreen => Generation::Three,
         }
     }
 }
@@ -66,7 +86,10 @@ impl Game {
     }
 
     pub fn money(self, amount: u32) -> String {
-        let sign = crate::text::decode(self, &[MONEY_SIGN]);
+        let sign = match self.generation() {
+            Generation::One | Generation::Two => crate::text::decode(self, &[MONEY_SIGN]),
+            Generation::Three => crate::gen3::text::decode(&[GEN3_MONEY_SIGN], self.language),
+        };
         let digits = amount.to_string();
         let mut grouped = String::new();
         for (i, digit) in digits.chars().enumerate() {
@@ -84,6 +107,7 @@ impl Game {
 }
 
 const MONEY_SIGN: u8 = 0xF0;
+const GEN3_MONEY_SIGN: u8 = 0xB7;
 
 const TITLE: usize = 0x134;
 const CODE: usize = 0x13F;
@@ -178,5 +202,16 @@ fn yellow_language(title: &[u8]) -> Option<Language> {
         b"POKEMON YELAPSI" => Some(Language::Italian),
         b"POKEMON YELAPSS" => Some(Language::Spanish),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Generation;
+
+    #[test]
+    fn gen3_boxes_hold_thirty() {
+        assert_eq!(Generation::Two.box_size(), 20);
+        assert_eq!(Generation::Three.box_size(), 30);
     }
 }

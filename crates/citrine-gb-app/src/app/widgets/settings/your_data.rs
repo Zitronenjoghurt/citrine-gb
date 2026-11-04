@@ -1,4 +1,6 @@
+use crate::app::widgets::progress::ProgressBar;
 use crate::icons;
+use crate::progress::{Counter, Progress};
 use crate::utils::file_loader::PickedFile;
 use crate::utils::file_saver::SaveOutcome;
 use crate::your_data::{Change, Files, Kind, Tally};
@@ -30,6 +32,8 @@ pub struct PendingImport {
     pub plan: Vec<(Kind, Change)>,
 }
 
+pub type Unpacked = (String, Result<Files, crate::your_data::ReadError>);
+
 pub struct YourDataUi {
     pub rows: Vec<(Kind, Tally)>,
     pub counted_at: Option<web_time::Instant>,
@@ -37,8 +41,12 @@ pub struct YourDataUi {
     pub exporting: Exporting,
     pub deleting: bool,
     pub pending: Option<PendingImport>,
-    pub files_tx: Sender<Files>,
-    pub files_rx: Receiver<Files>,
+    pub progress: Counter,
+    pub importing: Option<String>,
+    pub packed_tx: Sender<std::io::Result<Vec<u8>>>,
+    pub packed_rx: Receiver<std::io::Result<Vec<u8>>>,
+    pub unpacked_tx: Sender<Unpacked>,
+    pub unpacked_rx: Receiver<Unpacked>,
     pub saved_tx: Sender<SaveOutcome>,
     pub saved_rx: Receiver<SaveOutcome>,
     pub picked_tx: Sender<PickedFile>,
@@ -47,7 +55,8 @@ pub struct YourDataUi {
 
 impl Default for YourDataUi {
     fn default() -> Self {
-        let (files_tx, files_rx) = channel();
+        let (packed_tx, packed_rx) = channel();
+        let (unpacked_tx, unpacked_rx) = channel();
         let (saved_tx, saved_rx) = channel();
         let (picked_tx, picked_rx) = channel();
         Self {
@@ -57,8 +66,12 @@ impl Default for YourDataUi {
             exporting: Exporting::Idle,
             deleting: false,
             pending: None,
-            files_tx,
-            files_rx,
+            progress: Counter::default(),
+            importing: None,
+            packed_tx,
+            packed_rx,
+            unpacked_tx,
+            unpacked_rx,
             saved_tx,
             saved_rx,
             picked_tx,
@@ -75,7 +88,24 @@ pub fn show(ui: &mut Ui, state: &mut YourDataUi) {
         rows(ui, &state.rows);
         ui.add_space(12.0);
         buttons(ui, state);
+        if let Some((label, progress)) = load(state) {
+            ui.add_space(8.0);
+            ui.add(ProgressBar::new(&label, progress));
+        }
     });
+}
+
+pub fn loading(state: &YourDataUi) -> bool {
+    state.exporting == Exporting::Busy || state.importing.is_some()
+}
+
+pub fn load(state: &YourDataUi) -> Option<(String, Progress)> {
+    let progress = state.progress.bytes();
+    if let Some(name) = &state.importing {
+        return Some((format!("Reading '{name}'"), progress));
+    }
+    (state.exporting == Exporting::Busy && !progress.is_done())
+        .then(|| ("Exporting your data".to_owned(), progress))
 }
 
 fn rows(ui: &mut Ui, rows: &[(Kind, Tally)]) {
@@ -87,16 +117,16 @@ fn rows(ui: &mut Ui, rows: &[(Kind, Tally)]) {
                 .x
         })
     };
-    let count_width = rows
-        .iter()
-        .map(|(kind, tally)| measure(count_text(kind, tally.count), body.clone()))
-        .fold(0.0, f32::max);
     let size_width = rows
         .iter()
         .map(|(_, tally)| measure(size_text(tally), body.clone()))
         .fold(measure("999 KB".to_owned(), body.clone()), f32::max);
+    let count_widths: Vec<f32> = rows
+        .iter()
+        .map(|(kind, tally)| measure(count_text(kind, tally.count), body.clone()))
+        .collect();
     let height = ui.spacing().interact_size.y;
-    for (kind, tally) in rows {
+    for ((kind, tally), count_width) in rows.iter().zip(count_widths) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let name_width =
@@ -142,17 +172,13 @@ pub fn size_text(tally: &Tally) -> String {
 }
 
 fn buttons(ui: &mut Ui, state: &mut YourDataUi) {
-    let busy = state.exporting == Exporting::Busy;
-    let export = if busy {
-        format!("{} Exporting…", icons::HOURGLASS)
-    } else {
-        format!("{} {EXPORT}", icons::DOWNLOAD_SIMPLE)
-    };
+    let busy = loading(state);
+    let export = format!("{} {EXPORT}", icons::DOWNLOAD_SIMPLE);
     let labels = [
         (export, !busy, Request::Export),
         (
             format!("{} {IMPORT}", icons::UPLOAD_SIMPLE),
-            true,
+            !busy,
             Request::Import,
         ),
         (format!("{} {DELETE}", icons::TRASH), true, Request::Delete),
@@ -188,5 +214,54 @@ fn buttons(ui: &mut Ui, state: &mut YourDataUi) {
         ui.horizontal(|ui| press(ui, share));
     } else {
         press(ui, available);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(name: &'static str, units: (&'static str, &'static str)) -> Kind {
+        Kind {
+            name,
+            icon: icons::TAG,
+            units,
+            nouns: units,
+        }
+    }
+
+    #[test]
+    fn a_short_count_leaves_its_name_whole_in_the_dock() {
+        let ctx = egui::Context::default();
+        let table = [
+            (
+                kind("Media", ("", "")),
+                Tally {
+                    count: 600,
+                    bytes: 26 << 20,
+                },
+            ),
+            (kind("Chats", ("message", "messages")), Tally::default()),
+            (kind("Game names", ("", "")), Tally::default()),
+        ];
+        let mut elided = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.allocate_ui(vec2(217.0, 400.0), |ui| rows(ui, &table));
+                });
+            });
+            elided = output
+                .shapes
+                .into_iter()
+                .filter_map(|clipped| match clipped.shape {
+                    egui::Shape::Text(text) if text.galley.elided => {
+                        Some(text.galley.text().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+        }
+        assert!(elided.is_empty(), "cut short: {elided:?}");
     }
 }

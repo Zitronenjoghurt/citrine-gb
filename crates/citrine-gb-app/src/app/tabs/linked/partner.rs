@@ -41,8 +41,10 @@ impl EventCache {
             hash,
             ..Self::default()
         };
-        if hash.is_some() {
-            self.load(ctx, &emulator.gb.cartridge.rom_bytes());
+        if hash.is_some()
+            && let Some(gb) = emulator.as_gb()
+        {
+            self.load(ctx, &gb.cartridge.rom_bytes());
         }
     }
 
@@ -343,6 +345,7 @@ fn heading(ui: &mut Ui, generation: Generation) {
             ui.label(RichText::new("Red, Blue and Yellow events").strong());
             info_mark(ui, CAPSULE_HINT);
         }
+        Generation::Three => {}
     });
 }
 
@@ -443,7 +446,7 @@ fn panel_body(
     status_card(ui, status);
     ui.add_space(6.0);
     let mut plugged = plugged;
-    if ui.checkbox(&mut plugged, "Link cable plugged in").changed() {
+    if crate::app::widgets::check::checkbox(ui, &mut plugged, "Link cable plugged in").changed() {
         picks.plugged = Some(plugged);
     }
     ui.add_space(6.0);

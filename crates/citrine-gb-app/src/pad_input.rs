@@ -1,5 +1,5 @@
 use crate::app::ui_state::keybinds::{
-    BindingCapture, BindingKind, GbButton, KeyBindings, PadButton,
+    BindingCapture, BindingKind, GbButton, KeyBindings, PadButton, Shoulder,
 };
 use crate::controller_debug::PadInfo;
 use std::fmt::{Display, Formatter};
@@ -9,7 +9,7 @@ pub mod android_map;
 #[cfg(not(any(windows, target_os = "android")))]
 mod gilrs_source;
 #[cfg(any(windows, test))]
-mod sdl_map;
+pub(crate) mod sdl_map;
 #[cfg(windows)]
 mod sdl_source;
 
@@ -87,10 +87,20 @@ pub struct PadEvent {
     pub code: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PadMotion {
+    pub accel: [f32; 3],
+    pub gyro: [f32; 3],
+}
+
 pub trait PadSource {
     fn next_event(&mut self) -> Option<PadEvent>;
     fn pads(&self, seen: &[usize]) -> Vec<PadInfo>;
     fn api(&self) -> String;
+    fn rumble(&mut self, _strength: f32) {}
+    fn motion(&mut self) -> Option<PadMotion> {
+        None
+    }
 }
 
 #[cfg(not(any(windows, target_os = "android")))]
@@ -135,6 +145,7 @@ impl Display for Ignored {
 pub enum PadAction {
     Press(GbButton),
     Release(GbButton),
+    Shoulder(Shoulder, bool),
     Steer {
         on: Option<GbButton>,
         off: &'static [GbButton],
@@ -149,6 +160,8 @@ impl PadAction {
         let text = match self {
             Self::Press(button) => format!("Game Boy {button} down"),
             Self::Release(button) => format!("Game Boy {button} up"),
+            Self::Shoulder(shoulder, true) => format!("{shoulder} down"),
+            Self::Shoulder(shoulder, false) => format!("{shoulder} up"),
             Self::Steer { on: Some(on), off } => {
                 let off: Vec<String> = off.iter().map(|b| b.to_string()).collect();
                 format!("Game Boy {on} down, {} up", off.join(" and "))
@@ -185,12 +198,18 @@ pub fn route(
             if capture.wants(BindingKind::Gamepad) {
                 return PadAction::Capture(pad);
             }
+            if let Some(shoulder) = bindings.shoulder_for_pad(pad) {
+                return PadAction::Shoulder(shoulder, true);
+            }
             bound(pad, bindings).map_or_else(PadAction::Ignore, PadAction::Press)
         }
         PadInput::Released(key) => {
             let PadKey::Known(pad) = key else {
                 return PadAction::Ignore(Ignored::UnknownButton);
             };
+            if let Some(shoulder) = bindings.shoulder_for_pad(pad) {
+                return PadAction::Shoulder(shoulder, false);
+            }
             bound(pad, bindings).map_or_else(PadAction::Ignore, PadAction::Release)
         }
         PadInput::Moved(axis, value) => steer(axis, value, bindings, steering),
@@ -276,6 +295,22 @@ mod tests {
     }
 
     #[test]
+    fn the_shoulder_buttons_press_l_and_r() {
+        assert_eq!(
+            route_default(PadInput::Pressed(PadKey::Known(PadButton::LeftTrigger))),
+            PadAction::Shoulder(Shoulder::L, true)
+        );
+        assert_eq!(
+            route_default(PadInput::Released(PadKey::Known(PadButton::RightTrigger))),
+            PadAction::Shoulder(Shoulder::R, false)
+        );
+        assert_eq!(
+            PadAction::Shoulder(Shoulder::L, true).describe(true),
+            "L down"
+        );
+    }
+
+    #[test]
     fn a_bound_button_presses_its_game_boy_button() {
         assert_eq!(
             route_default(PadInput::Pressed(PadKey::Known(PadButton::East))),
@@ -290,7 +325,7 @@ mod tests {
     #[test]
     fn an_unbound_button_says_so() {
         assert_eq!(
-            route_default(PadInput::Pressed(PadKey::Known(PadButton::LeftTrigger))),
+            route_default(PadInput::Pressed(PadKey::Known(PadButton::LeftThumb))),
             PadAction::Ignore(Ignored::Unbound)
         );
         assert_eq!(

@@ -1,6 +1,6 @@
 use super::Emulator;
-use crate::app::ui_state::keybinds::GbButton;
-use strum::IntoEnumIterator;
+use citrine_gb::console::Console;
+use citrine_gb::debug::Debug;
 
 impl Emulator {
     pub fn play_replay(
@@ -8,11 +8,10 @@ impl Emulator {
         recording: citrine_gb::recording::Recording,
         game: &str,
     ) -> Result<(), crate::replay::ReplayError> {
-        let loaded = self.gb.cartridge.has_rom_loaded
+        let loaded = self.has_game()
             && self
-                .gb
-                .cartridge
-                .header
+                .machine
+                .rom_id()
                 .sha256_hex_string()
                 .eq_ignore_ascii_case(&recording.rom_sha256);
         if !loaded {
@@ -29,12 +28,8 @@ impl Emulator {
 
     pub fn stop_replay(&mut self) {
         if let Some(player) = self.replay.take() {
-            for button in GbButton::iter() {
-                let joypad = button.joypad();
-                if player.held().contains(joypad) && !self.is_held(joypad) {
-                    self.gb.release_button(joypad);
-                }
-            }
+            self.machine
+                .set_keys(self.machine.keys() - (player.held() - self.held_buttons()));
         }
     }
 
@@ -42,12 +37,12 @@ impl Emulator {
         let Some(player) = self.replay.as_mut() else {
             return;
         };
-        let cycle = self.gb.debugger.total_cycles as u64 * 4;
+        let cycle = Debug::cycles(&self.machine) as u64 * 4;
         for (button, pressed) in player.due(cycle) {
             if pressed {
-                self.gb.press_button(button);
+                self.machine.set_keys(self.machine.keys() | button);
             } else if !self.held.held().contains(button) {
-                self.gb.release_button(button);
+                self.machine.set_keys(self.machine.keys() - button);
             }
         }
         if player.finished() {
@@ -56,6 +51,6 @@ impl Emulator {
     }
 
     pub fn start_recording(&mut self) {
-        self.recorder.start(&self.gb);
+        self.recorder.start(&self.machine);
     }
 }

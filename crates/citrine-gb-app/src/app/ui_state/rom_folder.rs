@@ -28,10 +28,15 @@ pub struct FolderGame {
 
 pub fn game_name(file: &str) -> String {
     let lower = file.to_lowercase();
-    let cut = [".gbc", ".gb"]
+    let cut = crate::utils::save_files::ROM_FILTER
+        .1
         .iter()
-        .find(|extension| lower.ends_with(*extension))
-        .map_or(file.len(), |extension| file.len() - extension.len());
+        .find(|extension| {
+            lower
+                .strip_suffix(*extension)
+                .is_some_and(|stem| stem.ends_with('.'))
+        })
+        .map_or(file.len(), |extension| file.len() - extension.len() - 1);
     file[..cut].trim().to_owned()
 }
 

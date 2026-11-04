@@ -7,3 +7,6 @@
 [submodule "tests/mooneye"]
 	path = tests/mooneye
 	url = https://github.com/Gekkio/mooneye-test-suite.git
+[submodule "crates/mgba-sys/mGBA"]
+	path = crates/mgba-sys/mGBA
+	url = https://github.com/mgba-emu/mgba.git

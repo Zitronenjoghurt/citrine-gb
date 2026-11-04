@@ -144,6 +144,7 @@ pub fn facts_line(item: &MediaItem) -> String {
 fn kind_icon(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Screenshot => icons::CAMERA,
+        MediaKind::Print => icons::PRINTER,
         MediaKind::Recording => icons::VIDEO_CAMERA,
     }
 }
@@ -344,6 +345,7 @@ pub fn kind_label(kind: Option<MediaKind>) -> &'static str {
         None => "All kinds",
         Some(MediaKind::Screenshot) => "Screenshots",
         Some(MediaKind::Recording) => "Recordings",
+        Some(MediaKind::Print) => "Prints",
     }
 }
 
@@ -467,6 +469,7 @@ fn filter_bar(ui: &mut Ui, state: &mut Browse, id: &str, games: &[String]) {
                 ui.selectable_value(&mut state.kind, None, "All kinds");
                 ui.selectable_value(&mut state.kind, Some(MediaKind::Screenshot), "Screenshots");
                 ui.selectable_value(&mut state.kind, Some(MediaKind::Recording), "Recordings");
+                ui.selectable_value(&mut state.kind, Some(MediaKind::Print), "Prints");
             });
         let game_text = state
             .game
@@ -719,6 +722,7 @@ pub fn delete_question(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Screenshot => "Delete this screenshot? It can't be undone.",
         MediaKind::Recording => "Delete this recording? It can't be undone.",
+        MediaKind::Print => "Delete this print? It can't be undone.",
     }
 }
 
@@ -798,7 +802,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let mut store = MediaStore::at(root.clone());
         let item = match kind {
-            MediaKind::Screenshot => store.add_screenshot(new, b"png").unwrap(),
+            MediaKind::Screenshot | MediaKind::Print => store.add_screenshot(new, b"png").unwrap(),
             MediaKind::Recording => {
                 let temp = store.temp_path().unwrap();
                 std::fs::write(&temp, vec![0; 2048]).unwrap();

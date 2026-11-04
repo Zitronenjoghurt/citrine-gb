@@ -3,6 +3,7 @@ use super::{
     unique_file_name,
 };
 use crate::utils::idb::{finished, wait};
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use web_sys::wasm_bindgen::{JsCast, JsValue};
@@ -12,6 +13,13 @@ const DB_NAME: &str = "citrine-media";
 const DB_VERSION: u32 = 1;
 const ITEMS: &str = "items";
 const FILES: &str = "files";
+const READ_BATCH: usize = 32;
+const WRITE_BATCH: usize = 64;
+
+thread_local! {
+    static WAITING: RefCell<Vec<(String, JsValue, JsValue)>> = RefCell::default();
+    static WRITING: Cell<bool> = Cell::default();
+}
 
 pub struct MediaStore {
     items: Vec<MediaItem>,
@@ -106,11 +114,7 @@ impl MediaStore {
             info,
             thumbnail: decode_png(&thumb_png),
         };
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(err) = put(id.as_str(), record, file).await {
-                log::error!("Could not store {}: {err:?}", id.as_str());
-            }
-        });
+        queue_put(id.as_str().to_owned(), record, file);
         self.items.push(item.clone());
         sort_newest_first(&mut self.items);
         Ok(item)
@@ -119,6 +123,7 @@ impl MediaStore {
     pub fn delete(&mut self, id: &MediaId) -> io::Result<()> {
         self.items.retain(|i| &i.id != id);
         let key = id.as_str().to_string();
+        WAITING.with_borrow_mut(|waiting| waiting.retain(|(queued, _, _)| *queued != key));
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(err) = remove(&key).await {
                 log::error!("Could not delete {key}: {err:?}");
@@ -127,20 +132,40 @@ impl MediaStore {
         Ok(())
     }
 
-    pub fn read_files(&self, done: impl FnOnce(Vec<(MediaId, Vec<u8>)>) + 'static) {
+    pub fn read_files(&self, mut each: impl FnMut(Option<(MediaId, Vec<u8>)>) + 'static) {
         let ids: Vec<MediaId> = self.items.iter().map(|item| item.id.clone()).collect();
         wasm_bindgen_futures::spawn_local(async move {
-            let mut files = Vec::new();
-            for id in ids {
-                let Ok(Some(blob)) = read_file(id.as_str()).await else {
+            while WRITING.get() {
+                crate::utils::next_tick().await;
+            }
+            for chunk in ids.chunks(READ_BATCH) {
+                let keys: Vec<&str> = chunk.iter().map(MediaId::as_str).collect();
+                let Ok(blobs) = read_many(&keys).await else {
                     continue;
                 };
-                if let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(blob.array_buffer()).await
-                {
-                    files.push((id, js_sys::Uint8Array::new(&buffer).to_vec()));
+                let found: Vec<(&MediaId, web_sys::Blob)> = chunk
+                    .iter()
+                    .zip(blobs)
+                    .filter_map(|(id, blob)| Some((id, blob?)))
+                    .collect();
+                let buffers = found
+                    .iter()
+                    .map(|(_, blob)| JsValue::from(blob.array_buffer()))
+                    .collect::<js_sys::Array>();
+                let Ok(buffers) =
+                    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&buffers)).await
+                else {
+                    continue;
+                };
+                let buffers: js_sys::Array = buffers.unchecked_into();
+                for ((id, _), buffer) in found.iter().zip(buffers.iter()) {
+                    each(Some((
+                        (*id).clone(),
+                        js_sys::Uint8Array::new(&buffer).to_vec(),
+                    )));
                 }
             }
-            done(files);
+            each(None);
         });
     }
 
@@ -162,12 +187,7 @@ impl MediaStore {
         let thumb_png = thumb_png.unwrap_or_default();
         let record = record(&info, thumb_png).ok_or_else(|| io::Error::other("bad record"))?;
         let file = js_sys::Uint8Array::from(bytes);
-        let key = id.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(err) = put(key.as_str(), record, file.into()).await {
-                log::error!("Could not store {}: {err:?}", key.as_str());
-            }
-        });
+        queue_put(id.as_str().to_owned(), record, file.into());
         self.items.retain(|i| &i.id != id);
         self.items.push(MediaItem {
             id: id.clone(),
@@ -181,6 +201,7 @@ impl MediaStore {
     pub fn delete_all(&mut self) -> io::Result<()> {
         self.items.clear();
         self.loaded = true;
+        WAITING.with_borrow_mut(Vec::clear);
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(err) = clear().await {
                 log::error!("Could not clear the media library: {err:?}");
@@ -248,11 +269,38 @@ async fn list() -> Result<Vec<MediaItem>, JsValue> {
         .collect())
 }
 
-async fn put(key: &str, record: JsValue, file: JsValue) -> Result<(), JsValue> {
+fn queue_put(key: String, record: JsValue, file: JsValue) {
+    WAITING.with_borrow_mut(|waiting| waiting.push((key, record, file)));
+    if WRITING.replace(true) {
+        return;
+    }
+    wasm_bindgen_futures::spawn_local(async {
+        loop {
+            let batch: Vec<_> = WAITING.with_borrow_mut(|waiting| {
+                let end = waiting.len().min(WRITE_BATCH);
+                waiting.drain(..end).collect()
+            });
+            if batch.is_empty() {
+                break;
+            }
+            if let Err(err) = put_all(&batch).await {
+                log::error!("Could not store {} media files: {err:?}", batch.len());
+            }
+        }
+        WRITING.set(false);
+    });
+}
+
+async fn put_all(batch: &[(String, JsValue, JsValue)]) -> Result<(), JsValue> {
     let db = open().await?;
     let tx = readwrite(&db)?;
-    tx.object_store(FILES)?.put_with_key(&file, &key.into())?;
-    tx.object_store(ITEMS)?.put_with_key(&record, &key.into())?;
+    let files = tx.object_store(FILES)?;
+    let items = tx.object_store(ITEMS)?;
+    for (key, record, file) in batch {
+        let key = JsValue::from(key.as_str());
+        files.put_with_key(file, &key)?;
+        items.put_with_key(record, &key)?;
+    }
     finished(&tx).await
 }
 
@@ -273,17 +321,32 @@ async fn clear() -> Result<(), JsValue> {
 }
 
 async fn read_file(key: &str) -> Result<Option<web_sys::Blob>, JsValue> {
+    Ok(read_many(&[key]).await?.pop().flatten())
+}
+
+async fn read_many(keys: &[&str]) -> Result<Vec<Option<web_sys::Blob>>, JsValue> {
     let db = open().await?;
     let tx = db.transaction_with_str(FILES)?;
-    let value = wait(&tx.object_store(FILES)?.get(&key.into())?).await?;
-    if value.is_instance_of::<web_sys::Blob>() {
-        return Ok(Some(value.unchecked_into()));
+    let store = tx.object_store(FILES)?;
+    let requests = keys
+        .iter()
+        .map(|key| store.get(&JsValue::from(*key)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(last) = requests.last() {
+        wait(last).await?;
     }
-    let Ok(bytes) = value.dyn_into::<js_sys::Uint8Array>() else {
-        return Ok(None);
-    };
-    let parts = js_sys::Array::of1(&bytes);
-    Ok(web_sys::Blob::new_with_u8_array_sequence(&parts).ok())
+    requests
+        .iter()
+        .map(|request| request.result().map(as_blob))
+        .collect()
+}
+
+fn as_blob(value: JsValue) -> Option<web_sys::Blob> {
+    if value.is_instance_of::<web_sys::Blob>() {
+        return Some(value.unchecked_into());
+    }
+    let bytes = value.dyn_into::<js_sys::Uint8Array>().ok()?;
+    web_sys::Blob::new_with_u8_array_sequence(&js_sys::Array::of1(&bytes)).ok()
 }
 
 fn readwrite(db: &IdbDatabase) -> Result<IdbTransaction, JsValue> {

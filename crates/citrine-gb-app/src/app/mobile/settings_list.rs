@@ -2,8 +2,9 @@ use super::kit;
 use super::nav::Place;
 use crate::app::Citrine;
 use crate::app::tabs::Tab;
-use crate::app::ui_state::settings::{Settings, SettingsTab};
+use crate::app::ui_state::settings::{GbaScreen, Settings, SettingsTab};
 use crate::icons;
+use citrine_gb::console::ConsoleKind;
 use egui::{RichText, Ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,8 +32,11 @@ pub fn entries(dev_mode: bool) -> Vec<Entry> {
     entries
 }
 
-pub fn value(settings: &Settings, page: SettingsTab) -> String {
+pub fn value(settings: &Settings, page: SettingsTab, console: ConsoleKind) -> String {
     match page {
+        SettingsTab::Style if console == ConsoleKind::Gba => {
+            GbaScreen(settings.color_correction).to_string()
+        }
         SettingsTab::General => settings.ui_theme.to_string(),
         SettingsTab::Sound if settings.muted => "Muted".to_owned(),
         SettingsTab::Sound => format!("{:.0}%", settings.volume * 100.0),
@@ -55,6 +59,7 @@ impl Citrine {
             return;
         }
         let entries = entries(self.ui.settings.dev_mode);
+        let console = self.emulator.kind();
         let mut picked = None;
         let update = crate::app::widgets::update::texts_now(&self.ui.update);
         let mut update_tapped = false;
@@ -67,9 +72,9 @@ impl Citrine {
             let rows = entries
                 .iter()
                 .map(|entry| match entry {
-                    Entry::Page(page) => kit::Row::new(page.title())
+                    Entry::Page(page) => kit::Row::new(page.title_for(console))
                         .icon(page.icon())
-                        .value(value(&self.ui.settings, *page)),
+                        .value(value(&self.ui.settings, *page, console)),
                     Entry::About => kit::Row::new("About").icon(icons::INFO),
                 })
                 .collect();
@@ -104,7 +109,7 @@ impl Citrine {
 
     fn settings_page(&mut self, ui: &mut Ui, page: SettingsTab) {
         self.ui.settings.current_tab = page;
-        if self.page_title(ui, page.title()) {
+        if self.page_title(ui, page.title_for(self.emulator.kind())) {
             self.page_back();
             return;
         }

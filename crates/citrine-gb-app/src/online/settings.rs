@@ -2,6 +2,7 @@ use crate::online::address::ServerAddress;
 use citrine_gb_net::{Account, DeviceKey, Fingerprint, RelayId, RelayKey};
 use std::collections::BTreeMap;
 use std::fmt;
+use strum_macros::EnumIter;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -15,6 +16,7 @@ pub struct OnlineSettings {
     pub sync_settings: bool,
     pub friend_volume: f32,
     pub friend_muted: bool,
+    pub input_delay: InputDelay,
 }
 
 impl OnlineSettings {
@@ -33,6 +35,43 @@ impl Default for OnlineSettings {
             sync_settings: true,
             friend_volume: Self::DEFAULT_FRIEND_VOLUME,
             friend_muted: false,
+            input_delay: InputDelay::Auto,
+        }
+    }
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter,
+)]
+pub enum InputDelay {
+    #[default]
+    Auto,
+    Zero,
+    One,
+    Two,
+    Three,
+    Four,
+}
+
+impl InputDelay {
+    pub fn frames(self) -> Option<u32> {
+        match self {
+            Self::Auto => None,
+            Self::Zero => Some(0),
+            Self::One => Some(1),
+            Self::Two => Some(2),
+            Self::Three => Some(3),
+            Self::Four => Some(4),
+        }
+    }
+}
+
+impl fmt::Display for InputDelay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.frames() {
+            None => f.write_str("Auto"),
+            Some(1) => f.write_str("1 frame"),
+            Some(n) => write!(f, "{n} frames"),
         }
     }
 }

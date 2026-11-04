@@ -1,9 +1,11 @@
+use super::{Sheet, pick};
 use crate::app::Citrine;
 use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::widgets::settings::online::{
-    self, CLOUD_HINT, SYNC_HINT, TYPING, TYPING_HINT, cloud_problems, no_storage, storage,
+    self, CLOUD_HINT, DELAY_HINT, SYNC_HINT, TYPING, TYPING_HINT, cloud_problems, no_storage,
+    storage,
 };
-use egui::{RichText, Ui};
+use egui::{Context, RichText, Ui};
 use web_time::Instant;
 
 fn note(ui: &mut Ui, text: &str) {
@@ -65,6 +67,16 @@ impl Citrine {
                 dirty = true;
             }
         });
+        ui.add_space(12.0);
+        let mut open = None;
+        kit::list(ui, |list| {
+            let row = Row::new("Input delay")
+                .info(DELAY_HINT)
+                .value(s.online.input_delay.to_string());
+            if list.row(row).clicked() {
+                open = Some(Sheet::InputDelay);
+            }
+        });
         s.dirty |= dirty;
         for text in no_storage(s, client)
             .into_iter()
@@ -76,5 +88,13 @@ impl Citrine {
             ui.add_space(12.0);
             storage::storage_list(ui, client, form, now);
         }
+        self.open_sheet(open);
+    }
+
+    pub(super) fn online_sheet(&mut self, ctx: &Context) -> bool {
+        let s = &mut self.ui.settings;
+        let (changed, done) = pick(ctx, "Input delay", None, &mut s.online.input_delay);
+        s.dirty |= changed;
+        done
     }
 }

@@ -1,10 +1,10 @@
-use super::{Client, db, quota_of};
-use crate::db::AccountRow;
+use super::{Client, MAX_OLD_CHATS, db, quota_of};
+use crate::db::{AccountRow, OldRow};
 use crate::now;
 use crate::stats::Refused;
 use citrine_gb_net::{
-    Account, ChatMessage, ErrorCode, Friend, FriendState, OnlineId, Presence, Sealed, ServerMsg,
-    Tag, display_name,
+    Account, ChatMessage, ErrorCode, Friend, FriendState, OldChat, OnlineId, Presence, Sealed,
+    ServerMsg, Tag, display_name,
 };
 
 impl Client {
@@ -70,6 +70,7 @@ impl Client {
         let name = display_name(name).map_err(|_| ErrorCode::BadName)?;
         let me = self.me()?.id;
         db(self.app.db.set_display_name(me, &name).await)?;
+        self.app.hub.rename(me, &name);
         let row = self.my_row().await?;
         self.tell_me(ServerMsg::Account(self.account(&row).await?))
             .await;
@@ -175,7 +176,7 @@ impl Client {
             self.tell_me(ServerMsg::FriendGone(who)).await;
         }
         app.hub.send(other.id, ServerMsg::FriendGone(my_online));
-        for (session, _) in app.hub.end_between(me, other.id) {
+        for session in app.hub.end_between(me, other.id) {
             let ended = ServerMsg::SessionEnded {
                 session,
                 reason: citrine_gb_net::EndReason::Left,
@@ -190,10 +191,17 @@ impl Client {
         &mut self,
         tag: Tag,
         to: OnlineId,
+        key: Option<u64>,
         sealed: Sealed,
     ) -> Result<(), ErrorCode> {
         let me = self.me()?;
         let (me_id, me_online) = (me.id, me.online_id);
+        if let Some(key) = key
+            && let Some((id, at)) = db(self.app.db.sent_once(me_id, key).await)?
+        {
+            self.send(ServerMsg::ChatSent { tag, id, at }).await;
+            return Ok(());
+        }
         let other = self.user(to).await?;
         if !db(self.app.db.are_friends(me_id, other.id).await)? {
             return Err(ErrorCode::NotFriends);
@@ -217,7 +225,7 @@ impl Client {
         let id = db(self
             .app
             .db
-            .insert_message(me_id, other.id, self.device, at, &sealed)
+            .insert_message(me_id, other.id, self.device, at, key, &sealed)
             .await)?;
         self.app.stats.message();
         self.send(ServerMsg::ChatSent { tag, id, at }).await;
@@ -236,6 +244,74 @@ impl Client {
             },
         );
         self.app.hub.send(other.id, ServerMsg::Chat(message));
+        Ok(())
+    }
+
+    pub(super) async fn keep_old_chats(
+        &self,
+        chats: Vec<OldChat>,
+        done: bool,
+    ) -> Result<(), ErrorCode> {
+        let me = self.me()?.id;
+        let device = self.device.ok_or(ErrorCode::Server)?;
+        if chats.len() > MAX_OLD_CHATS {
+            return Err(ErrorCode::TooLarge);
+        }
+        if !db(self.app.db.old_chats_wanted(device).await)? {
+            return Err(ErrorCode::BadMessage);
+        }
+        let largest = self.app.settings.get().max_message_bytes;
+        let latest = now();
+        let mut friends = std::collections::HashMap::new();
+        let mut rows = Vec::new();
+        let mut kept_chats = Vec::new();
+        for chat in chats {
+            if chat.sealed.ciphertext.len() as u64 > largest {
+                continue;
+            }
+            let friend = match friends.get(&chat.friend) {
+                Some(id) => *id,
+                None => {
+                    let Ok(row) = self.user(chat.friend).await else {
+                        continue;
+                    };
+                    friends.insert(chat.friend, row.id);
+                    row.id
+                }
+            };
+            rows.push((friend, chat.key, chat.at.min(latest)));
+            kept_chats.push(chat);
+        }
+        let size = kept_chats
+            .iter()
+            .map(|c| c.sealed.ciphertext.len() as u64)
+            .sum();
+        self.room(size).await?;
+        let old: Vec<OldRow> = rows
+            .iter()
+            .zip(&kept_chats)
+            .map(|(&(friend, key, at), chat)| OldRow {
+                friend,
+                key,
+                at,
+                sealed: &chat.sealed,
+            })
+            .collect();
+        let kept = db(self.app.db.keep_old_chats(me, device, &old).await)?;
+        for (index, id) in kept {
+            let chat = &kept_chats[index];
+            self.others(ServerMsg::OldChat {
+                id,
+                chat: OldChat {
+                    at: rows[index].2,
+                    ..chat.clone()
+                },
+            })?;
+        }
+        if done {
+            db(self.app.db.old_chats_kept(device).await)?;
+        }
+        self.send(ServerMsg::OldChatsKept).await;
         Ok(())
     }
 

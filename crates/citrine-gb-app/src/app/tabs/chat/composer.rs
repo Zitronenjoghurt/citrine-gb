@@ -181,7 +181,7 @@ pub(super) fn icon_button(ui: &mut Ui, button: egui::Button, side: f32) -> egui:
 
 pub(super) fn attach_menu(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId, side: f32) {
     let button = icon_button(ui, egui::Button::new(icons::PLUS), side).on_hover_text("Share");
-    let has_rom = viewer.emulator.gb.cartridge.has_rom_loaded;
+    let has_rom = viewer.emulator.has_game();
     let has_media = !viewer.media.items().is_empty();
     let has_replay = viewer.emulator.recorder.has_data();
     let blocked = viewer.online.share_blocked();

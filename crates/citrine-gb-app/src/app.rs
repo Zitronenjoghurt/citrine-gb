@@ -13,6 +13,7 @@ use crate::play::Play;
 use crate::storage::SettingsStore;
 use crate::utils::file_channels::FileChannels;
 use crate::utils::save_files::SaveFiles;
+use citrine_gb::debug::Debug;
 use citrine_gb::gb::GbModel;
 use eframe::{Frame, Storage};
 use egui::{Context, FontDefinitions};
@@ -25,7 +26,11 @@ const QUICK_LOAD_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(target_arch = "wasm32")]
 const AUDIO_STALL_SECS: f32 = 1.0;
 
+const DOCK_PANE_MIN: f32 = 120.0;
+
 const FRIENDS_DOCK_SHARE: f32 = 0.34;
+const FRIENDS_DOCK_WIDTH: f32 = 180.0;
+const FRIENDS_STACK_SHARE: f32 = 0.6;
 const GAME_INFO_DOCK_SHARE: f32 = 0.42;
 
 const SETTINGS_WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -38,6 +43,9 @@ mod console;
 mod events;
 mod files;
 pub mod focus;
+#[cfg(feature = "gba")]
+mod gba_bios;
+mod gimmicks;
 mod hotkeys;
 mod info_dock;
 mod link;
@@ -45,11 +53,12 @@ mod mobile;
 mod online;
 mod render;
 mod reset;
+mod shelf;
 pub(crate) mod tabs;
 mod toasts;
 pub mod ui_state;
 pub mod viewer;
-mod widgets;
+pub(crate) mod widgets;
 mod your_data;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -95,6 +104,8 @@ pub struct Citrine {
     #[serde(skip, default)]
     pub media: MediaStore,
     #[serde(skip, default)]
+    pub(crate) senses: crate::senses::Senses,
+    #[serde(skip, default)]
     pub online: Online,
     #[serde(skip, default)]
     pub play: Box<Play>,
@@ -108,6 +119,8 @@ pub struct Citrine {
     cloud_hold: Option<CloudHold>,
     #[serde(skip, default)]
     pub stats: crate::stats::Stats,
+    #[serde(skip, default)]
+    shelf: crate::homebrew::loader::ShelfLoader,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     #[serde(skip, default)]
     discord: crate::discord::Rpc,
@@ -119,22 +132,20 @@ pub struct Citrine {
 struct CloudHold {
     since: web_time::Instant,
     was_running: bool,
-    told: bool,
 }
 
 const CLOUD_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(4);
-const CLOUD_HOLD_TOAST: std::time::Duration = std::time::Duration::from_millis(400);
 
 struct Activity {
     last_input: web_time::Instant,
-    held: citrine_gb::gb::joypad::JoypadState,
+    held: citrine_gb::console::Keys,
 }
 
 impl Default for Activity {
     fn default() -> Self {
         Self {
             last_input: web_time::Instant::now(),
-            held: citrine_gb::gb::joypad::JoypadState::empty(),
+            held: citrine_gb::console::Keys::empty(),
         }
     }
 }
@@ -183,6 +194,7 @@ impl Default for Citrine {
             reset_without_asking: false,
             pending_console: None,
             media: MediaStore::default(),
+            senses: crate::senses::Senses::default(),
             online: Online::default(),
             play: Box::default(),
             activity: Activity::default(),
@@ -190,6 +202,7 @@ impl Default for Citrine {
             cloud_hold: None,
             game_info: Default::default(),
             stats: crate::stats::Stats::default(),
+            shelf: Default::default(),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             discord: crate::discord::Rpc::default(),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -215,6 +228,8 @@ impl Citrine {
         }
 
         app.ui.settings.sanitize();
+        #[cfg(feature = "gba")]
+        app.load_gba_bios();
         app.online.persist_chats();
         app.online.cloud_attach(app.emulator.store.clone());
         app.stats = crate::stats::Stats::open(crate::stats::StatsStore::default());
@@ -227,16 +242,20 @@ impl Citrine {
         crate::autosave::install_panic_hook(app.emulator.last_good.clone());
         #[cfg(target_arch = "wasm32")]
         crate::autosave::save_when_hidden(app.emulator.last_good.clone());
+        #[cfg(all(feature = "dev-route", target_arch = "wasm32"))]
+        crate::dev_route::open(&mut app);
         #[cfg(target_os = "android")]
         crate::platform::android::lifecycle::save_on_pause(app.emulator.last_good.clone());
 
         app
     }
 
-    fn restore(storage: Option<&dyn Storage>) -> Self {
-        storage
+    fn restore(storage: Option<&dyn eframe::Storage>) -> Self {
+        let mut app = storage
             .and_then(|storage| eframe::get_value::<Self>(storage, eframe::APP_KEY))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        tabs::retire_old_tabs(&mut app.dock);
+        app
     }
 
     fn setup_fonts(ctx: &Context) {
@@ -250,6 +269,8 @@ impl Citrine {
 impl eframe::App for Citrine {
     fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
         self.ui.update_avg_timer.start();
+        #[cfg(all(feature = "dev-route", target_arch = "wasm32"))]
+        crate::dev_route::tick(self, ctx);
         #[cfg(target_os = "android")]
         if let Some(audio) = &mut self.audio {
             crate::platform::android::lifecycle::follow_visibility(audio);
@@ -263,7 +284,8 @@ impl eframe::App for Citrine {
             self.audio_stalled = true;
         }
 
-        self.emulator.gb.debugger.record_channels = self.dock.find_tab(&Tab::ApuWaves).is_some();
+        let apu_open = self.dock.find_tab(&Tab::Apu).is_some();
+        self.emulator.debug_mut().record_waves(apu_open);
 
         mobile::touch_spacing(ctx, self.is_mobile(ctx));
         self.name_games();
@@ -286,16 +308,30 @@ impl eframe::App for Citrine {
         self.codec_confirm(ctx);
         self.reset_confirm(ctx);
         self.load_state_confirm(ctx);
+        self.unlink_load_confirm(ctx);
         self.console_confirm(ctx);
         self.cloud_conflict(ctx);
         self.handle_your_data(ctx);
         tabs::playing::stop_confirm(ctx, &mut self.play, &mut self.online, &mut self.ui.playing);
+        tabs::playing::relink_confirm(
+            ctx,
+            &mut self.play,
+            &self.online,
+            &self.emulator,
+            &mut self.ui.playing,
+        );
         self.play_picker(ctx);
         if let Some(next) =
             tabs::playing::switch_confirm(ctx, &mut self.ui.playing, &self.online, &self.play)
         {
             self.play.leave(&mut self.online);
             self.ui.playing.switch_to = Some(next);
+        }
+        if let Some(invite) =
+            tabs::playing::join_confirm(ctx, &mut self.ui.playing, &self.online, &self.play)
+        {
+            self.play.leave(&mut self.online);
+            self.ui.playing.join_after = Some(invite);
         }
         self.note_console_switch();
         self.mobile_escape(ctx);
@@ -312,6 +348,7 @@ impl eframe::App for Citrine {
         self.handle_dropped_files(ctx);
         self.unlock_audio_on_interaction(ctx);
         self.watch_cloud_game();
+        self.sense_gimmicks(ctx);
 
         let Self {
             emulator,
@@ -331,6 +368,11 @@ impl eframe::App for Citrine {
         if let Err(err) = result {
             self.toasts.error(format!("Emulation error: {err}"));
         }
+        if let Some(friend) = self.emulator.take_handed_back() {
+            let name = tabs::playing::member_name(&self.play, &self.online, friend);
+            self.ui.playing.handed_back(friend, &name);
+        }
+        self.use_gimmicks();
         let presses = self.emulator.take_loose_presses();
         self.run_pad_shortcuts(presses);
         self.play.flush(&mut self.online);
@@ -352,11 +394,16 @@ impl eframe::App for Citrine {
             }
         }
         self.finish_recordings();
+        self.show_loads();
+        self.watch_shelf();
         self.watch_game_info();
 
         self.show_toasts(ctx);
 
         let mobile = self.is_mobile(ctx);
+        if !mobile {
+            crate::app::ui_state::ui_theme::paint_focus_ring(ctx);
+        }
         self.handle_event_queue(mobile);
         let changed = self.ui.settings.dirty;
         if let Some(err) = self
@@ -453,8 +500,8 @@ impl Citrine {
         let emulator = &self.emulator;
         let solo = emulator.rom_key().map(|key| crate::discord::Unit {
             game: key.to_string(),
-            running: emulator.running && emulator.gb.cartridge.has_rom_loaded,
-            frame: emulator.gb.frame().as_slice(),
+            running: emulator.running && emulator.has_game(),
+            frame: emulator.frame(),
         });
         let unit = crate::discord::my_unit(self.play.session(), solo);
         let shot = self.shots.due(
@@ -614,17 +661,27 @@ impl Citrine {
             events::AppEvent::LoadRomData { data } => {
                 self.handle_load_rom_data(data);
             }
+            events::AppEvent::PlayShelfGame { game } => self.play_shelf_game(game),
+            events::AppEvent::PrefetchShelfGame { game } => self.shelf.prefetch(game),
             events::AppEvent::OpenTab { tab } => self.show_tab(tab, touch),
             events::AppEvent::MediaSaved { id } => self.media_saved(id, touch),
             events::AppEvent::MediaAdded { id } => self.media_added(id),
             events::AppEvent::ShowMedia { id } => self.show_media(id, touch),
             events::AppEvent::PlayOn { model } => self.ask_play_on(model),
             events::AppEvent::PickSecondGame => self.pick_second_game(touch),
-            events::AppEvent::LinkGame { data, name } => self.link_game(data, name),
+            events::AppEvent::LinkGame { data, name } => {
+                self.link_game(data, name);
+            }
             events::AppEvent::EndLink => self.end_link(),
             events::AppEvent::StartPartner { event } => self.start_partner(event),
             events::AppEvent::OpenSettings { tab } => self.open_settings(tab, touch),
             events::AppEvent::UndoSnapshot { rom_key, slot } => self.undo_snapshot(&rom_key, slot),
+            events::AppEvent::PickCameraPicture => self.pick_camera_picture(),
+            events::AppEvent::CentreTilt => self.centre_tilt(),
+            #[cfg(feature = "gba")]
+            events::AppEvent::PickGbaBios => self.pick_gba_bios(),
+            #[cfg(feature = "gba")]
+            events::AppEvent::UseBuiltInBios => self.use_built_in_bios(),
         }
     }
 }

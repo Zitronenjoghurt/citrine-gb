@@ -4,7 +4,10 @@ use crate::app::ui_state::settings::SettingsTab;
 use crate::local_link::Game;
 use crate::partner_link::PartnerLink;
 use crate::utils::file_loader::PickedFile;
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::rom::Rom;
+
+const ONLY_EACH_OTHER: &str = "Game Boy Advance games link only with each other";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkEntry {
@@ -19,7 +22,7 @@ impl Citrine {
             LinkEntry::Open
         } else if self.play.is_live() {
             LinkEntry::Blocked("Not while you play together")
-        } else if self.emulator.open_game().is_none() {
+        } else if !self.emulator.has_game() {
             LinkEntry::Blocked("Open a game first")
         } else {
             LinkEntry::Ready
@@ -41,25 +44,27 @@ impl Citrine {
 
     pub(super) fn link_picked(&mut self, file: PickedFile) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = file.path.as_deref()
-            && let Ok(header) = Rom::new(&file.data).header()
+        let path = file.path.clone();
+        let linked = self.link_game(file.data, Some(file.name));
+        #[cfg(not(target_arch = "wasm32"))]
+        if linked
+            && let Some(path) = path
+            && let Some(link) = &self.emulator.link
         {
-            let name = crate::game_name::game_name(
-                &header.sha1,
-                Some(&file.name),
-                &header.title,
-                header.cgb_mode.is_cgb(),
-            );
-            let dropped = self.ui.recent.record(path, &name, None);
+            let (title, kind) = (link.title().to_owned(), link.kind());
+            let dropped = self.ui.recent.record_on(&path, &title, None, Some(kind));
             self.files
                 .rom_copies
                 .drop_copies(dropped.iter().map(|entry| entry.path.as_path()));
         }
-        self.link_game(file.data, Some(file.name));
+        #[cfg(target_arch = "wasm32")]
+        let _ = linked;
     }
 
     pub(super) fn start_partner(&mut self, event: &'static citrine_gb_partner::Event) {
-        let rom = self.emulator.gb.cartridge.rom_bytes();
+        let Some(rom) = self.emulator.as_gb().map(|gb| gb.cartridge.rom_bytes()) else {
+            return;
+        };
         let Some(game) = citrine_gb_gamedata::identify(&rom) else {
             self.toasts.error("This game has no event partner");
             return;
@@ -91,24 +96,22 @@ impl Citrine {
         }
     }
 
-    pub(super) fn link_game(&mut self, data: Vec<u8>, name: Option<String>) {
-        self.try_start_audio();
+    pub(super) fn link_game(&mut self, data: Vec<u8>, name: Option<String>) -> bool {
         let rom = Rom::new(&data);
-        let Ok(header) = rom.header() else {
+        let kind = self.opened_as(&rom, name.as_deref());
+        if (kind == ConsoleKind::Gba) != (self.emulator.kind() == ConsoleKind::Gba) {
+            self.toasts.error(ONLY_EACH_OTHER);
+            return false;
+        }
+        self.try_start_audio();
+        if kind != ConsoleKind::Gba && rom.header().is_err() {
             self.toasts.error("That file isn't a Game Boy game");
-            return;
-        };
-        let model = self.ui.settings.console_for_rom(&rom);
-        let title = crate::game_name::game_name(
-            &header.sha1,
-            name.as_deref(),
-            &header.title,
-            header.cgb_mode.is_cgb(),
-        );
-        if let Err(err) = self.emulator.start_link(&rom, model, title) {
+            return false;
+        }
+        if let Err(err) = self.emulator.start_link(&rom, kind, name.as_deref()) {
             self.toasts
                 .error(format!("Couldn't start the second game: {err}"));
-            return;
+            return false;
         }
         self.ui.linked.picking = false;
         self.ui.settings.dirty = true;
@@ -120,6 +123,7 @@ impl Citrine {
         } else {
             self.open_tab(Tab::Playing);
         }
+        true
     }
 
     pub(super) fn end_link(&mut self) {

@@ -56,6 +56,8 @@ fn main() {
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("app_canvas was not a HtmlCanvasElement");
 
+        citrine_gb_app::open_saves().await;
+
         let start_result = eframe::WebRunner::new()
             .start(
                 canvas,

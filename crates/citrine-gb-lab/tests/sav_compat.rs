@@ -1,3 +1,4 @@
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::persistence::rtc_footer::{RTC_FOOTER_LEN, RtcFooter};
 use citrine_gb::persistence::sram_dump::SramDump;
@@ -55,7 +56,7 @@ fn clock_rom(ram: &[u8], clock: [u8; 5]) -> Vec<u8> {
 
 fn sameboy_battery(rom: &[u8]) -> Vec<u8> {
     let mut sameboy = SameBoyEmulator::new();
-    sameboy.load(rom, None, GbModel::Dmg).expect("load");
+    sameboy.load(rom, None, ConsoleKind::Gb).expect("load");
     let mut frames = 0;
     while frames < 10 {
         if sameboy.step() {
@@ -67,7 +68,7 @@ fn sameboy_battery(rom: &[u8]) -> Vec<u8> {
 
 fn sameboy_reload(rom: &[u8], battery: &[u8]) -> Vec<u8> {
     let mut sameboy = SameBoyEmulator::new();
-    sameboy.load(rom, None, GbModel::Dmg).expect("load");
+    sameboy.load(rom, None, ConsoleKind::Gb).expect("load");
     sameboy.load_battery(battery);
     sameboy.save_battery()
 }

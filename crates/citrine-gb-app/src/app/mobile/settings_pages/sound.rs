@@ -6,9 +6,16 @@ use crate::app::ui_state::settings::Settings;
 use crate::audio::{DEFAULT_LATENCY_MS, MAX_LATENCY_MS, MIN_LATENCY_MS};
 use egui::{Context, RichText, Ui};
 
-const CHANNELS: [&str; 4] = ["Pulse with sweep", "Pulse", "Wave", "Noise"];
+const CHANNELS: [&str; 6] = [
+    "Pulse with sweep",
+    "Pulse",
+    "Wave",
+    "Noise",
+    "Direct Sound A",
+    "Direct Sound B",
+];
 
-pub fn channels_value(channels: &[bool; 4]) -> String {
+pub fn channels_value(channels: &[bool]) -> String {
     let on: Vec<String> = channels
         .iter()
         .enumerate()
@@ -16,7 +23,7 @@ pub fn channels_value(channels: &[bool; 4]) -> String {
         .map(|(index, _)| (index + 1).to_string())
         .collect();
     match on.len() {
-        4 => "All".to_owned(),
+        n if n == channels.len() => "All".to_owned(),
         0 => "None".to_owned(),
         _ => on.join(", "),
     }
@@ -28,6 +35,7 @@ fn milliseconds(value: f64) -> String {
 
 impl Citrine {
     pub(super) fn sound_page(&mut self, ui: &mut Ui) {
+        let count = self.emulator.channel_count();
         let s = &mut self.ui.settings;
         let mut open = None;
         let mut dirty = false;
@@ -50,7 +58,7 @@ impl Citrine {
                 open = Some(Sheet::Latency);
             }
             if list
-                .row(Row::new("Channels").value(channels_value(&s.channels)))
+                .row(Row::new("Channels").value(channels_value(s.channels_for(count))))
                 .clicked()
             {
                 open = Some(Sheet::Channels);
@@ -81,6 +89,7 @@ impl Citrine {
     }
 
     pub(super) fn sound_sheet(&mut self, ctx: &Context, open: Sheet) -> bool {
+        let count = self.emulator.channel_count();
         let s = &mut self.ui.settings;
         match open {
             Sheet::Volume => {
@@ -149,7 +158,7 @@ impl Citrine {
                 let shown = sheet::show(ctx, super::sheet_id(), "Channels", |ui| {
                     let mut changed = false;
                     kit::list(ui, |list| {
-                        for (index, on) in s.channels.iter_mut().enumerate() {
+                        for (index, on) in s.channels_for(count).iter_mut().enumerate() {
                             let label = format!("{} {}", index + 1, CHANNELS[index]);
                             changed |= list.switch(SwitchRow::new(&label, on));
                         }
@@ -168,4 +177,25 @@ fn device_name(s: &Settings) -> String {
     s.audio_device
         .clone()
         .unwrap_or_else(|| "System default".to_owned())
+}
+
+#[cfg(all(test, feature = "gba"))]
+mod tests {
+    use crate::app::files::tests::Opened;
+    use crate::app::tests::{play_frame, text_rect};
+    use crate::app::ui_state::settings::SettingsTab;
+    use egui::Context;
+
+    #[test]
+    fn the_phone_sound_page_counts_the_gba_channels() {
+        let mut opened = Opened::new("phone-channels");
+        let file = opened.picked();
+        opened.app.handle_load_rom(file);
+        opened.app.ui.settings.gba_channels[4] = false;
+        opened.app.mobile.nav.open_settings(SettingsTab::Sound);
+        let ctx = Context::default();
+        play_frame(&mut opened.app, &ctx, Vec::new());
+        let output = play_frame(&mut opened.app, &ctx, Vec::new());
+        assert!(text_rect(&output, "1, 2, 3, 4, 6").is_some());
+    }
 }

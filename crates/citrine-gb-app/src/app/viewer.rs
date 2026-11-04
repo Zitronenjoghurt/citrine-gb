@@ -37,7 +37,7 @@ pub enum ItemKey {
 }
 
 enum Status {
-    Loading(Option<u64>),
+    Loading(Option<crate::progress::Progress>),
     Ready,
     NeedsCodec,
     Note(String),
@@ -217,6 +217,7 @@ fn facts(
             Some(Facts {
                 icon: match item.info.kind {
                     MediaKind::Screenshot => icons::CAMERA,
+                    MediaKind::Print => icons::PRINTER,
                     MediaKind::Recording => icons::VIDEO_CAMERA,
                 },
                 title: game_name(&item.info.game).to_owned(),
@@ -253,9 +254,7 @@ fn facts(
             let local = local_copy(viewer, share).is_some();
             let rom = viewer
                 .emulator
-                .gb
-                .cartridge
-                .has_rom_loaded
+                .has_game()
                 .then(|| viewer.emulator.rom_key())
                 .flatten();
             let same_game = matches!(
@@ -434,13 +433,19 @@ fn draw(
         }
     }
 
+    let loading = match shown.map(|s| &s.status) {
+        Some(Status::Loading(Some(progress))) => Some(("Downloading", *progress)),
+        Some(Status::Loading(None)) => crate::media::recording::codec_progress()
+            .map(|progress| ("Downloading the video codec", progress)),
+        _ => None,
+    };
     let note = match shown.map(|s| &s.status) {
-        Some(Status::Loading(Some(done))) => Some(format!("Downloading {done}%")),
         Some(Status::Note(text)) => Some(text.clone()),
+        _ if loading.is_some() => None,
         _ => facts.replay_note.clone(),
     };
     let needs_codec = matches!(shown.map(|s| &s.status), Some(Status::NeedsCodec));
-    if note.is_some() || needs_codec || facts.replay {
+    if note.is_some() || loading.is_some() || needs_codec || facts.replay {
         let at = Rect::from_center_size(
             pos2(room.center().x, room.bottom() - 40.0),
             vec2(room.width().min(360.0), 64.0),
@@ -448,6 +453,9 @@ fn draw(
         ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.vertical_centered(|ui| {
+                    if let Some((label, progress)) = loading {
+                        ui.add(crate::app::widgets::progress::ProgressBar::new(label, progress));
+                    }
                     if let Some(note) = &note {
                         ui.label(note);
                     }

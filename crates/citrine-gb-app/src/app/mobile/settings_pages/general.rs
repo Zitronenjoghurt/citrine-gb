@@ -4,7 +4,8 @@ use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::mobile::sheet::Amount;
 use crate::app::ui_state::settings::{self, ConsoleChoice, LayoutMode, plays_on_both};
 use crate::autosave::{DEFAULT_KEEP, MAX_KEEP};
-use crate::media::recording::{MAX_SCALE, SOURCE_HEIGHT, SOURCE_WIDTH};
+use crate::media::recording::MAX_SCALE;
+use citrine_gb::console::VideoSpec;
 use citrine_gb::gb::GbModel;
 use egui::{Context, Ui};
 
@@ -18,11 +19,11 @@ struct Game {
     mode: citrine_gb::rom::header::RomCgbMode,
 }
 
-fn scale_label(scale: usize) -> String {
+fn scale_label(scale: usize, video: VideoSpec) -> String {
     format!(
         "{scale}x, {} × {}",
-        SOURCE_WIDTH * scale,
-        SOURCE_HEIGHT * scale
+        video.width * scale,
+        video.height * scale
     )
 }
 
@@ -33,7 +34,7 @@ fn count(value: f64) -> String {
 impl Citrine {
     fn general_game(&self) -> Option<Game> {
         let rom_key = self.emulator.rom_key()?.to_owned();
-        let mode = self.emulator.gb.cartridge.header.cgb_mode;
+        let mode = self.emulator.as_gb()?.cartridge.header.cgb_mode;
         Some(Game {
             rom_key,
             both: plays_on_both(mode),
@@ -44,6 +45,8 @@ impl Citrine {
 
     pub(super) fn general_page(&mut self, ui: &mut Ui) {
         let game = self.general_game();
+        #[cfg(feature = "gba")]
+        let gba_bios = self.emulator.gba_bios_name().map(str::to_owned);
         let narrow = LayoutMode::too_narrow_for_desktop(ui.ctx());
         let s = &mut self.ui.settings;
         let mut open = None;
@@ -83,6 +86,15 @@ impl Citrine {
                     open = Some(Sheet::GameConsole);
                 }
             }
+            #[cfg(feature = "gba")]
+            if list
+                .row(Row::new("GBA BIOS").value(
+                    crate::app::gba_bios::BiosChoice::current(gba_bios.as_deref()).to_string(),
+                ))
+                .clicked()
+            {
+                open = Some(Sheet::GbaBios);
+            }
             let too_narrow = if s.layout == LayoutMode::Desktop && narrow {
                 "Too narrow here, so it uses touch"
             } else {
@@ -117,6 +129,10 @@ impl Citrine {
             }
             dirty |= list.switch(SwitchRow::new("Dev tools", &mut s.dev_mode));
         });
+        if let Some(sheet) = self.cartridge_rows(ui) {
+            open = Some(sheet);
+        }
+        let s = &mut self.ui.settings;
         kit::section_label(ui, "Autosave");
         kit::list(ui, |list| {
             if list
@@ -156,6 +172,7 @@ impl Citrine {
 
     pub(super) fn general_sheet(&mut self, ctx: &Context, open: Sheet) -> bool {
         let game = self.general_game();
+        let video = self.emulator.video();
         let s = &mut self.ui.settings;
         let (changed, done) = match open {
             Sheet::Console => pick(
@@ -180,6 +197,24 @@ impl Citrine {
                 );
                 if changed {
                     self.events.play_on(choice.resolve(GbModel::Cgb));
+                }
+                return done;
+            }
+            #[cfg(feature = "gba")]
+            Sheet::GbaBios => {
+                use crate::app::gba_bios::BiosChoice;
+                let name = self.emulator.gba_bios_name();
+                let mut choice = BiosChoice::current(name);
+                let (changed, done) = pick_from(
+                    ctx,
+                    "GBA BIOS",
+                    Some(crate::app::gba_bios::BIOS_HINT),
+                    BiosChoice::all(name),
+                    &mut choice,
+                    |choice| choice.to_string(),
+                );
+                if changed {
+                    choice.apply(&mut self.events);
                 }
                 return done;
             }
@@ -212,7 +247,7 @@ impl Citrine {
                 None,
                 1..=MAX_SCALE,
                 &mut s.screenshot_scale,
-                scale_label,
+                |scale| scale_label(scale, video),
             ),
             _ => pick_from(
                 ctx,
@@ -220,7 +255,7 @@ impl Citrine {
                 None,
                 (2..=MAX_SCALE).step_by(2),
                 &mut s.recording_scale,
-                scale_label,
+                |scale| scale_label(scale, video),
             ),
         };
         s.dirty |= changed;

@@ -1,5 +1,5 @@
 use crate::chat::{ChatError, pack, unpack};
-use crate::crypto::{Keys, NONCE_BYTES};
+use crate::crypto::{Keys, NONCE_BYTES, Sealed};
 use crypto_secretbox::aead::{Aead, KeyInit};
 use crypto_secretbox::{Nonce, XSalsa20Poly1305};
 use hkdf::Hkdf;
@@ -107,6 +107,22 @@ impl Keys {
             .map_err(|_| ChatError::Open)
     }
 
+    pub fn seal_kept(&self, plaintext: &[u8]) -> Sealed {
+        let bytes = self.seal_for_me(&pack(plaintext, true));
+        let mut nonce = [0; NONCE_BYTES];
+        nonce.copy_from_slice(&bytes[..NONCE_BYTES]);
+        Sealed {
+            nonce,
+            ciphertext: bytes[NONCE_BYTES..].to_vec(),
+        }
+    }
+
+    pub fn open_kept(&self, sealed: &Sealed) -> Result<Vec<u8>, ChatError> {
+        let mut bytes = sealed.nonce.to_vec();
+        bytes.extend_from_slice(&sealed.ciphertext);
+        unpack(&self.open_for_me(&bytes)?, MAX_PAYLOAD_BYTES)
+    }
+
     pub fn seal_save(&self, payload: &SavePayload) -> Vec<u8> {
         let plain = postcard::to_allocvec(payload).expect("a payload always serialises");
         self.seal_for_me(&pack(&plain, true))
@@ -156,6 +172,15 @@ mod tests {
         assert_eq!(mine.keys().open_save(&sealed), Ok(payload()));
         let other = RelayId::from_bytes([2; 32]).keys();
         assert_eq!(other.open_save(&sealed), Err(ChatError::Open));
+    }
+
+    #[test]
+    fn an_old_chat_opens_only_on_devices_of_the_same_account() {
+        let mine = RelayId::from_bytes([1; 32]);
+        let sealed = mine.keys().seal_kept(b"hi mia");
+        assert_eq!(mine.keys().open_kept(&sealed), Ok(b"hi mia".to_vec()));
+        let other = RelayId::from_bytes([2; 32]).keys();
+        assert_eq!(other.open_kept(&sealed), Err(ChatError::Open));
     }
 
     #[test]

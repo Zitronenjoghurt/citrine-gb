@@ -9,12 +9,14 @@ pub enum FileKind {
     Other,
 }
 
+pub const ROM_FILTER: (&str, &[&str]) = ("Game Boy and GBA ROMs", &["gb", "gbc", "gba"]);
+
 pub fn kind_of(name: &str) -> FileKind {
     let extension = std::path::Path::new(name)
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match extension.as_deref() {
-        Some("gb" | "gbc") => FileKind::Rom,
+        Some("gb" | "gbc" | "gba") => FileKind::Rom,
         Some("sav" | "srm") => FileKind::Save,
         Some("rtc") => FileKind::Clock,
         _ => FileKind::Other,
@@ -77,6 +79,7 @@ mod tests {
     #[test]
     fn kinds_follow_the_extension_in_any_case() {
         assert_eq!(kind_of("Pokemon Silver.GBC"), FileKind::Rom);
+        assert_eq!(kind_of("Golden Sun.gba"), FileKind::Rom);
         assert_eq!(kind_of("silver.srm"), FileKind::Save);
         assert_eq!(kind_of("silver.SAV"), FileKind::Save);
         assert_eq!(kind_of("silver.rtc"), FileKind::Clock);

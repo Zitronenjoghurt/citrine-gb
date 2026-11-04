@@ -3,10 +3,13 @@ use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb::rom::Rom;
 use citrine_gb_gamedata::{
-    Game, Generation, Language, Palette, Place, Pokemon, RomTables, SaveCopy, Side, Sprite,
-    Version, identify, read_live, read_save,
+    Effect, Game, Generation, Language, Location, Palette, Place, Pokemon, Position, Region,
+    RomTables, SaveCopy, Side, Sprite, Version, identify, read_live, read_save,
 };
+use common::{map_picture, png};
 use std::path::{Path, PathBuf};
+
+mod common;
 
 fn rom_dir() -> PathBuf {
     std::env::var_os("CITRINE_ROMS")
@@ -61,6 +64,11 @@ fn expected_live(game: Game) -> Vec<(u16, usize)> {
             (0xD123, 0x2ED5),
             (0xD9B2, 0x302D),
         ],
+        Version::Ruby
+        | Version::Sapphire
+        | Version::Emerald
+        | Version::FireRed
+        | Version::LeafGreen => Vec::new(),
     }
 }
 
@@ -100,7 +108,7 @@ fn every_pokemon_rom_loads_its_tables() {
             let move_name = tables.move_name(id).expect("move name");
             assert!(!move_name.contains('\u{FFFD}'), "{name}: {move_name}");
         }
-        for id in 1..=0xC3u8 {
+        for id in 1..=0xC3u16 {
             let item = tables.item_name(id);
             assert!(
                 item.is_some() || game.generation() == Generation::One,
@@ -108,13 +116,14 @@ fn every_pokemon_rom_loads_its_tables() {
             );
         }
         let (machines, cut) = match game.generation() {
-            Generation::One => ((0xC4..=0xFAu8).collect::<Vec<_>>(), 0xC4),
+            Generation::One => ((0xC4..=0xFAu16).collect::<Vec<_>>(), 0xC4),
             Generation::Two => (
-                (0xBF..=0xF9u8)
+                (0xBF..=0xF9u16)
                     .filter(|&id| id != 0xC3 && id != 0xDC)
                     .collect(),
                 0xF3,
             ),
+            Generation::Three => continue,
         };
         for id in machines {
             assert!(tables.machine_move(id).is_some(), "{name}: machine {id:x}");
@@ -130,6 +139,99 @@ fn every_pokemon_rom_loads_its_tables() {
             "{name}: {game:?}, {dex} species, live map {:x?}",
             tables.live_map()
         );
+    }
+}
+
+fn location(group: u8, map: u8) -> Location {
+    Location {
+        group,
+        map,
+        x: 0,
+        y: 0,
+        outside: None,
+    }
+}
+
+#[test]
+#[ignore]
+fn moves_matchups_places_and_wild_read_in_every_pokemon_rom() {
+    const POUND: u16 = 1;
+    const WATER_GUN: u16 = 55;
+    const NORMAL: u8 = 0x00;
+    const GHOST: u8 = 0x08;
+    const FIRE: u8 = 0x14;
+    for (path, data, game) in pokemon_roms() {
+        if game.language == Language::Japanese {
+            continue;
+        }
+        let tables = RomTables::load(game, &data).expect("tables");
+        let pound = tables.move_data(POUND).expect("pound");
+        assert_eq!(
+            (pound.type_id, pound.power, pound.pp),
+            (NORMAL, 40, 35),
+            "{path:?}"
+        );
+        assert_eq!(tables.effect(WATER_GUN, [FIRE, FIRE]), Some(Effect::Double));
+        assert_eq!(tables.effect(POUND, [GHOST, GHOST]), Some(Effect::NoEffect));
+        let maps: Vec<Location> = match game.generation() {
+            Generation::One => (0..=0xF7).map(|map| location(0, map)).collect(),
+            Generation::Two => (1..=26)
+                .flat_map(|group| (1..=40).map(move |map| location(group, map)))
+                .collect(),
+            Generation::Three => continue,
+        };
+        let mut places = std::collections::BTreeSet::new();
+        let mut wild = std::collections::BTreeSet::new();
+        let mut lists = 0;
+        for at in &maps {
+            if let Some(spot) = tables.spot(at) {
+                places.insert(spot.name.to_owned());
+            }
+            for list in tables.wild(at, None) {
+                lists += 1;
+                for encounter in list.encounters {
+                    assert!(encounter.min_level <= encounter.max_level);
+                    assert!(encounter.percent > 0);
+                    wild.insert(
+                        tables
+                            .species_name(encounter.species)
+                            .expect("name")
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        println!(
+            "{path:?}: {} places, {lists} wild lists, {} wild species",
+            places.len(),
+            wild.len()
+        );
+        assert!(places.len() > 50 && wild.len() > 70, "{path:?}");
+        if game.language != Language::English {
+            continue;
+        }
+        match game.generation() {
+            Generation::One => {
+                assert_eq!(
+                    tables.spot(&location(0, 0)).map(|s| s.name),
+                    Some("PALLET TOWN")
+                );
+                let route_1: Vec<String> = tables
+                    .wild(&location(0, 0x0C), None)
+                    .iter()
+                    .flat_map(|list| &list.encounters)
+                    .filter_map(|e| tables.species_name(e.species).map(str::to_owned))
+                    .collect();
+                println!("  route 1: {route_1:?}");
+                assert!(route_1.iter().any(|name| name == "PIDGEY"));
+                assert!(places.contains("ROUTE 1") && places.contains("CERULEAN CITY"));
+            }
+            Generation::Two => {
+                assert!(places.contains("NEW BARK TOWN") && places.contains("ROUTE 29"));
+                assert!(wild.contains("SENTRET") && wild.contains("PIDGEY"));
+            }
+            Generation::Three => {}
+        }
     }
 }
 
@@ -222,6 +324,30 @@ fn silver_save_reads_and_matches_the_live_game() {
         }
     }
     let state = state.expect("the live game never matched the save");
+    let at = *saved
+        .location
+        .as_ref()
+        .and_then(Position::gb)
+        .expect("location");
+    println!(
+        "saved at {at:?}: {:?}, wild {:?}",
+        tables.spot(&at),
+        tables
+            .wild(&at, None)
+            .iter()
+            .flat_map(|list| &list.encounters)
+            .map(|e| (
+                tables.species_name(e.species),
+                e.min_level,
+                e.max_level,
+                e.percent
+            ))
+            .collect::<Vec<_>>()
+    );
+    println!("journey {:?}, next {:?}", saved.journey, saved.next_goal());
+    println!("live clock {:?}, battle {:?}", state.clock, state.battle);
+    assert!(state.clock.is_some());
+    assert!(state.battle.is_none());
     assert_eq!(state.copy, SaveCopy::Live);
     assert_eq!(state.trainer.name, saved.trainer.name);
     assert_eq!(state.trainer.id, saved.trainer.id);
@@ -359,53 +485,96 @@ fn contact_sheet(path: &Path, sprites: &[(Sprite, Palette)], columns: usize) {
     std::fs::write(path, png(width, height, &rgb)).expect("write sheet");
 }
 
-fn png(width: usize, height: usize, rgb: &[u8]) -> Vec<u8> {
-    let mut raw = Vec::with_capacity((width * 3 + 1) * height);
-    for row in rgb.chunks(width * 3) {
-        raw.push(0);
-        raw.extend_from_slice(row);
-    }
-    let mut zlib = vec![0x78, 0x01];
-    let blocks: Vec<&[u8]> = raw.chunks(0xFFFF).collect();
-    for (i, block) in blocks.iter().enumerate() {
-        zlib.push(u8::from(i + 1 == blocks.len()));
-        let len = block.len() as u16;
-        zlib.extend(len.to_le_bytes());
-        zlib.extend((!len).to_le_bytes());
-        zlib.extend_from_slice(block);
-    }
-    let (mut a, mut b) = (1u32, 0u32);
-    for &byte in &raw {
-        a = (a + u32::from(byte)) % 65521;
-        b = (b + a) % 65521;
-    }
-    zlib.extend(((b << 16) | a).to_be_bytes());
-    let mut header = Vec::new();
-    header.extend((width as u32).to_be_bytes());
-    header.extend((height as u32).to_be_bytes());
-    header.extend([8, 2, 0, 0, 0]);
-    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
-    for (kind, body) in [(b"IHDR", header), (b"IDAT", zlib), (b"IEND", Vec::new())] {
-        out.extend((body.len() as u32).to_be_bytes());
-        let mut chunk = kind.to_vec();
-        chunk.extend(&body);
-        out.extend(&chunk);
-        out.extend(crc32(&chunk).to_be_bytes());
-    }
-    out
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
+#[test]
+#[ignore]
+fn region_maps_decode_and_mark_known_places() {
+    let sheets = std::env::var_os("CITRINE_SHEETS").map(PathBuf::from);
+    for (path, data, game) in pokemon_roms() {
+        if path.to_string_lossy().contains("Translated") {
+            continue;
+        }
+        let tables = RomTables::load(game, &data).expect("tables");
+        let regions: &[Region] = match game.generation() {
+            Generation::One => &[Region::Kanto],
+            Generation::Two => &[Region::Johto, Region::Kanto],
+            Generation::Three => continue,
+        };
+        let known: Vec<(Location, &str, Region, (u16, u16))> = match game.generation() {
+            Generation::One => vec![
+                (location(0, 0x00), "PALLET TOWN", Region::Kanto, (36, 100)),
+                (location(0, 0x03), "CERULEAN CITY", Region::Kanto, (100, 28)),
+            ],
+            Generation::Two => vec![
+                (location(24, 4), "NEW BARK TOWN", Region::Johto, (132, 84)),
+                (location(22, 3), "CIANWOOD CITY", Region::Johto, (12, 84)),
+                (location(13, 2), "PALLET TOWN", Region::Kanto, (44, 92)),
+            ],
+            Generation::Three => continue,
+        };
+        for &region in regions {
+            let map = tables.region_map(region).expect("region map");
+            let colors: std::collections::BTreeSet<[u8; 4]> = map.pixels.iter().copied().collect();
+            println!(
+                "{path:?} {region:?}: {}x{}, {} colours",
+                map.width,
+                map.height,
+                colors.len()
+            );
+            if let Some(dir) = &sheets {
+                let marks: Vec<(u16, u16)> = known
+                    .iter()
+                    .filter_map(|(at, _, _, _)| tables.marker(at))
+                    .filter(|marker| std::ptr::eq(marker.map, map))
+                    .map(|marker| (marker.x, marker.y))
+                    .collect();
+                let name = path
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace(' ', "_");
+                std::fs::create_dir_all(dir).expect("sheets dir");
+                map_picture(&dir.join(format!("{name}-{region:?}.png")), map, &marks);
+            }
+            assert!(
+                [(160, 144), (144, 120)].contains(&(map.width, map.height)),
+                "{path:?}"
+            );
+            assert!(colors.len() >= 4, "{path:?} {region:?}");
+        }
+        if game.language != Language::English {
+            continue;
+        }
+        for (at, name, region, point) in known {
+            let marker = tables.marker(&at).expect("marker");
+            println!("  {name}: {:?} at {:?}", marker.name, (marker.x, marker.y));
+            assert_eq!(marker.name, name, "{path:?}");
+            assert!(std::ptr::eq(marker.map, tables.region_map(region).unwrap()));
+            assert_eq!((marker.x, marker.y), point, "{path:?} {name}");
         }
     }
-    !crc
+    let Some(save) = silver_save() else {
+        return;
+    };
+    let (_, data, game) = pokemon_roms()
+        .into_iter()
+        .find(|(_, _, game)| game.version == Version::Silver && game.language == Language::English)
+        .expect("silver rom");
+    let tables = RomTables::load(game, &data).expect("tables");
+    let saved = read_save(game, &save).expect("save");
+    let at = *saved
+        .location
+        .as_ref()
+        .and_then(Position::gb)
+        .expect("saved location");
+    let marker = tables.marker(&at).expect("lighthouse marker");
+    println!(
+        "  silver save: {:?} at {:?}",
+        marker.name,
+        (marker.x, marker.y)
+    );
+    assert_eq!(marker.name, "LIGHTHOUSE");
+    assert!(std::ptr::eq(
+        marker.map,
+        tables.region_map(Region::Johto).unwrap()
+    ));
 }

@@ -14,6 +14,12 @@ fn game_names_drop_the_extension_in_any_case() {
     assert_eq!(game_name("Tobu Tobu Girl.gb"), "Tobu Tobu Girl");
     assert_eq!(game_name("Petris.GBC"), "Petris");
     assert_eq!(game_name("readme.txt"), "readme.txt");
+    assert_eq!(game_name("Tobu.gbcx"), "Tobu.gbcx");
+}
+
+#[test]
+fn gba_games_drop_their_extension_too() {
+    assert_eq!(game_name("Pokemon Emerald.GBA"), "Pokemon Emerald");
 }
 
 #[test]

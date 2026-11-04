@@ -1,11 +1,13 @@
 use crate::app::ui_state::keybinds::{GbButton, KeyBindings, key_label};
 use crate::held::{Change, HeldButtons, InputSource};
 use crate::storage::{SaveStore, now_unix};
+use citrine_gb::console::{Console, ConsoleKind, Keys};
 use citrine_gb::error::GbResult;
-use citrine_gb::gb::joypad::JoypadState;
-use citrine_gb::gb::{GameBoy, GbModel};
-use citrine_gb::netplay::LocalCable;
-use citrine_gb::persistence::sram_dump::SramDump;
+use citrine_gb::gb::GameBoy;
+#[cfg(feature = "gba")]
+use citrine_gb::gba::machine::Gba;
+use citrine_gb::machine::{Firmware, Machine};
+use citrine_gb::netplay::{LinkPort, LocalCable};
 use citrine_gb::rom::Rom;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -219,9 +221,43 @@ pub enum Source {
     Touch,
 }
 
+enum Cable {
+    Gb(LocalCable<GameBoy>),
+    #[cfg(feature = "gba")]
+    Gba(LocalCable<Gba>),
+}
+
+impl Cable {
+    fn new(kind: ConsoleKind) -> Self {
+        let mut cable = match kind {
+            #[cfg(feature = "gba")]
+            ConsoleKind::Gba => Self::Gba(LocalCable::new()),
+            _ => Self::Gb(LocalCable::new()),
+        };
+        cable.set_plugged(true);
+        cable
+    }
+
+    fn plugged(&self) -> bool {
+        match self {
+            Self::Gb(cable) => cable.plugged(),
+            #[cfg(feature = "gba")]
+            Self::Gba(cable) => cable.plugged(),
+        }
+    }
+
+    fn set_plugged(&mut self, plugged: bool) {
+        match self {
+            Self::Gb(cable) => cable.set_plugged(plugged),
+            #[cfg(feature = "gba")]
+            Self::Gba(cable) => cable.set_plugged(plugged),
+        }
+    }
+}
+
 pub struct LocalLink {
-    pub gb: GameBoy,
-    cable: LocalCable,
+    pub machine: Machine,
+    cable: Cable,
     held: HeldButtons,
     control: Game,
     pads: Vec<usize>,
@@ -237,29 +273,29 @@ pub struct LocalLink {
 impl LocalLink {
     pub fn start(
         rom: &Rom,
-        model: GbModel,
-        title: String,
+        kind: ConsoleKind,
+        firmware: &Firmware,
+        file_name: Option<&str>,
         store: &SaveStore,
         sample_rate: u32,
         first_key: Option<&str>,
     ) -> GbResult<Self> {
-        let mut gb = GameBoy::new_empty(model);
-        gb.load_rom_with_model(rom, model)?;
-        gb.apu.set_sample_rate(sample_rate);
-        let rom_key = gb.cartridge.header.sha256_hex_string();
+        let mut machine = Machine::load(rom, kind, firmware)?;
+        machine.set_sample_rate(sample_rate);
+        let id = machine.rom_id();
+        let rom_key = id.sha256_hex_string();
+        let title = crate::game_name::game_name(&id.sha1, file_name, &machine.title());
         let save_key = if first_key == Some(rom_key.as_str()) {
             format!("{rom_key}-link2")
         } else {
             rom_key.clone()
         };
-        if let Some(data) = store.load_battery(&save_key) {
-            gb.put_sram_dump(SramDump::from_slice(&data), now_unix());
+        if let Some(save) = store.load_battery_save(&save_key, &machine) {
+            machine.put_battery(save, now_unix());
         }
-        let mut cable = LocalCable::new();
-        cable.set_plugged(true);
         Ok(Self {
-            gb,
-            cable,
+            machine,
+            cable: Cable::new(kind),
             held: HeldButtons::default(),
             control: Game::First,
             pads: Vec::new(),
@@ -286,8 +322,8 @@ impl LocalLink {
         &self.save_key
     }
 
-    pub fn model(&self) -> GbModel {
-        self.gb.model
+    pub fn kind(&self) -> ConsoleKind {
+        self.machine.kind()
     }
 
     pub fn plugged(&self) -> bool {
@@ -319,15 +355,15 @@ impl LocalLink {
         moved
     }
 
-    pub fn held(&self) -> JoypadState {
+    pub fn held(&self) -> Keys {
         self.held.held()
     }
 
-    pub fn held_of(&self, source: InputSource) -> JoypadState {
+    pub fn held_of(&self, source: InputSource) -> Keys {
         self.held.of(source)
     }
 
-    pub fn set_held(&mut self, source: InputSource, mask: JoypadState, down: JoypadState) {
+    pub fn set_held(&mut self, source: InputSource, mask: Keys, down: Keys) {
         self.held.set(source, mask, down);
     }
 
@@ -340,14 +376,46 @@ impl LocalLink {
         self.held.clear()
     }
 
-    pub fn run_frame(&mut self, first: &mut GameBoy, first_buttons: JoypadState) {
-        self.cable
-            .run_frame([first, &mut self.gb], [first_buttons, self.held.held()]);
+    pub fn run_frame(&mut self, first: &mut Machine, first_buttons: Keys) {
+        let keys = [first_buttons, self.held.held()];
+        match (&mut self.cable, first, &mut self.machine) {
+            (Cable::Gb(cable), Machine::Gb(first), Machine::Gb(second)) => {
+                if !cable.plugged() && first.has_ir() && second.has_ir() {
+                    if first.link_plugged() || second.link_plugged() {
+                        cable.unplug([&mut **first, &mut **second]);
+                    }
+                    infrared_frame([&mut **first, &mut **second], keys);
+                } else {
+                    cable.run_frame([&mut **first, &mut **second], keys);
+                }
+            }
+            #[cfg(feature = "gba")]
+            (Cable::Gba(cable), Machine::Gba(first), Machine::Gba(second)) => {
+                cable.run_frame([&mut **first, &mut **second], keys);
+            }
+            #[cfg(feature = "gba")]
+            (_, first, second) => {
+                for (console, keys) in [first, second].into_iter().zip(keys) {
+                    console.set_keys(keys);
+                    console.run_frame();
+                }
+            }
+        }
         self.held.take_owed();
     }
 
-    pub fn unplug(&mut self, first: &mut GameBoy) {
-        self.cable.unplug([first, &mut self.gb]);
+    pub fn unplug(&mut self, first: &mut Machine) {
+        match (&mut self.cable, first, &mut self.machine) {
+            (Cable::Gb(cable), Machine::Gb(first), Machine::Gb(second)) => {
+                cable.unplug([&mut **first, &mut **second]);
+            }
+            #[cfg(feature = "gba")]
+            (Cable::Gba(cable), Machine::Gba(first), Machine::Gba(second)) => {
+                cable.unplug([&mut **first, &mut **second]);
+            }
+            #[cfg(feature = "gba")]
+            (cable, _, _) => cable.set_plugged(false),
+        }
     }
 
     pub fn key(&self, key: egui::Key, bindings: &KeyBindings) -> Option<(Game, GbButton)> {
@@ -398,14 +466,13 @@ impl LocalLink {
     }
 
     pub fn mix(&mut self, samples: &mut [f32]) {
-        let mut fresh = std::mem::take(&mut self.gb.apu.audio_buffer);
+        let mut fresh = Vec::new();
+        self.machine.take_audio(&mut fresh);
         if self.settings.second_sound {
-            self.queued.extend(fresh.drain(..));
+            self.queued.extend(fresh);
         } else {
-            fresh.clear();
             self.queued.clear();
         }
-        self.gb.apu.audio_buffer = fresh;
         if !self.settings.second_sound {
             return;
         }
@@ -422,7 +489,7 @@ impl LocalLink {
     }
 
     pub fn clear_audio(&mut self) {
-        self.gb.apu.audio_buffer.clear();
+        self.machine.take_audio(&mut Vec::new());
         self.queued.clear();
     }
 
@@ -437,23 +504,47 @@ impl LocalLink {
     }
 
     pub fn flush_save(&mut self, store: &SaveStore) -> GbResult<()> {
-        let Some(dump) = self.gb.poll_sram_dump(false, now_unix()) else {
+        let Some(save) = self.machine.battery(false, now_unix()) else {
             return Ok(());
         };
-        store.store_battery(&self.save_key, dump.as_slice())?;
+        store.store_battery_save(&self.save_key, &save)?;
         self.last_save = Some(Instant::now());
         Ok(())
     }
 
-    pub fn finish(mut self, first: &mut GameBoy, store: &SaveStore, keep: usize) -> GbResult<()> {
+    pub fn finish(mut self, first: &mut Machine, store: &SaveStore, keep: usize) -> GbResult<()> {
         self.unplug(first);
         self.flush_save(store)?;
         if self.started_at.elapsed() >= PLAYED_FOR_AUTOSAVE {
-            let state = self.gb.dump_full(now_unix())?;
-            let frame = self.gb.frame().as_slice().to_vec();
-            store.store_autosave(&self.save_key, &state, &frame, self.gb.model, keep)?;
+            let state = self.machine.save_state(now_unix())?;
+            let frame = self.machine.frame().to_vec();
+            store.store_autosave(&self.save_key, &state, &frame, self.machine.kind(), keep)?;
         }
         Ok(())
+    }
+}
+
+pub fn infrared_frame(consoles: [&mut GameBoy; 2], keys: [Keys; 2]) {
+    let mut consoles = consoles;
+    for (gb, keys) in consoles.iter_mut().zip(keys) {
+        gb.set_keys(keys);
+        gb.begin_linked_frame();
+    }
+    let mut clocks = [0u64; 2];
+    let mut done = [false; 2];
+    while done != [true; 2] {
+        let i = match done {
+            [false, true] => 0,
+            [true, false] => 1,
+            _ => usize::from(clocks[1] < clocks[0]),
+        };
+        clocks[i] += consoles[i].step_linked();
+        let led = consoles[i].ir_led();
+        consoles[1 - i].set_ir_light(led);
+        if consoles[i].linked_frame_done() {
+            consoles[i].end_linked_frame();
+            done[i] = true;
+        }
     }
 }
 

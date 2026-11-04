@@ -1,6 +1,6 @@
 use crate::app::events::AppEventQueue;
 use crate::app::ui_state::settings::{Settings, console_name, other_console, plays_on_both};
-use crate::homebrew::HOMEBREW_GAMES;
+use crate::homebrew::{HomebrewGame, ShelfConsole, shelves};
 use crate::icons;
 use egui::{Response, ScrollArea, Ui, Widget};
 
@@ -45,102 +45,117 @@ impl<'a> HomebrewList<'a> {
         self
     }
 
-    pub fn rows(self, ui: &mut Ui) -> Response {
-        let action = if self.link { "Link" } else { "Load" };
+    pub fn rows(mut self, ui: &mut Ui) -> Response {
         ui.vertical(|ui| {
-            for game in HOMEBREW_GAMES {
-                ui.group(|ui| {
-                    ui.set_width(ui.available_width());
-
-                    let id = details_id(game.id);
-                    let mut state =
-                        egui::collapsing_header::CollapsingState::load_with_default_open(
-                            ui.ctx(),
-                            id,
-                            false,
-                        );
-                    let header = ui.horizontal(|ui| {
-                        let side = ui.spacing().interact_size.y;
-                        let caret = if state.is_open() {
-                            icons::CARET_DOWN
-                        } else {
-                            icons::CARET_RIGHT
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(caret)
-                                    .frame(false)
-                                    .min_size(egui::vec2(side * 0.6, side)),
-                            )
-                            .on_hover_text("Details")
-                            .clicked()
-                        {
-                            state.toggle(ui);
-                        }
-                        let load_width = action_width(ui, &[action]).max(self.button_width);
-                        let title_width =
-                            ui.available_width() - load_width - ui.spacing().item_spacing.x;
-                        ui.vertical(|ui| {
-                            ui.set_max_width(title_width);
-                            ui.style_mut().interaction.selectable_labels = false;
-                            let title = egui::Label::new(
-                                egui::RichText::new(game.title).strong().size(16.0),
-                            );
-                            if state.is_open() {
-                                ui.add(title.wrap());
-                            } else {
-                                ui.add(title.truncate());
-                            }
-                            ui.small(game.tag_str());
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let load =
-                                egui::Button::new(action).min_size(egui::vec2(load_width, 0.0));
-                            if ui.add(load).clicked() {
-                                if self.link {
-                                    self.events
-                                        .link_game(game.data(), Some(game.title.to_owned()));
-                                } else {
-                                    self.events.load_rom_data(game.data());
-                                }
-                            }
-                        });
-                    });
-                    if !self.link && plays_on_both(game.cgb_mode) {
-                        let model =
-                            other_console(self.settings.console_for(game.rom_key, game.cgb_mode));
-                        let row = header.response.interact(egui::Sense::click());
-                        row.context_menu(|ui| {
-                            if ui
-                                .button(format!("Play on {}", console_name(model)))
-                                .clicked()
-                            {
-                                self.settings.set_game_console(game.rom_key, model);
-                                self.events.load_rom_data(game.data());
-                            }
-                        });
+            let shelves = shelves();
+            for (console, games) in &shelves {
+                if self.link && *console != ShelfConsole::GameBoy {
+                    continue;
+                }
+                if self.link || shelves.len() == 1 {
+                    for (_, game) in games {
+                        self.row(ui, game);
                     }
-                    state.show_body_indented(&header.response, ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(format!("by {}", game.author)).italics());
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "• {} {}",
-                                    icons::SCALES,
-                                    game.license
-                                ))
-                                .weak(),
-                            );
-                        });
-                        ui.separator();
-                        ui.label(game.description);
-                        ui.add_space(8.0);
-                        game.show_links(ui);
-                    });
-                });
+                } else {
+                    crate::app::widgets::section::section(
+                        ui,
+                        console.icon(),
+                        console.label(),
+                        |ui| {
+                            for (_, game) in games {
+                                self.row(ui, game);
+                            }
+                        },
+                    );
+                }
             }
         })
         .response
+    }
+
+    fn row(&mut self, ui: &mut Ui, game: &'static HomebrewGame) {
+        let action = if self.link { "Link" } else { "Load" };
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+
+            let id = details_id(game.id);
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                false,
+            );
+            let header = ui.horizontal(|ui| {
+                let side = ui.spacing().interact_size.y;
+                let caret = if state.is_open() {
+                    icons::CARET_DOWN
+                } else {
+                    icons::CARET_RIGHT
+                };
+                if ui
+                    .add(
+                        egui::Button::new(caret)
+                            .frame(false)
+                            .min_size(egui::vec2(side * 0.6, side)),
+                    )
+                    .on_hover_text("Details")
+                    .clicked()
+                {
+                    state.toggle(ui);
+                    if state.is_open() {
+                        self.events.prefetch_shelf_game(game);
+                    }
+                }
+                let load_width = action_width(ui, &[action]).max(self.button_width);
+                let title_width = ui.available_width() - load_width - ui.spacing().item_spacing.x;
+                ui.vertical(|ui| {
+                    ui.set_max_width(title_width);
+                    ui.style_mut().interaction.selectable_labels = false;
+                    let title =
+                        egui::Label::new(egui::RichText::new(game.title).strong().size(16.0));
+                    if state.is_open() {
+                        ui.add(title.wrap());
+                    } else {
+                        ui.add(title.truncate());
+                    }
+                    ui.small(game.tag_str());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let load = egui::Button::new(action).min_size(egui::vec2(load_width, 0.0));
+                    if ui.add(load).clicked() {
+                        if !self.link {
+                            self.events.play_shelf_game(game);
+                        } else if let Some(data) = game.embedded() {
+                            self.events.link_game(data, Some(game.title.to_owned()));
+                        }
+                    }
+                });
+            });
+            if !self.link && plays_on_both(game.cgb_mode) {
+                let model = other_console(self.settings.console_for(game.rom_key, game.cgb_mode));
+                let row = header.response.interact(egui::Sense::click());
+                row.context_menu(|ui| {
+                    if ui
+                        .button(format!("Play on {}", console_name(model)))
+                        .clicked()
+                    {
+                        self.settings.set_game_console(game.rom_key, model);
+                        self.events.play_shelf_game(game);
+                    }
+                });
+            }
+            state.show_body_indented(&header.response, ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(format!("by {}", game.author)).italics());
+                    ui.label(
+                        egui::RichText::new(format!("• {} {}", icons::SCALES, game.license)).weak(),
+                    );
+                });
+                ui.separator();
+                ui.label(game.description);
+                ui.add_space(8.0);
+                game.show_links(ui);
+            });
+        });
     }
 }
 

@@ -5,6 +5,14 @@ pub enum GbError {
     #[cfg(feature = "base64")]
     #[error("Base64 decode error: {0}")]
     Base64Decode(#[from] base64::DecodeError),
+    #[error("Citrine can't play Game Boy Advance games")]
+    GbaGame,
+    #[cfg(feature = "gba")]
+    #[error("This snapshot needs a newer version of Citrine")]
+    NewerState,
+    #[cfg(feature = "gba")]
+    #[error("This isn't a Game Boy Advance game")]
+    NotGba,
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
     #[error("Missing ROM cartridge type")]

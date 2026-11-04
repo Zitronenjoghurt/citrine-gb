@@ -80,6 +80,20 @@ pub fn section(
     });
 }
 
+fn aspect_of(ui: &Ui, texture: egui::TextureId) -> f32 {
+    let size = ui
+        .ctx()
+        .tex_manager()
+        .read()
+        .meta(texture)
+        .map(|meta| meta.size);
+    let [width, height] = size.unwrap_or_else(|| {
+        let video = citrine_gb::console::ConsoleKind::Gb.video();
+        [video.width, video.height]
+    });
+    height as f32 / width as f32
+}
+
 fn card(ui: &mut Ui, shown: &Presence, screen: Option<egui::TextureId>) {
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
@@ -92,7 +106,7 @@ fn card(ui: &mut Ui, shown: &Presence, screen: Option<egui::TextureId>) {
                 let size = vec2(64.0, 64.0);
                 let image = match screen.filter(|_| shown.screenshot) {
                     Some(texture) => ui.add(
-                        egui::Image::new((texture, vec2(64.0 * 160.0 / 144.0, 64.0)))
+                        egui::Image::new((texture, vec2(64.0 / aspect_of(ui, texture), 64.0)))
                             .corner_radius(CornerRadius::same(6)),
                     ),
                     None => match crate::app::widgets::app_icon::texture(ui.ctx()) {

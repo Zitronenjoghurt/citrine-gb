@@ -1,3 +1,4 @@
+use crate::progress::{Counter, Progress, read_counted};
 use openh264::OpenH264API;
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -76,17 +77,20 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub type Fetch = Box<dyn FnOnce(&str) -> anyhow::Result<Vec<u8>> + Send>;
+pub type Fetch = Box<dyn FnOnce(&str, &Counter) -> anyhow::Result<Vec<u8>> + Send>;
 
 pub fn from_cisco() -> Fetch {
-    Box::new(|url| {
-        let bytes = ureq::get(url)
-            .call()?
+    Box::new(|url, counter| {
+        let mut response = ureq::get(url).call()?;
+        if let Some(total) = response.body().content_length() {
+            counter.set_total(total);
+        }
+        let mut reader = response
             .body_mut()
             .with_config()
             .limit(MAX_DOWNLOAD)
-            .read_to_vec()?;
-        Ok(bytes)
+            .reader();
+        Ok(read_counted(&mut reader, counter)?)
     })
 }
 
@@ -107,6 +111,7 @@ pub enum Answer {
 #[derive(Default)]
 struct State {
     downloading: bool,
+    counter: Counter,
     verified: Option<bool>,
     failure: Option<String>,
 }
@@ -163,13 +168,15 @@ impl Codec {
             }
             state.downloading = true;
             state.failure = None;
+            state.counter = Counter::default();
         }
         let dir = self.dir.clone();
         let state = self.state.clone();
+        let counter = self.lock().counter.clone();
         let spawned = std::thread::Builder::new()
             .name("codec download".into())
             .spawn(move || {
-                let result = install(binary, &dir, fetch);
+                let result = install(binary, &dir, fetch, &counter);
                 let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
                 state.downloading = false;
                 state.verified = Some(result.is_ok());
@@ -187,6 +194,15 @@ impl Codec {
         while self.status() == Status::Downloading {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    pub fn progress(&self) -> Option<Progress> {
+        let state = self.lock();
+        state.downloading.then(|| state.counter.bytes())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn take_failure(&self) -> Option<String> {
@@ -230,8 +246,8 @@ impl Codec {
     }
 }
 
-fn install(binary: Binary, dir: &Path, fetch: Fetch) -> anyhow::Result<PathBuf> {
-    let compressed = fetch(&binary.url())?;
+fn install(binary: Binary, dir: &Path, fetch: Fetch, counter: &Counter) -> anyhow::Result<PathBuf> {
+    let compressed = fetch(&binary.url(), counter)?;
     let bytes = binary.unpack(&compressed)?;
     std::fs::create_dir_all(dir)?;
     let path = binary.path_in(dir);
@@ -285,7 +301,11 @@ mod tests {
     }
 
     fn serve(bytes: Vec<u8>) -> Fetch {
-        Box::new(move |_| Ok(bytes))
+        Box::new(move |_, counter| {
+            counter.set_total(bytes.len() as u64);
+            counter.add(bytes.len() as u64);
+            Ok(bytes)
+        })
     }
 
     #[test]
@@ -374,10 +394,35 @@ mod tests {
     }
 
     #[test]
+    fn the_download_counts_its_bytes_up_to_done() {
+        let dir = folder("counted");
+        let codec = Codec::new(dir.clone(), Some(real_fake()));
+        let body = packed(&library());
+        let total = body.len() as u64;
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let (half, halfway) = std::sync::mpsc::channel::<()>();
+        codec.download(Box::new(move |_, counter| {
+            counter.set_total(total);
+            counter.add(total / 2);
+            half.send(()).unwrap();
+            wait.recv().unwrap();
+            counter.add(total - total / 2);
+            Ok(body)
+        }));
+        halfway.recv().unwrap();
+        assert_eq!(codec.progress(), Some(Progress::bytes(total / 2, total)));
+        go.send(()).unwrap();
+        codec.wait();
+        assert_eq!(codec.progress(), None);
+        assert_eq!(codec.status(), Status::Ready);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_failed_connection_is_reported() {
         let dir = folder("offline");
         let codec = Codec::new(dir.clone(), Some(real_fake()));
-        codec.download(Box::new(|_| anyhow::bail!("no connection")));
+        codec.download(Box::new(|_, _| anyhow::bail!("no connection")));
         codec.wait();
         assert_eq!(codec.status(), Status::Missing);
         assert_eq!(codec.take_failure().as_deref(), Some("no connection"));
@@ -388,7 +433,7 @@ mod tests {
     fn declining_downloads_nothing() {
         let dir = folder("declined");
         let codec = Codec::new(dir.clone(), Some(real_fake()));
-        let answer = codec.answer(false, Box::new(|_| panic!("fetched after a decline")));
+        let answer = codec.answer(false, Box::new(|_, _| panic!("fetched after a decline")));
         assert_eq!(answer, Answer::Declined);
         assert_eq!(codec.status(), Status::Missing);
         assert_eq!(codec.take_failure(), None);

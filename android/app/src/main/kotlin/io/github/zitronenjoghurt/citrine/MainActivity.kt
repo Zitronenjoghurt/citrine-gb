@@ -32,6 +32,12 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
     private val documents = Documents(this)
     private val pads = Pads()
     private var typing = false
+    private val senses by lazy {
+        Senses(this, { x, y, z, turn -> nativeMotion(x, y, z, turn) }, ::nativeLight)
+    }
+    private val camera by lazy {
+        CameraFeed(this, { senses.rotation() }, ::nativeCameraFrame, ::nativeCameraDenied)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -66,7 +72,23 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     override fun onPause() {
         super.onPause()
+        senses.pause()
+        camera.pause()
+        senses.rumble(0f)
         nativePause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        senses.resume()
+        camera.resume()
+    }
+
+    override fun onRequestPermissionsResult(code: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(code, permissions, results)
+        if (code == CameraFeed.PERMISSION_REQUEST) {
+            camera.permissionAnswered(results.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -174,6 +196,13 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
         }
     }
 
+    fun senses(motion: Boolean, light: Boolean, wantCamera: Boolean) = runOnUiThread {
+        senses.follow(motion, light)
+        camera.follow(wantCamera)
+    }
+
+    fun rumble(strength: Float) = runOnUiThread { senses.rumble(strength) }
+
     fun copyText(text: String) = runOnUiThread {
         getSystemService(ClipboardManager::class.java)
             .setPrimaryClip(ClipData.newPlainText("Citrine", text))
@@ -268,4 +297,12 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
     private external fun nativePadKey(id: Int, code: Int, down: Boolean, repeat: Boolean)
 
     private external fun nativePadAxes(id: Int, axes: FloatArray)
+
+    private external fun nativeMotion(x: Float, y: Float, z: Float, turn: Float)
+
+    private external fun nativeLight(lux: Float)
+
+    private external fun nativeCameraFrame(width: Int, height: Int, luma: ByteArray, mirror: Boolean)
+
+    private external fun nativeCameraDenied()
 }

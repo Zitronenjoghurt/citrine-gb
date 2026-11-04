@@ -37,7 +37,7 @@ fn charset(game: Game) -> Charset {
         (Language::French | Language::German, _) => Charset::FrenchGerman,
         (Language::Italian | Language::Spanish, _) => Charset::ItalianSpanish,
         (Language::English, Generation::One) => Charset::English1,
-        (Language::English, Generation::Two) => Charset::English2,
+        (Language::English, Generation::Two | Generation::Three) => Charset::English2,
     }
 }
 
@@ -48,6 +48,7 @@ fn nth(table: &str, index: u8) -> Option<char> {
 fn latin(game: Game, set: Charset, b: u8) -> Option<Glyph> {
     let gen1 = game.generation() == Generation::One;
     let glyph = match b {
+        0x4A => Glyph::Str("PKMN"),
         0x54 => Glyph::Str("POKé"),
         0x7F => Glyph::Char(' '),
         0x80..=0x99 => Glyph::Char((b'A' + (b - 0x80)) as char),

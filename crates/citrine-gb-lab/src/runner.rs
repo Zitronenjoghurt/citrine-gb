@@ -1,6 +1,7 @@
-use crate::emulator::{FRAME_BYTES, Frame, FrameEmulator, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::emulator::{Frame, FrameEmulator};
 use crate::metric::{FrameMetric, Polarity};
 use crate::recording::{InputEvent, Recording};
+use citrine_gb::console::ConsoleKind;
 use std::sync::mpsc::{Receiver, SyncSender, channel, sync_channel};
 use std::thread;
 
@@ -56,12 +57,12 @@ pub fn replay<E: FrameEmulator>(
     recording: &Recording,
     max_frames: usize,
 ) -> anyhow::Result<Vec<Frame>> {
-    emu.load(rom, boot_rom, recording.model)?;
+    let video = emu.load(rom, boot_rom, recording.model.into())?;
     let mut driver = FrameDriver::new(recording);
     let mut frames = Vec::with_capacity(max_frames);
     while frames.len() < max_frames {
         driver.advance(emu)?;
-        frames.push(emu.frame());
+        frames.push(emu.frame(video));
     }
     Ok(frames)
 }
@@ -96,6 +97,32 @@ pub struct ComparisonReport {
     pub reference_frame_count: usize,
     pub candidate_frame_count: usize,
     pub compared_frame_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_refusal: Option<String>,
+}
+
+impl ComparisonReport {
+    pub fn reference_alone(
+        reference_name: &str,
+        candidate_name: &str,
+        reference_frame_count: usize,
+        refusal: String,
+    ) -> Self {
+        Self {
+            reference_name: reference_name.to_string(),
+            candidate_name: candidate_name.to_string(),
+            metric_names: Vec::new(),
+            frames: Vec::new(),
+            summaries: Vec::new(),
+            first_divergent_frame: None,
+            last_divergent_frame: None,
+            divergent_frame_count: 0,
+            reference_frame_count,
+            candidate_frame_count: 0,
+            compared_frame_count: 0,
+            candidate_refusal: Some(refusal),
+        }
+    }
 }
 
 struct Aggregator {
@@ -188,8 +215,27 @@ impl Aggregator {
             reference_frame_count: n,
             candidate_frame_count: n,
             compared_frame_count: n,
+            candidate_refusal: None,
         }
     }
+}
+
+pub fn run_alone<E: FrameEmulator>(
+    emu: &mut E,
+    rom: &[u8],
+    boot_rom: Option<&[u8]>,
+    recording: &Recording,
+    console: ConsoleKind,
+    max_frames: usize,
+    mut on_frame: impl FnMut(usize, &Frame) -> anyhow::Result<()>,
+) -> anyhow::Result<usize> {
+    let video = emu.load(rom, boot_rom, console)?;
+    let mut driver = FrameDriver::new(recording);
+    for index in 0..max_frames {
+        driver.advance(emu)?;
+        on_frame(index, &emu.frame(video))?;
+    }
+    Ok(max_frames)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,8 +249,6 @@ pub enum Alignment {
 /// Candidate look-ahead, so the tail reference frames still have one that reaches their cycle.
 const ALIGN_SLACK: usize = 16;
 
-const FRAME_CYCLES: u64 = 70224;
-
 struct CycleFrame {
     cycle: u64,
     rgba: Vec<u8>,
@@ -212,20 +256,18 @@ struct CycleFrame {
 
 fn produce<E: FrameEmulator>(
     mut emu: E,
-    rom: &[u8],
-    boot_rom: Option<&[u8]>,
     recording: &Recording,
     count: usize,
+    frame_bytes: usize,
     tx: SyncSender<CycleFrame>,
     recycle: Receiver<Vec<u8>>,
 ) -> anyhow::Result<()> {
-    emu.load(rom, boot_rom, recording.model)?;
     let mut driver = FrameDriver::new(recording);
     for _ in 0..count {
         driver.advance(&mut emu)?;
         let mut rgba = recycle
             .try_recv()
-            .unwrap_or_else(|_| Vec::with_capacity(FRAME_BYTES));
+            .unwrap_or_else(|_| Vec::with_capacity(frame_bytes));
         emu.render_into(&mut rgba);
         // The consumer went away (early stop / error).
         if tx
@@ -260,11 +302,12 @@ fn frame_distance(a: &[u8], b: &[u8]) -> u64 {
 // A parameter struct would read better; deferred so the call sites stay stable for now.
 #[allow(clippy::too_many_arguments)]
 pub fn run_streaming<R, C>(
-    reference: R,
-    candidate: C,
+    mut reference: R,
+    mut candidate: C,
     rom: &[u8],
     boot_rom: Option<&[u8]>,
     recording: &Recording,
+    console: ConsoleKind,
     metrics: &[Box<dyn FrameMetric>],
     max_frames: usize,
     normalize: bool,
@@ -278,6 +321,15 @@ where
 {
     let ref_name = reference.name().to_string();
     let cand_name = candidate.name().to_string();
+    let canonical = Frame::canonical_for(console);
+    let video = reference.load(rom, boot_rom, console)?;
+    let cand_video = candidate.load(rom, boot_rom, console)?;
+    anyhow::ensure!(
+        video == cand_video,
+        "{ref_name} reports a {video:?} screen and {cand_name} a {cand_video:?} screen"
+    );
+    let frame_bytes = video.width * video.height * 4;
+    let frame_cycles = console.timing().cycles_per_frame as u64;
     let mut agg = Aggregator::new(metrics, max_frames);
 
     let cand_count = match alignment {
@@ -294,10 +346,9 @@ where
         let ref_handle = scope.spawn(move || {
             produce(
                 reference,
-                rom,
-                boot_rom,
                 recording,
                 max_frames,
+                frame_bytes,
                 ref_tx,
                 ref_recycle_rx,
             )
@@ -305,16 +356,15 @@ where
         let cand_handle = scope.spawn(move || {
             produce(
                 candidate,
-                rom,
-                boot_rom,
                 recording,
                 cand_count,
+                frame_bytes,
                 cand_tx,
                 cand_recycle_rx,
             )
         });
 
-        let empty = || Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT, Vec::new());
+        let empty = || Frame::new(video.width, video.height, Vec::new());
         let mut ref_raw = empty();
         let mut cand_raw = empty();
         let mut ref_norm = empty();
@@ -344,8 +394,8 @@ where
                     ref_raw.rgba = r.rgba;
                     cand_raw.rgba = c.rgba;
                     let (rf, cf) = if normalize {
-                        ref_raw.normalize_into(&mut ref_norm);
-                        cand_raw.normalize_into(&mut cand_norm);
+                        canonical(&ref_raw, &mut ref_norm);
+                        canonical(&cand_raw, &mut cand_norm);
                         (&ref_norm, &cand_norm)
                     } else {
                         (&ref_raw, &cand_raw)
@@ -362,7 +412,7 @@ where
                 // Both cycle streams rise monotonically, so a sliding window suffices. The extra
                 // half frame keeps the nearest candidate in range even at `tolerance == 0`.
                 use std::collections::VecDeque;
-                let tol_cycles = tolerance as u64 * FRAME_CYCLES + FRAME_CYCLES / 2;
+                let tol_cycles = tolerance as u64 * frame_cycles + frame_cycles / 2;
 
                 let mut window: VecDeque<CycleFrame> = VecDeque::new();
                 let mut pending: Option<CycleFrame> = None;
@@ -390,7 +440,7 @@ where
 
                     ref_raw.rgba = r.rgba;
                     let rf: &Frame = if normalize {
-                        ref_raw.normalize_into(&mut ref_norm);
+                        canonical(&ref_raw, &mut ref_norm);
                         &ref_norm
                     } else {
                         &ref_raw
@@ -420,7 +470,7 @@ where
                     for wi in lo..=hi {
                         std::mem::swap(&mut cand_raw.rgba, &mut window[wi].rgba);
                         let cf: &Frame = if normalize {
-                            cand_raw.normalize_into(&mut cand_norm);
+                            canonical(&cand_raw, &mut cand_norm);
                             &cand_norm
                         } else {
                             &cand_raw
@@ -446,7 +496,7 @@ where
 
                     std::mem::swap(&mut cand_raw.rgba, &mut window[rep_idx].rgba);
                     let cf: &Frame = if normalize {
-                        cand_raw.normalize_into(&mut cand_norm);
+                        canonical(&cand_raw, &mut cand_norm);
                         &cand_norm
                     } else {
                         &cand_raw

@@ -219,6 +219,7 @@ pub enum Seen {
 
 pub struct Online {
     connector: Connector,
+    protocol: u16,
     conn: Option<Box<dyn Transport>>,
     target: Option<Target>,
     keys: Option<Keys>,
@@ -270,6 +271,7 @@ impl Online {
     pub fn new(connector: Connector) -> Self {
         Self {
             connector,
+            protocol: PROTOCOL_VERSION,
             conn: None,
             target: None,
             keys: None,
@@ -506,7 +508,7 @@ impl Online {
                         continue;
                     }
                     self.send(ClientMsg::Hello {
-                        protocol: PROTOCOL_VERSION,
+                        protocol: self.protocol,
                         app: app_name(),
                     });
                 }
@@ -783,7 +785,10 @@ impl Online {
             }
             ServerMsg::ScreenRefused(_) => {}
             ServerMsg::Error(code) => match self.phase {
-                Phase::Connected => self.request_error = Some(code),
+                Phase::Connected => {
+                    self.request_error = Some(code);
+                    self.inbox.push(ServerMsg::Error(code));
+                }
                 _ => {
                     if code == ErrorCode::CodeWrong
                         && let Some(target) = self.target.as_mut()
@@ -1014,6 +1019,19 @@ impl Online {
 
     pub fn is_connected(&self) -> bool {
         self.phase == Phase::Connected
+    }
+
+    pub fn protocol(&self) -> u16 {
+        self.protocol
+    }
+
+    #[cfg(test)]
+    pub fn speak(&mut self, protocol: u16) {
+        self.protocol = protocol;
+    }
+
+    pub fn comes_back(&self) -> bool {
+        self.target.is_some() && !matches!(self.phase, Phase::Idle | Phase::Stopped(_))
     }
 
     pub fn is_active(&self) -> bool {

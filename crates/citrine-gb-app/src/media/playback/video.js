@@ -1,5 +1,7 @@
-const SOURCE_WIDTH = 160;
-const SOURCE_HEIGHT = 144;
+const SOURCE_SIZES = [
+  [160, 144],
+  [240, 160],
+];
 
 export class ClipPlayer {
   static canPlay() {
@@ -36,9 +38,11 @@ export class ClipPlayer {
   size() {
     const width = this.video.videoWidth;
     const height = this.video.videoHeight;
-    const scale = Math.floor(width / SOURCE_WIDTH);
-    if (scale > 0 && width === SOURCE_WIDTH * scale && height === SOURCE_HEIGHT * scale) {
-      return [SOURCE_WIDTH, SOURCE_HEIGHT];
+    for (const [w, h] of SOURCE_SIZES) {
+      const scale = Math.floor(width / w);
+      if (scale > 0 && width === w * scale && height === h * scale) {
+        return [w, h];
+      }
     }
     return [width, height];
   }

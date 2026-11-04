@@ -35,8 +35,13 @@ impl Walk {
 
     fn gb(&self, game: Game) -> &GameBoy {
         match game {
-            Game::First => &self.emulator.gb,
-            Game::Second => &self.emulator.link.as_ref().expect("a linked game").gb,
+            Game::First => self.emulator.gb(),
+            Game::Second => self
+                .emulator
+                .link
+                .as_ref()
+                .and_then(|link| link.machine.as_gb())
+                .expect("a linked game"),
         }
     }
 
@@ -55,7 +60,7 @@ impl Walk {
         })
     }
 
-    fn tap(&mut self, game: Game, button: JoypadState) {
+    fn tap(&mut self, game: Game, button: Keys) {
         self.emulator.press(Self::pad(game), button);
         self.frames(6);
         self.emulator.release(Self::pad(game), button);
@@ -70,13 +75,13 @@ impl Walk {
         (self.wram(game, X), self.wram(game, Y))
     }
 
-    fn taps(&mut self, game: Game, button: JoypadState, n: u32) {
+    fn taps(&mut self, game: Game, button: Keys, n: u32) {
         for _ in 0..n {
             self.tap(game, button);
         }
     }
 
-    fn step(&mut self, game: Game, button: JoypadState) -> bool {
+    fn step(&mut self, game: Game, button: Keys) -> bool {
         let (map, at) = (self.map(game), self.at(game));
         self.emulator.press(Self::pad(game), button);
         for _ in 0..40 {
@@ -90,7 +95,7 @@ impl Walk {
         self.map(game) != map || self.at(game) != at
     }
 
-    fn walk(&mut self, game: Game, button: JoypadState, steps: u32) {
+    fn walk(&mut self, game: Game, button: Keys, steps: u32) {
         for i in 0..steps {
             if !self.step(game, button) {
                 self.shot(game, &format!("blocked-{game:?}-{i}"));
@@ -135,7 +140,7 @@ impl Walk {
     }
 }
 
-fn species(mon: &Pokemon) -> u8 {
+fn species(mon: &Pokemon) -> u16 {
     match mon {
         Pokemon::Hatched(mon) => mon.species,
         Pokemon::Egg => 0,
@@ -149,7 +154,7 @@ fn nickname(mon: &Pokemon) -> &str {
     }
 }
 
-fn owned(state: &GameState, kind: u8) -> usize {
+fn owned(state: &GameState, kind: u16) -> usize {
     state
         .party
         .iter()
@@ -201,8 +206,8 @@ fn blue_trades_with_red_over_local_link() {
     emulator
         .start_link(
             &red_rom,
-            GbModel::for_rom(&red_rom).expect("model"),
-            "Red".into(),
+            GbModel::for_rom(&red_rom).expect("model").into(),
+            Some("Red"),
         )
         .expect("link red");
     link(&mut emulator).set_settings(&LinkSettings {
@@ -218,11 +223,7 @@ fn blue_trades_with_red_over_local_link() {
     walk.frames(60);
     for (game, tables) in [(Game::First, &tables[0]), (Game::Second, &tables[1])] {
         for step in 0..120 {
-            let button = if step % 2 == 0 {
-                JoypadState::START
-            } else {
-                JoypadState::A
-            };
+            let button = if step % 2 == 0 { Keys::START } else { Keys::A };
             walk.tap(game, button);
             walk.frames(34);
             if walk
@@ -234,25 +235,25 @@ fn blue_trades_with_red_over_local_link() {
         }
         for _ in 0..3 {
             walk.frames(120);
-            walk.tap(game, JoypadState::A);
+            walk.tap(game, Keys::A);
         }
         walk.frames(240);
         walk.report(game, &format!("{game:?}-0-start"));
 
-        walk.tap(game, JoypadState::START);
-        walk.tap(game, JoypadState::DOWN);
-        walk.tap(game, JoypadState::A);
+        walk.tap(game, Keys::START);
+        walk.tap(game, Keys::DOWN);
+        walk.tap(game, Keys::A);
         walk.frames(30);
-        walk.taps(game, JoypadState::DOWN, 4);
-        walk.tap(game, JoypadState::A);
-        walk.tap(game, JoypadState::A);
+        walk.taps(game, Keys::DOWN, 4);
+        walk.tap(game, Keys::A);
+        walk.tap(game, Keys::A);
         walk.frames(400);
         walk.report(game, &format!("{game:?}-1-dug"));
-        walk.walk(game, JoypadState::UP, 1);
+        walk.walk(game, Keys::UP, 1);
         walk.frames(60);
-        while walk.step(game, JoypadState::UP) {}
-        walk.walk(game, JoypadState::RIGHT, 8);
-        walk.tap(game, JoypadState::UP);
+        while walk.step(game, Keys::UP) {}
+        walk.walk(game, Keys::RIGHT, 8);
+        walk.tap(game, Keys::UP);
         walk.report(game, &format!("{game:?}-2-desk"));
     }
     for _ in 0..160 {
@@ -262,7 +263,7 @@ fn blue_trades_with_red_over_local_link() {
         }
         for (game, map) in [Game::First, Game::Second].into_iter().zip(maps) {
             if map != TRADE_CENTER {
-                walk.tap(game, JoypadState::A);
+                walk.tap(game, Keys::A);
             }
         }
     }
@@ -274,24 +275,24 @@ fn blue_trades_with_red_over_local_link() {
     walk.report(Game::First, "First-4-trade-center");
     walk.report(Game::Second, "Second-4-trade-center");
     walk.frames(200);
-    walk.tap(Game::First, JoypadState::RIGHT);
-    walk.tap(Game::First, JoypadState::A);
-    walk.tap(Game::Second, JoypadState::LEFT);
-    walk.tap(Game::Second, JoypadState::A);
+    walk.tap(Game::First, Keys::RIGHT);
+    walk.tap(Game::First, Keys::A);
+    walk.tap(Game::Second, Keys::LEFT);
+    walk.tap(Game::Second, Keys::A);
     walk.frames(400);
     walk.report(Game::First, "First-5-menu");
     walk.report(Game::Second, "Second-5-menu");
-    walk.tap(Game::First, JoypadState::A);
+    walk.tap(Game::First, Keys::A);
     walk.frames(30);
     walk.report(Game::First, "First-6-sub");
-    walk.tap(Game::First, JoypadState::RIGHT);
-    walk.tap(Game::First, JoypadState::A);
-    walk.taps(Game::Second, JoypadState::DOWN, 2);
-    walk.tap(Game::Second, JoypadState::A);
+    walk.tap(Game::First, Keys::RIGHT);
+    walk.tap(Game::First, Keys::A);
+    walk.taps(Game::Second, Keys::DOWN, 2);
+    walk.tap(Game::Second, Keys::A);
     walk.frames(30);
     walk.report(Game::Second, "Second-6-sub");
-    walk.tap(Game::Second, JoypadState::RIGHT);
-    walk.tap(Game::Second, JoypadState::A);
+    walk.tap(Game::Second, Keys::RIGHT);
+    walk.tap(Game::Second, Keys::A);
     walk.frames(300);
     walk.report(Game::First, "First-7-confirm");
     walk.report(Game::Second, "Second-7-confirm");
@@ -306,13 +307,13 @@ fn blue_trades_with_red_over_local_link() {
     let flareon = species(&before.party[0]);
     let blastoise = species(&before.party[2]);
     for _ in 0..2 {
-        walk.tap(Game::First, JoypadState::A);
-        walk.tap(Game::Second, JoypadState::A);
+        walk.tap(Game::First, Keys::A);
+        walk.tap(Game::Second, Keys::A);
         walk.frames(60);
     }
     walk.report(Game::First, "First-8-chosen");
     walk.report(Game::Second, "Second-8-chosen");
-    let traded = |walk: &Walk, game: Game, gone: u8, got: u8| {
+    let traded = |walk: &Walk, game: Game, gone: u16, got: u16| {
         let version = match game {
             Game::First => blue,
             Game::Second => red,
@@ -329,7 +330,7 @@ fn blue_trades_with_red_over_local_link() {
         }
         walk.frames(60);
         for game in [Game::First, Game::Second] {
-            walk.tap(game, JoypadState::B);
+            walk.tap(game, Keys::B);
         }
     }
     walk.frames(120);

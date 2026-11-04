@@ -10,9 +10,9 @@ use registers::audio_master_control::AudioMasterControl;
 use registers::master_volume_vin::MasterVolumeVin;
 use registers::sound_panning::SoundPanning;
 
-mod channels;
-mod components;
-mod registers;
+pub(crate) mod channels;
+pub(crate) mod components;
+pub(crate) mod registers;
 
 #[derive(Debug, Clone, Copy)]
 pub struct WriteContext {
@@ -26,6 +26,7 @@ const SKIP_DIV_EVENT: u8 = 2;
 const SKIPPED_DIV_EVENT: u8 = 1;
 pub const APU_CLOCK_RATE: u32 = 4_194_304;
 pub const MAX_AUDIO_BUFFER_SIZE: u32 = 8192;
+pub const CHANNEL_NAMES: [&str; 4] = ["Pulse 1", "Pulse 2", "Wave", "Noise"];
 const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 const MAX_FRAME_SAMPLES: u64 = 2048;
 const BLIP_SCALE: f32 = 16_000.0;
@@ -68,6 +69,8 @@ pub struct Apu {
     output_dirty: bool,
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) muted: bool,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) muted_channels: [bool; 4],
 }
 
 #[cfg(feature = "serde")]
@@ -80,6 +83,7 @@ fn default_max_frame_time() -> u32 {
     max_frame_time(DEFAULT_SAMPLE_RATE)
 }
 
+#[cfg(feature = "serde")]
 fn default_blip_buf() -> BlipBuf {
     BlipBuf::new(MAX_AUDIO_BUFFER_SIZE)
 }
@@ -121,6 +125,7 @@ impl Default for Apu {
             audio_buffer: vec![],
             output_dirty: true,
             muted: false,
+            muted_channels: [false; 4],
         }
     }
 }
@@ -170,6 +175,7 @@ impl Apu {
             audio_buffer: _,
             output_dirty,
             muted: _,
+            muted_channels: _,
         } = self;
         *cgb = source.cgb;
         *div_apu = source.div_apu;
@@ -188,6 +194,19 @@ impl Apu {
         ch3.clone_from(&source.ch3);
         ch4.clone_from(&source.ch4);
         *output_dirty = source.output_dirty;
+    }
+
+    pub fn channel_enabled(&self, index: usize) -> bool {
+        !self.muted_channels.get(index).copied().unwrap_or(false)
+    }
+
+    pub fn set_channel_enabled(&mut self, index: usize, enabled: bool) {
+        if let Some(muted) = self.muted_channels.get_mut(index)
+            && *muted == enabled
+        {
+            *muted = !enabled;
+            self.output_dirty = true;
+        }
     }
 
     pub fn restore(&mut self, model: GbModel) {
@@ -508,8 +527,7 @@ impl Apu {
                 break 'ch1 0.0;
             }
 
-            #[cfg(feature = "debug")]
-            if !debugger.channel_1_enabled() {
+            if self.muted_channels[0] {
                 break 'ch1 0.0;
             }
 
@@ -521,8 +539,7 @@ impl Apu {
                 break 'ch2 0.0;
             }
 
-            #[cfg(feature = "debug")]
-            if !debugger.channel_2_enabled() {
+            if self.muted_channels[1] {
                 break 'ch2 0.0;
             }
 
@@ -534,8 +551,7 @@ impl Apu {
                 break 'ch3 0.0;
             }
 
-            #[cfg(feature = "debug")]
-            if !debugger.channel_3_enabled() {
+            if self.muted_channels[2] {
                 break 'ch3 0.0;
             }
 
@@ -547,8 +563,7 @@ impl Apu {
                 break 'ch4 0.0;
             }
 
-            #[cfg(feature = "debug")]
-            if !debugger.channel_4_enabled() {
+            if self.muted_channels[3] {
                 break 'ch4 0.0;
             }
 
@@ -559,10 +574,7 @@ impl Apu {
         if debugger.wants_apu_channels() {
             debugger.record_apu_channels(
                 self.output_sample_rate,
-                ch1_sample,
-                ch2_sample,
-                ch3_sample,
-                ch4_sample,
+                &[ch1_sample, ch2_sample, ch3_sample, ch4_sample],
             );
         }
 

@@ -11,7 +11,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://gb.lemon.industries"
@@ -23,9 +23,13 @@ citrine-gb-gamedata = { path = "crates/citrine-gb-gamedata" }
 citrine-gb-net = { path = "crates/citrine-gb-net" }
 citrine-gb-partner = { path = "crates/citrine-gb-partner" }
 citrine-gb-server = { path = "crates/citrine-gb-server" }
+mgba-sys = { path = "crates/mgba-sys" }
 sameboy-sys = { path = "crates/sameboy-sys" }
 
 [profile.dev.package.citrine-gb]
+opt-level = 3
+
+[profile.dev.package.mgba-sys]
 opt-level = 3
 
 [profile.dev.package.sameboy-sys]

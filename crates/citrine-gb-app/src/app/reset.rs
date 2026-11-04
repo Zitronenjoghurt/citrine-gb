@@ -1,10 +1,11 @@
-use super::widgets;
 use super::{Citrine, PendingReset, RESET_STOP_ASKING};
+use super::{tabs, widgets};
 use egui::Context;
 
 impl Citrine {
     pub(super) fn ask_reset(&mut self) {
-        if self.reset_without_asking {
+        let linked = tabs::playing::group_partners(&self.play, &self.online).is_some();
+        if self.reset_without_asking && !linked {
             self.reset_game();
             return;
         }
@@ -31,10 +32,14 @@ impl Citrine {
             self.pending_reset = None;
             return;
         }
+        let question = match tabs::playing::group_partners(&self.play, &self.online) {
+            Some(partners) => format!("Reset the game? You'll unlink from {partners}."),
+            None => "Reset the game?".to_owned(),
+        };
         let choice = widgets::confirm::confirm_with_option(
             ctx,
             "reset_confirm",
-            "Reset the game?",
+            &question,
             "Reset",
             (RESET_STOP_ASKING, &mut pending.stop_asking),
         );
@@ -50,6 +55,7 @@ impl Citrine {
         self.emulator.running = pending.was_running;
         if confirmed {
             self.reset_without_asking = pending.stop_asking;
+            tabs::playing::unlink_group(&mut self.play, &mut self.emulator);
             self.reset_game();
         }
     }

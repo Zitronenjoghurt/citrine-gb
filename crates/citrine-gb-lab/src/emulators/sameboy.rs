@@ -1,4 +1,5 @@
-use crate::emulator::{Button, FrameEmulator, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::emulator::{Button, FrameEmulator};
+use citrine_gb::console::{ConsoleKind, VideoSpec};
 use citrine_gb::gb::GbModel;
 use sameboy_sys as sys;
 use std::ffi::c_void;
@@ -16,6 +17,7 @@ pub struct SameBoyEmulator {
     height: usize,
     total_ticks: u64,
     model: GbModel,
+    video: VideoSpec,
 }
 
 /// Packs to `[r, g, b, a]` in memory on little-endian targets, so pixels reinterpret as RGBA.
@@ -69,6 +71,7 @@ impl SameBoyEmulator {
                 height: 0,
                 total_ticks: 0,
                 model,
+                video: ConsoleKind::from(model).video(),
             }
         };
         emu.wire_callbacks();
@@ -151,7 +154,15 @@ impl FrameEmulator for SameBoyEmulator {
         "sameboy"
     }
 
-    fn load(&mut self, rom: &[u8], boot_rom: Option<&[u8]>, model: GbModel) -> anyhow::Result<()> {
+    fn load(
+        &mut self,
+        rom: &[u8],
+        boot_rom: Option<&[u8]>,
+        console: ConsoleKind,
+    ) -> anyhow::Result<VideoSpec> {
+        let model = GbModel::try_from(console)
+            .map_err(|e| anyhow::anyhow!("sameboy cannot run {console:?}: {e:?}"))?;
+        self.video = console.video();
         if model != self.model {
             self.model = model;
             unsafe {
@@ -181,7 +192,7 @@ impl FrameEmulator for SameBoyEmulator {
 
         self.ctx.frame_ready = false;
         self.total_ticks = 0;
-        Ok(())
+        Ok(self.video)
     }
 
     fn set_button(&mut self, button: Button, pressed: bool) {
@@ -204,14 +215,15 @@ impl FrameEmulator for SameBoyEmulator {
 
     fn render_into(&self, out: &mut Vec<u8>) {
         out.clear();
-        out.reserve(SCREEN_WIDTH * SCREEN_HEIGHT * 4);
-        if self.width == SCREEN_WIDTH && self.height == SCREEN_HEIGHT {
+        let VideoSpec { width, height } = self.video;
+        out.reserve(width * height * 4);
+        if self.width == width && self.height == height {
             let bytes = bytemuck_cast(&self.pixels);
             out.extend_from_slice(bytes);
             return;
         }
-        for y in 0..SCREEN_HEIGHT {
-            for x in 0..SCREEN_WIDTH {
+        for y in 0..height {
+            for x in 0..width {
                 let px = if x < self.width && y < self.height {
                     self.pixels[y * self.width + x]
                 } else {

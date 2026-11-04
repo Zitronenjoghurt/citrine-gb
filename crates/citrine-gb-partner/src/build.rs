@@ -168,6 +168,7 @@ pub(crate) fn offer(ctx: &Context, event: &Event, rng: &mut Rng) -> Result<Offer
             mon.extend(be(stats.special_defense));
             debug_assert_eq!(mon.len(), GEN2_MON);
         }
+        Generation::Three => return Err(OfferError::Generation),
     }
     Ok(Offered {
         species: if event.egg { EGG } else { species },

@@ -1,10 +1,6 @@
-use citrine_gb::gb::GbModel;
+use citrine_gb::console::{ConsoleKind, VideoSpec};
 
 pub use citrine_gb::recording::Button;
-
-pub const SCREEN_WIDTH: usize = 160;
-pub const SCREEN_HEIGHT: usize = 144;
-pub const FRAME_BYTES: usize = SCREEN_WIDTH * SCREEN_HEIGHT * 4;
 
 /// A completed frame as RGBA8888, row-major, top-left origin.
 #[derive(Clone, PartialEq, Eq)]
@@ -29,6 +25,28 @@ impl Frame {
         let mut out = Frame::new(self.width, self.height, vec![0u8; self.rgba.len()]);
         self.normalize_into(&mut out);
         out
+    }
+
+    pub fn canonical_for(console: ConsoleKind) -> fn(&Frame, &mut Frame) {
+        match console {
+            ConsoleKind::Gba => Frame::rgb555_into,
+            ConsoleKind::Gb | ConsoleKind::Gbc => Frame::normalize_into,
+        }
+    }
+
+    pub fn rgb555_into(&self, out: &mut Frame) {
+        out.width = self.width;
+        out.height = self.height;
+        out.rgba.resize(self.rgba.len(), 0);
+        for (px, o) in self
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(out.rgba.as_chunks_mut::<4>().0)
+        {
+            *o = [px[0] & 0xF8, px[1] & 0xF8, px[2] & 0xF8, 0xFF];
+        }
     }
 
     pub fn normalize_into(&self, out: &mut Frame) {
@@ -60,7 +78,12 @@ pub trait FrameEmulator {
     fn name(&self) -> &str;
 
     /// `None` jumps straight to the post-boot state. SameBoy cannot run without a boot ROM.
-    fn load(&mut self, rom: &[u8], boot_rom: Option<&[u8]>, model: GbModel) -> anyhow::Result<()>;
+    fn load(
+        &mut self,
+        rom: &[u8],
+        boot_rom: Option<&[u8]>,
+        console: ConsoleKind,
+    ) -> anyhow::Result<VideoSpec>;
 
     fn set_button(&mut self, button: Button, pressed: bool);
 
@@ -72,9 +95,40 @@ pub trait FrameEmulator {
     /// `out` is a recycled buffer with stale contents; implementors must overwrite it completely.
     fn render_into(&self, out: &mut Vec<u8>);
 
-    fn frame(&self) -> Frame {
-        let mut rgba = Vec::with_capacity(FRAME_BYTES);
+    fn frame(&self, video: VideoSpec) -> Frame {
+        let mut rgba = Vec::with_capacity(video.width * video.height * 4);
         self.render_into(&mut rgba);
-        Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT, rgba)
+        Frame::new(video.width, video.height, rgba)
+    }
+}
+
+impl<E: FrameEmulator + ?Sized> FrameEmulator for Box<E> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn load(
+        &mut self,
+        rom: &[u8],
+        boot_rom: Option<&[u8]>,
+        console: ConsoleKind,
+    ) -> anyhow::Result<VideoSpec> {
+        (**self).load(rom, boot_rom, console)
+    }
+
+    fn set_button(&mut self, button: Button, pressed: bool) {
+        (**self).set_button(button, pressed)
+    }
+
+    fn total_cycles(&self) -> u64 {
+        (**self).total_cycles()
+    }
+
+    fn step(&mut self) -> bool {
+        (**self).step()
+    }
+
+    fn render_into(&self, out: &mut Vec<u8>) {
+        (**self).render_into(out)
     }
 }

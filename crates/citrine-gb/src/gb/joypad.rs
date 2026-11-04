@@ -42,6 +42,17 @@ impl Joypad {
     pub fn release(&mut self, button: JoypadState) {
         self.held.remove(button);
     }
+
+    pub fn set(&mut self, held: JoypadState) {
+        if !(held - self.held).is_empty() {
+            self.new_input = true;
+        }
+        self.held = held;
+    }
+
+    pub fn held(&self) -> JoypadState {
+        self.held
+    }
 }
 
 impl WriteMemory for Joypad {

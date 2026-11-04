@@ -215,7 +215,7 @@ impl Ppu {
         let addr = self.fetcher.tile_data_address;
         if !self.tile_sel_glitch {
             let value = self.vram_read(bank, addr);
-            if high {
+            if high && self.fetcher.last_tileset {
                 self.fetcher.sel_glitch_data = value;
             }
             return value;

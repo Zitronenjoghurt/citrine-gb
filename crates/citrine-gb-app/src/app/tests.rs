@@ -9,10 +9,12 @@ use mobile::TOUCH_TARGET_PX;
 use mobile::nav::Place;
 
 mod chat_keys;
+#[cfg(feature = "gba")]
+mod gba_panels;
 mod restart;
 mod rotation;
 
-fn phone_app(name: &str) -> Citrine {
+pub(crate) fn phone_app(name: &str) -> Citrine {
     let root =
         std::env::temp_dir().join(format!("citrine-touch-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -321,7 +323,11 @@ fn game_in_view(app: &Citrine) -> bool {
         .is_some_and(|leaf| leaf.active == tab)
 }
 
-fn play_frame(app: &mut Citrine, ctx: &Context, events: Vec<egui::Event>) -> egui::FullOutput {
+pub(crate) fn play_frame(
+    app: &mut Citrine,
+    ctx: &Context,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -339,7 +345,17 @@ fn play_frame(app: &mut Citrine, ctx: &Context, events: Vec<egui::Event>) -> egu
     })
 }
 
-fn text_rect(output: &egui::FullOutput, wanted: &str) -> Option<egui::Rect> {
+#[cfg(feature = "gba")]
+pub(crate) fn inside_its_clip(output: &egui::FullOutput, wanted: &str) -> bool {
+    output.shapes.iter().any(|clipped| match &clipped.shape {
+        egui::Shape::Text(text) if text.galley.text().trim() == wanted => {
+            text.visual_bounding_rect().max.x <= clipped.clip_rect.max.x + 0.5
+        }
+        _ => false,
+    })
+}
+
+pub(crate) fn text_rect(output: &egui::FullOutput, wanted: &str) -> Option<egui::Rect> {
     output
         .shapes
         .iter()
@@ -398,7 +414,7 @@ fn badge_count(output: &egui::FullOutput) -> usize {
         .count()
 }
 
-fn tap(at: egui::Pos2) -> Vec<egui::Event> {
+pub(crate) fn tap(at: egui::Pos2) -> Vec<egui::Event> {
     vec![
         egui::Event::PointerMoved(at),
         egui::Event::PointerButton {
@@ -577,23 +593,19 @@ fn walk_game_info(app: &mut Citrine, ctx: &Context, width: f32) {
 }
 
 fn reach_overworld(app: &mut Citrine) -> bool {
-    use citrine_gb::gb::joypad::JoypadState;
+    use citrine_gb::console::Keys;
     for _ in 0..60 {
-        app.emulator.gb.run_frame();
+        app.emulator.gb_mut().run_frame();
     }
     for step in 0..120 {
-        let button = if step % 2 == 0 {
-            JoypadState::START
-        } else {
-            JoypadState::A
-        };
-        app.emulator.gb.press_button(button);
+        let button = if step % 2 == 0 { Keys::START } else { Keys::A };
+        app.emulator.gb_mut().press_button(button.into());
         for _ in 0..6 {
-            app.emulator.gb.run_frame();
+            app.emulator.gb_mut().run_frame();
         }
-        app.emulator.gb.release_button(button);
+        app.emulator.gb_mut().release_button(button.into());
         for _ in 0..54 {
-            app.emulator.gb.run_frame();
+            app.emulator.gb_mut().run_frame();
         }
         app.game_info.next_read_now();
         app.watch_game_info();
@@ -693,7 +705,72 @@ fn game_info_on_desktop_has_room_for_details_beside_the_list() {
     assert!(right <= 1280.0, "text reaches {right}");
 }
 
-fn info_frame_out(app: &mut Citrine, ctx: &Context, width: f32, height: f32) -> egui::FullOutput {
+#[test]
+fn game_info_pages_fit_the_panel_at_every_desktop_width() {
+    use crate::game_info::Page;
+    let save = citrine_gb_gamedata::fixtures::crystal_save();
+    for width in [560.0, 600.0, 640.0, 670.0, 720.0, 800.0, 1000.0, 1280.0] {
+        for page in [Page::Map, Page::Party, Page::Journey] {
+            let ctx = Context::default();
+            let mut app = crystal_app("info-fit", LayoutMode::Desktop, Some(&save));
+            app.open_tab(Tab::GameInfo);
+            app.widen_for_game_info();
+            app.watch_game_info();
+            app.game_info.view.page = page;
+            let _ = info_frame_out(&mut app, &ctx, width, 800.0);
+            let output = info_frame_out(&mut app, &ctx, width, 800.0);
+            let status = output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text)
+                        if text.galley.text().starts_with("Save file")
+                            || text.galley.text().starts_with("Playing") =>
+                    {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .expect("status line");
+            let left = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.visual_bounding_rect()),
+                    _ => None,
+                })
+                .filter(|rect| (rect.center().y - status.center().y).abs() < 4.0)
+                .map(|rect| rect.left())
+                .fold(f32::INFINITY, f32::min);
+            for clipped in &output.shapes {
+                let rect = match &clipped.shape {
+                    egui::Shape::Text(text) => text.visual_bounding_rect(),
+                    egui::Shape::Rect(rect) => rect.rect,
+                    _ => continue,
+                };
+                if rect.top() > status.top()
+                    && rect.left() >= left - 0.5
+                    && rect.left() < status.right()
+                    && rect.right().is_finite()
+                {
+                    assert!(
+                        rect.right() <= status.right() + 1.0,
+                        "a shape on {page:?} ends at {}, the panel at {} (screen {width})",
+                        rect.right(),
+                        status.right()
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn info_frame_out(
+    app: &mut Citrine,
+    ctx: &Context,
+    width: f32,
+    height: f32,
+) -> egui::FullOutput {
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -996,18 +1073,34 @@ fn a_channel_muted_in_the_apu_tab_stays_muted_after_a_volume_change() {
     for _ in 0..3 {
         output = desk_frame(&mut app, &ctx, Vec::new());
     }
-    let second = text_rect(&output, "2").expect("the APU tab's channel 2 box");
+    let second = text_rect(&output, "Pulse 2").expect("the APU tab's Pulse 2 box");
 
     click_at(&mut app, &ctx, second.center());
     desk_frame(&mut app, &ctx, Vec::new());
-    assert!(app.emulator.gb.debugger.ch2_disabled);
+    assert!(!app.emulator.gb().apu.channel_enabled(1));
 
     app.ui.settings.volume = 0.5;
     app.ui.settings.dirty = true;
     desk_frame(&mut app, &ctx, Vec::new());
 
-    assert!(app.emulator.gb.debugger.ch2_disabled);
+    assert!(!app.emulator.gb().apu.channel_enabled(1));
     assert_eq!(app.ui.settings.channels, [true, false, true, true]);
+}
+
+#[test]
+fn a_channel_muted_in_settings_stays_muted_after_loading_a_snapshot() {
+    let ctx = Context::default();
+    let mut app = media_app("mute-snapshot", LayoutMode::Desktop);
+    app.ui.settings.channels = [true, true, false, true];
+    app.ui.settings.dirty = true;
+    desk_frame(&mut app, &ctx, Vec::new());
+    app.emulator.save_snapshot(0).unwrap();
+
+    assert!(app.emulator.load_snapshot(0).unwrap());
+    desk_frame(&mut app, &ctx, Vec::new());
+
+    assert!(!app.emulator.gb().apu.channel_enabled(2));
+    assert!(app.emulator.gb().apu.channel_enabled(0));
 }
 
 #[test]
@@ -1170,6 +1263,90 @@ fn a_picked_event_partner_goes_back_to_the_event_list() {
     );
 }
 
+#[derive(Default)]
+struct MemoryStorage(std::collections::HashMap<String, String>);
+
+impl eframe::Storage for MemoryStorage {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_owned(), value);
+    }
+
+    fn flush(&mut self) {}
+}
+
+fn stored_with(tabs: Vec<Tab>) -> Vec<Tab> {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let mut saved = phone_app("stored-tabs");
+            saved.dock = DockState::new(tabs);
+            let mut storage = MemoryStorage::default();
+            eframe::set_value(&mut storage, eframe::APP_KEY, &saved);
+            drop(saved);
+            let app = Citrine::restore(Some(&storage));
+            app.dock.iter_all_tabs().map(|(_, tab)| *tab).collect()
+        })
+        .expect("thread")
+        .join()
+        .expect("restored")
+}
+
+#[test]
+fn a_layout_saved_with_apu_waves_opens_the_apu_tab() {
+    let tabs = stored_with(vec![Tab::GameBoy, Tab::ApuWaves, Tab::Settings]);
+    assert_eq!(tabs, [Tab::GameBoy, Tab::Apu, Tab::Settings]);
+}
+
+#[test]
+fn a_layout_saved_with_both_apu_tabs_keeps_one() {
+    let tabs = stored_with(vec![Tab::GameBoy, Tab::Apu, Tab::ApuWaves]);
+    assert_eq!(tabs, [Tab::GameBoy, Tab::Apu]);
+}
+
+#[test]
+fn a_gba_game_picked_as_the_second_game_says_what_it_is() {
+    let mut app = phone_app("gba-link");
+    let mut data = vec![0; 0x200];
+    data[0..4].copy_from_slice(&[0x2E, 0x00, 0x00, 0xEA]);
+    data[0xB2] = 0x96;
+    app.ui.linked.picking = true;
+    app.link_picked(crate::utils::file_loader::PickedFile {
+        name: "Test.gba".to_string(),
+        data,
+        path: None,
+    });
+    assert_eq!(
+        app.toasts.texts(),
+        ["Game Boy Advance games link only with each other"]
+    );
+    assert!(app.emulator.link.is_none());
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn a_gba_game_picked_to_play_online_goes_to_the_invite() {
+    let mut app = phone_app("gba-online");
+    let mut data = vec![0; 0x200];
+    data[0..4].copy_from_slice(&[0x2E, 0x00, 0x00, 0xEA]);
+    data[0xB2] = 0x96;
+    let friend = citrine_gb_net::OnlineId::new(7).expect("id");
+    app.picked_for(super::tabs::playing::PickFor::Invite(friend), |app| {
+        app.handle_load_rom_data(data)
+    });
+    assert_eq!(app.emulator.kind(), citrine_gb::console::ConsoleKind::Gba);
+    assert_eq!(app.toasts.texts(), ["Couldn't send the invite"]);
+    let card = app
+        .emulator
+        .game_file()
+        .and_then(|file| file.card())
+        .unwrap();
+    assert_eq!(card.console, citrine_gb_net::Console::Gba);
+}
+
 #[test]
 fn the_more_sheet_shows_close_game_on_phone_screens() {
     for (css, pixel_ratio) in [
@@ -1207,6 +1384,158 @@ fn the_more_sheet_shows_close_game_on_phone_screens() {
             close.1
         );
     }
+}
+
+#[test]
+fn a_layout_saved_with_time_control_opens_the_debugger_in_its_place() {
+    let tabs = stored_with(vec![Tab::GameBoy, Tab::TimeControl, Tab::Registers]);
+    assert_eq!(tabs, [Tab::GameBoy, Tab::Disassembly, Tab::Registers]);
+}
+
+#[test]
+fn a_layout_saved_with_both_old_debugger_tabs_keeps_one() {
+    let tabs = stored_with(vec![Tab::GameBoy, Tab::Disassembly, Tab::TimeControl]);
+    assert_eq!(tabs, [Tab::GameBoy, Tab::Disassembly]);
+}
+
+fn debugger_text_positions(css: egui::Vec2, beside_game: bool) -> (egui::Pos2, egui::Pos2) {
+    let ctx = Context::default();
+    let mut app = phone_app(&format!("debugger-{}", css.x));
+    app.ui.settings.layout = LayoutMode::Desktop;
+    load_tobu(&mut app);
+    app.dock = DockState::new(vec![Tab::Disassembly]);
+    if beside_game {
+        app.dock = DockState::new(vec![Tab::GameBoy]);
+        app.dock.main_surface_mut().split_right(
+            egui_dock::NodeIndex::root(),
+            0.6,
+            vec![Tab::Disassembly],
+        );
+    }
+    let output = settle(&mut app, &ctx, css, 1.0);
+    let find = |wanted: &dyn Fn(&str) -> bool| {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if wanted(text.galley.text()) => Some(text.pos),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("text is drawn at {css:?}"))
+    };
+    (find(&is_code_address), find(&|text| text == "CPU"))
+}
+
+fn is_code_address(text: &str) -> bool {
+    text.len() == 7
+        && text.as_bytes()[2] == b':'
+        && text
+            .chars()
+            .filter(|c| *c != ':')
+            .all(|c| c.is_ascii_hexdigit())
+}
+
+fn load_tobu(app: &mut Citrine) {
+    let tobu = include_bytes!("../../homebrew/tobu.gb");
+    app.emulator
+        .load_rom(&Rom::new(tobu), citrine_gb::gb::GbModel::Dmg, None)
+        .expect("tobu loads");
+    app.emulator.gb_mut().debugger.static_analysis_enabled = true;
+    for _ in 0..30 {
+        app.emulator.gb_mut().run_frame();
+    }
+}
+
+#[test]
+fn a_debugger_beside_the_game_puts_the_cpu_beside_the_code() {
+    let (code, cpu) = debugger_text_positions(egui::vec2(760.0, 800.0), false);
+    assert!(cpu.x > code.x + 200.0, "code at {code:?}, CPU at {cpu:?}");
+}
+
+#[test]
+fn a_debugger_in_the_side_dock_puts_the_code_above_the_cpu() {
+    let (code, cpu) = debugger_text_positions(egui::vec2(1280.0, 800.0), true);
+    assert!(code.y < cpu.y, "code at {code:?}, CPU at {cpu:?}");
+}
+
+fn docked_code_rows(ui_scale: f32, cpu_open: bool) -> (usize, String) {
+    let ctx = Context::default();
+    let mut app = phone_app(&format!("code-rows-{ui_scale}-{cpu_open}"));
+    app.ui.settings.layout = LayoutMode::Desktop;
+    app.ui.settings.ui_scale = ui_scale;
+    app.ui.registers.docked_cpu = cpu_open;
+    load_tobu(&mut app);
+    app.open_tab(Tab::Disassembly);
+    let output = settle(&mut app, &ctx, egui::vec2(1280.0, 800.0), 1.0);
+    let texts: Vec<(String, egui::Rect, egui::Rect)> = output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some((
+                text.galley.text().to_owned(),
+                text.visual_bounding_rect(),
+                clipped.clip_rect,
+            )),
+            _ => None,
+        })
+        .collect();
+    let rows: Vec<&(String, egui::Rect, egui::Rect)> = texts
+        .iter()
+        .filter(|(text, rect, clip)| is_code_address(text) && clip.contains_rect(*rect))
+        .collect();
+    let layout = format!(
+        "screen {:?}, rows {:?}, texts {:?}",
+        ctx.content_rect(),
+        rows.iter()
+            .map(|(_, rect, _)| rect.top())
+            .collect::<Vec<_>>(),
+        texts
+            .iter()
+            .filter(|(text, rect, _)| rect.left() > 330.0 && !is_code_address(text))
+            .map(|(text, rect, _)| (text.chars().take(12).collect::<String>(), rect.top()))
+            .collect::<Vec<_>>()
+    );
+    (rows.len(), layout)
+}
+
+#[test]
+fn the_docked_debugger_shows_ten_code_rows_at_web_zoom() {
+    for (ui_scale, cpu_open) in [(1.5, false), (1.5, true), (2.2, false)] {
+        let (rows, layout) = docked_code_rows(ui_scale, cpu_open);
+        assert!(
+            rows >= 10,
+            "{rows} rows at {ui_scale}, CPU open {cpu_open}: {layout}"
+        );
+    }
+}
+
+const DOCK_BEFORE_DEV_TOOLS: &str = include_str!("../../fixtures/dock-v0.11.0.ron");
+
+fn load_dock(text: &str) -> Option<DockState<Tab>> {
+    let mut storage = MemoryStorage::default();
+    eframe::Storage::set_string(&mut storage, "dock", text.trim().to_owned());
+    eframe::get_value(&storage, "dock")
+}
+
+#[test]
+fn a_dock_layout_saved_before_the_dev_tools_menu_still_loads() {
+    let mut dock = load_dock(DOCK_BEFORE_DEV_TOOLS).expect("loads");
+    tabs::retire_old_tabs(&mut dock);
+    let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
+    assert!(tabs.contains(&Tab::Disassembly));
+    assert!(tabs.contains(&Tab::AudioDebug));
+    assert!(!tabs.contains(&Tab::TimeControl));
+    assert_eq!(tabs.len(), 19);
+}
+
+#[test]
+fn a_tool_from_a_newer_build_loads_and_closes() {
+    let newer = DOCK_BEFORE_DEV_TOOLS.replace("Performance", "Tool(Hologram)");
+    let mut dock = load_dock(&newer).expect("loads");
+    assert!(dock.find_tab(&Tab::Tool(tabs::Tool::Unknown)).is_some());
+    tabs::retire_old_tabs(&mut dock);
+    assert!(dock.find_tab(&Tab::Tool(tabs::Tool::Unknown)).is_none());
+    assert!(dock.find_tab(&Tab::Settings).is_some());
 }
 
 fn settings_page(name: &str, page: SettingsTab) -> (Citrine, Context) {
@@ -1450,6 +1779,86 @@ fn back_closes_the_sign_in_key_sheet_and_stays_on_you() {
     assert_eq!(app.mobile.nav.place(), Place::You);
 }
 
+#[test]
+fn the_docked_debugger_shows_breakpoints_above_a_visible_cpu_header() {
+    use citrine_gb::debug::breakpoints::{Access, Watch};
+    use citrine_gb::debug::code::{Address, BlockId};
+    for cpu_open in [false, true] {
+        let ctx = Context::default();
+        let mut app = phone_app(&format!("debugger-stops-{cpu_open}"));
+        app.ui.settings.layout = LayoutMode::Desktop;
+        app.ui.settings.ui_scale = 2.2;
+        app.ui.registers.docked_cpu = cpu_open;
+        load_tobu(&mut app);
+        let gb = app.emulator.as_gb_mut().unwrap();
+        gb.debugger
+            .breakpoints
+            .insert(Address::at(BlockId::Rom, 0, 0x0150));
+        gb.debugger.breakpoints.watch(Watch {
+            from: Address::at(BlockId::Wram, 0, 0),
+            len: 1,
+            access: Access::Write,
+        });
+        app.open_tab(Tab::Disassembly);
+        let output = settle(&mut app, &ctx, egui::vec2(1280.0, 800.0), 1.0);
+        let shown = |wanted: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text().trim() == wanted => {
+                        let rect = text.visual_bounding_rect();
+                        Some((rect, clipped.clip_rect))
+                    }
+                    _ => None,
+                })
+        };
+        let (list, list_clip) = shown("Breakpoints").expect("a breakpoint list");
+        let (cpu, cpu_clip) = shown("CPU").expect("a CPU header");
+        assert!(
+            list_clip.contains_rect(list),
+            "CPU open {cpu_open}: the list at {list:?} is cut by {list_clip:?}"
+        );
+        assert!(
+            cpu_clip.contains_rect(cpu),
+            "CPU open {cpu_open}: the CPU header at {cpu:?} is cut by {cpu_clip:?}"
+        );
+        assert!(
+            list.bottom() <= cpu.top(),
+            "CPU open {cpu_open}: {list:?} {cpu:?}"
+        );
+        for entry in ["00:0150", "00:C000"] {
+            let listed = output.shapes.iter().any(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().trim() == entry => {
+                    let rect = text.visual_bounding_rect();
+                    let side = ctx.style().spacing.interact_size.y;
+                    clipped.clip_rect.contains_rect(rect)
+                        && clipped.clip_rect.height() >= side - 0.5
+                        && rect.top() >= list.bottom()
+                        && rect.bottom() <= cpu.top()
+                }
+                _ => false,
+            });
+            let found: Vec<(egui::Rect, egui::Rect)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text().trim() == entry => {
+                        Some((text.visual_bounding_rect(), clipped.clip_rect))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                listed,
+                "CPU open {cpu_open}: {entry} is not in view: {found:?}, side {}, list {list:?} in {list_clip:?}, cpu {cpu:?} in {cpu_clip:?}, floor {:?}",
+                ctx.style().spacing.interact_size.y,
+                ctx.data(|data| data.get_temp::<(f32, f32)>(egui::Id::new("debugger_stops_height")))
+            );
+        }
+    }
+}
+
 fn signed_out_you(name: &str, server: bool) -> (Citrine, Context) {
     let (mut app, ctx) = signed_in_you(name);
     app.ui.settings.online.leave();
@@ -1649,6 +2058,249 @@ fn an_offer_names_its_download_size() {
     assert_eq!(texts.action, Some("Update"));
 }
 
+#[test]
+fn the_video_tool_shows_every_view_of_a_game_boy_inside_its_tab() {
+    use crate::app::widgets::video::VideoTab;
+    let ctx = Context::default();
+    let mut app = phone_app("video-views");
+    app.ui.settings.layout = LayoutMode::Desktop;
+    app.ui.settings.ui_scale = 2.2;
+    load_tobu(&mut app);
+    app.open_tab(Tab::Tool(tabs::Tool::Video));
+    app.ui.video.show_hidden = true;
+    for tab in VideoTab::ALL {
+        app.ui.video.tab = tab;
+        let output = settle(&mut app, &ctx, egui::vec2(1280.0, 800.0), 1.0);
+        let images: Vec<_> = output
+            .shapes
+            .iter()
+            .filter(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => mesh.texture_id != egui::TextureId::default(),
+                _ => false,
+            })
+            .collect();
+        let shows_pictures = tab != VideoTab::Palettes;
+        assert_eq!(!images.is_empty(), shows_pictures, "{tab:?}");
+        for clipped in images {
+            let egui::Shape::Mesh(mesh) = &clipped.shape else {
+                continue;
+            };
+            let rect = mesh.calc_bounds();
+            assert!(
+                rect.left() >= clipped.clip_rect.left() - 0.5
+                    && rect.right() <= clipped.clip_rect.right() + 0.5,
+                "{tab:?}: picture {rect:?} is wider than its tab {:?}",
+                clipped.clip_rect
+            );
+        }
+    }
+    assert_eq!(app.ui.video.sprites().len(), 40);
+    assert_eq!(app.ui.video.maps().len(), 2);
+    assert_eq!(app.ui.video.palettes().len(), 2);
+    app.ui.video.tab = VideoTab::Sprites;
+    let source = app.ui.video.sprites()[0].source;
+    app.ui.video.select(source);
+    assert_eq!(app.ui.video.tab, VideoTab::Tiles);
+    assert_eq!(app.ui.video.selected, Some(source));
+    assert_eq!(app.ui.video.back, Some(VideoTab::Sprites));
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn the_video_tool_shows_a_gba_with_its_own_sheets_and_sprites() {
+    use crate::app::widgets::video::VideoTab;
+    let ctx = Context::default();
+    let mut app = phone_app("video-gba");
+    app.ui.settings.layout = LayoutMode::Desktop;
+    app.emulator.load_gba(&[0; 0x200]).expect("a gba loads");
+    app.open_tab(Tab::Tool(tabs::Tool::Video));
+    for tab in VideoTab::ALL {
+        app.ui.video.tab = tab;
+        settle(&mut app, &ctx, egui::vec2(1280.0, 800.0), 1.0);
+    }
+    assert_eq!(app.ui.video.sprites().len(), 128);
+    assert_eq!(app.ui.video.palettes()[0].colors.len(), 256);
+    app.ui.video.select(app.ui.video.sprites()[0].source);
+    settle(&mut app, &ctx, egui::vec2(1280.0, 800.0), 1.0);
+    assert_eq!(app.ui.video.sheet, 2);
+    assert_eq!(
+        app.ui.video.colors,
+        citrine_gb::debug::video::SheetColors::Palette { group: 1, row: 0 }
+    );
+}
+
+#[cfg(feature = "gba")]
+mod gba_tools;
+
+#[test]
+fn the_debugger_lays_out_side_by_side_in_the_right_pane_beside_another_tab() {
+    for (scale, pane) in [(1.0, 505.0), (1.113, 452.9)] {
+        let ctx = Context::default();
+        let mut app = phone_app(&format!("debugger-right-pane-{scale}"));
+        app.ui.settings.layout = LayoutMode::Desktop;
+        app.ui.settings.ui_scale = scale;
+        load_tobu(&mut app);
+        app.open_tab(Tab::Disassembly);
+        settle(&mut app, &ctx, egui::vec2(1280.0, 800.0), 1.0);
+        let output = settle(&mut app, &ctx, egui::vec2(1280.0, 800.0), 1.0);
+
+        let (_, node, _) = app.dock.find_tab(&Tab::Disassembly).expect("docked");
+        let egui_dock::Node::Leaf(leaf) = &app.dock.main_surface()[node] else {
+            panic!("the debugger sits in a leaf");
+        };
+        assert!(leaf.tabs().len() > 1, "the debugger shares its pane");
+        assert!((leaf.viewport.width() - pane).abs() < 1.0);
+        let right = leaf.viewport.right();
+        let af = output.shapes.iter().any(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => {
+                text.galley.text() == "AF"
+                    && text.pos.x > leaf.viewport.left()
+                    && clipped.clip_rect.contains_rect(text.visual_bounding_rect())
+            }
+            _ => false,
+        });
+        assert!(af, "the CPU column draws beside the code at {pane}");
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                assert!(
+                    text.pos.x <= right,
+                    "{:?} starts at {} past the pane's edge {right} at {pane}",
+                    text.galley.text(),
+                    text.pos.x
+                );
+            }
+        }
+    }
+}
+
+fn picture_rect(output: &egui::FullOutput) -> Option<egui::Rect> {
+    output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => {
+                Some(clipped.shape.visual_bounding_rect())
+            }
+            egui::Shape::Rect(rect) if rect.fill_texture_id() != egui::TextureId::default() => {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .max_by(|a, b| a.area().total_cmp(&b.area()))
+}
+
+fn toast_frames(app: &mut Citrine, ctx: &Context, size: egui::Vec2) -> egui::FullOutput {
+    let input = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        ..Default::default()
+    };
+    let mut output = None;
+    for _ in 0..4 {
+        output = Some(ctx.run(input(), |ctx| {
+            mobile::touch_spacing(ctx, false);
+            app.render(ctx);
+            app.show_toasts(ctx);
+        }));
+    }
+    output.unwrap()
+}
+
+#[test]
+fn on_desktop_no_toast_covers_the_game_picture_at_any_window_size() {
+    let sizes = [
+        (1024.0, 768.0),
+        (1280.0, 800.0),
+        (1920.0, 1080.0),
+        (800.0, 600.0),
+        (640.0, 480.0),
+        (1280.0 / 2.2, 720.0 / 2.2),
+        (1024.0 / 2.2, 640.0 / 2.2),
+        (1920.0 / 2.2, 1000.0 / 2.2),
+    ];
+    let progress = crate::progress::Progress::bytes(700 * 1024, 2500 * 1024);
+    let start = web_time::Instant::now();
+    let later = start + std::time::Duration::from_secs(1);
+    for (width, height) in sizes {
+        for two_lines in [false, true] {
+            for homebrew in [false, true] {
+                let name = format!("toast-{width}-{two_lines}-{homebrew}");
+                let mut app = crystal_app(&name, LayoutMode::Desktop, None);
+                app.emulator.running = true;
+                if homebrew {
+                    app.open_tab(Tab::Homebrew);
+                }
+                let ctx = Context::default();
+                app.emulator.clear_frame(&ctx);
+                let bare = toast_frames(&mut app, &ctx, egui::vec2(width, height));
+                let bare = picture_rect(&bare).expect("the game is drawn");
+                if two_lines {
+                    for now in [start, later] {
+                        app.toasts
+                            .load("shelf", "Downloading Hyperspace Roll", progress, now);
+                    }
+                }
+                app.toasts.error("Couldn't download Pentris").button(
+                    "Try again",
+                    events::AppEvent::OpenTab { tab: Tab::Homebrew },
+                );
+                let output = toast_frames(&mut app, &ctx, egui::vec2(width, height));
+                let picture = picture_rect(&output).expect("the game is drawn");
+                assert!(
+                    picture.height() >= bare.height() * 0.75,
+                    "{name}: {picture:?} shrank from {bare:?}"
+                );
+                let toasts = app.toasts.rects(&ctx);
+                assert_eq!(toasts.len(), 1 + two_lines as usize, "{name}");
+                for toast in toasts {
+                    assert!(
+                        !toast.shrink(0.5).intersects(picture),
+                        "{name}: {toast:?} covers {picture:?}"
+                    );
+                    assert!(
+                        ctx.content_rect().contains_rect(toast),
+                        "{name}: {toast:?} leaves the window"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn on_desktop_the_invite_banner_keeps_most_of_the_game_picture() {
+    for zoom in [1.0, 2.2] {
+        let name = format!("invite-picture-{zoom}");
+        let mut app = crystal_app(&name, LayoutMode::Desktop, None);
+        app.emulator.running = true;
+        let ctx = Context::default();
+        app.emulator.clear_frame(&ctx);
+        let heights: Vec<f32> = (0..32)
+            .map(|step| (560.0 + step as f32 * 16.0) / zoom)
+            .collect();
+        let size = |height: f32| egui::vec2(1280.0 / zoom, height);
+        let bare: Vec<egui::Rect> = heights
+            .iter()
+            .map(|&height| {
+                let output = toast_frames(&mut app, &ctx, size(height));
+                picture_rect(&output).expect("the game is drawn")
+            })
+            .collect();
+        app.play.push_invite(crate::play::IncomingInvite {
+            session: 1,
+            from: citrine_gb_net::OnlineId::new(7).expect("id"),
+            game: None,
+        });
+        for (&height, bare) in heights.iter().zip(bare) {
+            let output = toast_frames(&mut app, &ctx, size(height));
+            let picture = picture_rect(&output).expect("the game is drawn");
+            assert!(
+                picture.height() >= bare.height() * 0.75,
+                "{name} at {height}: {picture:?} shrank from {bare:?}"
+            );
+        }
+    }
+}
+
 fn shows_text(app: &mut Citrine, wanted: &str) -> bool {
     let ctx = Context::default();
     settle(app, &ctx, egui::vec2(412.0, 915.0), 2.0)
@@ -1748,11 +2400,11 @@ fn a_controller_press_hides_the_touch_buttons_until_a_touch_below_the_picture() 
     let select = text_rect(&output, "SELECT").expect("touch buttons show at first");
     app.emulator.press(
         crate::held::InputSource::PadButtons(0),
-        citrine_gb::gb::joypad::JoypadState::A,
+        citrine_gb::console::Keys::A,
     );
     app.emulator.release(
         crate::held::InputSource::PadButtons(0),
-        citrine_gb::gb::joypad::JoypadState::A,
+        citrine_gb::console::Keys::A,
     );
     let output = frames(&mut app, &ctx, vec![]);
     assert!(text_rect(&output, "SELECT").is_none());
@@ -1887,15 +2539,6 @@ fn textured(shape: &egui::Shape) -> Option<egui::Rect> {
     }
 }
 
-fn picture_rect(output: &egui::FullOutput) -> egui::Rect {
-    output
-        .shapes
-        .iter()
-        .filter_map(|clipped| textured(&clipped.shape))
-        .max_by(|a, b| a.area().total_cmp(&b.area()))
-        .expect("the game picture shows")
-}
-
 fn covering(output: &egui::FullOutput, picture: egui::Rect) -> Vec<egui::Rect> {
     let inside = picture.shrink(0.5);
     output
@@ -1918,7 +2561,7 @@ fn hidden_picture(name: &str, size: egui::Vec2, scale: f32) -> (egui::Rect, Vec<
         text_containing(&output, crate::icons::EYE).is_some(),
         "the eye shows"
     );
-    let picture = picture_rect(&output);
+    let picture = picture_rect(&output).expect("the game picture shows");
     (picture, covering(&output, picture))
 }
 
@@ -1962,7 +2605,7 @@ fn a_picture_that_cannot_take_the_full_height_sits_centred_shown_or_hidden() {
             for _ in 0..3 {
                 output = sized_frame(&mut app, &ctx, size, vec![]);
             }
-            let picture = picture_rect(&output);
+            let picture = picture_rect(&output).expect("the game picture shows");
             assert!(picture.height() < size.y - 1.0);
             let top = if hide { 0.0 } else { 48.0 };
             let middle = (top + size.y) / 2.0;
@@ -1985,22 +2628,25 @@ fn the_landscape_picture_keeps_its_place_when_a_key_press_hides_the_touch_button
     let (mut app, ctx) = game_at("fill-keep", size, 1.0, true);
     sized_frame(&mut app, &ctx, size, vec![]);
     let output = sized_frame(&mut app, &ctx, size, vec![]);
-    let before = picture_rect(&output);
+    let before = picture_rect(&output).expect("the game picture shows");
     assert!(text_rect(&output, "SELECT").is_some());
     app.emulator.press(
         crate::held::InputSource::PadButtons(0),
-        citrine_gb::gb::joypad::JoypadState::A,
+        citrine_gb::console::Keys::A,
     );
     app.emulator.release(
         crate::held::InputSource::PadButtons(0),
-        citrine_gb::gb::joypad::JoypadState::A,
+        citrine_gb::console::Keys::A,
     );
     let mut output = sized_frame(&mut app, &ctx, size, vec![]);
     for _ in 0..2 {
         output = sized_frame(&mut app, &ctx, size, vec![]);
     }
     assert!(text_rect(&output, "SELECT").is_none());
-    assert_eq!(picture_rect(&output), before);
+    assert_eq!(
+        picture_rect(&output).expect("the game picture shows"),
+        before
+    );
 }
 
 fn wheel_over(

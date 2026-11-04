@@ -1,13 +1,14 @@
 use super::{Client, MESSAGE_PAGE, Me, db};
 use crate::connections::address_key;
 use crate::db::{AccountRow, InviteRefusal};
-use crate::hub::Conn;
+use crate::hub::{Conn, Person};
 use crate::now;
 use crate::settings::Check;
 use crate::stats::Refused;
 use citrine_gb_net::{
-    AuthKey, ChatMessage, DeviceId, DeviceInfo, DeviceKey, ErrorCode, InviteCode, Notice,
+    AuthKey, ChatMessage, DeviceId, DeviceInfo, DeviceKey, ErrorCode, InviteCode, Notice, OldChat,
     OneTimeCode, PROTOCOL_VERSION, Presence, PublicKey, RelayPassword, ServerMsg, display_name,
+    speaks_protocol,
 };
 
 impl Client {
@@ -21,7 +22,7 @@ impl Client {
         if self.me.is_some() {
             return Err(ErrorCode::AlreadySignedIn);
         }
-        if self.hello != Some(PROTOCOL_VERSION) {
+        if !self.hello.is_some_and(speaks_protocol) {
             return Err(ErrorCode::Protocol {
                 server: PROTOCOL_VERSION,
             });
@@ -173,6 +174,14 @@ impl Client {
                 close: self.close.clone(),
                 presence,
                 ip: self.ip,
+                protocol: self
+                    .hello
+                    .unwrap_or(citrine_gb_net::OLDEST_PROTOCOL_VERSION),
+                person: Some(Person {
+                    online_id: account.online_id,
+                    display_name: account.display_name.clone(),
+                    public_key: account.public_key,
+                }),
             },
         );
         self.app.stats.connected(online);
@@ -200,6 +209,19 @@ impl Client {
                     at: stored.at,
                     sealed: stored.sealed,
                 };
+                if let Some(key) = stored.old_key {
+                    self.send(ServerMsg::OldChat {
+                        id: stored.id,
+                        chat: OldChat {
+                            friend: stored.to,
+                            key,
+                            at: stored.at,
+                            sealed: message.sealed,
+                        },
+                    })
+                    .await;
+                    continue;
+                }
                 self.send(if stored.from_id == account.id {
                     ServerMsg::ChatCopy {
                         to: stored.to,
@@ -215,6 +237,9 @@ impl Client {
             }
         }
         self.send_devices().await?;
+        if db(self.app.db.old_chats_wanted(device).await)? {
+            self.send(ServerMsg::OldChatsWanted).await;
+        }
         if before != Some(presence) {
             self.tell_friends(presence).await?;
         }

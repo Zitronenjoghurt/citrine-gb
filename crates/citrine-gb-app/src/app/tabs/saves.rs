@@ -10,8 +10,9 @@ use crate::app::widgets::snapshots::{
 };
 use crate::icons;
 use crate::online::cloud::LocalSave;
-use crate::storage::{THUMB_HEIGHT, THUMB_WIDTH};
-use citrine_gb::gb::GbModel;
+use citrine_gb::console::ConsoleKind;
+
+const LIST_END: f32 = 12.0;
 
 fn choose_button(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str, save: &LocalSave) {
     let Some(slot) = viewer
@@ -33,7 +34,7 @@ fn stamp_row(
     viewer: &mut TabViewer,
     ui: &mut egui::Ui,
     stamp: String,
-    console: Option<GbModel>,
+    console: Option<ConsoleKind>,
     rom_key: &str,
     save: &LocalSave,
 ) {
@@ -218,7 +219,7 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
         });
 
         form.text_row("Stored in", |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(&status.location).small()).truncate());
+            ui.add(egui::Label::new(&status.location).truncate());
         });
     });
 
@@ -367,30 +368,42 @@ fn button_width(ui: &egui::Ui, text: &str) -> f32 {
     galley.size().x + 2.0 * ui.spacing().button_padding.x
 }
 
-fn fit_thumb(ui: &egui::Ui, size: egui::Vec2) -> egui::Vec2 {
+fn row_thumb(ui: &egui::Ui, console: Option<ConsoleKind>) -> egui::Vec2 {
+    let [width, height] = crate::storage::thumb_size(console);
+    let thumb = egui::vec2(width as f32, height as f32);
+    let side = crate::app::mobile::touch_square(ui);
+    let thumb = if side == 0.0 {
+        thumb
+    } else {
+        let row = ui.spacing().interact_size.y
+            + side
+            + ui.text_style_height(&egui::TextStyle::Small)
+            + 2.0 * ui.spacing().item_spacing.y;
+        thumb * (row / thumb.y).max(1.0)
+    };
     let gap = ui.spacing().item_spacing.x;
     let more = button_width(ui, icons::DOTS_THREE).max(crate::app::mobile::touch_square(ui));
-    let buttons = button_width(ui, "Load") + button_width(ui, "Overwrite") + more + 2.0 * gap;
-    let room = ui.available_width() - gap - buttons;
-    size * (room / size.x).clamp(0.5, 1.0)
+    let snapshot = button_width(ui, "Load") + button_width(ui, "Overwrite") + more + 2.0 * gap;
+    let autosave =
+        button_width(ui, "Load") + button_width(ui, &format!("{} Delete", icons::TRASH)) + gap;
+    let room = ui.available_width() - gap - snapshot.max(autosave);
+    thumb * (room / thumb.x).clamp(0.5, 1.0)
 }
 
-fn thumb_size(ui: &egui::Ui, title_height: f32) -> egui::Vec2 {
-    let thumb = egui::vec2(THUMB_WIDTH as f32, THUMB_HEIGHT as f32);
-    let side = crate::app::mobile::touch_square(ui);
-    if side == 0.0 {
-        return thumb;
-    }
-    let row = title_height
-        + side
-        + ui.text_style_height(&egui::TextStyle::Small)
-        + 2.0 * ui.spacing().item_spacing.y;
-    thumb * (row / thumb.y).max(1.0)
+fn thumb_image(ui: &mut egui::Ui, texture: egui::TextureId, console: Option<ConsoleKind>) {
+    let slot = row_thumb(ui, console);
+    let [width, height] = crate::storage::thumb_size(console);
+    let picture = egui::vec2(width as f32, height as f32);
+    let fitted = picture * (slot.x / picture.x).min(slot.y / picture.y);
+    ui.add_sized(
+        slot,
+        egui::Image::new(egui::load::SizedTexture::new(texture, fitted)),
+    );
 }
 
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     scroll::gutter(ui);
-    if !viewer.emulator.gb.cartridge.has_rom_loaded {
+    if !viewer.emulator.has_game() {
         ui.small("No ROM loaded");
         return;
     }
@@ -407,6 +420,9 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     battery_section(viewer, ui, &rom_key);
     ui.add_space(8.0);
     ui.heading("Snapshots");
+    if viewer.ui.snapshots.is_empty() {
+        ui.weak("No snapshots yet.");
+    }
 
     let quick_slot = viewer.ui.settings.quick_slot;
     let quick_keys = viewer.ui.settings.hotkeys.quick_keys();
@@ -430,147 +446,140 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     if let Some(hint) = quick_keys_hint(touch, &viewer.ui.settings.hotkeys) {
         ui.add(egui::Label::new(egui::RichText::new(hint).small()).wrap());
     }
-    ui.separator();
-
-    if viewer.ui.snapshots.is_empty() {
-        ui.small("No snapshots yet.");
+    if !viewer.ui.snapshots.is_empty() {
+        ui.separator();
     }
 
-    let half = (ui.available_height() / 2.0).max(ui.spacing().interact_size.y * 3.0);
-    egui::ScrollArea::vertical()
-        .id_salt("snapshots")
-        .max_height(half)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            let slots: Vec<(usize, u64, String, egui::TextureId, Option<GbModel>)> = viewer
-                .ui
-                .snapshots
-                .slots()
-                .iter()
-                .map(|view| {
-                    (
-                        view.slot,
-                        view.saved_at,
-                        view.display_name(),
-                        view.texture.id(),
-                        view.console,
-                    )
-                })
-                .collect();
+    ui.vertical(|ui| {
+        let slots: Vec<(usize, u64, String, egui::TextureId, Option<ConsoleKind>)> = viewer
+            .ui
+            .snapshots
+            .slots()
+            .iter()
+            .map(|view| {
+                (
+                    view.slot,
+                    view.saved_at,
+                    view.display_name(),
+                    view.texture.id(),
+                    view.console,
+                )
+            })
+            .collect();
 
-            for (index, (slot, saved_at, name, texture, console)) in slots.into_iter().enumerate() {
-                if index > 0 {
-                    ui.separator();
-                }
-                let mut begin_rename = false;
-                ui.horizontal(|ui| {
-                    let size = fit_thumb(ui, thumb_size(ui, ui.spacing().interact_size.y));
-                    ui.image(egui::load::SizedTexture::new(texture, size));
+        let listed = !slots.is_empty();
+        for (index, (slot, saved_at, name, texture, console)) in slots.into_iter().enumerate() {
+            if index > 0 {
+                ui.separator();
+            }
+            let mut begin_rename = false;
+            ui.horizontal(|ui| {
+                thumb_image(ui, texture, console);
 
-                    ui.vertical(|ui| {
-                        match viewer.ui.snapshots.rename_buffer(slot) {
-                            Some(buffer) => match name_editor(ui, buffer, &name) {
-                                NameEdit::Cancel => viewer.ui.snapshots.cancel_rename(),
-                                NameEdit::Commit => {
-                                    if let Some((slot, text)) = viewer.ui.snapshots.take_rename() {
-                                        action = Some(SlotAction::Rename(slot, text));
-                                    }
+                ui.vertical(|ui| {
+                    match viewer.ui.snapshots.rename_buffer(slot) {
+                        Some(buffer) => match name_editor(ui, buffer, &name) {
+                            NameEdit::Cancel => viewer.ui.snapshots.cancel_rename(),
+                            NameEdit::Commit => {
+                                if let Some((slot, text)) = viewer.ui.snapshots.take_rename() {
+                                    action = Some(SlotAction::Rename(slot, text));
                                 }
-                                NameEdit::Editing => {}
-                            },
-                            None => {
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let mut rename = touch
-                                            && crate::app::mobile::compact_button(
-                                                ui,
-                                                icons::PENCIL_SIMPLE,
-                                            )
-                                            .clicked();
-                                        if !touch && slot == quick_slot {
-                                            ui.colored_label(
-                                                ui.visuals().warn_fg_color,
-                                                icons::STAR,
-                                            );
-                                        }
-                                        ui.with_layout(
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.add_space(4.0);
-                                                rename |= editable_name(ui, &name).clicked();
-                                            },
-                                        );
-                                        if rename {
-                                            begin_rename = true;
-                                        }
-                                    },
-                                );
                             }
-                        }
-
-                        let save = LocalSave::Snapshot(slot);
-                        stamp_row(
-                            viewer,
-                            ui,
-                            relative_time(saved_at),
-                            console,
-                            &rom_key,
-                            &save,
-                        );
-
-                        ui.horizontal(|ui| {
-                            if ui.button("Load").clicked() {
-                                action = Some(SlotAction::Load(slot));
-                            }
-                            if ui.button("Overwrite").clicked() {
-                                action = Some(SlotAction::Save(slot));
-                            }
-                            let side = crate::app::mobile::touch_square(ui);
-                            let more = more_button(side);
-                            egui::containers::menu::MenuButton::from_button(more)
-                                .ui(ui, |ui| {
-                                    if !touch
-                                        && ui
-                                            .add_enabled(
-                                                slot != quick_slot,
-                                                egui::Button::new(format!(
-                                                    "{} Use for {}",
-                                                    icons::STAR,
-                                                    quick_keys.as_deref().unwrap_or("quick save")
-                                                )),
-                                            )
-                                            .clicked()
-                                    {
-                                        action = Some(SlotAction::MakeQuick(slot));
+                            NameEdit::Editing => {}
+                        },
+                        None => {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let mut rename = touch
+                                        && crate::app::mobile::compact_button(
+                                            ui,
+                                            icons::PENCIL_SIMPLE,
+                                        )
+                                        .clicked();
+                                    if !touch && slot == quick_slot {
+                                        ui.colored_label(ui.visuals().warn_fg_color, icons::STAR);
                                     }
-                                    if !touch
-                                        && ui
-                                            .button(format!("{} Rename", icons::PENCIL_SIMPLE))
-                                            .clicked()
-                                    {
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(4.0);
+                                            rename |= editable_name(ui, &name).clicked();
+                                        },
+                                    );
+                                    if rename {
                                         begin_rename = true;
                                     }
-                                    if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
-                                        viewer.ui.snapshots.ask_delete(slot, name.clone());
-                                    }
-                                })
-                                .0
-                                .on_hover_text("More");
-                        });
+                                },
+                            );
+                        }
+                    }
+
+                    let save = LocalSave::Snapshot(slot);
+                    stamp_row(
+                        viewer,
+                        ui,
+                        relative_time(saved_at),
+                        console,
+                        &rom_key,
+                        &save,
+                    );
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Load").clicked() {
+                            action = Some(SlotAction::Load(slot));
+                        }
+                        if ui.button("Overwrite").clicked() {
+                            action = Some(SlotAction::Save(slot));
+                        }
+                        let side = crate::app::mobile::touch_square(ui);
+                        let more = more_button(side);
+                        egui::containers::menu::MenuButton::from_button(more)
+                            .ui(ui, |ui| {
+                                if !touch
+                                    && ui
+                                        .add_enabled(
+                                            slot != quick_slot,
+                                            egui::Button::new(format!(
+                                                "{} Use for {}",
+                                                icons::STAR,
+                                                quick_keys.as_deref().unwrap_or("quick save")
+                                            )),
+                                        )
+                                        .clicked()
+                                {
+                                    action = Some(SlotAction::MakeQuick(slot));
+                                }
+                                if !touch
+                                    && ui
+                                        .button(format!("{} Rename", icons::PENCIL_SIMPLE))
+                                        .clicked()
+                                {
+                                    begin_rename = true;
+                                }
+                                if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
+                                    viewer.ui.snapshots.ask_delete(slot, name.clone());
+                                }
+                            })
+                            .0
+                            .on_hover_text("More");
                     });
                 });
-                if begin_rename {
-                    let current = if name == crate::storage::default_slot_name(slot) {
-                        String::new()
-                    } else {
-                        name.clone()
-                    };
-                    viewer.ui.snapshots.begin_rename(slot, current);
-                }
+            });
+            if begin_rename {
+                let current = if name == crate::storage::default_slot_name(slot) {
+                    String::new()
+                } else {
+                    name.clone()
+                };
+                viewer.ui.snapshots.begin_rename(slot, current);
             }
-        });
+        }
+        if listed {
+            ui.add_space(LIST_END);
+        }
+    });
 
     autosave_section(viewer, ui, &rom_key, &mut auto_action);
 
@@ -631,7 +640,7 @@ enum AutoAction {
     Delete(usize, String),
 }
 
-type AutosaveRow = (usize, u64, egui::TextureId, Option<GbModel>);
+type AutosaveRow = (usize, u64, egui::TextureId, Option<ConsoleKind>);
 
 fn autosave_section(
     viewer: &mut TabViewer,
@@ -639,9 +648,9 @@ fn autosave_section(
     rom_key: &str,
     action: &mut Option<AutoAction>,
 ) {
+    ui.separator();
     ui.add_space(8.0);
     ui.heading("Autosaves");
-    ui.separator();
 
     let rows: Vec<AutosaveRow> = viewer
         .ui
@@ -653,13 +662,19 @@ fn autosave_section(
         .collect();
 
     if rows.is_empty() {
-        ui.small("No autosaves yet.");
+        ui.weak("No autosaves yet.");
     }
 
-    egui::ScrollArea::vertical()
-        .id_salt("autosaves")
-        .auto_shrink([false, true])
-        .show(ui, |ui| autosave_rows(viewer, ui, rom_key, rows, action));
+    autosave_rows(viewer, ui, rom_key, rows, action);
+}
+
+fn autosave_stamp_format(saved_at: u64, times: &[u64]) -> &'static str {
+    let minute = saved_at / 60;
+    if times.iter().filter(|at| **at / 60 == minute).count() > 1 {
+        "%b %-d, %H:%M:%S"
+    } else {
+        "%b %-d, %H:%M"
+    }
 }
 
 fn autosave_rows(
@@ -669,21 +684,21 @@ fn autosave_rows(
     rows: Vec<AutosaveRow>,
     action: &mut Option<AutoAction>,
 ) {
+    let times: Vec<u64> = rows.iter().map(|row| row.1).collect();
     for (index, (id, saved_at, texture, console)) in rows.into_iter().enumerate() {
         if index > 0 {
             ui.separator();
         }
         let label = relative_time(saved_at);
         ui.horizontal(|ui| {
-            let size = thumb_size(ui, ui.text_style_height(&egui::TextStyle::Body));
-            ui.image(egui::load::SizedTexture::new(texture, size));
+            thumb_image(ui, texture, console);
             ui.vertical(|ui| {
                 ui.add(egui::Label::new(egui::RichText::new(&label).strong()).truncate());
                 let save = LocalSave::Autosave(id);
                 stamp_row(
                     viewer,
                     ui,
-                    crate::media::local_stamp(saved_at, "%b %-d, %H:%M"),
+                    crate::media::local_stamp(saved_at, autosave_stamp_format(saved_at, &times)),
                     console,
                     rom_key,
                     &save,
@@ -706,6 +721,7 @@ fn autosave_rows(
             viewer.ui.snapshots.toggle_all_autosaves();
         }
     }
+    ui.add_space(LIST_END);
 }
 
 fn apply_auto(viewer: &mut TabViewer, rom_key: &str, action: AutoAction, ctx: &egui::Context) {
@@ -763,6 +779,13 @@ fn apply(viewer: &mut TabViewer, rom_key: &str, action: SlotAction, ctx: &egui::
         return;
     }
 
+    if let SlotAction::Load(slot) = action
+        && crate::app::tabs::playing::group_partners(viewer.play, viewer.online).is_some()
+    {
+        viewer.ui.playing.unlink_load = Some(slot);
+        return;
+    }
+
     let result = match action {
         SlotAction::New => {
             let slot = viewer.emulator.store.next_free_slot(rom_key);
@@ -817,6 +840,15 @@ mod tests {
     use super::*;
     use crate::app::ui_state::hotkeys::Hotkey;
     use egui::Key;
+
+    #[test]
+    fn autosaves_in_the_same_minute_show_seconds() {
+        let minute = 1_793_648_340;
+        let times = [minute + 50, minute + 5, minute - 300];
+        assert_eq!(autosave_stamp_format(times[0], &times), "%b %-d, %H:%M:%S");
+        assert_eq!(autosave_stamp_format(times[1], &times), "%b %-d, %H:%M:%S");
+        assert_eq!(autosave_stamp_format(times[2], &times), "%b %-d, %H:%M");
+    }
 
     #[test]
     fn the_touch_layout_shows_no_keyboard_hint() {

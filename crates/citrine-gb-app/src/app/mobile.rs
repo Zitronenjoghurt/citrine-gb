@@ -16,6 +16,7 @@ mod homebrew;
 pub mod kit;
 mod more;
 pub mod nav;
+mod room;
 mod settings_list;
 mod settings_pages;
 pub mod sheet;
@@ -149,11 +150,16 @@ impl Citrine {
         } else {
             0.0
         };
+        let bar = if landscape {
+            0.0
+        } else {
+            frame::bar_height(&ctx.style())
+        };
         sheet::set_area(
             ctx,
             Some(Rect::from_min_max(
                 pos2(screen.left() + rail, screen.top()),
-                screen.max,
+                pos2(screen.right(), screen.bottom() - bar),
             )),
         );
         let entries = self.frame_entries();
@@ -195,7 +201,7 @@ impl Citrine {
     }
 
     pub(super) fn game_open(&self) -> bool {
-        self.emulator.gb.cartridge.has_rom_loaded
+        self.emulator.has_game()
             || self.emulator.link.is_some()
             || self.emulator.partner.is_some()
             || self.play.session().is_some()
@@ -245,7 +251,7 @@ impl Citrine {
     }
 
     fn hold_game_off_screen(&mut self) {
-        let loaded = self.emulator.gb.cartridge.has_rom_loaded;
+        let loaded = self.emulator.has_game();
         if !loaded || self.play.session().is_some() {
             self.mobile.held_pause = false;
             return;
@@ -267,9 +273,9 @@ impl Citrine {
         }
     }
 
-    pub(super) fn resume_game(&mut self) {
+    pub(crate) fn resume_game(&mut self) {
         self.mobile.held_pause = false;
-        if self.emulator.gb.cartridge.has_rom_loaded {
+        if self.emulator.has_game() {
             self.emulator.running = true;
         }
         self.mobile.nav.show_game();
@@ -357,7 +363,7 @@ impl Citrine {
         }
         match (tab, self.play.session()) {
             (Tab::Playing, Some(session)) => {
-                let name = playing::friend_name(&self.online, session.friend());
+                let name = playing::member_name(&self.play, &self.online, session.friend());
                 format!("Playing with {name}")
             }
             (Tab::Playing, None) => linked::title(&self.emulator, self.ui.linked.listing),
@@ -396,6 +402,7 @@ impl Citrine {
             media: &mut self.media,
             online: &mut self.online,
             play: &mut self.play,
+            senses: &self.senses,
             stats: &self.stats,
             ui: &mut self.ui,
         }
@@ -473,6 +480,7 @@ impl Citrine {
                     None,
                     Some(MediaKind::Screenshot),
                     Some(MediaKind::Recording),
+                    Some(MediaKind::Print),
                 ],
                 browse.kind,
                 |kind| kind_label(kind).to_owned(),
@@ -587,10 +595,11 @@ impl Citrine {
     }
 
     pub(super) fn pick_rom(&mut self) {
+        use crate::utils::save_files::ROM_FILTER;
         self.try_start_audio();
         crate::utils::file_loader::FileLoader::new()
             .title("Load ROM")
-            .add_filter("Game Boy ROMs", &["gb", "gbc"])
+            .add_filter(ROM_FILTER.0, ROM_FILTER.1)
             .dispatch(self.files.rom_tx.clone());
     }
 }

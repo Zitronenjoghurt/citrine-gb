@@ -1,12 +1,13 @@
 # Citrine Lab
 
 An experimentation harness for the Citrine Game Boy emulator. The first experiment compares
-Citrine's frame output against the reference emulator **SameBoy**, frame by frame.
+Citrine's frame output against a reference emulator frame by frame: **SameBoy** for Game Boy and
+Game Boy Color games, **mGBA** for GBA games.
 
 Everything is built around three traits so experiments can swap implementations freely:
 
 - `FrameEmulator` (`src/emulator.rs`) is anything that can be stepped, fed cycle-timed input, and
-  produce frames. Adapters: `CitrineEmulator`, `SameBoyEmulator` (`src/emulators/`).
+  produce frames. Adapters: `CitrineEmulator`, `SameBoyEmulator`, `MgbaEmulator` (`src/emulators/`).
 - `FrameMetric` (`src/metric.rs`) is a scalar similarity measure. Built-ins: `ExactFrame` (`exact`),
   `ExactPixelRatio` (`px_match`), `Mse` (`mse`), `Nmse` (`nmse`, MSE normalized to 0..1), `Psnr`
   (`psnr`, in dB; identical frames reported as 100 dB), `Ssim` (`ssim`) (`src/metrics/`).
@@ -15,13 +16,17 @@ Everything is built around three traits so experiments can swap implementations 
 The comparison engine (`src/runner.rs`) and recording format
 (`citrine_gb::recording`, shared with the app frontend) are emulator-agnostic.
 
-## Building SameBoy
+## Building SameBoy and mGBA
 
 SameBoy is a git submodule at `crates/sameboy-sys/SameBoy`, compiled by the `sameboy-sys` crate's `build.rs`
 (via the `cc` crate, with hand-written FFI, so no bindgen/libclang is needed).
 
+mGBA 0.10.5 is a git submodule at `crates/mgba-sys/mGBA`. The `mgba-sys` crate's `build.rs` compiles
+its GBA core alone, with no threads, debugger or optional libraries, plus a small C file
+(`src/shim.c`) that the Rust side calls. mGBA is under the MPL-2.0, and the lab is never shipped.
+
 ```sh
-make lab-deps          # git submodule update --init crates/sameboy-sys/SameBoy
+make lab-deps          # git submodule update --init for both submodules
 cargo build -p citrine-gb-lab
 ```
 
@@ -48,6 +53,11 @@ cargo run --release -p citrine-gb-lab -- \
 - Output is normalized to a canonical greyscale by default so palette/theme choices don't count as
   differences; pass `--raw` to compare actual RGB output.
 - SameBoy is the reference; Citrine is the candidate under test.
+- `--model gba` runs a GBA game against mGBA, without a boot ROM (mGBA starts the game itself) or
+  with a GBA BIOS as `--boot-rom`. Frames are compared in 15-bit colour over windows of 280,896
+  cycles, one GBA frame. Recordings name a Game Boy model, so a GBA run takes no `--recording` yet.
+- Until Citrine has a GBA core it refuses GBA games. The lab then says so, runs mGBA alone and, with
+  `--dump-divergences`, writes each of mGBA's frames as `frame_NNNNN_ref.png`.
 - `--dump-divergences` defaults to **no cap**. On a run where most frames differ, that is three PNGs
   per frame (tens of thousands of files). Use `--max-dumps N` to bound it.
 - `--align` controls how the two frame sequences are paired. `cycle` (default) pairs each reference

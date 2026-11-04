@@ -46,6 +46,7 @@ pub(super) fn dex(game: Game) -> Dex {
     let count = match generation {
         Generation::One => 151,
         Generation::Two => 251,
+        Generation::Three => 0,
     };
     for number in 1..=count {
         let (index, record) = match generation {
@@ -57,6 +58,7 @@ pub(super) fn dex(game: Game) -> Dex {
                 number as u8,
                 gen2_record(number as u8, [PSYCHIC, PSYCHIC], EGG_CYCLES),
             ),
+            Generation::Three => break,
         };
         let name = match game.language {
             Language::Japanese => "ミュウ",

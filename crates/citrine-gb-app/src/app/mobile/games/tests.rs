@@ -7,6 +7,7 @@ fn entry(path: PathBuf, title: &str) -> RecentRom {
         title: title.to_owned(),
         last_played: 0,
         rom_key: None,
+        console: None,
     }
 }
 

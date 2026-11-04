@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE devices SET old_chats_wanted = 0 WHERE id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3e193ee4aafdb50177178113b7f6d4fb58c878ad817d30d31975f6b7b92efbf6"
+}

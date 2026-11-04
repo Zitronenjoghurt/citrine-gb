@@ -182,14 +182,16 @@ impl Citrine {
 
     fn tile_facts(&self) -> TileFacts {
         let session = self.play.session().is_some();
-        let cgb_mode = self.emulator.gb.cartridge.header.cgb_mode;
+        let both = self
+            .emulator
+            .as_gb()
+            .is_some_and(|gb| plays_on_both(gb.cartridge.header.cgb_mode));
         let has_rom = self.emulator.rom_key().is_some();
         TileFacts {
             session,
             alone: !session && self.emulator.link.is_none() && self.emulator.partner.is_none(),
             has_rom,
-            other_console: (plays_on_both(cgb_mode) && has_rom)
-                .then(|| other_console(self.emulator.console())),
+            other_console: (both && has_rom).then(|| other_console(self.emulator.console())),
             joined: self.ui.settings.online.is_joined(),
             recognised: self.game_info.recognised(),
             web: cfg!(target_arch = "wasm32"),
@@ -203,7 +205,7 @@ impl Citrine {
         if let Some(key) = self.emulator.rom_key().map(str::to_owned) {
             self.ui.snapshots.sync(ctx, &self.emulator.store, &key);
         }
-        let screen = ctx.content_rect();
+        let screen = super::sheet::area(ctx).unwrap_or(ctx.content_rect());
         let dim = egui::Area::new(Id::new("more_scrim"))
             .order(Order::Middle)
             .fixed_pos(screen.min)
@@ -328,15 +330,21 @@ impl Citrine {
     fn more_together(&mut self, ui: &mut Ui) -> Option<MoreAction> {
         let session = self.play.session()?;
         let friend = session.friend();
-        let full = self.online.display_name(friend);
-        let name = playing::short_name(&full).to_owned();
+        let name = playing::member_name(&self.play, &self.online, friend);
+        let room = self.play.room().is_some_and(|r| r.members().len() > 1);
         let mut action = None;
-        kit::section_label(ui, &format!("With {name}"));
+        if room {
+            kit::section_label(ui, "Room");
+        } else {
+            kit::section_label(ui, &format!("With {name}"));
+        }
         let switches = playing::bar_switches(session, &name);
         let sound = playing::FriendSound::of(&self.ui.settings.online);
         let hears_friend = playing::watching(session) && !session.watching_only();
         let leave = if session.stage() == Stage::Inviting {
             "Take back the invite"
+        } else if room {
+            "Leave the room"
         } else if session.watching_only() {
             "Stop watching"
         } else {
@@ -404,7 +412,7 @@ impl Citrine {
         }
         let gap = 8.0;
         let width = ((ui.available_width() - gap * 3.0) / 4.0).floor();
-        let picture = vec2(width, width * 144.0 / 160.0);
+        let picture = vec2(width, width * self.emulator.video().aspect());
         let mut slots: Vec<_> = self.ui.snapshots.slots().iter().collect();
         slots.sort_by_key(|slot| std::cmp::Reverse(slot.saved_at));
         ui.horizontal(|ui| {
@@ -637,16 +645,22 @@ impl Citrine {
             return;
         };
         let name = self.emulator.snapshot_name(slot);
+        let partners = crate::app::tabs::playing::group_partners(&self.play, &self.online);
+        let question = match &partners {
+            Some(partners) => format!("Load this state? You'll unlink from {partners}."),
+            None => format!("Load {name}?"),
+        };
         let choice = crate::app::widgets::confirm::confirm_with_detail(
             ctx,
             "load_state_confirm",
-            &format!("Load {name}?"),
-            Some("Progress since then is lost unless you save it first."),
+            &question,
+            Some("Unsaved progress is lost."),
             "Load",
         );
         match choice {
             Some(true) => {
                 self.mobile.more.loading = None;
+                crate::app::tabs::playing::unlink_group(&mut self.play, &mut self.emulator);
                 match self.emulator.load_snapshot(slot) {
                     Ok(_) => self.toasts.success(format!("Loaded {name}")),
                     Err(err) => self

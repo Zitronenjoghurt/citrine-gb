@@ -1,7 +1,7 @@
 use crate::debug::e2e::E2ETest;
 use crate::gb::GameBoy;
 use crate::rom::Rom;
-use crate::rom::header::RomHeader;
+use crate::rom::id::RomId;
 use crate::tests::skip;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -17,12 +17,12 @@ struct Sources {
     sources: BTreeMap<String, archives::Source>,
 }
 
-struct LedgerRoms {
+pub(super) struct LedgerRoms {
     archives: Vec<(zip::ZipArchive<File>, HashMap<String, String>)>,
 }
 
 impl LedgerRoms {
-    fn load() -> Result<Self, String> {
+    pub(super) fn load() -> Result<Self, String> {
         let manifest: Sources = archives::read_manifest()?;
         let mut archives = Vec::new();
         for (name, source) in &manifest.sources {
@@ -33,7 +33,7 @@ impl LedgerRoms {
         Ok(Self { archives })
     }
 
-    fn find(&mut self, sha: &str) -> Result<Option<Vec<u8>>, String> {
+    pub(super) fn find(&mut self, sha: &str) -> Result<Option<Vec<u8>>, String> {
         for (archive, index) in &mut self.archives {
             if let Some(path) = index.get(sha) {
                 return archives::read_entry(archive, path).map(Some);
@@ -94,10 +94,7 @@ fn map_available_roms(dir: &Path, rom_map: &mut HashMap<String, PathBuf>) {
                 && (ext == "gb" || ext == "gbc")
                 && let Ok(data) = fs::read(&path)
             {
-                let sha_hex = RomHeader::calculate_sha256(&data)
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<String>();
+                let sha_hex = RomId::new(&data).sha256_hex_string();
                 rom_map.insert(sha_hex, path);
             }
         }

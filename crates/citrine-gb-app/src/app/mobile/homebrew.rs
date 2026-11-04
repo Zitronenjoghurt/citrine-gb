@@ -2,7 +2,7 @@ use super::kit::{self, Row};
 use super::sheet;
 use crate::app::Citrine;
 use crate::app::ui_state::settings::{console_name, other_console, plays_on_both};
-use crate::homebrew::{HOMEBREW_GAMES, HomebrewGame};
+use crate::homebrew::{HOMEBREW_GAMES, HomebrewGame, shelves};
 use crate::icons;
 use egui::{Context, Id, RichText, Ui};
 
@@ -21,39 +21,45 @@ impl Citrine {
     pub(super) fn homebrew_page(&mut self, ui: &mut Ui) {
         let running = self
             .emulator
-            .gb
-            .cartridge
-            .has_rom_loaded
+            .has_game()
             .then(|| self.emulator.rom_key())
             .flatten()
             .map(str::to_owned);
         let mut pick = None;
         kit::place(ui, "homebrew_page", |ui| {
-            ui.add_space(8.0);
-            kit::list(ui, |list| {
-                for (index, game) in HOMEBREW_GAMES.iter().enumerate() {
-                    let tags = game.tag_str();
-                    let mut row = Row::new(game.title).detail(&tags).trailing(icons::INFO);
-                    if is_running(game, running.as_deref()) {
-                        row = row.value(format!("{} Resume", icons::PLAY)).accent();
-                    }
-                    let response = list.row(row);
-                    if response.clicked() {
-                        let on_info = response
-                            .interact_pointer_pos()
-                            .is_some_and(|at| at.x > response.rect.right() - INFO_SIDE);
-                        pick = Some(if on_info {
-                            Pick::Info(index)
-                        } else {
-                            Pick::Start(index)
-                        });
-                    }
+            let shelves = shelves();
+            for (console, games) in &shelves {
+                if shelves.len() > 1 {
+                    kit::section_label(ui, console.label());
+                } else {
+                    ui.add_space(8.0);
                 }
-            });
+                kit::list(ui, |list| {
+                    for &(index, game) in games {
+                        let tags = game.tag_str();
+                        let mut row = Row::new(game.title).detail(&tags).trailing(icons::INFO);
+                        if is_running(game, running.as_deref()) {
+                            row = row.value(format!("{} Resume", icons::PLAY)).accent();
+                        }
+                        let response = list.row(row);
+                        if response.clicked() {
+                            let on_info = response
+                                .interact_pointer_pos()
+                                .is_some_and(|at| at.x > response.rect.right() - INFO_SIDE);
+                            pick = Some(if on_info {
+                                Pick::Info(index)
+                            } else {
+                                Pick::Start(index)
+                            });
+                        }
+                    }
+                });
+            }
         });
         match pick {
             Some(Pick::Start(index)) => self.start_homebrew(index, running.as_deref()),
             Some(Pick::Info(index)) => {
+                self.shelf.prefetch(&HOMEBREW_GAMES[index]);
                 self.mobile.homebrew_info = Some(index);
                 self.release_touch();
             }
@@ -69,7 +75,7 @@ impl Citrine {
         if is_running(game, running) {
             self.resume_game();
         } else {
-            self.events.load_rom_data(game.data());
+            self.events.play_shelf_game(game);
         }
     }
 
@@ -117,7 +123,7 @@ impl Citrine {
         if let Some(model) = shown.inner {
             if let Some(model) = model {
                 self.ui.settings.set_game_console(game.rom_key, model);
-                self.events.load_rom_data(game.data());
+                self.events.play_shelf_game(game);
             } else {
                 self.start_homebrew(index, running);
             }

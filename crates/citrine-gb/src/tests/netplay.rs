@@ -1,11 +1,12 @@
 use crate::ReadMemory;
-use crate::gb::joypad::JoypadState;
+use crate::console::{ConsoleKind, Keys, Rollback};
+use crate::gb::serial::LinkMessage;
 use crate::gb::{GameBoy, GbModel};
 use crate::netplay::pair::{self, Cable};
 use crate::netplay::state::{self, Snapshot};
 use crate::netplay::{
     Advance, CableEvent, Check, ConsoleSetup, Input, MAX_ROLLBACK_FRAMES, Player, Session,
-    SessionConfig, new_console,
+    SessionConfig, Sync, new_console,
 };
 use crate::persistence::rtc_footer::RtcFooter;
 use crate::persistence::sram_dump::SramDump;
@@ -21,7 +22,7 @@ const POSTIE: &[u8] = include_bytes!("../../../citrine-gb-app/homebrew/postie.gb
 const FRAME_MS: f64 = 70_224.0 * 1000.0 / 4_194_304.0;
 const START_TIME: u64 = 1_790_000_000;
 const PLAYERS: [Player; 2] = [Player::One, Player::Two];
-const IDLE: [Input; 2] = [Input::new(JoypadState::empty()); 2];
+const IDLE: [Input; 2] = [Input::new(Keys::empty()); 2];
 
 struct Rng(u64);
 
@@ -91,7 +92,7 @@ fn setups(roms: &[Rom; 2]) -> [Option<ConsoleSetup<'_>>; 2] {
     [0, 1].map(|i| {
         Some(ConsoleSetup {
             rom: &roms[i],
-            model: GbModel::for_rom(&roms[i]).unwrap(),
+            kind: GbModel::for_rom(&roms[i]).unwrap().into(),
             save: None,
             state: None,
         })
@@ -105,21 +106,21 @@ fn config(local: Player, check_interval: u32) -> SessionConfig {
     }
 }
 
-fn session(roms: &[Rom; 2], local: Player, check_interval: u32) -> Session {
+fn session(roms: &[Rom; 2], local: Player, check_interval: u32) -> Session<GameBoy> {
     let mut session = Session::new(config(local, check_interval), setups(roms)).unwrap();
     session.watch_remote(true);
     session
 }
 
-const PAD: [JoypadState; 8] = [
-    JoypadState::empty(),
-    JoypadState::LEFT,
-    JoypadState::RIGHT,
-    JoypadState::UP,
-    JoypadState::DOWN,
-    JoypadState::A,
-    JoypadState::B,
-    JoypadState::A.union(JoypadState::RIGHT),
+const PAD: [Keys; 8] = [
+    Keys::empty(),
+    Keys::LEFT,
+    Keys::RIGHT,
+    Keys::UP,
+    Keys::DOWN,
+    Keys::A,
+    Keys::B,
+    Keys::A.union(Keys::RIGHT),
 ];
 
 fn random_inputs(seed: u64, frames: usize, longest: u64) -> Vec<Input> {
@@ -134,7 +135,7 @@ fn random_inputs(seed: u64, frames: usize, longest: u64) -> Vec<Input> {
     inputs
 }
 
-fn press(inputs: &mut [Input], at: usize, buttons: JoypadState, frames: usize) {
+fn press(inputs: &mut [Input], at: usize, buttons: Keys, frames: usize) {
     for input in &mut inputs[at..at + frames] {
         input.buttons = buttons;
     }
@@ -145,7 +146,7 @@ fn cable(inputs: &mut [Input], at: usize, event: CableEvent) {
 }
 
 struct Online {
-    sessions: [Session; 2],
+    sessions: [Session<GameBoy>; 2],
     checks: [Vec<Check>; 2],
     deepest: u32,
     rollbacks: u32,
@@ -155,10 +156,10 @@ struct Online {
 }
 
 fn play_online(
-    new_session: impl Fn(Player) -> Session,
+    new_session: impl Fn(Player) -> Session<GameBoy>,
     inputs: &[Vec<Input>; 2],
     delay: Delay,
-    mut corrupt: impl FnMut(u32, &mut Session),
+    mut corrupt: impl FnMut(u32, &mut Session<GameBoy>),
 ) -> Online {
     let frames = inputs[0].len() as u32;
     let mut online = Online {
@@ -239,7 +240,10 @@ fn play_online(
     panic!("sessions did not settle within {limit} ticks");
 }
 
-fn play_reference(session: Session, inputs: &[Vec<Input>; 2]) -> (Session, Vec<Check>) {
+fn play_reference(
+    session: Session<GameBoy>,
+    inputs: &[Vec<Input>; 2],
+) -> (Session<GameBoy>, Vec<Check>) {
     let mut session = session;
     let mut checks = Vec::new();
     for (frame, (&local, &remote)) in inputs[0].iter().zip(&inputs[1]).enumerate() {
@@ -254,7 +258,7 @@ fn play_reference(session: Session, inputs: &[Vec<Input>; 2]) -> (Session, Vec<C
 
 struct Plain {
     consoles: [GameBoy; 2],
-    cable: Cable,
+    cable: Cable<LinkMessage>,
     hashes: Vec<[u64; 2]>,
 }
 
@@ -292,8 +296,7 @@ fn by_frame(checks: &[Check]) -> Vec<[u64; 2]> {
 
 fn assert_same_consoles(a: &GameBoy, b: &GameBoy, what: &str) {
     assert!(
-        state::encode_console(&a.clone_state()).unwrap()
-            == state::encode_console(&b.clone_state()).unwrap(),
+        a.clone_state().encode_state().unwrap() == b.clone_state().encode_state().unwrap(),
         "{what}: console state differs"
     );
     assert!(
@@ -306,7 +309,7 @@ fn snake_inputs(frames: usize) -> [Vec<Input>; 2] {
     let mut one = random_inputs(11, frames, 24);
     let mut two = random_inputs(29, frames, 24);
     for at in (60..frames - 10).step_by(90) {
-        press(&mut two, at, JoypadState::START, 5);
+        press(&mut two, at, Keys::START, 5);
     }
     cable(&mut one, 20, CableEvent::Plug);
     cable(&mut two, frames / 2, CableEvent::Pull);
@@ -375,7 +378,7 @@ fn linked_round(
     inputs: &[Vec<Input>; 2],
     power_on: [u32; 2],
     least_messages: u64,
-) -> Cable {
+) -> Cable<LinkMessage> {
     let plain = play_plain(roms, inputs, power_on);
     assert!(
         plain.cable.messages.iter().all(|&m| m >= least_messages),
@@ -426,18 +429,12 @@ fn a_linked_petris_match_through_sessions_matches_a_local_pair() {
         vec![Input::default(); frames],
     ];
     cable(&mut inputs[0], 0, CableEvent::Plug);
-    press(&mut inputs[0], 450, JoypadState::START, 5);
-    press(&mut inputs[1], 450, JoypadState::START, 5);
-    press(&mut inputs[0], 600, JoypadState::DOWN, 5);
-    press(&mut inputs[0], 640, JoypadState::RIGHT, 5);
-    press(&mut inputs[0], 700, JoypadState::START, 5);
-    let pad = [
-        JoypadState::LEFT,
-        JoypadState::RIGHT,
-        JoypadState::A,
-        JoypadState::DOWN,
-        JoypadState::empty(),
-    ];
+    press(&mut inputs[0], 450, Keys::START, 5);
+    press(&mut inputs[1], 450, Keys::START, 5);
+    press(&mut inputs[0], 600, Keys::DOWN, 5);
+    press(&mut inputs[0], 640, Keys::RIGHT, 5);
+    press(&mut inputs[0], 700, Keys::START, 5);
+    let pad = [Keys::LEFT, Keys::RIGHT, Keys::A, Keys::DOWN, Keys::empty()];
     let mut rng = Rng(9);
     for side in &mut inputs {
         let mut at = 800;
@@ -468,7 +465,7 @@ fn snake_links_through_sessions_when_one_console_starts_later() {
         }
     }
     for at in (120..frames - 10).step_by(60) {
-        press(&mut inputs[1], at, JoypadState::START, 5);
+        press(&mut inputs[1], at, Keys::START, 5);
     }
     let cable = linked_round(&roms(SNAKE, SNAKE), &inputs, [0, 60], 20);
     let [one, two] = cable.transfers;
@@ -495,6 +492,81 @@ fn a_console_handed_back_comes_from_the_last_confirmed_frame() {
     let (reference, _) = play_reference(session(&roms, Player::One, 1), &shared);
     let handed = ahead.into_confirmed_console(Player::One);
     assert_same_consoles(&handed, reference.console(Player::One), "confirmed frame");
+}
+
+#[test]
+fn the_kept_states_up_to_the_confirmed_frame_match_a_replay() {
+    let roms = roms(SNAKE, SNAKE);
+    let inputs = snake_inputs(120);
+    let mut late = session(&roms, Player::One, 1);
+    let mut heard = 0;
+    for frame in 0..100u32 {
+        if frame % 16 == 0 {
+            while heard + 6 < frame {
+                late.add_remote_input(heard, inputs[1][heard as usize]);
+                heard += 1;
+            }
+        }
+        late.add_local_input(frame, inputs[0][frame as usize])
+            .unwrap();
+        assert_eq!(late.advance(), Advance::Ran);
+    }
+    late.advance();
+    let confirmed = late.confirmed_frame();
+    assert_eq!(confirmed, heard);
+    for player in [Player::One, Player::Two] {
+        let states = late.confirmed_states(player);
+        assert!(states.len() >= 10, "{} states", states.len());
+        let frames: Vec<u32> = states.iter().map(|&(frame, _)| frame).collect();
+        let first = frames[0];
+        assert_eq!(frames, (first..=confirmed).collect::<Vec<_>>());
+        for &index in &[0, states.len() / 2, states.len() - 1] {
+            let (frame, state) = &states[index];
+            let shared = [0, 1].map(|side| inputs[side][..*frame as usize].to_vec());
+            let (reference, _) = play_reference(session(&roms, Player::One, 1), &shared);
+            assert_same_consoles(state, reference.console(player), &format!("frame {frame}"));
+        }
+    }
+}
+
+#[test]
+fn a_session_at_its_budget_keeps_confirmed_states_only_when_asked() {
+    let roms = roms(SNAKE, SNAKE);
+    let inputs = snake_inputs(120);
+    let budget = Sync::new(4, 0);
+    let run = |keep: u32| {
+        let config = SessionConfig {
+            sync: budget,
+            ..config(Player::One, 1)
+        };
+        let mut late = Session::new(config, setups(&roms))
+            .unwrap()
+            .keeping_confirmed(keep);
+        late.watch_remote(true);
+        for frame in 0..60u32 {
+            for heard in frame.saturating_sub(4)..frame.saturating_sub(3) {
+                late.add_remote_input(heard, inputs[1][heard as usize]);
+            }
+            late.add_local_input(frame, inputs[0][frame as usize])
+                .unwrap();
+            assert_eq!(late.advance(), Advance::Ran, "frame {frame}");
+        }
+        late.advance();
+        (late.confirmed_frame(), late.confirmed_states(Player::Two))
+    };
+    assert!(run(0).1.len() <= 2);
+    let (confirmed, states) = run(20);
+    assert!(states.len() > 20, "{} states", states.len());
+    let frames: Vec<u32> = states.iter().map(|&(frame, _)| frame).collect();
+    assert_eq!(frames, (frames[0]..=confirmed).collect::<Vec<_>>());
+    let (frame, state) = &states[0];
+    let shared = [0, 1].map(|side| inputs[side][..*frame as usize].to_vec());
+    let (reference, _) = play_reference(session(&roms, Player::One, 1), &shared);
+    assert_same_consoles(
+        state,
+        reference.console(Player::Two),
+        &format!("frame {frame}"),
+    );
 }
 
 fn exchange_program(sc: u8, first: u8, step: u8, count: u16) -> Vec<u8> {
@@ -705,12 +777,12 @@ fn rtc_save(ram: u8, timestamp: u64) -> SramDump {
     SramDump::from_slice(&data)
 }
 
-fn rtc_session(rom: &Rom, local: Player, start_time: u64) -> Session {
+fn rtc_session(rom: &Rom, local: Player, start_time: u64) -> Session<GameBoy> {
     let saved = START_TIME - 3_600;
     let setups = [0x11, 0x22].map(|ram| {
         Some(ConsoleSetup {
             rom,
-            model: GbModel::Dmg,
+            kind: ConsoleKind::Gb,
             save: Some(rtc_save(ram, saved)),
             state: None,
         })
@@ -783,7 +855,7 @@ fn inputs_arrive_late_out_of_order_and_twice() {
     let mut rng = Rng(99);
     let mut pending: Vec<u32> = Vec::new();
     let mut delivered: Vec<u32> = Vec::new();
-    let deliver = |session: &mut Session, frame: u32| {
+    let deliver = |session: &mut Session<GameBoy>, frame: u32| {
         session.add_remote_input(frame, inputs[1][frame as usize]);
     };
     for frame in 0..frames {
@@ -836,7 +908,7 @@ fn a_session_waits_when_the_remote_falls_too_far_behind() {
         .add_local_input(MAX_ROLLBACK_FRAMES, Input::default())
         .unwrap();
     assert_eq!(session.advance(), Advance::AwaitingRemote);
-    session.add_remote_input(0, Input::new(JoypadState::A));
+    session.add_remote_input(0, Input::new(Keys::A));
     assert_eq!(session.advance(), Advance::Ran);
     assert_eq!(session.last_rollback(), MAX_ROLLBACK_FRAMES);
     assert_eq!(session.advance(), Advance::AwaitingLocal);
@@ -985,8 +1057,7 @@ fn a_console_taken_out_of_a_session_runs_on_like_the_session_copy() {
     for player in PLAYERS {
         let mut gb = play(250).into_console(player);
         for input in &inputs[player.index()][250..] {
-            gb.release_button(input.buttons.complement());
-            gb.press_button(input.buttons);
+            gb.set_keys(input.buttons);
             gb.run_frame();
         }
         assert_same_consoles(&gb, whole.console(player), &format!("{player:?}"));
@@ -999,7 +1070,7 @@ fn play_rewinding(
     inputs: &[Vec<Input>; 2],
     lag: usize,
     rewind_to: impl Fn(usize) -> Option<u32>,
-) -> (Session, Vec<Check>) {
+) -> (Session<GameBoy>, Vec<Check>) {
     let local = config.local;
     let mut session = Session::new(config, setups(roms)).unwrap();
     session.watch_remote(true);
@@ -1075,6 +1146,7 @@ fn rewinds_replay_to_the_same_state_as_a_straight_run() {
         let mapped = match local {
             Player::One => inputs.clone(),
             Player::Two => [inputs[1].clone(), inputs[0].clone()],
+            _ => unreachable!(),
         };
         for (interval, power_on) in [(1, [0, 0]), (60, [0, 0]), (1, [0, power_on])] {
             let config = SessionConfig {
@@ -1117,7 +1189,7 @@ fn rewinds_replay_to_the_same_state_as_a_straight_run() {
 
 #[test]
 fn a_session_keeps_its_consoles_off_the_stack() {
-    let size = std::mem::size_of::<Session>();
+    let size = std::mem::size_of::<Session<GameBoy>>();
     assert!(size < 4096, "a session is {size} bytes");
 }
 
@@ -1201,7 +1273,7 @@ fn measure(name: &str, roms: &[Rom; 2], plug: bool) {
     for f in 0..frames as u32 {
         session.add_local_input(f, inputs[0][f as usize]).unwrap();
         if f >= 8 {
-            let flipped = Input::new(JoypadState::from_bits_truncate(f as u8));
+            let flipped = Input::new(Keys::from_bits_truncate(u16::from(f as u8)));
             session.add_remote_input(f - 8, flipped);
         }
         let ms = time_ms(|| {
@@ -1258,7 +1330,7 @@ fn long_run(roms: &[Rom; 2], frames: usize, plug: bool, blind: bool) -> ([u64; 2
     let mut inputs = [random_inputs(5, frames, 30), random_inputs(6, frames, 30)];
     for side in &mut inputs {
         for at in (100..frames.saturating_sub(10)).step_by(240) {
-            press(side, at, JoypadState::START, 5);
+            press(side, at, Keys::START, 5);
         }
     }
     if plug {
@@ -1326,7 +1398,7 @@ fn alone<'a>(rom: &'a Rom, state: Option<&'a [u8]>) -> [Option<ConsoleSetup<'a>>
     [
         Some(ConsoleSetup {
             rom,
-            model: GbModel::for_rom(rom).unwrap(),
+            kind: GbModel::for_rom(rom).unwrap().into(),
             save: None,
             state,
         }),
@@ -1334,7 +1406,7 @@ fn alone<'a>(rom: &'a Rom, state: Option<&'a [u8]>) -> [Option<ConsoleSetup<'a>>
     ]
 }
 
-fn watched(rom: &Rom, local: Player, state: Option<&[u8]>) -> Session {
+fn watched(rom: &Rom, local: Player, state: Option<&[u8]>) -> Session<GameBoy> {
     let mut session = Session::new(config(local, 60), alone(rom, state)).unwrap();
     session.watch_remote(true);
     session
@@ -1342,8 +1414,7 @@ fn watched(rom: &Rom, local: Player, state: Option<&[u8]>) -> Session {
 
 fn run_alone(gb: &mut GameBoy, inputs: &[Input]) {
     for input in inputs {
-        gb.release_button(input.buttons.complement());
-        gb.press_button(input.buttons);
+        gb.set_keys(input.buttons);
         gb.run_frame();
     }
 }
@@ -1357,7 +1428,7 @@ fn a_player_never_waits_for_a_watcher() {
     assert!(!player.present(Player::Two));
     for (frame, &input) in inputs.iter().enumerate() {
         player.add_local_input(frame as u32, input).unwrap();
-        player.add_remote_input(frame as u32, Input::new(JoypadState::A));
+        player.add_remote_input(frame as u32, Input::new(Keys::A));
         assert_eq!(player.advance(), Advance::Ran);
         assert_eq!(player.confirmed_frame(), player.frame());
         assert_eq!(player.last_rollback(), 0);
@@ -1437,9 +1508,57 @@ fn a_console_resumes_from_its_running_state() {
             match local {
                 Player::One => session.add_local_input(frame as u32, input).unwrap(),
                 Player::Two => session.add_remote_input(frame as u32, input),
+                _ => unreachable!(),
             }
             assert_eq!(session.advance(), Advance::Ran);
         }
         assert_same_consoles(session.console(Player::One), &plain, &format!("{local:?}"));
+    }
+}
+
+#[test]
+fn the_state_hash_for_a_fixed_seed_and_script_is_pinned() {
+    let roms = roms(TOBU, PETRIS);
+    let mut inputs = [random_inputs(21, 300, 20), random_inputs(22, 300, 20)];
+    cable(&mut inputs[1], 0, CableEvent::Plug);
+    let (_, checks) = play_reference(session(&roms, Player::One, 60), &inputs);
+    let last = checks.last().unwrap();
+    assert_eq!(last.frame, 240);
+    assert_eq!(
+        last.hashes,
+        [10_327_700_034_087_936_027, 10_655_459_752_029_337_545]
+    );
+}
+
+#[test]
+fn inputs_encode_like_the_joypad_state_they_replaced() {
+    #[derive(serde::Serialize)]
+    struct Before {
+        buttons: crate::gb::joypad::JoypadState,
+        cable: Option<CableEvent>,
+    }
+    for bits in 0..=u8::MAX {
+        for cable in [None, Some(CableEvent::Plug), Some(CableEvent::Pull)] {
+            let before = Before {
+                buttons: crate::gb::joypad::JoypadState::from_bits_retain(bits),
+                cable,
+            };
+            let input = Input {
+                buttons: Keys::from_bits_retain(u16::from(bits)),
+                cable,
+            };
+            assert_eq!(
+                rmp_serde::to_vec(&input).unwrap(),
+                rmp_serde::to_vec(&before).unwrap()
+            );
+            assert_eq!(
+                rmp_serde::to_vec_named(&input).unwrap(),
+                rmp_serde::to_vec_named(&before).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_string(&input).unwrap(),
+                serde_json::to_string(&before).unwrap()
+            );
+        }
     }
 }

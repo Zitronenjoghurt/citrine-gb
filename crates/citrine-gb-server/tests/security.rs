@@ -487,7 +487,9 @@ async fn an_old_app_hears_the_new_protocol_version() {
     let error = ServerMsg::decode(&next_binary(&mut ws).await.unwrap()).unwrap();
     assert!(matches!(
         error,
-        ServerMsg::Error(ErrorCode::Protocol { server: 2 })
+        ServerMsg::Error(ErrorCode::Protocol {
+            server: PROTOCOL_VERSION
+        })
     ));
     assert!(next_binary(&mut ws).await.is_none());
 

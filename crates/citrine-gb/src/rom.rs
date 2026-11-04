@@ -3,6 +3,8 @@ use crate::rom::header::RomHeader;
 use std::path::Path;
 
 pub mod header;
+#[cfg(feature = "rom-id")]
+pub mod id;
 
 #[derive(Debug)]
 pub struct Rom {

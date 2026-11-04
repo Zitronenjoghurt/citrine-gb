@@ -1,5 +1,5 @@
+use crate::storage::SaveStore;
 use crate::storage::cloud::OtherBattery;
-use crate::storage::{SaveStore, THUMB_HEIGHT, THUMB_WIDTH};
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 
 #[derive(Default)]
@@ -124,7 +124,7 @@ pub struct SlotView {
     pub saved_at: u64,
     pub texture: TextureHandle,
     pub name: Option<String>,
-    pub console: Option<citrine_gb::gb::GbModel>,
+    pub console: Option<citrine_gb::console::ConsoleKind>,
 }
 
 impl SlotView {
@@ -353,8 +353,7 @@ fn views(
     infos
         .into_iter()
         .map(|info| {
-            let image =
-                ColorImage::from_rgba_unmultiplied([THUMB_WIDTH, THUMB_HEIGHT], &info.thumbnail);
+            let image = ColorImage::from_rgba_unmultiplied(info.thumb_size(), &info.thumbnail);
             SlotView {
                 slot: info.slot,
                 saved_at: info.saved_at,
@@ -373,7 +372,7 @@ fn views(
 pub fn stamp_row_with(
     ui: &mut egui::Ui,
     stamp: String,
-    console: Option<citrine_gb::gb::GbModel>,
+    console: Option<citrine_gb::console::ConsoleKind>,
     cloud: Option<crate::online::cloud::SyncState>,
     choose: bool,
 ) -> bool {
@@ -388,8 +387,8 @@ pub fn stamp_row_with(
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.small(stamp);
-            if let Some(console) = console {
-                console_tag(ui, console);
+            if let Some(kind) = console {
+                console_tag(ui, kind);
             }
             if let Some(state) = cloud {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -408,9 +407,9 @@ pub fn stamp_row_with(
     chosen
 }
 
-fn console_tag(ui: &mut egui::Ui, console: citrine_gb::gb::GbModel) {
-    let short = crate::app::ui_state::settings::console_short(console);
-    let name = crate::app::ui_state::settings::console_name(console);
+fn console_tag(ui: &mut egui::Ui, console: citrine_gb::console::ConsoleKind) {
+    let short = crate::app::ui_state::settings::kind_short(console);
+    let name = crate::app::ui_state::settings::kind_name(console);
     let galley = egui::WidgetText::from(egui::RichText::new(short).small()).into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
@@ -501,7 +500,13 @@ mod tests {
         let mut state = SnapshotsState::default();
 
         store
-            .store_autosave("GAME", b"a", &frame, citrine_gb::gb::GbModel::Dmg, 10)
+            .store_autosave(
+                "GAME",
+                b"a",
+                &frame,
+                citrine_gb::console::ConsoleKind::Gb,
+                10,
+            )
             .expect("autosave");
         state.reload(&ctx, &store, "GAME");
         assert_eq!(state.shown_autosaves(), 1);
@@ -509,7 +514,13 @@ mod tests {
 
         for _ in 0..4 {
             store
-                .store_autosave("GAME", b"a", &frame, citrine_gb::gb::GbModel::Dmg, 10)
+                .store_autosave(
+                    "GAME",
+                    b"a",
+                    &frame,
+                    citrine_gb::console::ConsoleKind::Gb,
+                    10,
+                )
                 .expect("autosave");
         }
         state.reload(&ctx, &store, "GAME");

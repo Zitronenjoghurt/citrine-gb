@@ -65,7 +65,7 @@ fn text(text: &str) -> egui::Event {
 }
 
 fn up_held(app: &Citrine) -> bool {
-    app.emulator.is_held(GbButton::Up.joypad())
+    app.emulator.is_held(GbButton::Up.key())
 }
 
 fn in_field(ctx: &Context) -> bool {
@@ -121,7 +121,7 @@ fn enter_sends_and_hands_the_keys_straight_back_to_the_game() {
     let sent = app.online.conversation(ana()).unwrap().entries.len();
     assert_eq!(sent, 1);
     assert!(
-        !app.emulator.is_held(GbButton::Start.joypad()),
+        !app.emulator.is_held(GbButton::Start.key()),
         "the Enter that sent never reaches the game"
     );
     frame(&mut app, &ctx, vec![key(egui::Key::W, true)]);

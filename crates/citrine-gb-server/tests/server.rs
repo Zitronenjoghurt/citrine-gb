@@ -1,7 +1,8 @@
 use citrine_gb_net::{
     Account, CHUNK_BYTES, Channel, ClientHandshake, ClientMsg, DeviceId, DeviceInfo, DeviceKey,
-    EndReason, ErrorCode, FriendState, GameKey, MAX_SCREEN_BYTES, NONCE_BYTES, Notice, OnlineId,
-    PROTOCOL_VERSION, Presence, RelayId, RelayPassword, Sealed, ServerInfo, ServerMsg, SessionId,
+    EndReason, ErrorCode, FriendState, GameKey, MAX_SCREEN_BYTES, NONCE_BYTES, Notice,
+    OLDEST_PROTOCOL_VERSION, OnlineId, PROTOCOL_VERSION, Presence, RelayId, RelayPassword, Sealed,
+    ServerInfo, ServerMsg, SessionId,
 };
 use citrine_gb_server::{Config, ConfigError, Running, StartError, start};
 use futures_util::{SinkExt, StreamExt};
@@ -462,6 +463,50 @@ async fn sign_in_needs_hello_first() {
 }
 
 #[tokio::test]
+async fn an_app_of_the_oldest_protocol_still_signs_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let mut c = Client::connect(s.addr).await;
+    c.send(ClientMsg::Hello {
+        protocol: OLDEST_PROTOCOL_VERSION,
+        app: "0.10".into(),
+    })
+    .await;
+    match c.recv().await {
+        ServerMsg::Info(info) => assert_eq!(info.protocol, PROTOCOL_VERSION),
+        other => panic!("expected info, got {other:?}"),
+    }
+    let keys = RelayId::random().keys();
+    c.send(ClientMsg::SignUp {
+        relay_password: Some(RelayPassword(PASSWORD.into())),
+        auth_key: keys.auth_key().clone(),
+        public_key: keys.public_key(),
+        display_name: "Lena".into(),
+        invite: None,
+        device_name: "Test".into(),
+    })
+    .await;
+    c.welcome().await;
+    c.quiet().await;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn an_unknown_room_refuses_room_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Lena").await;
+    c.send(ClientMsg::MemberUpdate {
+        room: 7,
+        shows_screen: true,
+        playing: false,
+    })
+    .await;
+    assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::UnknownSession));
+    s.stop().await;
+}
+
+#[tokio::test]
 async fn friend_request_accept_and_presence() {
     let dir = tempfile::tempdir().unwrap();
     let s = server(dir.path(), &[]).await;
@@ -777,6 +822,79 @@ async fn an_offline_message_arrives_on_next_connect() {
     };
     assert_eq!(msg.sealed, live);
     s.stop().await;
+}
+
+#[tokio::test]
+async fn a_repeated_chat_key_is_stored_once_and_answered_with_the_stored_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let ((mut a, a_acc, a_id), (mut b, b_acc, b_id)) = friends(s.addr).await;
+    let to = b_acc.online_id;
+    let once = |tag, key, text: &[u8]| ClientMsg::ChatOnce {
+        tag,
+        to,
+        key,
+        sealed: a_id.keys().seal(&b_id.keys().public_key(), text),
+    };
+    let sent =
+        |tag| move |m: &ServerMsg| matches!(m, ServerMsg::ChatSent { tag: t, .. } if *t == tag);
+
+    a.send(once(1, 42, b"hi")).await;
+    let ServerMsg::ChatSent { id, at, .. } = a.expect("sent", sent(1)).await else {
+        unreachable!()
+    };
+    let ServerMsg::Chat(first) = b.expect("chat", |m| matches!(m, ServerMsg::Chat(_))).await else {
+        unreachable!()
+    };
+    assert_eq!(first.id, id);
+
+    a.send(once(2, 42, b"hi")).await;
+    assert_eq!(
+        a.expect("sent again", sent(2)).await,
+        ServerMsg::ChatSent { tag: 2, id, at }
+    );
+
+    a.send(once(3, 43, b"next")).await;
+    let ServerMsg::ChatSent { id: next, .. } = a.expect("next sent", sent(3)).await else {
+        unreachable!()
+    };
+    assert_ne!(next, id);
+    let ServerMsg::Chat(second) = b.expect("chat", |m| matches!(m, ServerMsg::Chat(_))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(second.id, next);
+
+    b.send(ClientMsg::ChatOnce {
+        tag: 4,
+        to: a_acc.online_id,
+        key: 42,
+        sealed: b_id.keys().seal(&a_id.keys().public_key(), b"mine"),
+    })
+    .await;
+    let ServerMsg::ChatSent { id: theirs, .. } = b.expect("their own", sent(4)).await else {
+        unreachable!()
+    };
+    assert!(theirs > next);
+
+    assert_eq!(s.stored_messages().await.unwrap(), 3);
+    let (mut fresh, _) = Client::sign_in(s.addr, &b_id).await;
+    for want in [id, next] {
+        let ServerMsg::Chat(copy) = fresh
+            .expect("history", |m| matches!(m, ServerMsg::Chat(_)))
+            .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(copy.id, want);
+    }
+    let ServerMsg::ChatCopy { message, .. } = fresh
+        .expect("their own", |m| matches!(m, ServerMsg::ChatCopy { .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(message.id, theirs);
 }
 
 #[tokio::test]

@@ -38,9 +38,11 @@ fn dialog(
         message(ui, phone, text);
         if let Some(detail) = detail {
             if phone {
-                sheet::note(ui, detail);
+                phone_note(ui, detail);
             } else {
-                ui.add(egui::Label::new(egui::RichText::new(detail).small()).truncate());
+                ui.add_space(4.0);
+                let weak = ui.visuals().weak_text_color();
+                ui.add(egui::Label::new(egui::RichText::new(detail).color(weak)).wrap());
             }
         }
         if let Some((label, checked)) = option {
@@ -48,7 +50,7 @@ fn dialog(
                 kit::list(ui, |list| list.switch(kit::SwitchRow::new(label, checked)));
                 ui.add_space(14.0);
             } else {
-                ui.checkbox(checked, label);
+                crate::app::widgets::check::checkbox(ui, checked, label);
             }
         }
         buttons(ui, phone, (action, true), None)
@@ -71,7 +73,7 @@ fn host<R>(
     }
     let modal = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
         ui.set_max_width(300.0);
-        body(ui, false)
+        ui.vertical_centered(|ui| body(ui, false)).inner
     });
     let closed = modal.should_close();
     (modal.inner, closed)
@@ -80,12 +82,23 @@ fn host<R>(
 fn message(ui: &mut egui::Ui, phone: bool, text: &str) {
     if phone {
         sheet::inset(ui, |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(text).size(16.0)).wrap());
+            ui.vertical_centered(|ui| {
+                ui.add(egui::Label::new(egui::RichText::new(text).size(16.0)).wrap());
+            });
         });
         ui.add_space(14.0);
     } else {
         ui.label(text);
     }
+}
+
+fn phone_note(ui: &mut egui::Ui, text: &str) {
+    sheet::inset(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Label::new(egui::RichText::new(text).size(14.0).weak()).wrap());
+        });
+    });
+    ui.add_space(16.0);
 }
 
 fn buttons(
@@ -127,8 +140,17 @@ fn buttons(
         return answer;
     }
     ui.add_space(8.0);
+    let size = egui::vec2(80.0, 32.0);
+    let left = row_indent(
+        ui,
+        extra
+            .map(|(label, _)| label)
+            .into_iter()
+            .chain([action.0, "Cancel"]),
+        size.x,
+    );
     ui.horizontal(|ui| {
-        let size = egui::vec2(80.0, 32.0);
+        ui.add_space(left);
         if let Some((label, enabled)) = extra
             && ui
                 .add_enabled(enabled, egui::Button::new(label).min_size(size))
@@ -136,10 +158,12 @@ fn buttons(
         {
             answer = Some(Answer::Extra);
         }
-        if ui
-            .add_enabled(action.1, egui::Button::new(action.0).min_size(size))
-            .clicked()
-        {
+        let button = if destructive(action.0) {
+            super::action::danger_button(ui, action.0)
+        } else {
+            super::action::main_button(ui, action.0)
+        };
+        if ui.add_enabled(action.1, button.min_size(size)).clicked() {
             answer = Some(Answer::Action);
         }
         if ui.add(egui::Button::new("Cancel").min_size(size)).clicked() {
@@ -147,6 +171,25 @@ fn buttons(
         }
     });
     answer
+}
+
+fn row_indent<'a>(ui: &egui::Ui, labels: impl Iterator<Item = &'a str>, min: f32) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad = ui.spacing().button_padding.x * 2.0;
+    let gap = ui.spacing().item_spacing.x;
+    let widths: Vec<f32> = labels
+        .map(|label| {
+            let text = ui.ctx().fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(label.to_owned(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            });
+            (text + pad).max(min)
+        })
+        .collect();
+    let row = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+    ((ui.available_width() - row) / 2.0).max(0.0)
 }
 
 fn destructive(action: &str) -> bool {
@@ -217,6 +260,7 @@ pub struct Ask<'a> {
     pub action: &'a str,
     pub action_enabled: bool,
     pub extra: Option<(&'a str, bool)>,
+    pub load: Option<(&'a str, crate::progress::Progress)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,10 +275,14 @@ pub fn ask(ctx: &egui::Context, id: &str, ask: Ask) -> Option<Answer> {
         message(ui, phone, ask.message);
         for note in ask.notes {
             if phone {
-                sheet::note(ui, note);
+                phone_note(ui, note);
             } else {
                 ui.label(egui::RichText::new(note).small());
             }
+        }
+        if let Some((label, progress)) = ask.load {
+            ui.add_space(8.0);
+            ui.add(super::progress::ProgressBar::new(label, progress));
         }
         buttons(ui, phone, (ask.action, ask.action_enabled), ask.extra)
     });

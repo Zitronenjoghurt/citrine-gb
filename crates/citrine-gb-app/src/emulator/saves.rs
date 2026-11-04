@@ -2,9 +2,9 @@ use super::{Emulator, PLAYING_AFTER, SAVE_COOLDOWN, SaveImport, SaveStatus};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::SaveStore;
 use crate::storage::now_unix;
+use citrine_gb::console::Console;
 use citrine_gb::error::GbResult;
 use citrine_gb::persistence::rtc_footer::RtcFooter;
-use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb::rom::Rom;
 
 impl Emulator {
@@ -27,21 +27,19 @@ impl Emulator {
         let Some(key) = self.rom_key.clone() else {
             return Ok(());
         };
-        let Some(sdump) = self.gb.poll_sram_dump(false, now_unix()) else {
+        let Some(save) = self.machine.battery(false, now_unix()) else {
             return Ok(());
         };
-        self.store.store_battery(&key, sdump.as_slice())?;
+        self.store.store_battery_save(&key, &save)?;
         self.last_save = Some(web_time::Instant::now());
         Ok(())
     }
 
     pub fn name_game(&mut self, file_name: Option<&str>) {
-        let header = &self.gb.cartridge.header;
         self.game_name = crate::game_name::game_name(
-            &header.sha1,
+            &self.machine.rom_id().sha1,
             file_name,
-            &header.title,
-            header.cgb_mode.is_cgb(),
+            &self.machine.title(),
         );
     }
 
@@ -70,14 +68,14 @@ impl Emulator {
             return Ok(());
         }
         let running = self.running;
-        let rom = Rom::new(&self.gb.cartridge.rom_bytes());
+        let rom = Rom::new(&self.machine.rom_bytes());
         let name = self.game_name.clone();
         let launched = self.stat_events.launched;
         #[cfg(not(target_arch = "wasm32"))]
         let path = self.rom_path.clone();
-        self.load_rom(
+        self.load_game(
             &rom,
-            self.gb.model,
+            self.machine.kind(),
             #[cfg(not(target_arch = "wasm32"))]
             path.as_deref(),
         )?;
@@ -109,9 +107,8 @@ impl Emulator {
         if !self.store.import_legacy_save(&key, &path) {
             return false;
         }
-        if let Some(data) = self.store.load_battery(&key) {
-            self.gb
-                .put_sram_dump(SramDump::from_slice(&data), now_unix());
+        if let Some(save) = self.store.load_battery_save(&key, &self.machine) {
+            self.machine.put_battery(save, now_unix());
             self.save_loaded = true;
             return true;
         }
@@ -133,15 +130,15 @@ impl Emulator {
         match (ram, clock) {
             (Some(ram), None) => {
                 self.store.store_battery(&key, ram)?;
-                self.gb.put_sram_dump(SramDump::from_slice(ram), now);
+                let save = self.machine.battery_from_file(ram);
+                self.machine.put_battery(save, now);
             }
             (ram, Some(footer)) => {
-                if let Some(ram) = ram {
-                    self.gb.put_sram_dump(SramDump::from_slice(ram), now);
-                }
-                self.gb.cartridge.put_rtc_footer(footer, now);
-                if let Some(dump) = self.gb.poll_sram_dump(true, now) {
-                    self.store.store_battery(&key, dump.as_slice())?;
+                let mut save = self.machine.battery_from_file(ram.unwrap_or_default());
+                save.clock = Some(footer);
+                self.machine.put_battery(save, now);
+                if let Some(save) = self.machine.battery(true, now) {
+                    self.store.store_battery_save(&key, &save)?;
                 }
             }
             (None, None) => return Ok(SaveImport::Nothing),
@@ -154,7 +151,7 @@ impl Emulator {
     pub fn import_blocker(&self, with_clock: bool) -> Option<SaveImport> {
         if self.rom_key.is_none() {
             Some(SaveImport::NoRom)
-        } else if with_clock && self.gb.cartridge.rtc().is_none() {
+        } else if with_clock && !self.machine.has_clock() {
             Some(SaveImport::NoClock)
         } else {
             None
@@ -167,23 +164,21 @@ impl Emulator {
     }
 
     pub fn restart(&mut self) {
-        self.gb.soft_reset();
+        self.machine.soft_reset();
         self.running = true;
         self.started_at = Some(web_time::Instant::now());
     }
 
-    pub fn export_rtc_files(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        let footer = self.gb.cartridge.rtc_footer(now_unix())?;
-        Some((
-            self.gb.cartridge.battery_ram(),
-            footer.encode_rtc_file().to_vec(),
-        ))
+    pub fn export_rtc_files(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        let save = self.machine.battery(true, now_unix())?;
+        let clock = save.clock?;
+        Some((save.ram, clock.encode_rtc_file().to_vec()))
     }
 
     pub fn export_save_bytes(&mut self) -> Option<Vec<u8>> {
-        self.gb
-            .poll_sram_dump(true, now_unix())
-            .map(|dump| dump.as_slice().to_vec())
+        self.machine
+            .battery(true, now_unix())
+            .map(|save| save.to_file())
     }
 
     pub fn save_status(&self) -> SaveStatus {
@@ -192,11 +187,11 @@ impl Emulator {
             name: key
                 .and_then(|k| self.store.battery_name(k))
                 .unwrap_or_else(|| self.default_battery_name()),
-            battery_backed: self.gb.cartridge.has_battery(),
+            battery_backed: self.machine.has_battery(),
             stored: key.is_some_and(|k| self.store.has_battery(k)),
             saved_at: key.and_then(|k| self.store.battery_saved_at(k)),
             location: self.store.location(),
-            has_clock: self.gb.cartridge.rtc().is_some(),
+            has_clock: self.machine.has_clock(),
             #[cfg(not(target_arch = "wasm32"))]
             legacy_path: self
                 .rom_path

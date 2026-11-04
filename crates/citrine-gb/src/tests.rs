@@ -6,24 +6,44 @@ use std::io::Write;
 mod audio;
 mod boot_rom;
 mod cgb;
+#[cfg(feature = "debug")]
+mod code;
 mod cpu;
 #[cfg(feature = "debug")]
 mod debug_step;
+#[cfg(feature = "debug")]
 mod disassembly;
 mod e2e;
 mod halt;
+mod keys;
 mod lcd_on;
 mod link;
 #[cfg(feature = "persistence")]
 mod local_link;
+#[cfg(all(feature = "debug", feature = "persistence"))]
+mod machine;
+#[cfg(feature = "persistence")]
+mod mappers;
+#[cfg(feature = "debug")]
+mod memory_view;
 #[cfg(feature = "persistence")]
 mod netplay;
 #[cfg(feature = "persistence")]
 mod peer_link;
+#[cfg(feature = "debug")]
+mod registers;
+#[cfg(feature = "persistence")]
+mod rooms;
 #[cfg(feature = "persistence")]
 mod rtc;
 #[cfg(feature = "persistence")]
 mod snapshot;
+#[cfg(feature = "debug")]
+mod trace;
+#[cfg(feature = "debug")]
+mod video;
+#[cfg(all(feature = "debug", feature = "gba"))]
+mod video_gba;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct TestBus {

@@ -11,6 +11,7 @@ use crate::icons;
 use crate::media::recording;
 use crate::online::OnlineSettings;
 use citrine_gb::ReadMemory;
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::GameBoy;
 use citrine_gb::gb::GbModel;
 use citrine_gb::gb::ppu::compat::CompatPalette;
@@ -156,6 +157,28 @@ impl Display for ScalingMode {
     }
 }
 
+pub const GBC_SCREEN_NOTE: &str =
+    "How Game Boy Color colours look. Like a GBC softens them the way its screen did.";
+
+pub const GBA_SCREEN_NOTE: &str =
+    "How Game Boy Advance colours look. Like a GBA darkens them the way its unlit screen did.";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GbaScreen(pub ColorCorrection);
+
+impl GbaScreen {
+    pub const ALL: [Self; 2] = [Self(ColorCorrection::Raw), Self(ColorCorrection::Screen)];
+}
+
+impl std::fmt::Display for GbaScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            ColorCorrection::Raw => f.write_str("Raw"),
+            ColorCorrection::Screen => f.write_str("Like a GBA"),
+        }
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -186,12 +209,14 @@ pub struct Settings {
     pub audio_queue_ms: u32,
     pub audio_device: Option<String>,
     pub channels: [bool; 4],
+    pub gba_channels: [bool; 6],
 
     pub bindings: KeyBindings,
     pub hotkeys: Hotkeys,
     pub touch: TouchSettings,
     pub online: OnlineSettings,
     pub local_link: crate::local_link::LinkSettings,
+    pub gimmicks: crate::emulator::gimmicks::GimmickSettings,
     pub discord: crate::discord::DiscordSettings,
     pub stats_range: crate::app::tabs::stats::Range,
 
@@ -247,6 +272,7 @@ impl Default for Settings {
             audio_queue_ms: DEFAULT_LATENCY_MS,
             audio_device: None,
             channels: [true; 4],
+            gba_channels: [true; 6],
 
             bindings: KeyBindings::default(),
             hotkeys: Hotkeys::default(),
@@ -271,6 +297,7 @@ impl Default for Settings {
             scale_drag: false,
             themed_for_phone: None,
             local_link: crate::local_link::LinkSettings::default(),
+            gimmicks: crate::emulator::gimmicks::GimmickSettings::default(),
             discord: crate::discord::DiscordSettings::default(),
             stats_range: Default::default(),
         }
@@ -317,6 +344,20 @@ pub fn console_short(model: GbModel) -> &'static str {
     match model {
         GbModel::Dmg => "GB",
         GbModel::Cgb => "GBC",
+    }
+}
+
+pub fn kind_name(kind: ConsoleKind) -> &'static str {
+    match GbModel::try_from(kind) {
+        Ok(model) => console_name(model),
+        Err(_) => "Game Boy Advance",
+    }
+}
+
+pub fn kind_short(kind: ConsoleKind) -> &'static str {
+    match GbModel::try_from(kind) {
+        Ok(model) => console_short(model),
+        Err(_) => "GBA",
     }
 }
 
@@ -538,6 +579,14 @@ impl Settings {
         }
     }
 
+    pub fn channels_for(&mut self, count: usize) -> &mut [bool] {
+        if count == self.gba_channels.len() {
+            &mut self.gba_channels
+        } else {
+            &mut self.channels
+        }
+    }
+
     pub fn apply(
         &mut self,
         ctx: &egui::Context,
@@ -546,6 +595,9 @@ impl Settings {
         mobile: bool,
     ) -> Option<String> {
         self.adopt_pixel_ratio(desktop_pixel_ratio(ctx));
+        if self.bindings.adopt_triggers() {
+            self.dirty = true;
+        }
         if !std::mem::take(&mut self.scale_drag) {
             let wanted_ppp = self.pixels_per_point(ctx, mobile);
             if (ctx.pixels_per_point() - wanted_ppp).abs() > f32::EPSILON {
@@ -560,7 +612,7 @@ impl Settings {
 
         if self.themed_for_phone != Some(mobile) {
             self.themed_for_phone = Some(mobile);
-            self.ui_theme.apply(ctx, mobile);
+            self.ui_theme.apply(ctx);
         }
         if !self.dirty {
             return None;
@@ -568,20 +620,28 @@ impl Settings {
         self.dirty = false;
         self.unsaved = true;
 
-        self.ui_theme.apply(ctx, mobile);
+        self.ui_theme.apply(ctx);
 
         let rom_key = emulator.rom_key().map(str::to_owned);
-        self.apply_colors(&mut emulator.gb, rom_key.as_deref());
+        if let Some(gb) = emulator.as_gb_mut() {
+            self.apply_colors(gb, rom_key.as_deref());
+        }
+        #[cfg(feature = "gba")]
+        emulator.set_gba_color_correction(self.color_correction);
         if let Some(link) = &mut emulator.link {
             let key = link.rom_key().to_owned();
-            self.apply_colors(&mut link.gb, Some(&key));
+            if let Some(gb) = link.machine.as_gb_mut() {
+                self.apply_colors(gb, Some(&key));
+            }
             link.set_settings(&self.local_link);
         }
-        emulator.gb.ram_init = if self.randomized_ram {
-            citrine_gb::gb::ram_init::RamInit::random()
-        } else {
-            citrine_gb::gb::ram_init::RamInit::Zeroed
-        };
+        if let Some(gb) = emulator.as_gb_mut() {
+            gb.ram_init = if self.randomized_ram {
+                citrine_gb::gb::ram_init::RamInit::random()
+            } else {
+                citrine_gb::gb::ram_init::RamInit::Zeroed
+            };
+        }
         emulator.enable_matrix = self.matrix;
         emulator.enable_ghosting = self.ghosting;
         emulator.matrix_edge_brightness = 1.0 - self.matrix_edge_darkness;
@@ -589,11 +649,12 @@ impl Settings {
         emulator.ghosting_blend = 1.0 - self.ghosting_strength;
         emulator.autosave_interval = self.autosave_interval;
         emulator.autosave_keep = self.autosave_keep;
+        emulator.set_gimmick_settings(&self.gimmicks);
 
-        emulator.gb.debugger.ch1_disabled = !self.channels[0];
-        emulator.gb.debugger.ch2_disabled = !self.channels[1];
-        emulator.gb.debugger.ch3_disabled = !self.channels[2];
-        emulator.gb.debugger.ch4_disabled = !self.channels[3];
+        let count = emulator.channel_count();
+        for (index, enabled) in self.channels_for(count).to_vec().into_iter().enumerate() {
+            emulator.set_channel_enabled(index, enabled);
+        }
 
         emulator.sound = self.sound_levels();
 
@@ -638,6 +699,13 @@ impl SettingsTab {
             Self::Online => "Online",
             Self::YourData => "Your data",
             Self::Developer => "Developer",
+        }
+    }
+
+    pub fn title_for(&self, console: ConsoleKind) -> &'static str {
+        match (self, console) {
+            (Self::Style, ConsoleKind::Gba) => "GBA style",
+            _ => self.title(),
         }
     }
 

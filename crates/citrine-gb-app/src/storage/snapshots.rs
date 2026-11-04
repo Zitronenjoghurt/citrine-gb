@@ -1,9 +1,9 @@
 use super::{
-    SaveStore, SnapshotInfo, THUMB_HEIGHT, THUMB_WIDTH, compress, decode_meta, decompress,
-    downscale, encode_meta, now_unix, snapshot_blob, snapshot_meta, snapshot_name, snapshot_thumb,
-    state_console,
+    SaveStore, SnapshotInfo, compress, decode_meta, decompress, downscale, encode_meta, now_unix,
+    snapshot_blob, snapshot_meta, snapshot_name, snapshot_thumb, thumb_size,
 };
-use citrine_gb::gb::GbModel;
+use citrine_gb::console::ConsoleKind;
+use citrine_gb::persistence::state::state_kind;
 
 impl SaveStore {
     pub fn store_snapshot(
@@ -12,18 +12,18 @@ impl SaveStore {
         slot: usize,
         state: &[u8],
         frame_rgba: &[u8],
-        model: GbModel,
+        console: ConsoleKind,
     ) -> std::io::Result<()> {
         self.write(rom_key, &snapshot_blob(slot), state)?;
         self.write(
             rom_key,
             &snapshot_thumb(slot),
-            &compress(&downscale(frame_rgba)),
+            &compress(&downscale(frame_rgba, console.video())),
         )?;
         self.write(
             rom_key,
             &snapshot_meta(slot),
-            &encode_meta(now_unix(), model),
+            &encode_meta(now_unix(), console),
         )
     }
 
@@ -68,12 +68,13 @@ impl SaveStore {
             .unwrap_or_default();
         let console = console.or_else(|| self.note_console(rom_key, blob, meta, saved_at));
         let saved_at = saved_at.unwrap_or(0);
+        let [width, height] = thumb_size(console);
         let thumbnail = self
             .backend
             .read(rom_key, thumb)
             .and_then(|t| decompress(&t))
-            .filter(|t| t.len() == THUMB_WIDTH * THUMB_HEIGHT * 4)
-            .unwrap_or_else(|| vec![0; THUMB_WIDTH * THUMB_HEIGHT * 4]);
+            .filter(|t| t.len() == width * height * 4)
+            .unwrap_or_else(|| vec![0; width * height * 4]);
         Some(SnapshotInfo {
             slot,
             saved_at,
@@ -89,13 +90,13 @@ impl SaveStore {
         blob: &str,
         meta: &str,
         saved_at: Option<u64>,
-    ) -> Option<GbModel> {
-        let model = state_console(&self.backend.read(rom_key, blob)?)?;
-        let meta_bytes = encode_meta(saved_at.unwrap_or(0), model);
+    ) -> Option<ConsoleKind> {
+        let console = state_kind(&self.backend.read(rom_key, blob)?)?;
+        let meta_bytes = encode_meta(saved_at.unwrap_or(0), console);
         if let Err(err) = self.write(rom_key, meta, &meta_bytes) {
             log::warn!("could not note the console of {blob}: {err}");
         }
-        Some(model)
+        Some(console)
     }
 
     pub fn used_slots(&self, rom_key: &str) -> Vec<usize> {

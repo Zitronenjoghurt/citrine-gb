@@ -3,6 +3,7 @@ pub mod files;
 pub mod keyboard;
 pub mod lifecycle;
 pub mod pads;
+pub mod sensors;
 
 use android_activity::AndroidApp;
 use jni::objects::JObject;

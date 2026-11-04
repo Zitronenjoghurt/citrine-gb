@@ -8,6 +8,7 @@ const SRAM_SIZE: usize = 0x8000;
 const PARTY_MON: usize = 44;
 const BOX_MON: usize = 33;
 const DEX: u16 = 151;
+const GOT_POKEDEX: usize = 37;
 
 pub(crate) fn read_save(game: Game, sram: &[u8]) -> Result<GameState, ReadError> {
     let layout = Gen1Layout::of(game);
@@ -102,7 +103,39 @@ fn read(game: Game, layout: &Gen1Layout, sram: &[u8], copy: SaveCopy) -> Option<
             caught: list::flags(&sram[layout.pokedex_owned..][..19], DEX),
         },
         copy,
+        location: layout.location.map(|at| {
+            Position::Gb(Location {
+                group: 0,
+                map: sram[at],
+                x: sram[at + 4],
+                y: sram[at + 3],
+                outside: None,
+            })
+        }),
+        journey: journey(layout, sram, badges),
+        hall_of_fame: layout.hall_of_fame.map(|at| sram[at]),
+        battle: None,
+        clock: None,
     })
+}
+
+fn journey(layout: &Gen1Layout, sram: &[u8], badges: u8) -> Vec<Step> {
+    let (Some(events), Some(hall_of_fame)) = (layout.events, layout.hall_of_fame) else {
+        return Vec::new();
+    };
+    let mut steps = vec![Step {
+        milestone: Milestone::Pokedex,
+        done: list::flag(&sram[events..], GOT_POKEDEX),
+    }];
+    steps.extend((0..8).map(|bit| Step {
+        milestone: Milestone::Badge(bit),
+        done: badges >> bit & 1 == 1,
+    }));
+    steps.push(Step {
+        milestone: Milestone::EliteFour,
+        done: sram[hall_of_fame] > 0,
+    });
+    steps
 }
 
 fn pokemon(game: Game, shape: Shape, bytes: &[u8]) -> Option<Vec<Pokemon>> {
@@ -115,7 +148,7 @@ fn pokemon(game: Game, shape: Shape, bytes: &[u8]) -> Option<Vec<Pokemon>> {
                 let party = m.len() == PARTY_MON;
                 let word = |at: usize| u16::from_be_bytes([m[at], m[at + 1]]);
                 Pokemon::Hatched(Box::new(Mon {
-                    species: m[0],
+                    species: u16::from(m[0]),
                     nickname: text::decode(game, entry.nickname),
                     ot_name: text::decode(game, entry.ot_name),
                     ot_id: word(12),
@@ -124,14 +157,16 @@ fn pokemon(game: Game, shape: Shape, bytes: &[u8]) -> Option<Vec<Pokemon>> {
                     moves: (0..4)
                         .filter(|&i| m[8 + i] != 0)
                         .map(|i| MoveSlot {
-                            id: m[8 + i],
+                            id: u16::from(m[8 + i]),
                             pp: m[29 + i] & 0x3F,
                             pp_ups: m[29 + i] >> 6,
                         })
                         .collect(),
                     held_item: None,
-                    dvs: Dvs::from_bytes(m[27], m[28]),
-                    stat_exp: [word(17), word(19), word(21), word(23), word(25)],
+                    genes: Genes::Gb {
+                        dvs: Dvs::from_bytes(m[27], m[28]),
+                        stat_exp: [word(17), word(19), word(21), word(23), word(25)],
+                    },
                     hp: Some(word(1)),
                     stats: party.then(|| Stats {
                         max_hp: word(34),

@@ -1,11 +1,20 @@
 use super::*;
 use crate::app::ui_state::touch::LandscapeControls;
+use citrine_gb::console::{ConsoleKind, VideoSpec};
 use egui::pos2;
+
+fn gb() -> VideoSpec {
+    ConsoleKind::Gb.video()
+}
+
+fn gba() -> VideoSpec {
+    ConsoleKind::Gba.video()
+}
 
 #[test]
 fn portrait_bands_cover_the_area_exactly() {
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(390.0, 760.0));
-    let (screen, controls) = portrait_split(area, &TouchSettings::default(), false);
+    let (screen, controls) = portrait_split(area, &TouchSettings::default(), false, gb(), false);
 
     assert!((screen.height() + controls.height() - area.height()).abs() < 0.01);
     assert_eq!(screen.top(), area.top());
@@ -15,11 +24,11 @@ fn portrait_bands_cover_the_area_exactly() {
 #[test]
 fn one_screen_sits_under_the_strip_with_even_space_around_the_buttons() {
     let area = Rect::from_min_size(pos2(0.0, 60.0), vec2(412.0, 700.0));
-    let (screen, controls) = portrait_split(area, &TouchSettings::default(), true);
+    let (screen, controls) = portrait_split(area, &TouchSettings::default(), true, gb(), false);
 
     assert_eq!(screen.top(), area.top());
     assert!((screen.height() - 412.0 * 144.0 / 160.0).abs() < 0.01);
-    let needed = TouchLayout::bar_height(area.width(), &TouchSettings::default());
+    let needed = TouchLayout::bar_height(area.width(), &TouchSettings::default(), false);
     let slack = (controls.height() - needed) / 2.0;
     let above = controls.top() - screen.bottom() + slack;
     let below = area.bottom() - controls.bottom();
@@ -38,8 +47,8 @@ fn the_control_band_fits_the_controls_without_stranding_them() {
     for height in [600.0_f32, 760.0, 900.0, 1200.0] {
         let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, height));
         let settings = TouchSettings::default();
-        let (_, controls) = portrait_split(area, &settings, false);
-        let needed = TouchLayout::bar_height(area.width(), &settings);
+        let (_, controls) = portrait_split(area, &settings, false, gb(), false);
+        let needed = TouchLayout::bar_height(area.width(), &settings, false);
 
         assert!(
             controls.height() >= needed - 0.01,
@@ -67,15 +76,15 @@ fn bigger_buttons_get_a_taller_band() {
         ..Default::default()
     };
 
-    let (_, small_band) = portrait_split(area, &small, false);
-    let (_, large_band) = portrait_split(area, &large, false);
+    let (_, small_band) = portrait_split(area, &small, false, gb(), false);
+    let (_, large_band) = portrait_split(area, &large, false, gb(), false);
     assert!(large_band.height() > small_band.height());
 }
 
 #[test]
 fn a_short_portrait_window_still_leaves_room_for_buttons() {
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
-    let (screen, controls) = portrait_split(area, &TouchSettings::default(), false);
+    let (screen, controls) = portrait_split(area, &TouchSettings::default(), false, gb(), false);
 
     assert!(
         screen.height() > 0.0,
@@ -90,7 +99,7 @@ fn a_short_portrait_window_still_leaves_room_for_buttons() {
 #[test]
 fn landscape_columns_do_not_overlap_the_screen() {
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(844.0, 390.0));
-    let (screen, left, right, _) = landscape_split(area, LandscapeControls::Beside, true);
+    let (screen, left, right, _) = landscape_split(area, LandscapeControls::Beside, gb(), Some(5));
 
     assert!(screen.left() >= left.right());
     assert!(screen.right() <= right.left());
@@ -100,7 +109,7 @@ fn landscape_columns_do_not_overlap_the_screen() {
 #[test]
 fn the_overlay_mode_hands_the_whole_area_to_the_screen() {
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(844.0, 390.0));
-    let (screen, left, right, _) = landscape_split(area, LandscapeControls::Overlay, true);
+    let (screen, left, right, _) = landscape_split(area, LandscapeControls::Overlay, gb(), Some(5));
 
     assert_eq!(screen, area, "the picture uses the full width");
     assert!(left.width() > 0.0 && right.width() > 0.0);
@@ -110,7 +119,7 @@ fn the_overlay_mode_hands_the_whole_area_to_the_screen() {
 #[test]
 fn a_very_wide_window_still_keeps_the_columns_reachable() {
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(2000.0, 400.0));
-    let (_, left, _, _) = landscape_split(area, LandscapeControls::Beside, true);
+    let (_, left, _, _) = landscape_split(area, LandscapeControls::Beside, gb(), Some(5));
     assert!(
         left.width() <= area.width() * 0.32,
         "columns never sprawl across half the screen"
@@ -118,9 +127,55 @@ fn a_very_wide_window_still_keeps_the_columns_reachable() {
 }
 
 #[test]
+fn a_gba_screen_spans_the_portrait_width_and_leaves_more_room_below() {
+    let area = Rect::from_min_size(pos2(0.0, 60.0), vec2(412.0, 760.0));
+    let settings = TouchSettings::default();
+    let (gb_screen, _) = portrait_split(area, &settings, true, gb(), false);
+    let (screen, controls) = portrait_split(area, &settings, true, gba(), true);
+
+    assert!((screen.height() - 412.0 * 160.0 / 240.0).abs() < 0.01);
+    assert!(screen.height() < gb_screen.height());
+    assert!(controls.top() >= screen.bottom());
+    assert!(controls.bottom() <= area.bottom() + 0.01);
+    let needed = TouchLayout::bar_height(area.width(), &settings, true);
+    assert!(
+        controls.height() >= needed - 0.01,
+        "L and R fit in the band"
+    );
+    let layout = TouchLayout::bar(controls, &settings, true);
+    assert!(controls.contains_rect(layout.bounds()));
+}
+
+#[test]
+fn a_gba_screen_in_landscape_keeps_its_shape_beside_the_columns() {
+    for size in [vec2(915.0, 412.0), vec2(844.0, 390.0), vec2(740.0, 360.0)] {
+        let area = Rect::from_min_size(pos2(0.0, 0.0), size);
+        let (screen, left, right, _) =
+            landscape_split(area, LandscapeControls::Beside, gba(), None);
+        assert!(screen.left() >= left.right() && screen.right() <= right.left());
+        let picture_width = screen.width().min(screen.height() * 1.5);
+        assert!(
+            picture_width >= area.height() * 1.5 * 0.85,
+            "the 3:2 picture keeps most of the height at {size:?}: {picture_width}"
+        );
+        let layout = TouchLayout::columns(left, right, &TouchSettings::default(), true);
+        assert!(left.union(right).contains_rect(layout.bounds()), "{size:?}");
+    }
+}
+
+#[test]
+fn a_gba_screen_in_the_overlay_mode_gets_the_whole_area() {
+    let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(915.0, 412.0));
+    let (screen, left, right, _) = landscape_split(area, LandscapeControls::Overlay, gba(), None);
+    assert_eq!(screen, area);
+    let layout = TouchLayout::columns(left, right, &TouchSettings::default(), true);
+    assert!(area.contains_rect(layout.bounds()));
+}
+
+#[test]
 fn beside_puts_the_strip_in_one_row_above_the_picture() {
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(794.0, 400.0));
-    let (screen, _, right, strip) = landscape_split(area, LandscapeControls::Beside, true);
+    let (screen, _, right, strip) = landscape_split(area, LandscapeControls::Beside, gb(), Some(5));
 
     assert!(
         screen.top() >= strip.bottom(),
@@ -141,7 +196,7 @@ fn beside_puts_the_strip_in_one_row_above_the_picture() {
 #[test]
 fn with_the_strip_hidden_the_beside_picture_takes_the_full_height() {
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(891.0, 412.0));
-    let (screen, left, right, strip) = landscape_split(area, LandscapeControls::Beside, false);
+    let (screen, left, right, strip) = landscape_split(area, LandscapeControls::Beside, gb(), None);
     assert_eq!(screen.top(), area.top());
     assert_eq!(screen.bottom(), area.bottom());
     assert_eq!(screen.left(), left.right());

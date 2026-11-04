@@ -1,21 +1,22 @@
-use super::{Sheet, pick, slide};
+use super::{Sheet, pick, pick_from, slide};
 use crate::app::Citrine;
 use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::mobile::sheet::{self, Amount};
 use crate::app::ui_state::palette::{CustomPalette, PaletteChoice};
-use crate::app::ui_state::settings::{ScalingMode, Settings, rom_header};
+use crate::app::ui_state::settings::{
+    GBA_SCREEN_NOTE, GBC_SCREEN_NOTE, GbaScreen, ScalingMode, Settings, rom_header,
+};
 use crate::app::widgets::palette_strip::paint_strip;
 use crate::app::widgets::settings::palette::{
     Action, PaletteEditorState, SHADE_NAMES, all_choices, apply, choice_colors, choice_label,
 };
 use crate::icons;
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 use egui::{Context, Rect, RichText, Ui, vec2};
 
 const MATRIX_NOTE: &str = "Draws the grid between pixels.";
 const GHOSTING_NOTE: &str = "Smears frames together, the way the original LCD did.";
-const GBC_NOTE: &str =
-    "How Game Boy Color colours look. Like a GBC softens them the way its screen did.";
 const STRIP: f32 = 22.0;
 
 pub struct StyleGame {
@@ -70,7 +71,7 @@ fn palette_sheet(
 impl Citrine {
     fn style_game(&self) -> Option<StyleGame> {
         let rom_key = self.emulator.rom_key()?.to_owned();
-        let gb = &self.emulator.gb;
+        let gb = self.emulator.as_gb()?;
         Some(StyleGame {
             rom_key,
             title: self.emulator.game_name().to_owned(),
@@ -81,83 +82,87 @@ impl Citrine {
 
     pub(super) fn style_page(&mut self, ui: &mut Ui) {
         let game = self.style_game();
+        let palettes = self.emulator.as_gb().is_some();
+        let gba = self.emulator.kind() == ConsoleKind::Gba;
         let header = game.as_ref().map(|g| g.header.clone()).unwrap_or_default();
         let s = &mut self.ui.settings;
         let state = &mut self.ui.palette_editor;
         let mut open = None;
         let mut action = None;
         ui.add_space(8.0);
-        let global = s.global_choice();
-        kit::list(ui, |list| {
-            if list
-                .row(Row::new("Palette").value(choice_label(&global)))
-                .clicked()
-            {
-                open = Some(Sheet::Palette);
-            }
-            list.custom(|ui| strip_row(ui, s, &global, &header));
-            if list
-                .row(Row::new("New palette").icon(icons::PLUS).no_chevron())
-                .clicked()
-            {
-                let name = s.palettes.unique_name("My palette");
-                action = Some(Action::Create(CustomPalette::from_theme(
-                    name,
-                    &DmgTheme::GreyScale,
-                )));
-            }
-            if list
-                .row(Row::new("Duplicate").icon(icons::COPY).no_chevron())
-                .clicked()
-            {
-                let shown = DmgTheme::Custom(choice_colors(s, &global, &header)[0]);
-                let name = s.palettes.unique_name(&choice_label(&global));
-                action = Some(Action::Create(CustomPalette::from_theme(name, &shown)));
-            }
-        });
-        if let Some(selected) = s.custom_palette.clone()
-            && let Some(palette) = s.palettes.get(&selected).cloned()
-        {
-            state.focus(&selected, &palette);
-            kit::section_label(ui, &palette.name);
-            editor(ui, &palette, state, &mut action, &mut open);
-        } else {
-            state.forget();
-        }
-        if let Some(game) = &game {
-            let title = if game.title.is_empty() {
-                "Running now"
-            } else {
-                &game.title
-            };
-            kit::section_label(ui, "This game");
+        if palettes {
+            let global = s.global_choice();
             kit::list(ui, |list| {
-                if game.own_colors {
-                    list.row(
-                        Row::new(title)
-                            .detail("Uses its own colours, not a palette")
-                            .no_chevron(),
-                    );
-                    return;
+                if list
+                    .row(Row::new("Palette").value(choice_label(&global)))
+                    .clicked()
+                {
+                    open = Some(Sheet::Palette);
                 }
-                let own = s.game_palette(Some(&game.rom_key)).cloned();
-                let mut keep = own.is_some();
-                if list.switch(SwitchRow::new("Own palette", &mut keep).detail(Some(title))) {
-                    action = Some(Action::SetGame {
-                        rom_key: game.rom_key.clone(),
-                        choice: keep.then(|| global.clone()),
-                    });
+                list.custom(|ui| strip_row(ui, s, &global, &header));
+                if list
+                    .row(Row::new("New palette").icon(icons::PLUS).no_chevron())
+                    .clicked()
+                {
+                    let name = s.palettes.unique_name("My palette");
+                    action = Some(Action::Create(CustomPalette::from_theme(
+                        name,
+                        &DmgTheme::GreyScale,
+                    )));
                 }
-                if let Some(own) = own {
-                    if list
-                        .row(Row::new("Palette").value(choice_label(&own)))
-                        .clicked()
-                    {
-                        open = Some(Sheet::GamePalette);
-                    }
-                    list.custom(|ui| strip_row(ui, s, &own, &game.header));
+                if list
+                    .row(Row::new("Duplicate").icon(icons::COPY).no_chevron())
+                    .clicked()
+                {
+                    let shown = DmgTheme::Custom(choice_colors(s, &global, &header)[0]);
+                    let name = s.palettes.unique_name(&choice_label(&global));
+                    action = Some(Action::Create(CustomPalette::from_theme(name, &shown)));
                 }
             });
+            if let Some(selected) = s.custom_palette.clone()
+                && let Some(palette) = s.palettes.get(&selected).cloned()
+            {
+                state.focus(&selected, &palette);
+                kit::section_label(ui, &palette.name);
+                editor(ui, &palette, state, &mut action, &mut open);
+            } else {
+                state.forget();
+            }
+            if let Some(game) = &game {
+                let title = if game.title.is_empty() {
+                    "Running now"
+                } else {
+                    &game.title
+                };
+                kit::section_label(ui, "This game");
+                kit::list(ui, |list| {
+                    if game.own_colors {
+                        list.row(
+                            Row::new(title)
+                                .detail("Uses its own colours, not a palette")
+                                .no_chevron(),
+                        );
+                        return;
+                    }
+                    let own = s.game_palette(Some(&game.rom_key)).cloned();
+                    let mut keep = own.is_some();
+                    if list.switch(SwitchRow::new("Own palette", &mut keep).detail(Some(title))) {
+                        action = Some(Action::SetGame {
+                            rom_key: game.rom_key.clone(),
+                            choice: keep.then(|| global.clone()),
+                        });
+                    }
+                    if let Some(own) = own {
+                        if list
+                            .row(Row::new("Palette").value(choice_label(&own)))
+                            .clicked()
+                        {
+                            open = Some(Sheet::GamePalette);
+                        }
+                        list.custom(|ui| strip_row(ui, s, &own, &game.header));
+                    }
+                });
+            }
         }
         kit::section_label(ui, "Screen");
         let mut dirty = false;
@@ -201,10 +206,12 @@ impl Citrine {
             {
                 open = Some(Sheet::GhostStrength);
             }
-            if list
-                .row(Row::new("GBC screen").value(s.color_correction.to_string()))
-                .clicked()
-            {
+            let (screen, value) = if gba {
+                ("GBA screen", GbaScreen(s.color_correction).to_string())
+            } else {
+                ("GBC screen", s.color_correction.to_string())
+            };
+            if list.row(Row::new(screen).value(value)).clicked() {
                 open = Some(Sheet::GbcScreen);
             }
         });
@@ -217,6 +224,7 @@ impl Citrine {
 
     pub(super) fn style_sheet(&mut self, ctx: &Context, open: Sheet) -> bool {
         let game = self.style_game();
+        let gba = self.emulator.kind() == ConsoleKind::Gba;
         let header = game.as_ref().map(|g| g.header.clone()).unwrap_or_default();
         let s = &mut self.ui.settings;
         let state = &mut self.ui.palette_editor;
@@ -264,8 +272,23 @@ impl Citrine {
                 done
             }
             Sheet::GbcScreen => {
-                let (changed, done) =
-                    pick(ctx, "GBC screen", Some(GBC_NOTE), &mut s.color_correction);
+                let (changed, done) = if gba {
+                    pick_from(
+                        ctx,
+                        "GBA screen",
+                        Some(GBA_SCREEN_NOTE),
+                        GbaScreen::ALL.map(|screen| screen.0),
+                        &mut s.color_correction,
+                        |value| GbaScreen(value).to_string(),
+                    )
+                } else {
+                    pick(
+                        ctx,
+                        "GBC screen",
+                        Some(GBC_SCREEN_NOTE),
+                        &mut s.color_correction,
+                    )
+                };
                 s.dirty |= changed;
                 done
             }

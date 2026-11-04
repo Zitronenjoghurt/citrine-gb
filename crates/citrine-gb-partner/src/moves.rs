@@ -8,6 +8,7 @@ pub(crate) fn pp_table(game: Game, rom: &[u8]) -> Option<Vec<u8>> {
     let (record, count) = match game.generation() {
         Generation::One => (6, 165),
         Generation::Two => (7, 251),
+        Generation::Three => return None,
     };
     let span = record * count;
     let at = (0..rom.len().saturating_sub(span)).find(|&at| {

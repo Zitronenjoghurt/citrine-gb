@@ -236,6 +236,10 @@ impl Ppu {
         ppu
     }
 
+    pub fn line(&self) -> u8 {
+        self.line
+    }
+
     pub fn cycle(&mut self, ic: &mut impl ICInterface, oam_dma: bool, double_speed: bool) {
         if !self.lcdc.lcd_enabled {
             for write in std::mem::take(&mut self.timed_writes).into_iter().flatten() {
@@ -339,7 +343,7 @@ impl Ppu {
                 let old = u8::from(self.lcdc);
                 self.write_naive(write.addr, value);
                 self.timed_writes[i] = None;
-                if write.addr == 0xFF40 && self.model.is_cgb() && old & !value & 0x10 != 0 {
+                if write.addr == 0xFF40 && self.model.is_cgb() && (old ^ value) & 0x10 != 0 {
                     self.tile_sel_glitch = true;
                 }
             }
@@ -375,6 +379,7 @@ impl Ppu {
             (0xFF4B, true, false) => [Some((value, 5)), None],
             (0xFF40, true, false) if old & !value & 0x10 != 0 => [Some((value, 4)), None],
             (0xFF40, true, false) if (old ^ value) & 0x04 != 0 => [Some((value, 5)), None],
+            (0xFF40, true, false) if !old & value & 0x10 != 0 => [Some((value, 4)), None],
             _ => return false,
         };
         let mut slots = self.timed_writes.iter_mut().filter(|w| w.is_none());
@@ -835,6 +840,54 @@ impl Ppu {
         if self.model.is_cgb() {
             self.cgb_mode = cgb_mode;
         }
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn vram_bank(&self) -> u16 {
+        if self.model.is_cgb() {
+            u16::from(self.vbk & 1)
+        } else {
+            0
+        }
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn vram(&self, bank: usize) -> Option<&[u8]> {
+        self.vram.get(bank).map(|bytes| &bytes[..])
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn vram_mut(&mut self, bank: usize) -> Option<&mut [u8]> {
+        self.vram.get_mut(bank).map(|bytes| &mut bytes[..])
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn oam(&self) -> &[u8] {
+        &self.oam
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn oam_mut(&mut self) -> &mut [u8] {
+        &mut self.oam
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn dmg_palettes(&self) -> [u8; 3] {
+        [self.bgp, self.obp0, self.obp1]
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn palette_ram(&self, sprites: bool) -> &[u8; 64] {
+        if sprites {
+            &self.obj_palette_ram
+        } else {
+            &self.bg_palette_ram
+        }
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn palette_color(&self, sprites: bool, palette: u8, index: u8) -> RGBA {
+        self.cgb_color(self.palette_ram(sprites), palette, index)
     }
 
     pub fn cgb_mode(&self) -> bool {

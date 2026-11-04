@@ -15,6 +15,7 @@ pub use native::recording_temp_path;
 #[cfg(target_arch = "wasm32")]
 pub use web::MediaStore;
 
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::GbModel;
 use serde::{Deserialize, Serialize};
 
@@ -25,21 +26,27 @@ pub const THUMB_HEIGHT: u32 = 144;
 pub enum MediaKind {
     Screenshot,
     Recording,
+    Print,
 }
 
 impl MediaKind {
-    pub const ALL: [MediaKind; 2] = [MediaKind::Screenshot, MediaKind::Recording];
+    pub const ALL: [MediaKind; 3] = [
+        MediaKind::Screenshot,
+        MediaKind::Recording,
+        MediaKind::Print,
+    ];
 
     pub fn folder(self) -> &'static str {
         match self {
             MediaKind::Screenshot => "screenshots",
             MediaKind::Recording => "recordings",
+            MediaKind::Print => "prints",
         }
     }
 
     pub fn extension(self) -> &'static str {
         match self {
-            MediaKind::Screenshot => "png",
+            MediaKind::Screenshot | MediaKind::Print => "png",
             MediaKind::Recording => "mp4",
         }
     }
@@ -48,6 +55,7 @@ impl MediaKind {
         match self {
             MediaKind::Screenshot => "Screenshot",
             MediaKind::Recording => "Recording",
+            MediaKind::Print => "Print",
         }
     }
 }
@@ -140,20 +148,20 @@ pub struct NewMedia {
 
 impl NewMedia {
     pub fn current(kind: MediaKind, emulator: &crate::emulator::Emulator) -> Self {
-        let gb = &emulator.gb;
+        let video = emulator.video();
         Self {
             kind,
             game: emulator.game_name().to_string(),
             rom_key: emulator.rom_key().map(str::to_string),
-            model: Some(gb.model),
+            model: Some(emulator.console()),
             created_at: crate::storage::now_unix(),
-            width: THUMB_WIDTH,
-            height: THUMB_HEIGHT,
+            width: video.width as u32,
+            height: video.height as u32,
             length_ms: None,
             frame: Frame {
-                width: THUMB_WIDTH,
-                height: THUMB_HEIGHT,
-                rgba: gb.frame().as_slice().to_vec(),
+                width: video.width as u32,
+                height: video.height as u32,
+                rgba: emulator.frame().to_vec(),
             },
         }
     }
@@ -178,7 +186,7 @@ pub fn save_screenshot(
     store: &mut MediaStore,
     scale: usize,
 ) -> Result<MediaItem, String> {
-    if !emulator.gb.cartridge.has_rom_loaded {
+    if !emulator.has_game() {
         return Err("Load a ROM before taking a screenshot".to_string());
     }
     let (width, height, rgba) = emulator.screenshot(scale);
@@ -192,6 +200,27 @@ pub fn save_screenshot(
         .map_err(|err| format!("Could not save the screenshot: {err}"))
 }
 
+pub fn save_print(
+    emulator: &crate::emulator::Emulator,
+    store: &mut MediaStore,
+    print: &citrine_gb::gb::printer::PrintedImage,
+) -> Result<MediaItem, String> {
+    let rgba: Vec<u8> = print.pixels.iter().flat_map(|&v| [v, v, v, 255]).collect();
+    let png = crate::utils::screenshot::encode_png(print.width, print.height, &rgba)
+        .ok_or_else(|| "Could not encode the print".to_string())?;
+    let mut new = NewMedia::current(MediaKind::Print, emulator);
+    new.width = print.width as u32;
+    new.height = print.height as u32;
+    new.frame = Frame {
+        width: print.width as u32,
+        height: print.height as u32,
+        rgba,
+    };
+    store
+        .add_screenshot(new, &png)
+        .map_err(|err| format!("Could not save the print: {err}"))
+}
+
 pub fn export(
     store: &MediaStore,
     id: &MediaId,
@@ -199,7 +228,7 @@ pub fn export(
 ) {
     let kind = id.kind().unwrap_or(MediaKind::Screenshot);
     let filter = match kind {
-        MediaKind::Screenshot => "PNG image",
+        MediaKind::Screenshot | MediaKind::Print => "PNG image",
         MediaKind::Recording => "MP4 video",
     };
     let saver = crate::utils::file_saver::FileSaver::new(id.file_name())
@@ -303,7 +332,14 @@ pub fn thumbnail_of(frame: &Frame) -> Option<Frame> {
     if !frame.is_valid() {
         return None;
     }
-    let scale = (frame.width.div_ceil(THUMB_WIDTH)).max(frame.height.div_ceil(THUMB_HEIGHT));
+    let gba = ConsoleKind::Gba.video();
+    let (most_width, most_height) =
+        if frame.width * gba.height as u32 == frame.height * gba.width as u32 {
+            (gba.width as u32, gba.height as u32)
+        } else {
+            (THUMB_WIDTH, THUMB_HEIGHT)
+        };
+    let scale = (frame.width.div_ceil(most_width)).max(frame.height.div_ceil(most_height));
     let scale = scale.max(1);
     let width = (frame.width / scale).max(1);
     let height = (frame.height / scale).max(1);
@@ -459,6 +495,19 @@ mod tests {
             rgba: vec![9; 160 * 144 * 4],
         };
         assert_eq!(thumbnail_of(&small), Some(small));
+    }
+
+    #[test]
+    fn a_gba_thumbnail_keeps_the_full_screen() {
+        for scale in [1, 2, 3, 4] {
+            let frame = Frame {
+                width: 240 * scale,
+                height: 160 * scale,
+                rgba: vec![70; (240 * 160 * scale * scale * 4) as usize],
+            };
+            let thumb = thumbnail_of(&frame).expect("thumbnail");
+            assert_eq!((thumb.width, thumb.height), (240, 160), "{scale}x");
+        }
     }
 
     #[test]

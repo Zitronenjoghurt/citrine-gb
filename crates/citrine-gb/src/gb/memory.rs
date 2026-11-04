@@ -82,7 +82,27 @@ impl Memory {
         self.wram.get(bank)
     }
 
-    fn switchable_bank(&self) -> usize {
+    #[cfg(feature = "debug")]
+    pub(crate) fn wram_banks(&self) -> usize {
+        self.wram.len()
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn wram_bank_mut(&mut self, bank: usize) -> Option<&mut [u8]> {
+        self.wram.get_mut(bank).map(|bytes| &mut bytes[..])
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn hram_mut(&mut self) -> &mut [u8] {
+        &mut self.hram
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn hram(&self) -> &[u8] {
+        &self.hram
+    }
+
+    pub(crate) fn switchable_bank(&self) -> usize {
         let bank = (self.svbk as usize).max(1);
         if bank < self.wram.len() { bank } else { 1 }
     }

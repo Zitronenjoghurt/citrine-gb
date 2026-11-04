@@ -2,20 +2,24 @@ use crate::app::events::AppEventQueue;
 use crate::app::tabs::Tab;
 use crate::app::ui_state::keybinds::BindingCapture;
 use crate::app::ui_state::settings::{
-    self, ConsoleChoice, LayoutMode, ScalingMode, Settings, SettingsTab, plays_on_both,
+    self, ConsoleChoice, GBA_SCREEN_NOTE, GBC_SCREEN_NOTE, GbaScreen, LayoutMode, ScalingMode,
+    Settings, SettingsTab, plays_on_both,
 };
 use crate::app::ui_state::ui_theme::UiTheme;
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::info_mark::info_mark;
 use crate::app::widgets::reset_slider::ResetSlider;
 use crate::app::widgets::section::{section, section_with_hint};
+use crate::app::widgets::settings::cartridge::CartridgeState;
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::settings::palette::PaletteEditorState;
-use crate::app::widgets::settings::{controls, online, palette, your_data};
+use crate::app::widgets::settings::{cartridge, controls, online, palette, your_data};
 use crate::app::widgets::text::faint;
 use crate::audio::{Audio, DEFAULT_LATENCY_MS, MAX_LATENCY_MS, MIN_LATENCY_MS};
 use crate::autosave::{AutosaveInterval, DEFAULT_KEEP, MAX_KEEP};
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::GbModel;
+use citrine_gb::gb::apu::CHANNEL_NAMES;
 use citrine_gb::gb::ppu::types::color::ColorCorrection;
 use citrine_gb::rom::header::RomCgbMode;
 use egui::{Response, ScrollArea, Ui, Widget};
@@ -35,9 +39,15 @@ pub struct SettingsContent<'a> {
     palette_editor: &'a mut PaletteEditorState,
     audio: Option<&'a Audio>,
     game: Option<LoadedGame<'a>>,
+    palettes: bool,
+    console: ConsoleKind,
+    channels: &'static [&'static str],
+    #[cfg(feature = "gba")]
+    gba_bios: Option<&'a str>,
     events: Option<&'a mut AppEventQueue>,
     online: Option<(&'a mut crate::online::Online, &'a mut online::JoinForm)>,
     your_data: Option<&'a mut your_data::YourDataUi>,
+    cartridge: Option<CartridgeState<'a>>,
     top_space: f32,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     discord: Option<(
@@ -72,17 +82,49 @@ impl<'a> SettingsContent<'a> {
             palette_editor,
             audio,
             game,
+            palettes: true,
+            console: ConsoleKind::Gb,
+            channels: &CHANNEL_NAMES,
+            #[cfg(feature = "gba")]
+            gba_bios: None,
             events,
             online: None,
             your_data: None,
+            cartridge: None,
             top_space: 0.0,
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             discord: None,
         }
     }
 
+    pub fn palettes(mut self, shown: bool) -> Self {
+        self.palettes = shown;
+        self
+    }
+
+    pub fn console(mut self, console: ConsoleKind) -> Self {
+        self.console = console;
+        self
+    }
+
+    pub fn channels(mut self, names: &'static [&'static str]) -> Self {
+        self.channels = names;
+        self
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn gba_bios(mut self, name: Option<&'a str>) -> Self {
+        self.gba_bios = name;
+        self
+    }
+
     pub fn top_space(mut self, space: f32) -> Self {
         self.top_space = space;
+        self
+    }
+
+    pub fn cartridge(mut self, state: CartridgeState<'a>) -> Self {
+        self.cartridge = state.cart.any().then_some(state);
         self
     }
 
@@ -147,6 +189,10 @@ impl SettingsContent<'_> {
     fn general(self, ui: &mut Ui) {
         let s = self.settings;
         let game = self.game;
+        let video = self.console.video();
+        let mut events = self.events;
+        #[cfg(feature = "gba")]
+        let gba_bios = self.gba_bios;
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let discord = self.discord;
         let touch = s.layout.is_touch(ui.ctx());
@@ -178,7 +224,7 @@ impl SettingsContent<'_> {
                         .default_value(default)
                         .ui(ui)
                         .changed();
-                    if changed && let Some(events) = self.events {
+                    if changed && let Some(events) = events.as_deref_mut() {
                         events.play_on(choice.resolve(GbModel::Cgb));
                     }
                 });
@@ -190,6 +236,28 @@ impl SettingsContent<'_> {
                     ));
                 }
             }
+
+            #[cfg(feature = "gba")]
+            form.row_with_hint("GBA BIOS", crate::app::gba_bios::BIOS_HINT, |ui| {
+                use crate::app::gba_bios::BiosChoice;
+                let mut choice = BiosChoice::current(gba_bios);
+                let response = GenericSelect::new(
+                    &mut choice,
+                    BiosChoice::all(gba_bios),
+                    "enum_select_gba_bios",
+                )
+                .default_value(BiosChoice::BuiltIn)
+                .middle_ellipsis()
+                .ui(ui);
+                if let Some(name) = gba_bios {
+                    response.clone().on_hover_text(name);
+                }
+                if response.changed()
+                    && let Some(events) = events.as_deref_mut()
+                {
+                    choice.apply(events);
+                }
+            });
 
             form.row_with_hint("Layout", LAYOUT_HINT, |ui| {
                 s.dirty |= GenericSelect::from_enum(&mut s.layout, "enum_select_layout")
@@ -222,13 +290,19 @@ impl SettingsContent<'_> {
 
             #[cfg(not(target_arch = "wasm32"))]
             form.row_with_hint("Check for updates", UPDATES_NOTE, |ui| {
-                s.dirty |= ui.checkbox(&mut s.check_updates, "").changed();
+                s.dirty |=
+                    crate::app::widgets::check::checkbox(ui, &mut s.check_updates, "").changed();
             });
 
             form.row("Dev tools", |ui| {
-                s.dirty |= ui.checkbox(&mut s.dev_mode, "").changed();
+                s.dirty |= crate::app::widgets::check::checkbox(ui, &mut s.dev_mode, "").changed();
             });
         });
+
+        if let Some(state) = self.cartridge {
+            ui.add_space(24.0);
+            cartridge::show(ui, s, state, events);
+        }
 
         ui.add_space(10.0);
         section_with_hint(
@@ -274,10 +348,10 @@ impl SettingsContent<'_> {
         section(ui, crate::icons::CAMERA, "Capture", |ui| {
             Form::show(ui, "capture", |form| {
                 form.row("Screenshot scale", |ui| {
-                    s.dirty |= capture_scale(ui, &mut s.screenshot_scale, 1);
+                    s.dirty |= capture_scale(ui, &mut s.screenshot_scale, 1, video);
                 });
                 form.row("Recording scale", |ui| {
-                    s.dirty |= capture_scale(ui, &mut s.recording_scale, 2);
+                    s.dirty |= capture_scale(ui, &mut s.recording_scale, 2, video);
                 });
 
                 #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
@@ -311,6 +385,12 @@ impl SettingsContent<'_> {
 
     fn sound(self, ui: &mut Ui) {
         let s = self.settings;
+        let names = self.channels;
+        let hint = if names.len() == CHANNEL_NAMES.len() {
+            CHANNELS_HINT
+        } else {
+            GBA_CHANNELS_HINT
+        };
 
         Form::show(ui, "sound", |form| {
             form.row("Volume", |ui| {
@@ -322,7 +402,7 @@ impl SettingsContent<'_> {
             });
 
             form.row("Mute", |ui| {
-                s.dirty |= ui.checkbox(&mut s.muted, "").changed();
+                s.dirty |= crate::app::widgets::check::checkbox(ui, &mut s.muted, "").changed();
             });
 
             form.row_with_hint(
@@ -340,10 +420,25 @@ impl SettingsContent<'_> {
                 },
             );
 
-            form.row_with_hint("Channels", CHANNELS_HINT, |ui| {
-                for (index, enabled) in s.channels.iter_mut().enumerate() {
-                    s.dirty |= ui.checkbox(enabled, format!("{}", index + 1)).changed();
-                }
+            form.row_with_hint("Channels", hint, |ui| {
+                let columns = channel_columns(ui, names);
+                let mut changed = false;
+                egui::Grid::new("channels")
+                    .num_columns(columns)
+                    .show(ui, |ui| {
+                        for (index, (name, enabled)) in names
+                            .iter()
+                            .zip(s.channels_for(names.len()).iter_mut())
+                            .enumerate()
+                        {
+                            changed |=
+                                crate::app::widgets::check::checkbox(ui, enabled, *name).changed();
+                            if (index + 1) % columns == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                s.dirty |= changed;
             });
 
             #[cfg(not(target_arch = "wasm32"))]
@@ -383,12 +478,14 @@ impl SettingsContent<'_> {
     }
 
     fn style(self, ui: &mut Ui) {
-        palette::show(ui, self.settings, self.palette_editor, self.game);
-
-        ui.add_space(10.0);
-        ui.separator();
+        if self.palettes {
+            palette::show(ui, self.settings, self.palette_editor, self.game);
+            ui.add_space(10.0);
+            ui.separator();
+        }
 
         let s = self.settings;
+        let gba_screen = self.console == ConsoleKind::Gba;
 
         Form::show(ui, "style", |form| {
             form.row("Scaling", |ui| {
@@ -402,7 +499,8 @@ impl SettingsContent<'_> {
                 "Matrix",
                 "Draws the grid between pixels. It needs whole-number scaling.",
                 |ui| {
-                    s.dirty |= ui.checkbox(&mut s.matrix, "").changed();
+                    s.dirty |=
+                        crate::app::widgets::check::checkbox(ui, &mut s.matrix, "").changed();
                 },
             );
             if s.matrix && s.scaling != ScalingMode::Integer {
@@ -433,7 +531,8 @@ impl SettingsContent<'_> {
                 "Ghosting",
                 "Smears frames together, the way the original LCD did.",
                 |ui| {
-                    s.dirty |= ui.checkbox(&mut s.ghosting, "").changed();
+                    s.dirty |=
+                        crate::app::widgets::check::checkbox(ui, &mut s.ghosting, "").changed();
                 },
             );
 
@@ -447,17 +546,24 @@ impl SettingsContent<'_> {
 
             form.separator();
 
-            form.row_with_hint(
-                "GBC screen",
-                "How Game Boy Color colours look. Like a GBC softens them the way its screen did.",
-                |ui| {
+            if gba_screen {
+                form.row_with_hint("GBA screen", GBA_SCREEN_NOTE, |ui| {
+                    let mut screen = GbaScreen(s.color_correction);
+                    s.dirty |= GenericSelect::new(&mut screen, GbaScreen::ALL, "gba_screen")
+                        .default_value(GbaScreen(ColorCorrection::Screen))
+                        .ui(ui)
+                        .changed();
+                    s.color_correction = screen.0;
+                });
+            } else {
+                form.row_with_hint("GBC screen", GBC_SCREEN_NOTE, |ui| {
                     s.dirty |=
                         GenericSelect::from_enum(&mut s.color_correction, "enum_select_gbc_screen")
                             .default_value(ColorCorrection::Screen)
                             .ui(ui)
                             .changed();
-                },
-            );
+                });
+            }
         });
     }
 
@@ -490,7 +596,8 @@ impl SettingsContent<'_> {
 
         Form::show(ui, "developer", |form| {
             form.row("Randomized power-on RAM", |ui| {
-                s.dirty |= ui.checkbox(&mut s.randomized_ram, "").changed();
+                s.dirty |=
+                    crate::app::widgets::check::checkbox(ui, &mut s.randomized_ram, "").changed();
             });
         });
     }
@@ -498,13 +605,41 @@ impl SettingsContent<'_> {
 
 const MAX_COLUMN_WIDTH: f32 = 480.0;
 
-const CHANNELS_HINT: &str =
-    "The Game Boy's four sound channels: 1 pulse with sweep, 2 pulse, 3 wave, 4 noise.";
+fn channel_columns(ui: &Ui, names: &[&str]) -> usize {
+    let spacing = ui.spacing();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let boxes: f32 = names
+        .iter()
+        .map(|name| {
+            let text = ui
+                .painter()
+                .layout_no_wrap(name.to_string(), font.clone(), egui::Color32::PLACEHOLDER)
+                .size()
+                .x;
+            spacing.icon_width + spacing.icon_spacing + text
+        })
+        .sum();
+    let gaps = spacing.item_spacing.x * (names.len() - 1) as f32;
+    if boxes + gaps <= ui.available_width() {
+        names.len()
+    } else {
+        2
+    }
+}
+
+const CHANNELS_HINT: &str = "The Game Boy's four sound channels. Pulse 1 and 2 usually carry the tune, Wave the bass and Noise the drums.";
+
+const GBA_CHANNELS_HINT: &str = "The Game Boy Advance's six sound channels. The first four are the Game Boy's. Direct Sound A and B play recorded sound, often the music and voices.";
 
 const LAYOUT_HINT: &str = "Automatic uses the touch layout on small screens. To resize the touch layout, use UI size on the Controls page.";
 
-fn capture_scale(ui: &mut Ui, scale: &mut usize, step: usize) -> bool {
-    use crate::media::recording::{DEFAULT_SCALE, MAX_SCALE, SOURCE_HEIGHT, SOURCE_WIDTH};
+fn capture_scale(
+    ui: &mut Ui,
+    scale: &mut usize,
+    step: usize,
+    video: citrine_gb::console::VideoSpec,
+) -> bool {
+    use crate::media::recording::{DEFAULT_SCALE, MAX_SCALE};
     let response = ResetSlider::new(scale, step..=MAX_SCALE)
         .step_by(step as f64)
         .default_value(DEFAULT_SCALE)
@@ -513,8 +648,8 @@ fn capture_scale(ui: &mut Ui, scale: &mut usize, step: usize) -> bool {
     let changed = response.drag_stopped() || (response.changed() && !response.dragged());
     response.on_hover_text(format!(
         "{} × {} pixels",
-        SOURCE_WIDTH * *scale,
-        SOURCE_HEIGHT * *scale
+        video.width * *scale,
+        video.height * *scale
     ));
     changed
 }
@@ -536,8 +671,12 @@ fn codec_row(ui: &mut Ui) {
             }
         }
         Status::Downloading => {
-            ui.spinner();
-            ui.label("Downloading");
+            ui.add(crate::app::widgets::progress::ProgressBar::new(
+                "Downloading",
+                codec
+                    .progress()
+                    .unwrap_or_else(crate::progress::Progress::unknown),
+            ));
         }
         Status::Unsupported => {
             ui.label("Not available on this system");
@@ -854,6 +993,38 @@ mod tests {
                 clip >= top - 0.01,
                 "rows show from {clip}, the page starts at {top}"
             );
+        }
+    }
+
+    #[cfg(feature = "gba")]
+    mod gba {
+        use crate::app::files::tests::Opened;
+        use crate::app::tabs::Tab;
+        use crate::app::tests::{info_frame_out, text_rect};
+        use crate::app::ui_state::settings::{LayoutMode, SettingsTab};
+        use egui::Context;
+
+        #[test]
+        fn the_sound_page_lists_the_running_consoles_channels() {
+            for gba in [false, true] {
+                let mut opened = Opened::new(&format!("channels-{gba}"));
+                opened.app.ui.settings.layout = LayoutMode::Desktop;
+                if gba {
+                    let file = opened.picked();
+                    opened.app.handle_load_rom(file);
+                }
+                opened.app.ui.settings.current_tab = SettingsTab::Sound;
+                opened.app.open_tab(Tab::Settings);
+                let ctx = Context::default();
+                info_frame_out(&mut opened.app, &ctx, 1280.0, 900.0);
+                let output = info_frame_out(&mut opened.app, &ctx, 1280.0, 900.0);
+                assert!(text_rect(&output, "Noise").is_some(), "gba {gba}");
+                assert_eq!(
+                    text_rect(&output, "Direct Sound A").is_some(),
+                    gba,
+                    "gba {gba}"
+                );
+            }
         }
     }
 }

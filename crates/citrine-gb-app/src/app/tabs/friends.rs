@@ -1,6 +1,6 @@
 use crate::app::mobile::kit;
 use crate::app::tabs::chat::{self, ChatUi};
-use crate::app::tabs::playing::{self, PlayButton};
+use crate::app::tabs::playing;
 use crate::app::tabs::{Tab, TabViewer};
 use crate::app::ui_state::settings::SettingsTab;
 use crate::app::widgets::action::{action_height, main_button, quiet_button, wide_button};
@@ -16,7 +16,7 @@ use crate::app::widgets::settings::online::{connection_line, my_seen, retry_row}
 use crate::app::widgets::typing;
 use crate::icons;
 use crate::online::{Online, RelayEntry, Seen, game_title, seen};
-use crate::play::Stage;
+use crate::play::{Play, Stage};
 use citrine_gb_net::{ErrorCode, Friend, FriendState, OnlineId};
 use egui::{Align, CursorIcon, Label, Layout, RichText, Sense, TextStyle, Ui};
 use web_time::Instant;
@@ -82,22 +82,17 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
         if chat::show(viewer, ui) {
             viewer.ui.friends.profile = viewer.ui.friends.chat.current();
         }
-        let profile_button = viewer
+        let offer = viewer
             .ui
             .friends
             .profile
-            .and_then(|id| playing::play_button(viewer.play, viewer.online, id));
-        let profile_watch = viewer
-            .ui
-            .friends
-            .profile
-            .is_some_and(|id| playing::can_watch(viewer.play, viewer.online, id, game_open));
+            .map(|id| Offer::of(viewer.play, viewer.online, id, game_open))
+            .unwrap_or_default();
         if let Some((id, way)) = profile(
             ui.ctx(),
             viewer.online,
             &mut viewer.ui.friends,
-            profile_button,
-            profile_watch,
+            offer,
             unix_now,
             now,
         ) {
@@ -230,8 +225,10 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
             }
 
             let friends: Vec<Friend> = online.friends().into_iter().cloned().collect();
-            if touch {
+            if touch && !incoming.is_empty() {
                 kit::section_label(ui, "Friends");
+            } else if touch {
+                ui.add_space(8.0);
             } else {
                 heading(ui, "Friends");
             }
@@ -251,15 +248,17 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                     }
                     let id = person.online_id;
                     let presence = online.presence(person);
-                    let live = playing::play_subtitle(play, id);
-                    let in_session = live.is_some();
-                    let subtitle = live.unwrap_or_else(|| subtitle(online, person, unix_now));
+                    let note = playing::invite_note(play, online, id);
+                    let shown = playing::play_subtitle(play, id);
+                    let in_session = shown.is_some();
+                    let subtitle = shown.unwrap_or_else(|| subtitle(online, person, unix_now));
                     let unread = online.unread(id);
                     let invite = play.invites().iter().find(|i| i.from == id).cloned();
                     let sent = play.session().is_some_and(|s| {
                         s.is_live() && s.friend() == id && s.stage() == Stage::Inviting
                     });
-                    let button = playing::play_button(play, online, id);
+                    let button = playing::play_button(play, online, id)
+                        .filter(|_| !playing::invite_closed(play, online, id));
                     let watches = playing::can_watch(play, online, id, game_open);
                     let row_width = ui.available_width() - if touch { 24.0 } else { 0.0 };
                     let below = invite.is_some() && row_width < INVITE_ROW_MIN;
@@ -316,10 +315,14 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                             }
                         }
                     };
+                    let line = Subtitle {
+                        line: subtitle,
+                        note: note.as_deref(),
+                    };
                     let row = if touch {
-                        phone_row(ui, person, presence, unread, mode, subtitle, row_actions)
+                        phone_row(ui, person, presence, unread, mode, line, row_actions)
                     } else {
-                        person_row(ui, person, presence, unread, mode, subtitle, row_actions)
+                        person_row(ui, person, presence, unread, mode, line, row_actions)
                     };
                     if let (true, Some(invite)) = (below, &invite) {
                         let margin = if touch { 12 } else { 0 };
@@ -478,21 +481,11 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
             ui.add_space(8.0);
         });
 
-    let profile_button = state
+    let offer = state
         .profile
-        .and_then(|id| playing::play_button(play, online, id));
-    let profile_watch = state
-        .profile
-        .is_some_and(|id| playing::can_watch(play, online, id, game_open));
-    if let Some((id, way)) = profile(
-        ui.ctx(),
-        online,
-        state,
-        profile_button,
-        profile_watch,
-        unix_now,
-        now,
-    ) {
+        .map(|id| Offer::of(play, online, id, game_open))
+        .unwrap_or_default();
+    if let Some((id, way)) = profile(ui.ctx(), online, state, offer, unix_now, now) {
         actions.push(match way {
             Way::Play => PlayAction::Invite(id),
             Way::Watch => PlayAction::Watch(id),
@@ -785,6 +778,27 @@ enum RowMode {
     Folded,
 }
 
+#[derive(Clone, Copy)]
+struct Subtitle<'a> {
+    line: Line<'a>,
+    note: Option<&'a str>,
+}
+
+impl<'a> From<&'a str> for Subtitle<'a> {
+    fn from(text: &'a str) -> Self {
+        Self {
+            line: Line::Text(text),
+            note: None,
+        }
+    }
+}
+
+impl<'a> From<&'a String> for Subtitle<'a> {
+    fn from(text: &'a String) -> Self {
+        Self::from(text.as_str())
+    }
+}
+
 #[derive(Default)]
 struct RowClicks {
     face: bool,
@@ -822,13 +836,20 @@ fn person_row<'a>(
     presence: Option<Seen>,
     unread: usize,
     mode: RowMode,
-    subtitle: impl Into<Line<'a>>,
+    subtitle: impl Into<Subtitle<'a>>,
     actions: impl FnOnce(&mut Ui),
 ) -> RowClicks {
     let subtitle = subtitle.into();
-    let clicks = person_row_sized(
-        ui, ROW_AVATAR, person, presence, unread, mode, subtitle, actions,
-    );
+    let clicks = ui
+        .scope(|ui| {
+            ui.style_mut()
+                .text_styles
+                .insert(TextStyle::Small, egui::FontId::proportional(11.0));
+            person_row_sized(
+                ui, ROW_AVATAR, person, presence, unread, mode, subtitle, actions,
+            )
+        })
+        .inner;
     ui.add_space(2.0);
     clicks
 }
@@ -839,7 +860,7 @@ fn phone_row<'a>(
     presence: Option<Seen>,
     unread: usize,
     mode: RowMode,
-    subtitle: impl Into<Line<'a>>,
+    subtitle: impl Into<Subtitle<'a>>,
     actions: impl FnOnce(&mut Ui),
 ) -> RowClicks {
     let subtitle = subtitle.into();
@@ -863,13 +884,21 @@ fn person_row_sized(
     presence: Option<Seen>,
     unread: usize,
     mode: RowMode,
-    subtitle: Line<'_>,
+    subtitle: Subtitle,
     actions: impl FnOnce(&mut Ui),
 ) -> RowClicks {
     let mut clicks = RowClicks::default();
     let chat = mode != RowMode::Plain;
     let fold = mode == RowMode::Folded;
-    let height = size.max(ui.spacing().interact_size.y);
+    let small = ui.text_style_height(&TextStyle::Small);
+    let mut block = ui.text_style_height(&TextStyle::Body);
+    if !subtitle.line.is_empty() {
+        block += 1.0 + small;
+    }
+    if subtitle.note.is_some() {
+        block += 1.0 + small;
+    }
+    let height = size.max(ui.spacing().interact_size.y).max(block);
     let area = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), height));
     let background = ui.painter().add(egui::Shape::Noop);
     let back = chat.then(|| {
@@ -907,10 +936,6 @@ fn person_row_sized(
                 }
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    let mut block = ui.text_style_height(&TextStyle::Body);
-                    if !subtitle.is_empty() {
-                        block += 1.0 + ui.text_style_height(&TextStyle::Small);
-                    }
                     ui.add_space(((height - block) / 2.0).max(0.0));
                     let strong = ui.visuals().strong_text_color();
                     let name = emoji::line(ui, &person.display_name, TextStyle::Body, strong)
@@ -918,10 +943,10 @@ fn person_row_sized(
                     let color = if chat && unread > 0 {
                         strong
                     } else {
-                        ui.visuals().weak_text_color()
+                        ui.visuals().text_color()
                     };
                     clicks.open |= name.clicked();
-                    let line = match subtitle {
+                    let line = match subtitle.line {
                         Line::Text("") => None,
                         Line::Text(text) => Some(emoji::line(ui, text, TextStyle::Small, color)),
                         Line::Typing => {
@@ -931,6 +956,11 @@ fn person_row_sized(
                     };
                     if let Some(line) = line {
                         clicks.open |= line.on_hover_cursor(CursorIcon::PointingHand).clicked();
+                    }
+                    if let Some(note) = subtitle.note {
+                        let warn = ui.visuals().warn_fg_color;
+                        let note = emoji::line(ui, note, TextStyle::Small, warn);
+                        clicks.open |= note.on_hover_cursor(CursorIcon::PointingHand).clicked();
                     }
                 });
             });
@@ -1011,12 +1041,30 @@ pub fn ago(then: u64, now: u64) -> String {
     }
 }
 
+#[derive(Default)]
+struct Offer {
+    play: bool,
+    note: Option<String>,
+    watch: bool,
+}
+
+impl Offer {
+    fn of(play: &Play, online: &Online, id: OnlineId, game_open: bool) -> Self {
+        let note = playing::invite_note(play, online, id);
+        Self {
+            play: !playing::invite_closed(play, online, id)
+                && playing::play_button(play, online, id).is_some(),
+            watch: playing::can_watch(play, online, id, game_open),
+            note,
+        }
+    }
+}
+
 fn profile(
     ctx: &egui::Context,
     online: &mut Online,
     state: &mut FriendsUi,
-    play_button: Option<PlayButton>,
-    watch: bool,
+    offer: Offer,
     unix_now: u64,
     now: Instant,
 ) -> Option<(OnlineId, Way)> {
@@ -1066,7 +1114,12 @@ fn profile(
         match person.state {
             FriendState::Friend => {
                 let size = egui::vec2(ui.available_width(), action_height(ui));
-                match (play_button.is_some(), watch) {
+                if let Some(note) = &offer.note {
+                    let warn = ui.visuals().warn_fg_color;
+                    ui.vertical_centered(|ui| ui.label(RichText::new(note).color(warn)));
+                    ui.add_space(4.0);
+                }
+                match (offer.play, offer.watch) {
                     (true, true) => ui.columns(2, |columns| {
                         let half = egui::vec2(columns[0].available_width(), size.y);
                         let join = egui::Button::new(format!("{}  Join", icons::GAME_CONTROLLER));

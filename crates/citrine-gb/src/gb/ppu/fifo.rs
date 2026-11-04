@@ -176,7 +176,7 @@ impl Ppu {
         self.fifo.position = self.fifo.position.wrapping_add(1);
     }
 
-    fn apply_bg_palette(&self, palette: u8, color_index: u8) -> RGBA {
+    pub(crate) fn apply_bg_palette(&self, palette: u8, color_index: u8) -> RGBA {
         if self.cgb_mode {
             return self.cgb_color(&self.bg_palette_ram, palette, color_index);
         }
@@ -187,7 +187,7 @@ impl Ppu {
         }
     }
 
-    fn apply_sprite_palette(&self, palette: u8, color_index: u8) -> RGBA {
+    pub(crate) fn apply_sprite_palette(&self, palette: u8, color_index: u8) -> RGBA {
         if self.cgb_mode {
             return self.cgb_color(&self.obj_palette_ram, palette, color_index);
         }

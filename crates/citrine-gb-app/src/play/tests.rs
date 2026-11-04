@@ -2,10 +2,12 @@ use super::*;
 use crate::online::address::ServerAddress;
 use crate::online::transport::{self, Connector, Transport, TransportEvent};
 use crate::online::{Phase, Trust};
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::console::{Console, Keys};
+use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::netplay::{
     Advance, ConsoleSetup, Input, Player, Session, SessionConfig, encode_state,
 };
+use citrine_gb::rom::Rom;
 use citrine_gb_net::{ErrorCode, FriendState, InviteCode, Mode, NONCE_BYTES, Sealed};
 use citrine_gb_server::{Config, Running, start};
 use std::collections::HashMap;
@@ -14,15 +16,15 @@ pub(crate) const SNAKE: &[u8] = include_bytes!("../../homebrew/snake.gb");
 const PASSWORD: &str = "lemon tree";
 const FRAME: Duration = Duration::from_nanos(16_742_706);
 const SETTLE: Duration = Duration::from_secs(60);
-const PAD: [JoypadState; 8] = [
-    JoypadState::empty(),
-    JoypadState::LEFT,
-    JoypadState::RIGHT,
-    JoypadState::UP,
-    JoypadState::DOWN,
-    JoypadState::A,
-    JoypadState::B,
-    JoypadState::A.union(JoypadState::RIGHT),
+const PAD: [Keys; 8] = [
+    Keys::empty(),
+    Keys::LEFT,
+    Keys::RIGHT,
+    Keys::UP,
+    Keys::DOWN,
+    Keys::A,
+    Keys::B,
+    Keys::A.union(Keys::RIGHT),
 ];
 
 struct Rng(u64);
@@ -38,11 +40,14 @@ impl Rng {
 
 type Meter = std::rc::Rc<std::cell::RefCell<Vec<(Instant, usize)>>>;
 type Cut = std::rc::Rc<std::cell::Cell<bool>>;
+type Now = std::rc::Rc<std::cell::Cell<Instant>>;
 
 struct Lag {
     inner: Box<dyn Transport>,
+    clock: Now,
     meter: Meter,
     cut: Cut,
+    down: Cut,
     closed: bool,
     half: Duration,
     jitter_ms: u64,
@@ -65,9 +70,13 @@ impl Transport for Lag {
         if self.closed {
             return;
         }
-        let now = Instant::now();
-        if let Ok(ClientMsg::Play { sealed, .. } | ClientMsg::Game { sealed, .. }) =
-            ClientMsg::decode(&bytes)
+        let now = self.clock.get();
+        if let Ok(
+            ClientMsg::Play { sealed, .. }
+            | ClientMsg::Game { sealed, .. }
+            | ClientMsg::RoomPlay { sealed, .. }
+            | ClientMsg::RoomGame { sealed, .. },
+        ) = ClientMsg::decode(&bytes)
         {
             self.meter.borrow_mut().push((now, sealed.ciphertext.len()));
         }
@@ -80,11 +89,11 @@ impl Transport for Lag {
         if self.closed {
             return None;
         }
-        if self.cut.replace(false) {
+        if self.cut.replace(false) || self.down.get() {
             self.closed = true;
             return Some(TransportEvent::Closed);
         }
-        let now = Instant::now();
+        let now = self.clock.get();
         while self.out.front().is_some_and(|(due, _)| *due <= now) {
             if let Some((_, bytes)) = self.out.pop_front() {
                 self.inner.send(bytes);
@@ -105,16 +114,25 @@ impl Transport for Lag {
     }
 }
 
-fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64, meter: Meter, cut: Cut) -> Connector {
+fn lagged(
+    one_way_ms: u64,
+    jitter_ms: u64,
+    seed: u64,
+    meter: Meter,
+    [cut, down]: [Cut; 2],
+    clock: Now,
+) -> Connector {
     let mut websocket = transport::websocket();
     let mut opened = 0;
     Box::new(move |url| {
         opened += 1;
-        let now = Instant::now();
+        let now = clock.get();
         Box::new(Lag {
             inner: websocket(url),
+            clock: clock.clone(),
             meter: meter.clone(),
             cut: cut.clone(),
+            down: down.clone(),
             closed: false,
             half: Duration::from_millis(one_way_ms) / 2,
             jitter_ms: jitter_ms / 2,
@@ -125,6 +143,44 @@ fn lagged(one_way_ms: u64, jitter_ms: u64, seed: u64, meter: Meter, cut: Cut) ->
             last_in: now,
         })
     })
+}
+
+struct Clock {
+    now: Now,
+    next: Instant,
+}
+
+impl Clock {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            now: Now::new(now.into()),
+            next: now,
+        }
+    }
+
+    fn now(&self) -> Instant {
+        self.now.get()
+    }
+
+    fn tick(&mut self) -> Instant {
+        self.next += FRAME;
+        let real = Instant::now();
+        if self.next > real {
+            std::thread::sleep(self.next - real);
+        } else {
+            self.next = real;
+        }
+        self.now.set(self.now.get() + FRAME);
+        self.now.get()
+    }
+
+    fn waited(&self, since: Instant, what: &str) {
+        assert!(
+            self.now().duration_since(since) < SETTLE,
+            "timed out waiting until {what}"
+        );
+    }
 }
 
 struct Relay {
@@ -151,6 +207,9 @@ impl Relay {
                 dir.path().join("static").display().to_string(),
             ),
             ("CITRINE_RELAY", "true".into()),
+            ("CITRINE_ROOM_GRACE_SECS", "10".into()),
+            ("CITRINE_IP_UNSIGNED", "8".into()),
+            ("CITRINE_SIGN_UPS_PER_IP", "8".into()),
             ("CITRINE_RELAY_PASSWORD", PASSWORD.into()),
             ("CITRINE_WEB", "false".into()),
             (
@@ -177,6 +236,19 @@ impl Relay {
 }
 
 impl Relay {
+    fn sql(&self, sql: &'static str) {
+        let path = self._dir.path().join("data").join("citrine.db");
+        self.runtime.block_on(async {
+            use sqlx::ConnectOptions;
+            let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(path)
+                .connect()
+                .await
+                .unwrap();
+            sqlx::raw_sql(sql).execute(&mut conn).await.unwrap();
+        });
+    }
+
     fn invites(&self, required: bool) -> [Option<InviteCode>; 2] {
         let Some(running) = self.running.as_ref().filter(|_| required) else {
             return [None, None];
@@ -211,44 +283,66 @@ pub(crate) struct Side {
     pub(crate) online: Online,
     meter: Meter,
     cut: Cut,
+    down: Cut,
     pub(crate) play: Play,
     rng: Rng,
-    held: JoypadState,
+    held: Keys,
     held_for: u64,
     pressed: u32,
     cable_gb: Option<GameBoy>,
     cable_frames: u32,
     received: bool,
+    arrived: Vec<(u32, u32)>,
+    sent: bool,
     presses_start: bool,
     own: Option<GameBoy>,
+    #[cfg(feature = "gba")]
+    own_gba: Option<Box<citrine_gb::gba::machine::Gba>>,
     gave: Option<Vec<u8>>,
     runs_own: bool,
     start_only: bool,
-    stop_at: Option<u32>,
+    shoulders: bool,
+    history: Option<DropHistory>,
+    handed_back: Option<(OnlineId, bool)>,
 }
 
 impl Side {
-    fn new(lag: (u64, u64), seed: u64, shelf: Box<dyn Shelf>) -> Self {
+    fn new(lag: (u64, u64), seed: u64, shelf: Box<dyn Shelf>, clock: &Clock) -> Self {
         let meter = Meter::default();
-        let cut = Cut::default();
+        let (cut, down) = (Cut::default(), Cut::default());
+        let line = [cut.clone(), down.clone()];
         Self {
-            online: Online::new(lagged(lag.0, lag.1, seed, meter.clone(), cut.clone())),
+            online: Online::new(lagged(
+                lag.0,
+                lag.1,
+                seed,
+                meter.clone(),
+                line,
+                clock.now.clone(),
+            )),
             meter,
             cut,
+            down,
             play: Play::new(shelf),
             rng: Rng(seed),
-            held: JoypadState::empty(),
+            held: Keys::empty(),
             held_for: 0,
             pressed: 0,
             cable_gb: None,
             cable_frames: 0,
             received: false,
+            arrived: Vec::new(),
+            sent: false,
             presses_start: false,
             own: None,
+            #[cfg(feature = "gba")]
+            own_gba: None,
             gave: None,
             runs_own: false,
             start_only: false,
-            stop_at: None,
+            shoulders: false,
+            history: None,
+            handed_back: None,
         }
     }
 
@@ -269,7 +363,7 @@ impl Side {
     }
 
     fn running(&mut self, file: GameFile) -> GameFile {
-        let mut gb = GameBoy::new_empty(file.model);
+        let mut gb = GameBoy::new_empty(GbModel::try_from(file.kind).unwrap());
         gb.load_rom(&Rom::new(&file.rom)).unwrap();
         for _ in 0..90 {
             gb.run_frame();
@@ -281,20 +375,39 @@ impl Side {
         }
     }
 
+    fn own_state(&self) -> Option<Vec<u8>> {
+        if let Some(gb) = &self.own {
+            return encode_state(gb).ok();
+        }
+        #[cfg(feature = "gba")]
+        if let Some(gba) = self.own_gba.as_deref() {
+            return encode_state(gba).ok();
+        }
+        None
+    }
+
     fn session_mut(&mut self) -> &mut PlaySession {
         self.play.session_mut().unwrap()
     }
 
-    fn buttons(&mut self) -> JoypadState {
+    fn buttons(&mut self) -> Keys {
+        let pad = self.pad_buttons();
+        match self.shoulders && self.pressed % 40 < 10 {
+            true => pad | Keys::L | Keys::R,
+            false => pad,
+        }
+    }
+
+    fn pad_buttons(&mut self) -> Keys {
         self.pressed += 1;
         if self.start_only {
             return match self.presses_start && (30..35).contains(&(self.frame() % 60)) {
-                true => JoypadState::START,
-                false => JoypadState::empty(),
+                true => Keys::START,
+                false => Keys::empty(),
             };
         }
         if self.presses_start && self.pressed % 90 < 5 {
-            return JoypadState::START;
+            return Keys::START;
         }
         if self.held_for == 0 {
             self.held = PAD[self.rng.below(PAD.len() as u64) as usize];
@@ -307,30 +420,36 @@ impl Side {
     fn step(&mut self, now: Instant) {
         self.online.update(now);
         self.play.update(&mut self.online, now);
-        if let Some(play) = self.play.session_mut() {
-            if let Some(back) = play.take_returned() {
-                self.own = Some(back.console);
-            }
-            if play.wants_state()
-                && let Some(gb) = &self.own
-            {
-                let state = encode_state(gb).unwrap();
-                self.gave = Some(state.clone());
-                play.give_state(state);
-            }
+        if let Some(back) = self.play.session_mut().and_then(PlaySession::take_returned) {
+            self.handed_back = Some((back.friend, back.paused));
+            self.history = back.history;
+            self.own = match back.console {
+                #[cfg(feature = "gba")]
+                Machine::Gba(gba) => {
+                    self.own_gba = Some(gba);
+                    None
+                }
+                console => game_boy(console),
+            };
+        }
+        if self.play.session().is_some_and(PlaySession::wants_state)
+            && let Some(state) = self.own_state()
+        {
+            self.gave = Some(state.clone());
+            let history = self.history.take();
+            self.session_mut().give_state(state, history);
         }
         let buttons = self.buttons();
         if self.runs_own
             && !self.play.is_live()
             && let Some(gb) = &mut self.own
         {
-            gb.release_button(buttons.complement());
-            gb.press_button(buttons);
+            gb.release_button(buttons.complement().into());
+            gb.press_button(buttons.into());
             gb.run_frame();
         }
         if let Some(play) = self.play.session_mut()
             && play.stage() == Stage::Playing
-            && self.stop_at.is_none_or(|at| play.frame() < at)
         {
             match play.mode() {
                 Some(Mode::Rollback) => {
@@ -346,9 +465,12 @@ impl Side {
                 Some(Mode::Apart) | None => {}
             }
         }
-        if matches!(self.stage(), Some(Stage::Receiving { .. })) {
+        if let Some(Stage::Receiving { got, total }) = self.stage() {
             self.received = true;
+            self.arrived.push((got, total));
         }
+        self.sent |= self.play.session().is_some_and(PlaySession::sends_game);
+        self.play.tick_watch(now);
         self.play.flush(&mut self.online);
     }
 }
@@ -357,6 +479,7 @@ pub(crate) struct Pair {
     pub(crate) host: Side,
     pub(crate) guest: Side,
     relay: Relay,
+    clock: Clock,
 }
 
 impl Pair {
@@ -368,14 +491,16 @@ impl Pair {
     ) -> Self {
         let relay = Relay::start(sharing);
         let [host_shelf, guest_shelf] = shelves;
+        let clock = Clock::new();
         let mut pair = Self {
-            host: Side::new((one_way_ms, jitter_ms), 11, host_shelf),
-            guest: Side::new((one_way_ms, jitter_ms), 29, guest_shelf),
+            host: Side::new((one_way_ms, jitter_ms), 11, host_shelf, &clock),
+            guest: Side::new((one_way_ms, jitter_ms), 29, guest_shelf, &clock),
             relay,
+            clock,
         };
         pair.guest.presses_start = true;
         let [host_code, guest_code] = pair.relay.invites(sharing);
-        let now = Instant::now();
+        let now = pair.clock.now();
         for side in [&mut pair.host, &mut pair.guest] {
             side.online.probe(
                 pair.relay.address.clone(),
@@ -387,7 +512,7 @@ impl Pair {
         pair.until("both probed", |p| {
             p.host.online.phase() == Phase::Probed && p.guest.online.phase() == Phase::Probed
         });
-        let now = Instant::now();
+        let now = pair.clock.now();
         pair.host
             .online
             .create_invited_account("Clara".into(), host_code, now);
@@ -413,25 +538,34 @@ impl Pair {
         pair
     }
 
+    pub(crate) fn relay_sql(&self, sql: &'static str) {
+        self.relay.sql(sql);
+    }
+
+    pub(crate) fn cut(&mut self) {
+        self.host.cut.set(true);
+        self.guest.cut.set(true);
+    }
+
     fn tick(&mut self) {
-        let now = Instant::now();
+        let now = self.clock.tick();
         self.host.step(now);
         self.guest.step(now);
     }
 
+    pub(crate) fn stored_messages(&self) -> u64 {
+        let running = self.relay.running.as_ref().unwrap();
+        self.relay
+            .runtime
+            .block_on(running.stored_messages())
+            .unwrap()
+    }
+
     pub(crate) fn until(&mut self, what: &str, mut done: impl FnMut(&Pair) -> bool) {
-        let begun = Instant::now();
-        let mut next = begun;
+        let begun = self.clock.now();
         while !done(self) {
-            assert!(begun.elapsed() < SETTLE, "timed out waiting until {what}");
+            self.clock.waited(begun, what);
             self.tick();
-            next += FRAME;
-            let now = Instant::now();
-            if next > now {
-                std::thread::sleep(next - now);
-            } else {
-                next = now;
-            }
         }
     }
 
@@ -447,26 +581,16 @@ impl Pair {
     }
 
     fn run_host_alone(&mut self, frames: u32) {
-        let mut next = Instant::now();
         for _ in 0..frames {
-            self.host.step(Instant::now());
-            next += FRAME;
-            let now = Instant::now();
-            if next > now {
-                std::thread::sleep(next - now);
-            }
+            let now = self.clock.tick();
+            self.host.step(now);
         }
     }
 
     fn run_guest_alone(&mut self, frames: u32) {
-        let mut next = Instant::now();
         for _ in 0..frames {
-            self.guest.step(Instant::now());
-            next += FRAME;
-            let now = Instant::now();
-            if next > now {
-                std::thread::sleep(next - now);
-            }
+            let now = self.clock.tick();
+            self.guest.step(now);
         }
     }
 
@@ -481,6 +605,16 @@ impl Pair {
         });
     }
 
+    fn until_checked(&mut self) {
+        self.until("both logged three checks", |p| {
+            [&p.host, &p.guest].iter().all(|side| {
+                side.session()
+                    .log()
+                    .is_some_and(|log| log.checks.len() >= 3)
+            })
+        });
+    }
+
     pub(crate) fn play_frames(&mut self, frames: u32) {
         let target = self.host.frame().max(self.guest.frame()) + frames;
         self.until("both ran the frames", |p| {
@@ -489,11 +623,19 @@ impl Pair {
     }
 }
 
+fn game_boy(machine: Machine) -> Option<GameBoy> {
+    match machine {
+        Machine::Gb(gb) => Some(*gb),
+        #[cfg(feature = "gba")]
+        Machine::Gba(_) => None,
+    }
+}
+
 fn game(rom: &[u8], title: &str) -> GameFile {
     GameFile {
         rom: rom.to_vec(),
         title: title.into(),
-        model: GbModel::for_rom(&Rom::new(rom)).unwrap(),
+        kind: GbModel::for_rom(&Rom::new(rom)).unwrap().into(),
         save: None,
         running: false,
     }
@@ -530,13 +672,13 @@ fn reference_checks(play: &PlaySession, roms: [&[u8]; 2]) -> HashMap<u32, [u64; 
     let setups = [0, 1].map(|i| {
         Some(ConsoleSetup {
             rom: &roms[i],
-            model: GbModel::for_rom(&roms[i]).unwrap(),
+            kind: GbModel::for_rom(&roms[i]).unwrap().into(),
             save: None,
             state: None,
         })
     });
     let config = SessionConfig {
-        power_on: start.power_on,
+        power_on: start.power_on.as_slice().try_into().unwrap(),
         ..SessionConfig::new(Player::One, start.seed, start.start_time)
     };
     let mut session = Session::new(config, setups).unwrap();
@@ -550,7 +692,8 @@ fn reference_checks(play: &PlaySession, roms: [&[u8]; 2]) -> HashMap<u32, [u64; 
         .zip(two)
         .map_while(|(one, two)| one.zip(*two))
         .collect();
-    for (frame, (one, two)) in inputs.into_iter().enumerate() {
+    let next = (Input::default(), Input::default());
+    for (frame, (one, two)) in inputs.into_iter().chain([next]).enumerate() {
         session.add_remote_input(frame as u32, two);
         session.add_local_input(frame as u32, one).unwrap();
         assert_eq!(session.advance(), Advance::Ran);
@@ -594,11 +737,18 @@ fn plays_snake(one_way_ms: u64, jitter_ms: u64) {
     let session = pair.invite(snake());
     pair.accept(session, MyGame::Own(snake()));
     pair.play_frames(480);
+    pair.until_checked();
     let host = pair.host.session();
     let guest = pair.guest.session();
     assert_eq!(host.mode(), Some(Mode::Rollback));
     let slow = one_way_ms * 2 > u64::from(SLOW_ROUND_TRIP_MS);
-    assert_eq!(host.delay(), Some(if slow { SLOW_DELAY } else { 0 }));
+    let delay = u32::from(host.delay().unwrap());
+    if slow {
+        assert!((u32::from(SLOW_DELAY)..=links::MAX_INPUT_DELAY).contains(&delay));
+    } else {
+        assert_eq!(delay, 0);
+    }
+    assert_eq!(host.sync().map(|s| s.delay), Some(delay));
     assert_eq!(guest.delay(), host.delay());
     assert_same_inputs(host, guest);
     assert_matches_reference(host, [SNAKE, SNAKE]);
@@ -620,6 +770,46 @@ fn snake_at_75_ms_plays_like_a_local_session() {
 #[test]
 fn snake_at_250_ms_plays_like_a_local_session() {
     plays_snake(250, 40);
+}
+
+#[test]
+fn l_and_r_pressed_on_one_side_arrive_on_the_other() {
+    let mut pair = Pair::new(false, 30, 10, homebrew());
+    pair.host.shoulders = true;
+    let session = pair.invite(snake());
+    pair.accept(session, MyGame::Own(snake()));
+    pair.play_frames(240);
+    pair.until_checked();
+    let (host, guest) = (pair.host.session(), pair.guest.session());
+    assert_same_inputs(host, guest);
+    let shoulders = guest
+        .log()
+        .unwrap()
+        .remote
+        .iter()
+        .flatten()
+        .filter(|input| input.buttons.contains(Keys::L | Keys::R))
+        .count();
+    assert!(shoulders >= 40, "{shoulders} frames with L and R");
+}
+
+#[test]
+fn the_hosts_input_delay_setting_reaches_both_sessions() {
+    let mut pair = Pair::new(false, 30, 10, homebrew());
+    pair.host.play.set_input_delay(Some(3));
+    pair.guest.play.set_input_delay(Some(1));
+    let session = pair.invite(snake());
+    pair.accept(session, MyGame::Own(snake()));
+    pair.play_frames(240);
+    pair.until_checked();
+    let (host, guest) = (pair.host.session(), pair.guest.session());
+    assert_eq!(host.delay(), Some(3));
+    assert_eq!(guest.delay(), Some(3));
+    assert_eq!(host.sync().map(|s| s.delay), Some(3));
+    assert_eq!(guest.sync().map(|s| s.delay), Some(3));
+    assert_same_inputs(host, guest);
+    assert_matches_reference(host, [SNAKE, SNAKE]);
+    assert_eq!(host.resyncs() + guest.resyncs(), 0);
 }
 
 fn joined_pair(guest_runs: bool) -> (Pair, Vec<u8>, Option<Vec<u8>>) {
@@ -694,6 +884,7 @@ fn either_player_plugs_and_pulls_the_cable() {
         pair.host.session().resyncs() + pair.guest.session().resyncs(),
         0
     );
+    pair.until_checked();
     assert_matches_reference(pair.host.session(), [SNAKE, SNAKE]);
 }
 
@@ -722,22 +913,12 @@ fn dropped_after(frames: u32) -> (Pair, [Returned; 2]) {
         linked.iter().all(|&n| n >= 20),
         "before the drop: {linked:?}"
     );
-    let at = pair.host.frame().max(pair.guest.frame()) + 1;
-    for side in [&mut pair.host, &mut pair.guest] {
-        side.stop_at = Some(at);
-    }
-    pair.until("both confirmed the same frame", |p| {
-        [&p.host, &p.guest]
-            .iter()
-            .all(|side| side.frame() == at && side.session().confirmed_frame() == at)
-    });
-    pair.guest.cut.set(true);
+    pair.guest.down.set(true);
     pair.until("both lost the session", |p| {
         !p.host.play.is_live() && !p.guest.play.is_live()
     });
-    for side in [&mut pair.host, &mut pair.guest] {
-        side.stop_at = None;
-    }
+    pair.guest.down.set(false);
+    pair.guest.online.retry_now(pair.clock.now());
     let returned = [&mut pair.host, &mut pair.guest].map(|side| {
         assert_eq!(side.stage(), Some(Stage::Ended(Ending::Dropped)));
         side.play.close().and_then(PlaySession::finish).unwrap()
@@ -758,7 +939,8 @@ fn a_dropped_snake_pair_links_again_when_both_come_back() {
         let (mut pair, returned) = dropped_after(frames);
         for (side, back) in [&mut pair.host, &mut pair.guest].into_iter().zip(returned) {
             side.runs_own = !back.paused;
-            side.own = Some(back.console);
+            side.history = back.history;
+            side.own = game_boy(back.console);
         }
         pair.until("the guest is back", |p| p.guest.online.is_connected());
         let session = pair.invite(running_snake());
@@ -803,16 +985,9 @@ fn leaving_ends_the_session_for_both_and_keeps_the_console() {
     pair.until("the friend sees it", |p| {
         p.guest.stage() == Some(Stage::Ended(Ending::FriendLeft))
     });
-    let screen = pair
-        .host
-        .session()
-        .console(true)
-        .unwrap()
-        .frame()
-        .as_slice()
-        .to_vec();
-    let gb = pair.host.play.close().unwrap().finish().unwrap().console;
-    assert!(gb.frame().as_slice() == screen.as_slice());
+    let screen = pair.host.session().console(true).unwrap().frame().to_vec();
+    let console = pair.host.play.close().unwrap().finish().unwrap().console;
+    assert!(console.frame() == screen.as_slice());
     assert!(pair.host.play.session().is_none());
     assert!(pair.guest.play.close().unwrap().finish().is_some());
 }
@@ -857,6 +1032,7 @@ fn a_borrowed_game_crosses_when_the_relay_shares_games() {
     assert_eq!(pair.host.session().resyncs() + guest.resyncs(), 0);
     assert!(!pair.guest.play.holds(&hash));
     let custom = custom().rom;
+    pair.until_checked();
     assert_matches_reference(pair.host.session(), [&custom, &custom]);
 }
 
@@ -865,13 +1041,21 @@ fn missing_games_cross_both_ways_when_the_relay_shares_games() {
     let mut pair = Pair::new(true, 30, 10, empty());
     let session = pair.invite(custom());
     pair.accept(session, MyGame::Own(snake()));
-    assert!(pair.guest.received);
+    assert!(pair.guest.received && pair.host.received);
+    assert!(pair.guest.sent && pair.host.sent);
+    for side in [&pair.host, &pair.guest] {
+        assert!(side.arrived.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert!(side.arrived.iter().all(|(got, total)| got <= total));
+        assert_eq!(side.arrived.first().map(|a| a.0), Some(0));
+    }
+    assert!(!pair.host.session().sends_game() && !pair.guest.session().sends_game());
     pair.play_frames(120);
     assert_eq!(pair.host.session().mode(), Some(Mode::Rollback));
     assert_eq!(
         pair.host.session().resyncs() + pair.guest.session().resyncs(),
         0
     );
+    pair.until_checked();
     assert_matches_reference(pair.host.session(), [&custom().rom, SNAKE]);
 }
 
@@ -887,7 +1071,7 @@ fn without_game_sharing_different_games_play_over_the_cable() {
     let mine = custom();
     let theirs = snake();
     for (side, file) in [(&mut pair.host, &mine), (&mut pair.guest, &theirs)] {
-        let mut gb = GameBoy::new_empty(file.model);
+        let mut gb = GameBoy::new_empty(GbModel::try_from(file.kind).unwrap());
         gb.load_rom(&Rom::new(&file.rom)).unwrap();
         side.cable_gb = Some(gb);
     }
@@ -1034,7 +1218,7 @@ fn a_player_never_waits_for_the_watcher() {
     let before = pair.guest.frame();
     pair.run_guest_alone(120);
     assert!(pair.guest.frame() >= before + 100);
-    assert!(!pair.guest.session().waiting_for_friend(Instant::now()));
+    assert!(!pair.guest.session().waiting_for_friend(pair.clock.now()));
 }
 
 #[test]
@@ -1080,7 +1264,7 @@ fn the_watcher_leaves_and_the_player_keeps_the_game() {
     assert!(pair.host.play.close().unwrap().finish().is_none());
     let back = pair.guest.play.close().unwrap().finish().unwrap();
     assert!(back.borrowed.is_none());
-    assert_eq!(back.console.cartridge.rom_bytes(), SNAKE);
+    assert_eq!(back.console.rom_bytes(), SNAKE);
 }
 
 #[test]
@@ -1103,10 +1287,7 @@ fn a_watcher_without_the_game_and_no_sharing_watches_nothing() {
     let switches = bar_switches(watcher, "Mia");
     assert_eq!(switches.len(), 1);
     assert_eq!(switches[0].switch, Switch::Watch);
-    assert_eq!(
-        switches[0].why_off.as_deref(),
-        Some("You don't have My Snake")
-    );
+    assert_eq!(switches[0].why_off.as_deref(), Some("Needs My Snake"));
     assert_eq!(
         play_subtitle(&pair.host.play, pair.guest.id()).as_deref(),
         Some("Needs My Snake")
@@ -1230,6 +1411,7 @@ fn both_play_the_same_game_and_each_watches_the_other() {
         !p.guest.session().friend_lets_me_watch()
     });
     pair.play_frames(120);
+    pair.until_checked();
     let (host, guest) = (pair.host.session(), pair.guest.session());
     assert!(!guest.sees_friend() && host.sees_friend());
     assert_eq!((host.round(), guest.round()), (1, 1));
@@ -1263,6 +1445,7 @@ fn different_games_link_only_while_both_cables_are_in() {
     pair.guest.session_mut().set_cable(true);
     pair.until("the cable is in on both", |p| linked(p) == (true, true));
     pair.play_frames(60);
+    pair.until_checked();
     let (host, guest) = (pair.host.session(), pair.guest.session());
     assert_eq!((host.round(), guest.round()), (1, 1));
     assert_eq!(host.resyncs() + guest.resyncs(), 0);
@@ -1276,6 +1459,7 @@ fn the_guest_picks_another_game_on_join() {
     let session = pair.invite(snake());
     pair.accept(session, MyGame::Own(custom()));
     pair.play_frames(120);
+    pair.until_checked();
     let (host, guest) = (pair.host.session(), pair.guest.session());
     assert_eq!(guest.my_game().unwrap().title, "My Snake");
     assert_eq!(host.friend_game().unwrap().title, "My Snake");
@@ -1358,9 +1542,9 @@ fn every_ending_keeps_both_games_where_they_were() {
         for side in [&mut pair.host, &mut pair.guest] {
             let session = side.session();
             assert!(session.frame() > 180, "{close:?}");
-            let gb = session.console(true).unwrap();
+            let gb = session.game_boy(true).unwrap();
             let was = (gb.frame().as_slice().to_vec(), gb.cpu.pc, gb.cycle_counter);
-            let back = side.play.close().unwrap().finish().unwrap().console;
+            let back = game_boy(side.play.close().unwrap().finish().unwrap().console).unwrap();
             let now = (
                 back.frame().as_slice().to_vec(),
                 back.cpu.pc,
@@ -1378,6 +1562,7 @@ fn every_ending_keeps_both_games_where_they_were() {
 }
 
 mod real_games;
+mod rooms;
 
 #[test]
 fn watching_the_friend_brings_their_sound_and_watch_off_leaves_mine() {
@@ -1478,7 +1663,7 @@ fn the_discord_picture_in_a_session_is_my_own_unit_and_keeps_moving() {
     pair.play_frames(300);
     for (side, before) in [&pair.host, &pair.guest].into_iter().zip(before) {
         let session = side.session();
-        let mine = session.console(true).unwrap();
+        let mine = session.game_boy(true).unwrap();
         let unit = my_unit(Some(session), solo(&[1, 2, 3])).unwrap();
         assert!(std::ptr::eq(unit.frame, mine.frame().as_slice()));
         assert!(unit.running);
@@ -1502,7 +1687,7 @@ fn a_watcher_sends_no_discord_picture_of_the_player() {
     let unit = crate::discord::my_unit(Some(player), solo(&[1])).unwrap();
     assert!(std::ptr::eq(
         unit.frame,
-        player.console(true).unwrap().frame().as_slice()
+        player.console(true).unwrap().frame()
     ));
 }
 
@@ -1518,4 +1703,128 @@ fn after_a_session_the_discord_picture_is_the_solo_game_again() {
     let unit = crate::discord::my_unit(pair.host.play.session(), solo(&frame)).unwrap();
     assert_eq!(unit.game, "solo");
     assert!(crate::discord::my_unit(None, solo(&frame)).is_some_and(|u| u.game == "solo"));
+}
+
+#[cfg(feature = "gba")]
+fn link_words() -> GameFile {
+    let rom: Vec<u8> = [
+        0xE3A0_0404u32,
+        0xE280_2C01,
+        0xE280_3C02,
+        0xE3A0_4000,
+        0xE1C2_43B4,
+        0xE3A0_5A06,
+        0xE385_5083,
+        0xE3C5_A080,
+        0xE1C2_A2B8,
+        0xE3A0_8402,
+        0xE3A0_9080,
+        0xE1D2_13B0,
+        0xE021_1004,
+        0xE1C2_12BA,
+        0xE1C3_90B2,
+        0xE1D2_62B8,
+        0xE316_0008,
+        0x0AFF_FFFC,
+        0xE1C2_52B8,
+        0xE1D3_60B2,
+        0xE316_0080,
+        0x0AFF_FFFC,
+        0xE592_6020,
+        0xE592_7024,
+        0xE8A8_00C0,
+        0xE3C8_8701,
+        0xE284_4001,
+        0xEAFF_FFEE,
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect();
+    GameFile {
+        rom,
+        title: "Link Words".into(),
+        kind: ConsoleKind::Gba,
+        save: None,
+        running: false,
+    }
+}
+
+#[cfg(feature = "gba")]
+fn runs_a_gba(session: &PlaySession, local: bool) -> bool {
+    session
+        .console(local)
+        .is_some_and(|console| console.kind() == ConsoleKind::Gba)
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn two_gba_players_join_and_trade_link_words() {
+    let mut pair = Pair::new(false, 30, 10, empty());
+    let session = pair.invite(link_words());
+    assert_eq!(
+        pair.guest.play.invites()[0]
+            .game
+            .as_ref()
+            .map(|g| g.console),
+        Some(citrine_gb_net::Console::Gba)
+    );
+    pair.accept(session, MyGame::Own(link_words()));
+    for side in [&pair.host, &pair.guest] {
+        assert_eq!(side.session().mode(), Some(Mode::Rollback));
+        assert!(runs_a_gba(side.session(), true) && runs_a_gba(side.session(), false));
+    }
+    let moved = transfers_over(&mut pair, 240);
+    assert!(pair.host.session().cable_plugged() && pair.guest.session().cable_plugged());
+    assert!(moved.iter().all(|&n| n >= 100), "{moved:?}");
+    pair.until_checked();
+    let (host, guest) = (pair.host.session(), pair.guest.session());
+    assert_eq!(host.resyncs() + guest.resyncs(), 0);
+    assert_same_inputs(host, guest);
+    assert_watcher_sees_the_player(host, guest);
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn a_gba_game_crosses_to_a_friend_without_it_and_both_play() {
+    let mut pair = Pair::new(true, 30, 10, empty());
+    let session = pair.invite(link_words());
+    pair.accept(session, MyGame::Borrow { save: None });
+    assert!(pair.guest.received);
+    assert!(runs_a_gba(pair.guest.session(), true));
+    let moved = transfers_over(&mut pair, 120);
+    assert!(moved.iter().all(|&n| n >= 50), "{moved:?}");
+    pair.host.play.leave(&mut pair.host.online);
+    pair.until("the borrower sees the host go", |p| {
+        p.guest.stage() == Some(Stage::Ended(Ending::FriendLeft))
+    });
+    let back = pair.guest.play.close().unwrap().finish().unwrap();
+    assert_eq!(back.borrowed, Some(hash_of(&link_words())));
+    assert_eq!(back.console.kind(), ConsoleKind::Gba);
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn a_friend_with_no_game_watches_a_gba_player() {
+    let mut pair = Pair::new(true, 30, 10, empty());
+    let session = pair.invite_with(None);
+    pair.accept(session, MyGame::Own(link_words()));
+    pair.play_frames(240);
+    let (watcher, player) = (pair.host.session(), pair.guest.session());
+    assert!(watcher.watching_only() && !player.watching_only());
+    assert!(watcher.console(true).is_none() && runs_a_gba(watcher, false));
+    assert!(runs_a_gba(player, true) && player.console(false).is_none());
+    assert_eq!(watcher.resyncs() + player.resyncs(), 0);
+    assert_watcher_sees_the_player(watcher, player);
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn a_game_boy_and_a_gba_player_play_apart() {
+    let mut pair = Pair::new(false, 30, 10, homebrew());
+    let session = pair.invite(snake());
+    pair.accept(session, MyGame::Own(link_words()));
+    for side in [&pair.host, &pair.guest] {
+        assert_eq!(side.session().mode(), Some(Mode::Apart));
+        assert!(side.session().console(true).is_none());
+    }
 }

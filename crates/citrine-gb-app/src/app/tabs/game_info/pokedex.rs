@@ -34,7 +34,7 @@ impl Pages<'_> {
             let last = state.pokedex.seen.iter().copied().max().unwrap_or(0);
             (1..=last).collect()
         };
-        let entries: Vec<(u16, Option<(u8, &str)>)> = numbers
+        let entries: Vec<(u16, Option<(u16, &str)>)> = numbers
             .into_iter()
             .map(|number| {
                 let named = if state.pokedex.seen.contains(&number) {
@@ -81,7 +81,7 @@ impl Pages<'_> {
         ui: &mut Ui,
         width: f32,
         number: u16,
-        named: Option<(u8, &str)>,
+        named: Option<(u16, &str)>,
         caught: bool,
     ) {
         let (rect, _) = ui.allocate_exact_size(vec2(width, TILE + 34.0), Sense::hover());

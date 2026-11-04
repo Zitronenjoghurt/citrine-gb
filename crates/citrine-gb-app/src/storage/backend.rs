@@ -1,7 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Backend, data_dir};
 #[cfg(target_arch = "wasm32")]
-pub use web::Backend;
+pub use web::{Backend, keep_crash_save, open_saves};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -111,93 +111,4 @@ mod native {
 }
 
 #[cfg(target_arch = "wasm32")]
-mod web {
-    use base64::Engine;
-
-    #[derive(Default, Clone)]
-    pub struct Backend;
-
-    fn storage() -> Option<web_sys::Storage> {
-        web_sys::window()?.local_storage().ok()?
-    }
-
-    fn key(namespace: &str, name: &str) -> String {
-        format!("citrine/{namespace}/{name}")
-    }
-
-    impl Backend {
-        pub fn settings() -> Self {
-            Self
-        }
-
-        pub fn read(&self, namespace: &str, name: &str) -> Option<Vec<u8>> {
-            let raw = storage()?.get_item(&key(namespace, name)).ok()??;
-            base64::engine::general_purpose::STANDARD.decode(raw).ok()
-        }
-
-        pub fn write(&self, namespace: &str, name: &str, data: &[u8]) -> std::io::Result<()> {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-            storage()
-                .ok_or_else(|| std::io::Error::other("local storage unavailable"))?
-                .set_item(&key(namespace, name), &encoded)
-                .map_err(|_| std::io::Error::other("local storage write failed (quota?)"))
-        }
-
-        pub fn delete(&self, namespace: &str, name: &str) -> std::io::Result<()> {
-            if let Some(storage) = storage() {
-                let _ = storage.remove_item(&key(namespace, name));
-            }
-            Ok(())
-        }
-
-        pub fn exists(&self, namespace: &str, name: &str) -> bool {
-            self.read(namespace, name).is_some()
-        }
-
-        pub fn size(&self, namespace: &str, name: &str) -> u64 {
-            storage()
-                .and_then(|s| s.get_item(&key(namespace, name)).ok().flatten())
-                .map_or(0, |raw| raw.len() as u64 / 4 * 3)
-        }
-
-        pub fn clear(&self, namespace: &str) -> std::io::Result<()> {
-            for name in self.list(namespace) {
-                self.delete(namespace, &name)?;
-            }
-            Ok(())
-        }
-
-        pub fn list(&self, namespace: &str) -> Vec<String> {
-            let Some(storage) = storage() else {
-                return Vec::new();
-            };
-            let prefix = format!("citrine/{namespace}/");
-            let count = storage.length().unwrap_or(0);
-            (0..count)
-                .filter_map(|i| storage.key(i).ok().flatten())
-                .filter_map(|k| k.strip_prefix(&prefix).map(str::to_owned))
-                .collect()
-        }
-
-        pub fn namespaces(&self) -> Vec<String> {
-            let Some(storage) = storage() else {
-                return Vec::new();
-            };
-            let count = storage.length().unwrap_or(0);
-            let mut found: Vec<String> = (0..count)
-                .filter_map(|i| storage.key(i).ok().flatten())
-                .filter_map(|k| {
-                    let rest = k.strip_prefix("citrine/")?;
-                    rest.split_once('/').map(|(ns, _)| ns.to_owned())
-                })
-                .collect();
-            found.sort();
-            found.dedup();
-            found
-        }
-
-        pub fn location(&self) -> String {
-            "browser local storage".to_string()
-        }
-    }
-}
+mod web;

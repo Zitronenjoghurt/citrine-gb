@@ -9,6 +9,14 @@ pub struct StoredMessage {
     pub to: OnlineId,
     pub at: u64,
     pub sealed: Sealed,
+    pub old_key: Option<u64>,
+}
+
+pub struct OldRow<'a> {
+    pub friend: i64,
+    pub key: u64,
+    pub at: u64,
+    pub sealed: &'a Sealed,
 }
 
 impl Db {
@@ -23,7 +31,6 @@ impl Db {
         Ok((r.count as u64, r.bytes as u64))
     }
 
-    #[cfg(test)]
     pub async fn stored_messages(&self) -> Result<(u64, u64)> {
         let (count, bytes): (i64, i64) =
             sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM messages")
@@ -38,19 +45,22 @@ impl Db {
         to: i64,
         from_device: Option<i64>,
         at: u64,
+        key: Option<u64>,
         sealed: &Sealed,
     ) -> Result<MessageId> {
         let at = at as i64;
+        let key = key.map(|k| k as i64);
         let nonce = &sealed.nonce[..];
         let from_device = from_device.unwrap_or(-1);
         let mut tx = self.pool.begin().await?;
         let id = sqlx::query!(
-            "INSERT INTO messages (from_id, to_id, sent_at, nonce, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO messages (from_id, to_id, sent_at, nonce, body, sender_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             from,
             to,
             at,
             nonce,
             sealed.ciphertext,
+            key,
         )
         .execute(&mut *tx)
         .await?
@@ -70,6 +80,19 @@ impl Db {
         Ok(id as MessageId)
     }
 
+    pub async fn sent_once(&self, from: i64, key: u64) -> Result<Option<(MessageId, u64)>> {
+        let key = key as i64;
+        let row = sqlx::query!(
+            r#"SELECT id AS "id!: i64", sent_at AS "sent_at!: i64" FROM messages
+               WHERE from_id = ?1 AND sender_key = ?2"#,
+            from,
+            key,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.id as MessageId, r.sent_at as u64)))
+    }
+
     pub async fn pending_messages(
         &self,
         device: i64,
@@ -80,7 +103,7 @@ impl Db {
         let rows = sqlx::query!(
             r#"SELECT m.id AS "id!: i64", m.from_id AS "from_id!: i64", f.online_id AS "from_online!: i64",
                    t.online_id AS "to_online!: i64", m.sent_at AS "sent_at!: i64",
-                   m.nonce AS "nonce!: Vec<u8>", m.body AS "body!: Vec<u8>"
+                   m.nonce AS "nonce!: Vec<u8>", m.body AS "body!: Vec<u8>", m.old_key AS "old_key: i64"
                FROM message_deliveries d
                JOIN messages m ON m.id = d.message_id
                JOIN accounts f ON f.id = m.from_id
@@ -109,9 +132,53 @@ impl Db {
                         nonce,
                         ciphertext: r.body,
                     },
+                    old_key: r.old_key.map(|k| k as u64),
                 }
             })
             .collect())
+    }
+
+    pub async fn keep_old_chats(
+        &self,
+        account: i64,
+        device: i64,
+        chats: &[OldRow<'_>],
+    ) -> Result<Vec<(usize, MessageId)>> {
+        let mut kept = Vec::new();
+        let mut tx = self.pool.begin().await?;
+        for (index, chat) in chats.iter().enumerate() {
+            let key = chat.key as i64;
+            let at = chat.at as i64;
+            let nonce = &chat.sealed.nonce[..];
+            let done = sqlx::query!(
+                "INSERT OR IGNORE INTO messages (from_id, to_id, sent_at, nonce, body, receiver_keeps, old_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                account,
+                chat.friend,
+                at,
+                nonce,
+                chat.sealed.ciphertext,
+                key,
+            )
+            .execute(&mut *tx)
+            .await?;
+            if done.rows_affected() == 0 {
+                continue;
+            }
+            let id = done.last_insert_rowid();
+            sqlx::query!(
+                "INSERT INTO message_deliveries (device_id, message_id)
+                   SELECT id, ?3 FROM devices WHERE account_id = ?1 AND id != ?2 AND left_at IS NULL",
+                account,
+                device,
+                id,
+            )
+            .execute(&mut *tx)
+            .await?;
+            kept.push((index, id as MessageId));
+        }
+        tx.commit().await?;
+        Ok(kept)
     }
 
     pub async fn ack_messages(&self, device: i64, ids: &[MessageId]) -> Result<()> {
@@ -207,11 +274,11 @@ mod tests {
             .await
             .unwrap();
         let first = db
-            .insert_message(a.id, b.id, Some(a_phone), 100, &sealed(1))
+            .insert_message(a.id, b.id, Some(a_phone), 100, None, &sealed(1))
             .await
             .unwrap();
         let second = db
-            .insert_message(a.id, b.id, Some(a_phone), 200, &sealed(2))
+            .insert_message(a.id, b.id, Some(a_phone), 200, None, &sealed(2))
             .await
             .unwrap();
         assert!(
@@ -253,7 +320,7 @@ mod tests {
         let b = account(&db, 2, "b").await;
         let b_mac = db.add_device(b.id, &[3; 32], "Mac", 5).await.unwrap();
         let id = db
-            .insert_message(a.id, b.id, None, 100, &sealed(1))
+            .insert_message(a.id, b.id, None, 100, None, &sealed(1))
             .await
             .unwrap();
         assert!(
@@ -284,7 +351,7 @@ mod tests {
         let a = account(&db, 1, "a").await;
         let b = account(&db, 2, "b").await;
         let id = db
-            .insert_message(a.id, b.id, None, 100, &sealed(1))
+            .insert_message(a.id, b.id, None, 100, None, &sealed(1))
             .await
             .unwrap();
         assert_eq!(db.waiting_between(a.id, b.id).await.unwrap(), (1, 3));
@@ -292,5 +359,53 @@ mod tests {
         let first = db.add_device(b.id, &[3; 32], "Mac", 5).await.unwrap();
         assert_eq!(db.pending_messages(first, 0, 10).await.unwrap()[0].id, id);
         assert_eq!(db.waiting_messages().await.unwrap(), (1, 3));
+    }
+    #[tokio::test]
+    async fn old_chats_reach_only_the_other_devices_of_their_account_once() {
+        let (_dir, db) = db().await;
+        let me = account(&db, 1, "me").await.id;
+        let friend = account(&db, 2, "friend").await.id;
+        let phone = db
+            .add_device(me, &[7; 32], "Android phone", 10)
+            .await
+            .unwrap();
+        let pc = db.add_device(me, &[8; 32], "Linux PC", 10).await.unwrap();
+        let theirs = db.add_device(friend, &[9; 32], "iPad", 10).await.unwrap();
+        let body = sealed(4);
+        let rows = [
+            super::OldRow {
+                friend,
+                key: 41,
+                at: 5,
+                sealed: &body,
+            },
+            super::OldRow {
+                friend,
+                key: 42,
+                at: 6,
+                sealed: &body,
+            },
+        ];
+        let kept = db.keep_old_chats(me, phone, &rows).await.unwrap();
+        assert_eq!(kept.iter().map(|k| k.0).collect::<Vec<_>>(), [0, 1]);
+        assert!(db.keep_old_chats(me, pc, &rows).await.unwrap().is_empty());
+        assert!(db.pending_messages(phone, 0, 10).await.unwrap().is_empty());
+        assert!(db.pending_messages(theirs, 0, 10).await.unwrap().is_empty());
+        let got = db.pending_messages(pc, 0, 10).await.unwrap();
+        assert_eq!(
+            got.iter().map(|m| (m.old_key, m.at)).collect::<Vec<_>>(),
+            [(Some(41), 5), (Some(42), 6)]
+        );
+        assert_eq!(db.waiting_between(me, friend).await.unwrap(), (0, 0));
+        assert_eq!(db.waiting_between(friend, me).await.unwrap(), (0, 0));
+        let later = db.add_device(me, &[5; 32], "Mac", 20).await.unwrap();
+        assert_eq!(db.pending_messages(later, 0, 10).await.unwrap().len(), 2);
+        let friend_later = db.add_device(friend, &[6; 32], "Phone", 20).await.unwrap();
+        assert!(
+            db.pending_messages(friend_later, 0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

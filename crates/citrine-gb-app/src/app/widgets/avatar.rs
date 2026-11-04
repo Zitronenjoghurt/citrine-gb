@@ -19,8 +19,19 @@ pub fn avatar(ui: &mut Ui, name: &str, seed: u64, size: f32, seen: Option<Seen>)
 
 pub fn paint(ui: &Ui, rect: Rect, name: &str, seed: u64, seen: Option<Seen>) {
     let painter = ui.painter_at(rect.expand(2.0));
+    paint_with(&painter, ui.visuals(), rect, name, seed, seen);
+}
+
+pub fn paint_with(
+    painter: &egui::Painter,
+    visuals: &egui::Visuals,
+    rect: Rect,
+    name: &str,
+    seed: u64,
+    seen: Option<Seen>,
+) {
     let (from, to) = colors(seed);
-    let feather = 1.0 / ui.ctx().pixels_per_point();
+    let feather = 1.0 / painter.ctx().pixels_per_point();
     painter.add(gradient_disc(
         rect.center(),
         rect.width() / 2.0,
@@ -59,7 +70,7 @@ pub fn paint(ui: &Ui, rect: Rect, name: &str, seed: u64, seen: Option<Seen>) {
     };
     let radius = (size * 0.15).max(4.0);
     let dot = rect.right_bottom() - Vec2::splat(radius * 0.9);
-    painter.circle_filled(dot, radius + 1.5, ui.visuals().panel_fill);
+    painter.circle_filled(dot, radius + 1.5, visuals.panel_fill);
     painter.circle_filled(dot, radius, color);
 }
 

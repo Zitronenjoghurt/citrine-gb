@@ -27,7 +27,7 @@ fn reads_a_gold_and_silver_save() {
     );
     assert_eq!(trainer.badges.len(), 8);
     assert_eq!(state.badge_count(), 4);
-    let items: Vec<(u8, u8)> = state
+    let items: Vec<(u16, u16)> = state
         .bag
         .tms_hms
         .iter()
@@ -55,7 +55,7 @@ fn reads_a_gold_and_silver_save() {
     assert_eq!(first.friendship, Some(70));
     assert_eq!(first.pokerus, Some(0x21));
     assert_eq!(first.caught, None);
-    assert!(first.dvs.shiny());
+    assert!(first.shiny());
     assert_eq!(
         (first.moves.len(), first.moves[0].pp, first.moves[0].pp_ups),
         (1, 30, 1)

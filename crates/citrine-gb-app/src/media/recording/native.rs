@@ -1,7 +1,7 @@
 use super::audio::AacEncoder;
 use super::h264::H264Encoder;
 use super::mp4::{Mp4Writer, VideoFormat, avc_config};
-use super::{FRAME_TICKS, SOURCE_HEIGHT, SOURCE_WIDTH, StopReason, VIDEO_TIMESCALE, fps};
+use super::{Source, StopReason};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -30,20 +30,26 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(path: PathBuf, sample_rate: u32, scale: usize) -> anyhow::Result<Self> {
-        Self::start_with(super::video_api()?, path, sample_rate, scale)
+    pub fn start(
+        path: PathBuf,
+        source: Source,
+        sample_rate: u32,
+        scale: usize,
+    ) -> anyhow::Result<Self> {
+        Self::start_with(super::video_api()?, path, source, sample_rate, scale)
     }
 
     pub fn start_with(
         api: openh264::OpenH264API,
         path: PathBuf,
+        source: Source,
         sample_rate: u32,
         scale: usize,
     ) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let video = H264Encoder::new(api, SOURCE_WIDTH, SOURCE_HEIGHT, scale, fps() as f32)?;
+        let video = H264Encoder::new(api, source.width, source.height, scale, source.fps() as f32)?;
         let audio = AacEncoder::new(sample_rate)?;
         let file = File::create(&path)?;
         let (sender, receiver) = sync_channel(BACKLOG_FRAMES * 2);
@@ -52,7 +58,7 @@ impl Worker {
         let handle = std::thread::Builder::new()
             .name("screen recording".into())
             .spawn(move || {
-                let result = encode(receiver, file, &path, video, audio, scale);
+                let result = encode(receiver, file, &path, video, audio, source, scale);
                 if result.is_err() {
                     flag.store(true, Ordering::Relaxed);
                     let _ = std::fs::remove_file(&path);
@@ -136,6 +142,7 @@ fn encode(
     path: &Path,
     mut video: H264Encoder,
     mut audio: AacEncoder,
+    source: Source,
     scale: usize,
 ) -> anyhow::Result<Output> {
     let mut mp4 = Mp4Writer::new(BufWriter::with_capacity(1 << 20, file))?;
@@ -152,13 +159,13 @@ fn encode(
                             anyhow::bail!("the video encoder sent no stream header");
                         };
                         mp4.layout().set_video(VideoFormat {
-                            width: (SOURCE_WIDTH * scale) as u16,
-                            height: (SOURCE_HEIGHT * scale) as u16,
-                            timescale: VIDEO_TIMESCALE,
+                            width: (source.width * scale) as u16,
+                            height: (source.height * scale) as u16,
+                            timescale: source.timescale,
                             avc_config: avc_config(&sps, &pps),
                         });
                     }
-                    mp4.write_video(&frame.sample, FRAME_TICKS, frame.keyframe)?;
+                    mp4.write_video(&frame.sample, source.frame_ticks, frame.keyframe)?;
                 }
             }
             Message::Audio(samples) => {

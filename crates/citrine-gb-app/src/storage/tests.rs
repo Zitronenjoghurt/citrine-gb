@@ -1,4 +1,5 @@
 use super::*;
+use citrine_gb::console::ConsoleKind;
 
 const KEY: &str = "ABC123";
 
@@ -66,6 +67,48 @@ fn writes_leave_no_temp_file_behind() {
         .filter(|n| n.ends_with(".tmp"))
         .collect();
     assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_game_boy_battery_save_is_stored_as_before() {
+    use citrine_gb::persistence::battery_save::BatterySave;
+    let (store, root) = store("battery-gb");
+    let save = BatterySave::raw(vec![3; 0x2000]);
+    store.store_battery_save(KEY, &save).expect("store");
+    assert_eq!(store.load_battery(KEY), Some(save.to_file()));
+    let meta = store.read_file(KEY, "battery.meta").expect("meta");
+    assert_eq!(meta.len(), 8);
+    assert!(store.battery_saved_at(KEY).is_some_and(|t| t > 0));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn a_gba_battery_save_keeps_its_chip_next_to_the_raw_file() {
+    use citrine_gb::gba::machine::Gba;
+    use citrine_gb::gba::save::SaveType;
+    let (store, root) = store("battery-gba");
+    let gba = Gba::new(&[0; 0x200]);
+    for chip in [
+        SaveType::Sram32K,
+        SaveType::Sram64K,
+        SaveType::Flash64K,
+        SaveType::Flash128K,
+        SaveType::Eeprom,
+        SaveType::Eeprom512,
+        SaveType::Eeprom8K,
+    ] {
+        let mut save = citrine_gb::persistence::battery_save::BatterySave::raw(vec![1, 2, 3]);
+        save.chip = Some(chip);
+        store.store_battery_save(KEY, &save).expect("store");
+        assert_eq!(store.load_battery(KEY).as_deref(), Some(&[1, 2, 3][..]));
+        let loaded = store.load_battery_save(KEY, &gba).expect("load");
+        assert_eq!(loaded.chip, Some(chip));
+        assert!(store.battery_saved_at(KEY).is_some_and(|t| t > 0));
+    }
+    store.store_battery(KEY, &[4]).expect("raw");
+    assert_eq!(store.load_battery_save(KEY, &gba).expect("load").chip, None);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -144,7 +187,7 @@ fn snapshot_round_trips_with_metadata() {
     assert!(store.snapshot_info(KEY, 0).is_none());
 
     store
-        .store_snapshot(KEY, 3, b"state-bytes", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 3, b"state-bytes", &frame(), ConsoleKind::Gb)
         .expect("store");
     assert_eq!(
         store.load_snapshot(KEY, 3).as_deref(),
@@ -154,7 +197,7 @@ fn snapshot_round_trips_with_metadata() {
     let info = store.snapshot_info(KEY, 3).expect("filled");
     assert_eq!(info.slot, 3);
     assert!(info.saved_at > 0, "timestamp recorded");
-    assert_eq!(info.thumbnail.len(), THUMB_WIDTH * THUMB_HEIGHT * 4);
+    assert_eq!(info.thumbnail.len(), 80 * 72 * 4);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -163,7 +206,7 @@ fn slots_are_unbounded_and_listed_in_order() {
     let (store, root) = store("unbounded");
     for slot in [0, 5, 99, 1000] {
         store
-            .store_snapshot(KEY, slot, b"state", &frame(), GbModel::Dmg)
+            .store_snapshot(KEY, slot, b"state", &frame(), ConsoleKind::Gb)
             .expect("store");
     }
     assert_eq!(store.used_slots(KEY), vec![0, 5, 99, 1000]);
@@ -178,7 +221,7 @@ fn next_free_slot_fills_gaps_before_extending() {
 
     for slot in [0, 1, 2] {
         store
-            .store_snapshot(KEY, slot, b"state", &frame(), GbModel::Dmg)
+            .store_snapshot(KEY, slot, b"state", &frame(), ConsoleKind::Gb)
             .expect("store");
     }
     assert_eq!(store.next_free_slot(KEY), 3);
@@ -192,10 +235,10 @@ fn next_free_slot_fills_gaps_before_extending() {
 fn thumbnails_are_stored_compressed() {
     let (store, root) = store("compress");
     store
-        .store_snapshot(KEY, 0, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
 
-    let raw = THUMB_WIDTH * THUMB_HEIGHT * 4;
+    let raw = 80 * 72 * 4;
     let on_disk = std::fs::metadata(root.join(KEY).join("slot0.thumb"))
         .expect("thumb")
         .len() as usize;
@@ -214,7 +257,7 @@ fn snapshots_and_battery_share_one_namespace() {
     let (store, root) = store("namespace");
     store.store_battery(KEY, b"sram").expect("battery");
     store
-        .store_snapshot(KEY, 0, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"state", &frame(), ConsoleKind::Gb)
         .expect("snapshot");
     assert!(root.join(KEY).join("battery.sav").exists());
     assert!(root.join(KEY).join("slot0.snap").exists());
@@ -225,7 +268,7 @@ fn snapshots_and_battery_share_one_namespace() {
 fn a_slot_with_no_name_counts_from_one() {
     let (store, root) = store("unnamed");
     store
-        .store_snapshot(KEY, 2, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 2, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
 
     let info = store.snapshot_info(KEY, 2).expect("filled");
@@ -244,11 +287,11 @@ fn a_save_from_before_one_based_names_still_loads() {
     let dir = root.join(KEY);
     std::fs::create_dir_all(&dir).expect("dir");
     store
-        .store_snapshot(KEY, 0, b"old state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"old state", &frame(), ConsoleKind::Gb)
         .expect("store");
     std::fs::write(dir.join("slot1.name"), "Slot 0").expect("old name");
     store
-        .store_snapshot(KEY, 1, b"named", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 1, b"named", &frame(), ConsoleKind::Gb)
         .expect("store");
 
     assert_eq!(store.used_slots(KEY), vec![0, 1]);
@@ -270,7 +313,7 @@ fn a_save_from_before_one_based_names_still_loads() {
 fn naming_a_slot_sticks() {
     let (store, root) = store("named");
     store
-        .store_snapshot(KEY, 0, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
 
     store
@@ -287,12 +330,12 @@ fn naming_a_slot_sticks() {
 fn overwriting_a_slot_keeps_its_name() {
     let (store, root) = store("named-overwrite");
     store
-        .store_snapshot(KEY, 1, b"first", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 1, b"first", &frame(), ConsoleKind::Gb)
         .expect("store");
     store.set_snapshot_name(KEY, 1, "Checkpoint").expect("name");
 
     store
-        .store_snapshot(KEY, 1, b"second", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 1, b"second", &frame(), ConsoleKind::Gb)
         .expect("overwrite");
 
     let info = store.snapshot_info(KEY, 1).expect("filled");
@@ -305,7 +348,7 @@ fn overwriting_a_slot_keeps_its_name() {
 fn a_blank_name_goes_back_to_the_default() {
     let (store, root) = store("name-cleared");
     store
-        .store_snapshot(KEY, 0, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
     store.set_snapshot_name(KEY, 0, "Temporary").expect("name");
 
@@ -321,7 +364,7 @@ fn a_blank_name_goes_back_to_the_default() {
 fn a_name_matching_the_default_is_not_stored() {
     let (store, root) = store("name-default");
     store
-        .store_snapshot(KEY, 4, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 4, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
 
     store.set_snapshot_name(KEY, 4, "Slot 5").expect("name");
@@ -334,7 +377,7 @@ fn a_name_matching_the_default_is_not_stored() {
 fn names_are_capped() {
     let (store, root) = store("name-length");
     store
-        .store_snapshot(KEY, 0, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
 
     let long = "x".repeat(MAX_SAVE_NAME * 3);
@@ -349,7 +392,7 @@ fn names_are_capped() {
 fn deleting_a_slot_takes_its_name_with_it() {
     let (store, root) = store("name-delete");
     store
-        .store_snapshot(KEY, 0, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
     store.set_snapshot_name(KEY, 0, "Gone soon").expect("name");
 
@@ -359,7 +402,7 @@ fn deleting_a_slot_takes_its_name_with_it() {
     assert!(store.snapshot_info(KEY, 0).is_none());
 
     store
-        .store_snapshot(KEY, 0, b"fresh", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"fresh", &frame(), ConsoleKind::Gb)
         .expect("store");
     assert_eq!(
         store.snapshot_info(KEY, 0).expect("filled").display_name(),
@@ -372,7 +415,7 @@ fn deleting_a_slot_takes_its_name_with_it() {
 fn names_do_not_look_like_snapshot_slots() {
     let (store, root) = store("name-listing");
     store
-        .store_snapshot(KEY, 7, b"state", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 7, b"state", &frame(), ConsoleKind::Gb)
         .expect("store");
     store.set_snapshot_name(KEY, 7, "Named").expect("name");
 
@@ -445,9 +488,34 @@ fn thumbnail_averages_each_2x2_block() {
     for (i, dx) in [(0usize, 0usize), (1, 4), (160, 8), (161, 12)] {
         frame[i * 4] = dx as u8;
     }
-    let thumb = downscale(&frame);
-    assert_eq!(thumb.len(), THUMB_WIDTH * THUMB_HEIGHT * 4);
+    let thumb = downscale(&frame, ConsoleKind::Gb.video());
+    assert_eq!(thumb.len(), 80 * 72 * 4);
     assert_eq!(thumb[0], 6);
+}
+
+#[test]
+fn a_thumbnail_is_half_the_console_screen() {
+    assert_eq!(thumb_size(Some(ConsoleKind::Gb)), [80, 72]);
+    assert_eq!(thumb_size(Some(ConsoleKind::Gbc)), [80, 72]);
+    assert_eq!(thumb_size(Some(ConsoleKind::Gba)), [120, 80]);
+    assert_eq!(thumb_size(None), [80, 72]);
+    assert_eq!(thumb_size_of(&[0; 120 * 80 * 4]), Some([120, 80]));
+    assert_eq!(thumb_size_of(&[0; 80 * 72 * 4]), Some([80, 72]));
+    assert_eq!(thumb_size_of(&[0; 12]), None);
+}
+
+#[test]
+fn a_gba_snapshot_keeps_its_console_and_wide_thumbnail() {
+    let (store, root) = store("gba-thumb");
+    let frame = vec![200u8; 240 * 160 * 4];
+    store
+        .store_snapshot(KEY, 0, b"state", &frame, ConsoleKind::Gba)
+        .unwrap();
+    let info = store.snapshot_info(KEY, 0).unwrap();
+    assert_eq!(info.console, Some(ConsoleKind::Gba));
+    assert_eq!(info.thumb_size(), [120, 80]);
+    assert_eq!(info.thumbnail, vec![200u8; 120 * 80 * 4]);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -455,7 +523,7 @@ fn autosaves_keep_only_the_newest() {
     let (store, root) = store("auto-keep");
     for n in 0..5u8 {
         store
-            .store_autosave(KEY, &[n], &frame(), GbModel::Dmg, 3)
+            .store_autosave(KEY, &[n], &frame(), ConsoleKind::Gb, 3)
             .expect("autosave");
     }
 
@@ -472,7 +540,7 @@ fn a_lower_limit_drops_the_oldest_at_once() {
     let (store, root) = store("auto-shrink");
     for _ in 0..4 {
         store
-            .store_autosave(KEY, b"state", &frame(), GbModel::Dmg, 10)
+            .store_autosave(KEY, b"state", &frame(), ConsoleKind::Gb, 10)
             .expect("autosave");
     }
     store.prune_autosaves(KEY, 1).expect("prune");
@@ -484,13 +552,13 @@ fn a_lower_limit_drops_the_oldest_at_once() {
 fn autosaves_never_touch_manual_snapshots() {
     let (store, root) = store("auto-apart");
     store
-        .store_snapshot(KEY, 0, b"mine", &frame(), GbModel::Dmg)
+        .store_snapshot(KEY, 0, b"mine", &frame(), ConsoleKind::Gb)
         .expect("snapshot");
     store.set_snapshot_name(KEY, 0, "Boss fight").expect("name");
 
     for _ in 0..3 {
         store
-            .store_autosave(KEY, b"auto", &frame(), GbModel::Dmg, 1)
+            .store_autosave(KEY, b"auto", &frame(), ConsoleKind::Gb, 1)
             .expect("autosave");
     }
 

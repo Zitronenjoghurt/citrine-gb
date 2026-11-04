@@ -30,6 +30,46 @@ fn undrained_audio_stays_bounded() {
     }
 }
 
+fn loud(gb: &mut GameBoy) -> bool {
+    for _ in 0..5 {
+        gb.run_frame();
+    }
+    gb.apu.audio_buffer.clear();
+    for _ in 0..10 {
+        gb.run_frame();
+    }
+    gb.apu.audio_buffer.iter().any(|s| s.abs() > 0.01)
+}
+
+#[test]
+fn a_muted_channel_stays_silent_across_a_reset_and_a_new_game() {
+    let mut gb = GameBoy::new_empty(GbModel::Dmg);
+    gb.load_rom(&tone_rom()).expect("load");
+    assert!(loud(&mut gb));
+
+    gb.apu.set_channel_enabled(1, false);
+    assert!(!loud(&mut gb));
+    gb.soft_reset();
+    assert!(!loud(&mut gb));
+    gb.load_rom(&tone_rom()).expect("load");
+    assert!(!loud(&mut gb));
+
+    gb.apu.set_channel_enabled(1, true);
+    assert!(loud(&mut gb));
+}
+
+#[test]
+fn a_channel_mute_stays_out_of_the_saved_state() {
+    let mut gb = GameBoy::new_empty(GbModel::Dmg);
+    gb.load_rom(&tone_rom()).expect("load");
+    gb.run_frame();
+    let audible = gb.dump_full(0).unwrap();
+
+    gb.apu.set_channel_enabled(1, false);
+
+    assert!(gb.dump_full(0).unwrap() == audible);
+}
+
 fn writes_rom(writes: &[(u8, u8)]) -> Rom {
     let mut code = vec![];
     for &(reg, value) in writes {
@@ -83,4 +123,53 @@ fn four_full_channels_peak_at_half_scale() {
 
     assert!(peak > 0.45, "peak {peak}");
     assert!(peak < 0.55, "peak {peak}");
+}
+
+#[cfg(feature = "debug")]
+fn wave_fingerprint(gb: &GameBoy) -> Vec<(usize, u64)> {
+    gb.debugger
+        .waves()
+        .iter()
+        .map(|ring| {
+            let hash = ring.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, sample| {
+                (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0100_0000_01b3)
+            });
+            (ring.len(), hash)
+        })
+        .collect()
+}
+
+#[cfg(feature = "debug")]
+#[test]
+fn the_wave_rings_keep_their_samples_for_a_fixed_run() {
+    let mut gb = GameBoy::new_empty(GbModel::Dmg);
+    gb.load_rom(&four_channels_at_full_volume()).expect("load");
+    gb.apu.set_sample_rate(48_000);
+    gb.debugger.record_channels = true;
+
+    for _ in 0..20 {
+        gb.run_frame();
+        gb.apu.audio_buffer.clear();
+    }
+    gb.apu.set_channel_enabled(1, false);
+    for _ in 0..5 {
+        gb.run_frame();
+        gb.apu.audio_buffer.clear();
+    }
+
+    assert_eq!(
+        wave_fingerprint(&gb),
+        vec![
+            (2048, 15466843843163243301),
+            (2048, 2937223237197546277),
+            (2048, 1756449107157631781),
+            (2048, 10978820079561392933),
+        ]
+    );
+}
+
+#[test]
+fn the_game_boy_names_its_four_channels() {
+    let gb = GameBoy::new_empty(GbModel::Dmg);
+    assert_eq!(gb.audio_channels(), ["Pulse 1", "Pulse 2", "Wave", "Noise"]);
 }

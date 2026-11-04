@@ -1,15 +1,15 @@
 use crate::app::tabs::TabViewer;
-use crate::app::ui_state::keybinds::GbButton;
 use crate::app::widgets;
 use crate::app::widgets::chip::chip_text;
 use crate::app::widgets::section::{heading, section};
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::text::faint;
-use crate::controller_debug::{PadInfo, REPORT_FILE, Report, SystemInfo, capture_text, steer_text};
+use crate::controller_debug::{
+    ButtonsHeld, PadInfo, REPORT_FILE, Report, SystemInfo, capture_text, steer_text,
+};
 use crate::icons;
 use crate::utils::file_saver::FileSaver;
 use egui::{Label, RichText, Ui, Widget};
-use strum::IntoEnumIterator;
 
 const SHOWN_EVENTS: usize = 200;
 const AXIS_WIDTH: f32 = 88.0;
@@ -17,16 +17,19 @@ const AXIS_WIDTH: f32 = 88.0;
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     let system = SystemInfo::current(viewer.pads.api());
     let pads = pads(viewer);
-    let held: Vec<GbButton> = GbButton::iter()
-        .filter(|b| viewer.emulator.is_held(b.joypad()))
-        .collect();
+    let held = ButtonsHeld {
+        console: viewer.emulator.kind(),
+        keys: viewer.emulator.held_buttons(),
+    };
     let focused = ui.input(|i| i.viewport().focused);
     let bindings = &viewer.ui.settings.bindings;
     let deadzone = bindings.stick_as_dpad.then(|| bindings.deadzone());
 
     ui.horizontal(|ui| {
-        let copy = ui.button(format!("{} Copy report", icons::COPY));
-        let save = ui.button(format!("{} Save report", icons::DOWNLOAD_SIMPLE));
+        let icon = icons::COPY;
+        let copy = ui.button(format!("{icon} Copy report"));
+        let icon = icons::DOWNLOAD_SIMPLE;
+        let save = ui.button(format!("{icon} Save report"));
         if copy.clicked() || save.clicked() {
             let report = Report {
                 system: &system,
@@ -34,7 +37,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                 pads: &pads,
                 bindings: &viewer.ui.settings.bindings,
                 capture: viewer.ui.capture.pending,
-                held: &held,
+                held,
                 log: viewer.ui.controller_debug.log(),
             }
             .to_string();
@@ -64,10 +67,10 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
         }
     });
 
-    section(ui, icons::JOYSTICK, "Game Boy buttons held", |ui| {
+    section(ui, icons::JOYSTICK, held.title(), |ui| {
         ui.horizontal_wrapped(|ui| {
-            for button in GbButton::iter() {
-                chip(ui, &button.to_string(), held.contains(&button));
+            for (name, lit) in held.buttons() {
+                chip(ui, &name, lit);
             }
         });
     });

@@ -15,6 +15,16 @@ pub fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
     wasm_bindgen_futures::spawn_local(future);
 }
 
+#[cfg(target_arch = "wasm32")]
+pub async fn next_tick() {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback(&resolve);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn reduced_motion() -> bool {
     false

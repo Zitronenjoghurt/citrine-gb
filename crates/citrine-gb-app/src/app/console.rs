@@ -8,7 +8,10 @@ impl Citrine {
     pub(super) fn ask_play_on(&mut self, model: GbModel) {
         if self.emulator.rom_key().is_none()
             || self.emulator.console() == model
-            || !plays_on_both(self.emulator.gb.cartridge.header.cgb_mode)
+            || !self
+                .emulator
+                .as_gb()
+                .is_some_and(|gb| plays_on_both(gb.cartridge.header.cgb_mode))
         {
             return;
         }

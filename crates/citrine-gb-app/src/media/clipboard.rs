@@ -25,7 +25,7 @@ impl Way {
 
     pub fn hint(self, kind: MediaKind) -> &'static str {
         match (self, kind) {
-            (Self::Copy, MediaKind::Screenshot) => "Copy picture",
+            (Self::Copy, MediaKind::Screenshot | MediaKind::Print) => "Copy picture",
             (Self::Copy, MediaKind::Recording) => "Copy file",
             (Self::Share, _) => "Share",
         }
@@ -35,8 +35,8 @@ impl Way {
 pub fn pick(kind: MediaKind, shares: bool, copies_images: bool) -> Option<Way> {
     match kind {
         _ if shares => Some(Way::Share),
-        MediaKind::Screenshot if copies_images => Some(Way::Copy),
-        MediaKind::Screenshot => None,
+        MediaKind::Screenshot | MediaKind::Print if copies_images => Some(Way::Copy),
+        MediaKind::Screenshot | MediaKind::Print => None,
         MediaKind::Recording if cfg!(any(target_arch = "wasm32", target_os = "android")) => None,
         MediaKind::Recording => Some(Way::Copy),
     }
@@ -99,7 +99,7 @@ mod platform {
     ) {
         let path = store.path(id);
         let result = match kind {
-            MediaKind::Screenshot => std::fs::read(&path)
+            MediaKind::Screenshot | MediaKind::Print => std::fs::read(&path)
                 .map_err(|err| err.to_string())
                 .and_then(|bytes| {
                     crate::media::decode_png(&bytes).ok_or_else(|| "unreadable picture".into())
@@ -152,7 +152,7 @@ mod platform {
 
     fn mime(kind: MediaKind) -> &'static str {
         match kind {
-            MediaKind::Screenshot => "image/png",
+            MediaKind::Screenshot | MediaKind::Print => "image/png",
             MediaKind::Recording => "video/mp4",
         }
     }

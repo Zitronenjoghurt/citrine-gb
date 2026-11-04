@@ -418,7 +418,15 @@ impl Online {
                 match opened {
                     Some(Ok(payload)) => {
                         let key = (rom.clone(), slot.clone());
+                        let foreign = self
+                            .cloud
+                            .store
+                            .as_ref()
+                            .is_some_and(|store| !store.takes(&rom, &payload));
                         match self.cloud.conflicts.get_mut(&key) {
+                            Some(_) if foreign => {
+                                self.cloud.unreadable.insert((game, slot, version));
+                            }
                             Some(conflict) if conflict.version == version => {
                                 conflict.cloud.thumb = thumb_of(&payload);
                                 conflict.payload = Some(payload);

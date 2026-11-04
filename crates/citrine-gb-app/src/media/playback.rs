@@ -26,13 +26,15 @@ pub fn clock(seconds: f64) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn native_size(width: usize, height: usize) -> (usize, usize) {
-    use crate::media::recording::{SOURCE_HEIGHT, SOURCE_WIDTH};
-    let scale = width / SOURCE_WIDTH;
-    if scale > 0 && width == SOURCE_WIDTH * scale && height == SOURCE_HEIGHT * scale {
-        (SOURCE_WIDTH, SOURCE_HEIGHT)
-    } else {
-        (width, height)
-    }
+    use citrine_gb::console::ConsoleKind;
+    [ConsoleKind::Gb, ConsoleKind::Gba]
+        .into_iter()
+        .map(ConsoleKind::video)
+        .find(|video| {
+            let scale = width / video.width;
+            scale > 0 && width == video.width * scale && height == video.height * scale
+        })
+        .map_or((width, height), |video| (video.width, video.height))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -84,5 +86,6 @@ mod tests {
         assert_eq!(&frame.rgba[at..at + 4], &[37, 10, 0, 255]);
         assert_eq!(native_size(160, 144), (160, 144));
         assert_eq!(native_size(500, 400), (500, 400));
+        assert_eq!(native_size(720, 480), (240, 160));
     }
 }

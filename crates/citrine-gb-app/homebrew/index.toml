@@ -125,3 +125,77 @@ links = [
     { url = "https://github.com/reini1305/gb_snake", kind = "github" }
 ]
 tags = ["Arcade", "2-player link"]
+
+[cascade7]
+title = "CASCADE7"
+author = "Mick Schroeder"
+description = "Drop numbered discs into seven columns. A disc clears when its number matches the count of discs in its row or column, and every few turns a new row rises from the bottom."
+license = "MIT"
+links = [
+    { url = "https://github.com/mick-schroeder/gba-cascade7", kind = "github" }
+]
+tags = ["Puzzle"]
+sha1 = "d7d83865fa6e0c222d9912a45e8cd09bd4d3c152"
+size = 224924
+
+[gbarcade]
+title = "GBArcade"
+author = "Emma Britton"
+description = "Six small arcade games in one: Asteroids, Pipe Dream, Brick Break, Minesweeper, Space Invaders and Lights Out."
+license = "MIT"
+links = [
+    { url = "https://github.com/emmabritton/gba_gbarcade", kind = "github" }
+]
+tags = ["Arcade"]
+sha1 = "49bdf62187024151637919df7580122fa1704f9c"
+size = 1143616
+
+[nonogram_advance]
+title = "Nonogram Advance"
+author = "Emma Britton"
+description = "108 nonogram puzzles. Fill in the grid from the number clues on each row and column to reveal a picture."
+license = "MIT"
+links = [
+    { url = "https://github.com/emmabritton/gba_nonogram_advance", kind = "github" }
+]
+tags = ["Puzzle"]
+sha1 = "800312b931051cdc00b17020c1d1cd6049693e0c"
+size = 2531852
+
+[pentris]
+title = "Pentris"
+author = "Andrew Bailey"
+description = "Falling-block puzzles with pentominoes: every piece has five squares instead of four."
+license = "MIT"
+links = [
+    { url = "https://github.com/andrewbailey/Pentris", kind = "github" }
+]
+tags = ["Puzzle"]
+sha1 = "10a1a7d408fa6b24127fd6b2c2da0299ada5bd18"
+size = 1161944
+
+[the_hat_chooses_the_wizard]
+title = "The Hat Chooses the Wizard"
+author = "Corwin Kuiper and Gwilym Inzani"
+description = "A wizard and his hat are joined together. Throw the hat, then pull yourself to it or call it back to cross gaps and beat enemies. Made for GMTK Game Jam 2021."
+license = "MPL-2.0 (code), CC BY-SA 4.0 (graphics), CC BY 3.0 (music by Otto Halmén)"
+links = [
+    { url = "https://lostimmortal.itch.io/the-hat-chooses-the-wizard", kind = "itch" },
+    { url = "https://github.com/agbrs/agb/tree/v0.25.0/examples/the-hat-chooses-the-wizard", kind = "github" }
+]
+tags = ["Platformer"]
+sha1 = "396324a4b5df8e160d40a05effae926178a820c1"
+size = 1484736
+
+[hyperspace_roll]
+title = "Hyperspace Roll"
+author = "Corwin Kuiper, Gwilym Inzani and Sam Williams"
+description = "Roll dice to power your ship's shields and weapons, and fight your way through enemy ships one battle at a time. Made for GMTK Game Jam 2022."
+license = "MPL-2.0 (code), CC BY-SA 4.0 (graphics and music), CC BY-SA 3.0 (font by Greenma201)"
+links = [
+    { url = "https://lostimmortal.itch.io/hyperspace-roll", kind = "itch" },
+    { url = "https://github.com/agbrs/agb/tree/v0.25.0/examples/hyperspace-roll", kind = "github" }
+]
+tags = ["Strategy"]
+sha1 = "90ffde893a28d1a2f4515f34b8feabeb0b6b0342"
+size = 6948016

@@ -1,4 +1,5 @@
 use crate::app::ui_state::keybinds::PadButton;
+use crate::icons;
 use std::fmt::Display;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -100,6 +101,11 @@ pub enum HotkeyAction {
     ToggleTouchControls,
     SwitchGame,
     FocusChat,
+    StepInstruction,
+    StepOver,
+    StepOut,
+    StepLine,
+    StepFrame,
 }
 
 impl HotkeyAction {
@@ -118,6 +124,11 @@ impl HotkeyAction {
             Self::ToggleTouchControls => "On-screen buttons",
             Self::SwitchGame => "Switch game",
             Self::FocusChat => "Type in chat",
+            Self::StepInstruction => "Step one instruction",
+            Self::StepOver => "Step over",
+            Self::StepOut => "Step out",
+            Self::StepLine => "Step one line",
+            Self::StepFrame => "Step one frame",
         }
     }
 
@@ -136,7 +147,50 @@ impl HotkeyAction {
             Self::ToggleTouchControls => "Show or hide the on-screen buttons",
             Self::SwitchGame => "Play the other linked game with the same controls",
             Self::FocusChat => "Move into the open chat and back to the game",
+            Self::StepInstruction => "Run the next instruction, into a call too",
+            Self::StepOver => "Run the next instruction, a call to its return",
+            Self::StepOut => "Run until the current call returns",
+            Self::StepLine => "Run until the screen moves to its next line",
+            Self::StepFrame => "Run until the next frame is drawn",
         }
+    }
+
+    pub fn icon(self, on: bool) -> &'static str {
+        match self {
+            Self::TogglePause if on => icons::PAUSE,
+            Self::TogglePause => icons::PLAY,
+            Self::SoftReset => icons::ARROW_COUNTER_CLOCKWISE,
+            Self::Screenshot => icons::CAMERA,
+            Self::ToggleMute if on => icons::SPEAKER_SLASH,
+            Self::ToggleMute => icons::SPEAKER_HIGH,
+            Self::ToggleFocusMode | Self::LeaveFocusMode => icons::FRAME_CORNERS,
+            Self::StepInstruction => icons::ARROW_DOWN,
+            Self::StepOver => icons::ARROW_BEND_DOWN_RIGHT,
+            Self::StepOut => icons::ARROW_BEND_LEFT_UP,
+            Self::StepLine => icons::ROWS,
+            Self::StepFrame => icons::FILM_STRIP,
+            _ => "",
+        }
+    }
+
+    pub fn hint(self, on: bool) -> &'static str {
+        match self {
+            Self::TogglePause if on => "Pause",
+            Self::TogglePause => "Resume",
+            Self::ToggleMute if on => "Unmute",
+            other => other.label(),
+        }
+    }
+
+    pub fn is_debugger(self) -> bool {
+        matches!(
+            self,
+            Self::StepInstruction
+                | Self::StepOver
+                | Self::StepOut
+                | Self::StepLine
+                | Self::StepFrame
+        )
     }
 
     pub fn is_hold(self) -> bool {
@@ -159,6 +213,10 @@ impl HotkeyAction {
             Self::ToggleTouchControls => return None,
             Self::SwitchGame => Hotkey::plain(Key::F6),
             Self::FocusChat => Hotkey::plain(Key::Tab),
+            Self::StepInstruction => Hotkey::plain(Key::F7),
+            Self::StepOver => Hotkey::plain(Key::F3),
+            Self::StepOut => Hotkey::plain(Key::F4),
+            Self::StepLine | Self::StepFrame => return None,
         })
     }
 }
@@ -170,13 +228,83 @@ impl Display for HotkeyAction {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(from = "StoredHotkeys", into = "StoredHotkeys")]
 pub struct Hotkeys {
+    bindings: Vec<(Hotkey, HotkeyAction)>,
+    pads: Vec<(PadButton, HotkeyAction)>,
+    offered: Vec<HotkeyAction>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct StoredHotkeys {
     bindings: Vec<(Hotkey, HotkeyAction)>,
     #[serde(default = "Vec::new")]
     pads: Vec<(PadButton, HotkeyAction)>,
     #[serde(default = "Vec::new")]
     offered: Vec<HotkeyAction>,
+    #[serde(default)]
+    debugger: DebuggerHotkeys,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct DebuggerHotkeys {
+    bindings: Vec<(Hotkey, HotkeyAction)>,
+    pads: Vec<(PadButton, HotkeyAction)>,
+    offered: Vec<HotkeyAction>,
+}
+
+impl Default for StoredHotkeys {
+    fn default() -> Self {
+        let mut stored = Self::from(Hotkeys::default());
+        stored.debugger = DebuggerHotkeys::default();
+        stored
+    }
+}
+
+fn split<T>(list: Vec<T>, action: impl Fn(&T) -> HotkeyAction) -> (Vec<T>, Vec<T>) {
+    list.into_iter()
+        .partition(|item| !action(item).is_debugger())
+}
+
+impl From<Hotkeys> for StoredHotkeys {
+    fn from(hotkeys: Hotkeys) -> Self {
+        let (bindings, debugger_bindings) = split(hotkeys.bindings, |(_, action)| *action);
+        let (pads, debugger_pads) = split(hotkeys.pads, |(_, action)| *action);
+        let (offered, debugger_offered) = split(hotkeys.offered, |action| *action);
+        Self {
+            bindings,
+            pads,
+            offered,
+            debugger: DebuggerHotkeys {
+                bindings: debugger_bindings,
+                pads: debugger_pads,
+                offered: debugger_offered,
+            },
+        }
+    }
+}
+
+impl From<StoredHotkeys> for Hotkeys {
+    fn from(stored: StoredHotkeys) -> Self {
+        let StoredHotkeys {
+            mut bindings,
+            mut pads,
+            mut offered,
+            debugger,
+        } = stored;
+        bindings.extend(debugger.bindings);
+        pads.extend(debugger.pads);
+        if !offered.is_empty() {
+            offered.extend(debugger.offered);
+        }
+        Self {
+            bindings,
+            pads,
+            offered,
+        }
+    }
 }
 
 impl Default for Hotkeys {
@@ -401,11 +529,82 @@ mod tests {
             let bound = !Hotkeys::default().keys_for(action).is_empty();
             assert_eq!(
                 bound,
-                action != HotkeyAction::ToggleTouchControls,
+                !matches!(
+                    action,
+                    HotkeyAction::ToggleTouchControls
+                        | HotkeyAction::StepLine
+                        | HotkeyAction::StepFrame
+                ),
                 "{action:?}"
             );
             assert!(!action.label().is_empty());
             assert!(!action.description().is_empty());
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    enum OlderAction {
+        QuickSave,
+        QuickSaveNewSlot,
+        QuickLoad,
+        Screenshot,
+        ToggleRecording,
+        TogglePause,
+        SoftReset,
+        ToggleMute,
+        ToggleFocusMode,
+        LeaveFocusMode,
+        ToggleTouchControls,
+        SwitchGame,
+        FocusChat,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[expect(dead_code, reason = "only decoded, the way an older build reads it")]
+    struct OlderHotkeys {
+        bindings: Vec<(Hotkey, OlderAction)>,
+        pads: Vec<(PadButton, OlderAction)>,
+        offered: Vec<OlderAction>,
+    }
+
+    #[test]
+    fn a_build_from_before_the_debugger_still_reads_the_hotkeys() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind_pad(PadButton::iter().next().unwrap(), HotkeyAction::StepOver);
+        let stored = serde_json::to_string(&hotkeys).unwrap();
+
+        let older: Result<OlderHotkeys, _> = serde_json::from_str(&stored);
+
+        assert!(older.is_ok(), "{stored}");
+        let back: Hotkeys = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, hotkeys);
+    }
+
+    #[test]
+    fn hotkeys_from_before_the_debugger_gain_its_steps() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("debugger");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::StepInstruction).is_empty());
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::F7, Modifiers::NONE),
+            Some(HotkeyAction::StepInstruction)
+        );
+        assert_eq!(hotkeys, Hotkeys::default());
+    }
+
+    #[test]
+    fn the_debugger_steps_have_their_keys() {
+        let hotkeys = Hotkeys::default();
+        for (key, action) in [
+            (Key::F7, HotkeyAction::StepInstruction),
+            (Key::F3, HotkeyAction::StepOver),
+            (Key::F4, HotkeyAction::StepOut),
+        ] {
+            assert_eq!(hotkeys.action_for(key, Modifiers::NONE), Some(action));
         }
     }
 

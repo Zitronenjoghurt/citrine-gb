@@ -154,13 +154,20 @@ impl MediaStore {
         Ok(())
     }
 
-    pub fn read_files(&self, done: impl FnOnce(Vec<(MediaId, Vec<u8>)>)) {
-        let files = self
+    pub fn read_files(&self, mut each: impl FnMut(Option<(MediaId, Vec<u8>)>) + Send + 'static) {
+        let files: Vec<_> = self
             .items
             .iter()
-            .filter_map(|item| Some((item.id.clone(), std::fs::read(self.path(&item.id)).ok()?)))
+            .map(|item| (item.id.clone(), self.path(&item.id)))
             .collect();
-        done(files);
+        std::thread::spawn(move || {
+            for (id, path) in files {
+                if let Ok(bytes) = std::fs::read(path) {
+                    each(Some((id, bytes)));
+                }
+            }
+            each(None);
+        });
     }
 
     pub fn restore(
@@ -260,7 +267,8 @@ impl MediaStore {
             .ok()
             .and_then(|raw| serde_json::from_slice::<MediaInfo>(&raw).ok())
             .filter(|info| info.kind == kind);
-        let file_png = (kind == MediaKind::Screenshot && metadata.len() <= MAX_DECODE_BYTES)
+        let file_png = (matches!(kind, MediaKind::Screenshot | MediaKind::Print)
+            && metadata.len() <= MAX_DECODE_BYTES)
             .then(|| std::fs::read(&path).ok())
             .flatten();
         let info = match stored {

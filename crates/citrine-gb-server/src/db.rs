@@ -16,6 +16,7 @@ mod settings;
 
 pub use devices::KnownDevice;
 pub use invites::{InviteFilter, InviteRefusal, InviteRow};
+pub use messages::OldRow;
 pub use saves::{NewSave, SaveWrite};
 
 pub type Result<T> = sqlx::Result<T>;

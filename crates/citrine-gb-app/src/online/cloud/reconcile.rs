@@ -241,6 +241,10 @@ impl CloudState {
         let Some(store) = self.store.clone() else {
             return false;
         };
+        if !store.takes(rom, payload) {
+            log::warn!("a cloud save of {rom} is for another console");
+            return false;
+        }
         let written = match self.local_save(rom, slot) {
             Some(save) => store.write_payload(rom, &save, payload).map(|()| save),
             None if slot_kind(slot) == Some(SlotKind::Autosave) => store

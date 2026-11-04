@@ -7,6 +7,7 @@ use std::fmt::Display;
 use strum::IntoEnumIterator;
 
 mod about;
+mod cartridge;
 mod controls;
 mod general;
 mod online;
@@ -30,12 +31,17 @@ pub enum Sheet {
     Device,
     Console,
     GameConsole,
+    #[cfg(feature = "gba")]
+    GbaBios,
     Layout,
     Theme,
     AutosaveEvery,
     AutosaveKeep,
     ScreenshotScale,
     RecordingScale,
+    Clock,
+    Sunlight,
+    Camera,
     Palette,
     GamePalette,
     EdgeDarkness,
@@ -44,6 +50,7 @@ pub enum Sheet {
     GbcScreen,
     PasteCode,
     DeletePalette,
+    InputDelay,
 }
 
 fn sheet_id() -> Id {
@@ -140,6 +147,9 @@ impl Citrine {
                 | Sheet::AutosaveKeep
                 | Sheet::ScreenshotScale
                 | Sheet::RecordingScale => self.general_sheet(&ctx, open),
+                #[cfg(feature = "gba")]
+                Sheet::GbaBios => self.general_sheet(&ctx, open),
+                Sheet::Clock | Sheet::Sunlight | Sheet::Camera => self.cartridge_sheet(&ctx, open),
                 Sheet::Palette
                 | Sheet::GamePalette
                 | Sheet::EdgeDarkness
@@ -148,6 +158,7 @@ impl Citrine {
                 | Sheet::GbcScreen
                 | Sheet::PasteCode
                 | Sheet::DeletePalette => self.style_sheet(&ctx, open),
+                Sheet::InputDelay => self.online_sheet(&ctx),
             };
             if closed {
                 self.mobile.sheet = None;

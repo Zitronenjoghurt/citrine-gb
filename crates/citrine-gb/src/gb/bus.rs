@@ -36,8 +36,38 @@ pub struct CpuBus<'a> {
     pub cycles: &'a mut u32,
 }
 
+macro_rules! read_io {
+    ($bus:expr, $addr:expr) => {{
+        let addr: u16 = $addr;
+        #[allow(clippy::match_overlapping_arm)]
+        match addr {
+            0xFF00 => $bus.joypad.read_naive(addr),
+            0xFF01 => $bus.serial.sb,
+            0xFF02 => $bus.serial.read_sc($bus.cgb.cgb_mode),
+            0xFF04..=0xFF07 => $bus.timer.read_naive(addr),
+            0xFF0F => $bus.ic.flag.into(),
+            0xFF10..=0xFF14 | 0xFF16..=0xFF1E | 0xFF20..=0xFF26 | 0xFF30..=0xFF3F => {
+                $bus.apu.read_naive(addr)
+            }
+            0xFF46 => $bus.dma.source,
+            0xFF69 | 0xFF6B | 0xFF6C if !$bus.cgb.cgb_mode => 0xFF,
+            0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6C => {
+                $bus.ppu.read_naive(addr)
+            }
+            0xFF4D | 0xFF56 | 0xFF72..=0xFF75 => $bus.cgb.read(addr),
+            0xFF55 if $bus.cgb.cgb_mode => $bus.hdma.read_hdma5(),
+            0xFF70 if $bus.cgb.cgb_mode => $bus.memory.svbk(),
+            0xFF76 | 0xFF77 if $bus.model.is_cgb() => $bus.apu.read_naive(addr),
+            0xFFFF => $bus.ic.enable,
+            _ => 0xFF,
+        }
+    }};
+}
+
+#[cfg(feature = "debug")]
+pub(crate) use read_io;
+
 impl ReadMemory for CpuBus<'_> {
-    #[allow(clippy::match_overlapping_arm)]
     fn read_naive(&self, addr: u16) -> u8 {
         if self.boot_rom.maps(addr) {
             return self.boot_rom.rom[addr as usize];
@@ -48,25 +78,7 @@ impl ReadMemory for CpuBus<'_> {
             0x8000..=0x9FFF => self.ppu.read_naive(addr),
             0xA000..=0xBFFF => self.cartridge.read_naive(addr),
             0xFE00..=0xFE9F => self.ppu.read_naive(addr),
-            0xFF00 => self.joypad.read_naive(addr),
-            0xFF01 => self.serial.sb,
-            0xFF02 => self.serial.read_sc(self.cgb.cgb_mode),
-            0xFF04..=0xFF07 => self.timer.read_naive(addr),
-            0xFF0F => self.ic.flag.into(),
-            0xFF10..=0xFF14 | 0xFF16..=0xFF1E | 0xFF20..=0xFF26 | 0xFF30..=0xFF3F => {
-                self.apu.read_naive(addr)
-            }
-            0xFF46 => self.dma.source,
-            0xFF69 | 0xFF6B | 0xFF6C if !self.cgb.cgb_mode => 0xFF,
-            0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6C => {
-                self.ppu.read_naive(addr)
-            }
-            0xFF4D | 0xFF56 | 0xFF72..=0xFF75 => self.cgb.read(addr),
-            0xFF55 if self.cgb.cgb_mode => self.hdma.read_hdma5(),
-            0xFF70 if self.cgb.cgb_mode => self.memory.svbk(),
-            0xFF76 | 0xFF77 if self.model.is_cgb() => self.apu.read_naive(addr),
-            0xFFFF => self.ic.enable,
-            0xFF00..=0xFF7F => 0xFF,
+            0xFF00..=0xFF7F | 0xFFFF => read_io!(self, addr),
             _ => self.memory.read_naive(addr),
         }
     }
@@ -216,6 +228,25 @@ impl CpuBus<'_> {
             .div_changed(old, self.timer.div, self.cgb.cgb_mode, self.ic);
     }
 
+    #[cfg(feature = "debug")]
+    #[cold]
+    fn watch(&mut self, addr: u16, seen: crate::debug::breakpoints::Access) {
+        let address_of = |addr| {
+            crate::debug::memory::address_of(
+                self.boot_rom,
+                self.cartridge,
+                self.ppu,
+                self.memory,
+                addr,
+            )
+        };
+        let Some(at) = address_of(addr) else {
+            return;
+        };
+        let by = address_of(self.debugger.breakpoints.instruction);
+        self.debugger.breakpoints.check(at, seen, by);
+    }
+
     fn hdma_source_byte(&self, src: u16) -> u8 {
         if src < 0x8000 || (src & 0xE000) == 0xA000 || (src & 0xE000) == 0xC000 {
             self.read_naive(src)
@@ -273,16 +304,37 @@ impl CpuBusInterface for CpuBus<'_> {
     fn read_increment(&mut self, addr: u16) -> u8 {
         self.tick(None);
         self.oam_bug(addr, OamAccess::ReadIncrement);
+        #[cfg(feature = "debug")]
+        if self.debugger.breakpoints.watching() {
+            self.watch(addr, crate::debug::breakpoints::Access::Read);
+        }
         self.read_now(addr)
     }
 
     fn read(&mut self, addr: u16) -> u8 {
         self.tick(None);
         self.oam_bug(addr, OamAccess::Read);
+        #[cfg(feature = "debug")]
+        if self.debugger.breakpoints.watching() {
+            self.watch(addr, crate::debug::breakpoints::Access::Read);
+        }
         self.read_now(addr)
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        #[cfg(feature = "debug")]
+        if self.debugger.breakpoints.watching() {
+            use crate::debug::breakpoints::Access;
+            let changed = self.read_naive(addr) != value;
+            self.watch(
+                addr,
+                if changed {
+                    Access::Change
+                } else {
+                    Access::Write
+                },
+            );
+        }
         if !self.dma.cpu_conflicts(addr) && self.ppu.schedule_write(addr, value) {
             self.tick(None);
             return;
@@ -300,14 +352,44 @@ impl CpuBusInterface for CpuBus<'_> {
     #[cfg(feature = "debug")]
     fn on_fetch(&mut self, addr: u16) {
         if self.debugger.static_analysis_enabled {
-            self.debugger.disassembly.on_fetch(self.cartridge, addr);
+            match addr {
+                0x0000..=0x7FFF => self.debugger.disassembly.on_fetch(self.cartridge, addr),
+                _ => {
+                    if let Some(at) = self.memory.code_address(addr) {
+                        self.debugger.disassembly.on_ram_fetch(at);
+                    }
+                }
+            }
         }
     }
 
     #[cfg(feature = "debug")]
-    fn probe_rom_location(&self, addr: u16) -> crate::gb::cartridge::RomLocation {
-        use crate::disassembly::DisassemblySource;
-        self.cartridge.probe_rom_location(addr)
+    fn on_instruction(&mut self, cpu: &crate::gb::cpu::Cpu) {
+        use crate::debug::disassembly::DisassemblySource;
+        use crate::debug::trace::TraceEntry;
+        let pc = cpu.pc.wrapping_sub(1);
+        if self.debugger.breakpoints.watching() {
+            self.debugger.breakpoints.instruction = pc;
+        }
+        if !self.debugger.trace.is_on() {
+            return;
+        }
+        let at = match pc {
+            0x0000..=0x7FFF if !self.boot_rom.maps(pc) => Some(self.cartridge.rom_address(pc)),
+            0x0000..=0x7FFF => None,
+            _ => self.memory.code_address(pc),
+        };
+        let bytes = [
+            cpu.ir,
+            self.read_naive(cpu.pc),
+            self.read_naive(cpu.pc.wrapping_add(1)),
+        ];
+        self.debugger.trace.push(TraceEntry {
+            pc,
+            at,
+            bytes,
+            registers: cpu.trace_registers(),
+        });
     }
 }
 
@@ -351,9 +433,7 @@ pub trait CpuBusInterface {
     fn on_fetch(&mut self, _addr: u16) {}
 
     #[cfg(feature = "debug")]
-    fn probe_rom_location(&self, _addr: u16) -> crate::gb::cartridge::RomLocation {
-        crate::gb::cartridge::RomLocation::default()
-    }
+    fn on_instruction(&mut self, _cpu: &crate::gb::cpu::Cpu) {}
 }
 
 impl ICInterface for CpuBus<'_> {

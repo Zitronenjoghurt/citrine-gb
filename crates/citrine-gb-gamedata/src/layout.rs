@@ -22,6 +22,10 @@ impl Layout {
                     live_starts: layout.live_starts,
                 }
             }
+            Generation::Three => Self {
+                sram_size: crate::gen3::FLASH_SIZE,
+                live_starts: &[],
+            },
         }
     }
 }
@@ -43,6 +47,9 @@ pub(crate) struct Gen1Layout {
     pub checksum: usize,
     pub box_slots: usize,
     pub boxes_per_bank: usize,
+    pub location: Option<usize>,
+    pub events: Option<usize>,
+    pub hall_of_fame: Option<usize>,
     pub live_starts: &'static [usize],
 }
 
@@ -63,6 +70,9 @@ pub(crate) const GEN1_INTERNATIONAL: Gen1Layout = Gen1Layout {
     checksum: 0x3523,
     box_slots: 20,
     boxes_per_bank: 6,
+    location: Some(0x260A),
+    events: Some(0x29F3),
+    hall_of_fame: Some(0x284E),
     live_starts: &[0x2598, 0x25A3, 0x2F2C, 0x30C0],
 };
 
@@ -83,6 +93,9 @@ pub(crate) const GEN1_JAPANESE: Gen1Layout = Gen1Layout {
     checksum: 0x3594,
     box_slots: 30,
     boxes_per_bank: 4,
+    location: None,
+    events: None,
+    hall_of_fame: None,
     live_starts: &[0x2598, 0x259E, 0x2ED5, 0x302D],
 };
 
@@ -126,6 +139,10 @@ pub(crate) struct Gen2Layout {
     pub box_slots: usize,
     pub gender: Option<usize>,
     pub visited_spawns: usize,
+    pub location: Option<usize>,
+    pub outside: Option<usize>,
+    pub events: Option<usize>,
+    pub status_flags: Option<usize>,
     pub live_starts: &'static [usize],
 }
 
@@ -174,6 +191,10 @@ pub(crate) const GS_INTERNATIONAL: Gen2Layout = Gen2Layout {
     box_slots: 20,
     gender: None,
     visited_spawns: 0x2856,
+    location: Some(0x2868),
+    outside: Some(0x285E),
+    events: Some(0x261F),
+    status_flags: Some(0x23D9),
     live_starts: &[0x2009, 0x2856, 0x288A],
 };
 
@@ -207,6 +228,10 @@ pub(crate) const CRYSTAL_INTERNATIONAL: Gen2Layout = Gen2Layout {
     box_slots: 20,
     gender: Some(0x3E3D),
     visited_spawns: 0x2833,
+    location: Some(0x2843),
+    outside: Some(0x283B),
+    events: Some(0x2600),
+    status_flags: Some(0x23DA),
     live_starts: &[0x2009, 0x2833, 0x2865, 0x3E3D],
 };
 
@@ -240,6 +265,10 @@ pub(crate) const GS_JAPANESE: Gen2Layout = Gen2Layout {
     box_slots: 30,
     gender: None,
     visited_spawns: 0x280A,
+    location: None,
+    outside: None,
+    events: None,
+    status_flags: None,
     live_starts: &[0x2009, 0x283E],
 };
 
@@ -273,6 +302,10 @@ pub(crate) const CRYSTAL_JAPANESE: Gen2Layout = Gen2Layout {
     box_slots: 30,
     gender: Some(0x8000),
     visited_spawns: 0x27E8,
+    location: None,
+    outside: None,
+    events: None,
+    status_flags: None,
     live_starts: &[0x2009, 0x281A],
 };
 
@@ -306,6 +339,10 @@ pub(crate) const GS_KOREAN: Gen2Layout = Gen2Layout {
     box_slots: 20,
     gender: None,
     visited_spawns: 0x289A,
+    location: None,
+    outside: None,
+    events: None,
+    status_flags: None,
     live_starts: &[0x2009, 0x28CC],
 };
 

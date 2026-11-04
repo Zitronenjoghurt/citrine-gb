@@ -1,0 +1,396 @@
+{
+  "ui_scale": 1.5,
+  "ui_scale_per_ratio": true,
+  "ui_theme": "Dark",
+  "layout": "Auto",
+  "console": "Auto",
+  "game_consoles": {},
+  "game_names": {},
+  "dmg_theme": "Citrine",
+  "custom_palette": null,
+  "gbc_palette": null,
+  "palettes": {
+    "entries": []
+  },
+  "game_palettes": {},
+  "color_correction": "Screen",
+  "scaling": "Integer",
+  "matrix": false,
+  "ghosting": false,
+  "matrix_edge_darkness": 0.15,
+  "matrix_corner_darkness": 0.25,
+  "ghosting_strength": 0.3,
+  "volume": 0.4,
+  "muted": false,
+  "audio_queue_ms": 80,
+  "audio_device": null,
+  "channels": [
+    true,
+    false,
+    true,
+    true
+  ],
+  "bindings": {
+    "keyboard": [
+      [
+        "W",
+        "Up"
+      ],
+      [
+        "ArrowUp",
+        "Up"
+      ],
+      [
+        "S",
+        "Down"
+      ],
+      [
+        "ArrowDown",
+        "Down"
+      ],
+      [
+        "A",
+        "Left"
+      ],
+      [
+        "ArrowLeft",
+        "Left"
+      ],
+      [
+        "D",
+        "Right"
+      ],
+      [
+        "ArrowRight",
+        "Right"
+      ],
+      [
+        "Z",
+        "A"
+      ],
+      [
+        "Y",
+        "A"
+      ],
+      [
+        "O",
+        "A"
+      ],
+      [
+        "E",
+        "B"
+      ],
+      [
+        "X",
+        "B"
+      ],
+      [
+        "P",
+        "B"
+      ],
+      [
+        "Enter",
+        "Start"
+      ],
+      [
+        "Space",
+        "Start"
+      ],
+      [
+        "Backspace",
+        "Select"
+      ],
+      [
+        "J",
+        "A"
+      ]
+    ],
+    "gamepad": [
+      [
+        "DPadUp",
+        "Up"
+      ],
+      [
+        "DPadDown",
+        "Down"
+      ],
+      [
+        "DPadLeft",
+        "Left"
+      ],
+      [
+        "DPadRight",
+        "Right"
+      ],
+      [
+        "East",
+        "A"
+      ],
+      [
+        "West",
+        "A"
+      ],
+      [
+        "South",
+        "B"
+      ],
+      [
+        "North",
+        "B"
+      ],
+      [
+        "Start",
+        "Start"
+      ],
+      [
+        "Select",
+        "Select"
+      ],
+      [
+        "LeftTrigger",
+        "Select"
+      ]
+    ],
+    "stick_as_dpad": true,
+    "stick_deadzone": 50
+  },
+  "hotkeys": {
+    "bindings": [
+      [
+        {
+          "key": "F8",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "QuickSave"
+      ],
+      [
+        {
+          "key": "F8",
+          "ctrl": false,
+          "shift": true,
+          "alt": false
+        },
+        "QuickSaveNewSlot"
+      ],
+      [
+        {
+          "key": "F9",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "QuickLoad"
+      ],
+      [
+        {
+          "key": "F12",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "Screenshot"
+      ],
+      [
+        {
+          "key": "F12",
+          "ctrl": false,
+          "shift": true,
+          "alt": false
+        },
+        "ToggleRecording"
+      ],
+      [
+        {
+          "key": "F5",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "TogglePause"
+      ],
+      [
+        {
+          "key": "R",
+          "ctrl": true,
+          "shift": false,
+          "alt": false
+        },
+        "SoftReset"
+      ],
+      [
+        {
+          "key": "F10",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "ToggleMute"
+      ],
+      [
+        {
+          "key": "F11",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "ToggleFocusMode"
+      ],
+      [
+        {
+          "key": "Escape",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "LeaveFocusMode"
+      ],
+      [
+        {
+          "key": "F6",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "SwitchGame"
+      ]
+    ],
+    "pads": [],
+    "offered": [
+      "QuickSave",
+      "QuickSaveNewSlot",
+      "QuickLoad",
+      "Screenshot",
+      "ToggleRecording",
+      "TogglePause",
+      "SoftReset",
+      "ToggleMute",
+      "ToggleFocusMode",
+      "LeaveFocusMode",
+      "ToggleTouchControls",
+      "SwitchGame"
+    ]
+  },
+  "touch": {
+    "show_controls": true,
+    "opacity": 0.75,
+    "scale": 1.0,
+    "haptics": true,
+    "landscape": "Beside",
+    "mirrored": false,
+    "ui_scale": 1.0,
+    "scaling": "Fit"
+  },
+  "online": {
+    "address": "",
+    "joined": null,
+    "relays": {},
+    "show_playing": true,
+    "cloud_saves": true,
+    "sync_settings": true,
+    "friend_volume": 0.5,
+    "friend_muted": false
+  },
+  "local_link": {
+    "controls": "Shared",
+    "swapped": false,
+    "second_sound": true,
+    "left_keys": [
+      [
+        "W",
+        "Up"
+      ],
+      [
+        "S",
+        "Down"
+      ],
+      [
+        "A",
+        "Left"
+      ],
+      [
+        "D",
+        "Right"
+      ],
+      [
+        "G",
+        "A"
+      ],
+      [
+        "F",
+        "B"
+      ],
+      [
+        "Num2",
+        "Start"
+      ],
+      [
+        "Num1",
+        "Select"
+      ]
+    ],
+    "right_keys": [
+      [
+        "ArrowUp",
+        "Up"
+      ],
+      [
+        "ArrowDown",
+        "Down"
+      ],
+      [
+        "ArrowLeft",
+        "Left"
+      ],
+      [
+        "ArrowRight",
+        "Right"
+      ],
+      [
+        "L",
+        "A"
+      ],
+      [
+        "K",
+        "B"
+      ],
+      [
+        "Enter",
+        "Start"
+      ],
+      [
+        "Backspace",
+        "Select"
+      ]
+    ]
+  },
+  "discord": {
+    "enabled": false,
+    "game": true,
+    "details": true,
+    "play_time": true,
+    "screenshot": false,
+    "every": "TwoMinutes"
+  },
+  "stats_range": "Week",
+  "current_tab": "General",
+  "quick_slot": 0,
+  "autosave_interval": "FiveMinutes",
+  "autosave_keep": 10,
+  "screenshot_scale": 4,
+  "recording_scale": 4,
+  "randomized_ram": false,
+  "dev_mode": false,
+  "focus_mode": false,
+  "focus_place": {
+    "x": 0.5,
+    "y": 0.5
+  },
+  "track_pc": false,
+  "synced": {
+    "entries": {},
+    "clock": 0,
+    "started": false
+  }
+}

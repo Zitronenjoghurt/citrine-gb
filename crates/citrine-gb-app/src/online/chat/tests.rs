@@ -206,6 +206,30 @@ fn an_edit_only_changes_text_from_the_friend() {
 }
 
 #[test]
+fn a_message_on_the_wire_when_the_link_drops_is_edited_as_sent() {
+    let mut online = Online::default();
+    let friend = OnlineId::new(7).unwrap();
+    online.chat.push(friend, mine(1, Delivery::Sending));
+    online.chat.push(friend, mine(2, Delivery::Sending));
+    let tag = online.chat.tag();
+    online.chat.sending.insert(tag, Out::Entry(friend, 1));
+    online.chat.queue_back(Out::Entry(friend, 2));
+    online.chat.fail_pending();
+
+    assert!(online.edit_text(friend, 1, "hi there"));
+    let wired = &online.conversation(friend).unwrap().entries[0];
+    assert_eq!(wired.delivery, Delivery::Failed(Failure::NotConnected));
+    assert_eq!(wired.change, Change::Edited { told: false });
+    online.delete_message(friend, 1);
+    let wired = &online.conversation(friend).unwrap().entries[0];
+    assert_eq!(wired.change, Change::Deleted { told: false });
+
+    assert!(online.edit_text(friend, 2, "never left"));
+    let queued = &online.conversation(friend).unwrap().entries[1];
+    assert_eq!(queued.change, Change::Kept);
+}
+
+#[test]
 fn an_unsent_message_is_edited_quietly_and_deleted_without_a_trace() {
     let mut online = Online::default();
     let friend = OnlineId::new(7).unwrap();
@@ -227,6 +251,30 @@ fn an_unsent_message_is_edited_quietly_and_deleted_without_a_trace() {
     let sent = &online.conversation(friend).unwrap().entries[0];
     assert_eq!(sent.change, Change::Deleted { told: false });
     assert!(!online.edit_text(friend, 2, "back"));
+}
+
+#[test]
+fn a_retry_after_a_lost_chat_sent_is_stored_once_and_shown_as_sent() {
+    use crate::play::tests::{Pair, homebrew};
+    let mut pair = Pair::new(false, 0, 0, homebrew());
+    let (host, guest) = (pair.host.id(), pair.guest.id());
+    assert!(pair.host.online.send_text(guest, "hi"));
+    pair.host.online.chat.fail_pending();
+    let id = pair.host.online.conversation(guest).unwrap().entries[0].id;
+    pair.until("the relay keeps it and the guest's receipt", |p| {
+        p.stored_messages() == 2 && texts(&p.guest.online, host).len() == 1
+    });
+    let delivery = |p: &Pair| p.host.online.conversation(guest).unwrap().entries[0].delivery;
+    assert_eq!(delivery(&pair), Delivery::Failed(Failure::NotConnected));
+
+    pair.host.online.retry(guest, id);
+    pair.until("the retry is answered", |p| delivery(p).rank() > 0);
+    assert_eq!(pair.stored_messages(), 2);
+    assert_eq!(texts(&pair.guest.online, host), vec![(false, "hi".into())]);
+    assert_eq!(
+        pair.host.online.conversation(guest).unwrap().entries.len(),
+        1
+    );
 }
 
 fn second_device(pair: &mut crate::play::tests::Pair) -> Online {
@@ -459,4 +507,91 @@ fn typing_crosses_the_relay_and_ends_on_empty_send_or_off() {
     let start = Instant::now();
     pair.until("a moment passes", |_| start.elapsed() > SHOW_FOR / 5);
     assert!(!typing(&pair));
+}
+
+#[test]
+fn a_new_device_shows_a_chat_that_was_there_before_it() {
+    use crate::play::tests::{Pair, homebrew};
+    let mut pair = Pair::new(false, 0, 0, homebrew());
+    let (host, guest) = (pair.host.id(), pair.guest.id());
+    assert!(pair.host.online.send_text(guest, "hi mia"));
+    pair.until("mia has it", |p| texts(&p.guest.online, host).len() == 1);
+    assert!(pair.guest.online.send_text(host, "hi clara"));
+    assert!(pair.guest.online.send_text(host, "how are you"));
+    pair.until("clara has both", |p| {
+        texts(&p.host.online, guest).len() == 3
+    });
+    let newest = pair.host.online.conversation(guest).unwrap().entries[2].id;
+    pair.host.online.mark_seen(guest, &[newest]);
+    pair.host.online.mark_read(guest);
+    assert!(pair.host.online.send_text(guest, "good"));
+    pair.until("mia has the answer", |p| {
+        texts(&p.guest.online, host).len() == 3
+    });
+    let mut settle = 0;
+    pair.until("the acks reach the relay", |_| {
+        settle += 1;
+        settle > 60
+    });
+    let before = texts(&pair.host.online, guest);
+
+    let mut phone = second_device(&mut pair);
+    let begun = Instant::now();
+    with_phone(
+        &mut pair,
+        &mut phone,
+        "the phone has the chat",
+        |_, phone| {
+            texts(phone, guest).len() == before.len() || begun.elapsed() > Duration::from_secs(10)
+        },
+    );
+    assert_eq!(texts(&phone, guest), before);
+}
+
+#[test]
+fn a_new_device_gets_the_chats_an_older_relay_deleted() {
+    use crate::play::tests::{Pair, homebrew};
+    let mut pair = Pair::new(false, 0, 0, homebrew());
+    let (host, guest) = (pair.host.id(), pair.guest.id());
+    assert!(pair.host.online.send_text(guest, "hi mia"));
+    pair.until("mia has it", |p| texts(&p.guest.online, host).len() == 1);
+    assert!(pair.guest.online.send_text(host, "hi clara"));
+    pair.until("clara has it", |p| texts(&p.host.online, guest).len() == 2);
+    let newest = pair.host.online.conversation(guest).unwrap().entries[1].id;
+    pair.host.online.mark_seen(guest, &[newest]);
+    pair.host.online.mark_read(guest);
+    let mut settle = 0;
+    pair.until("the acks reach the relay", |_| {
+        settle += 1;
+        settle > 60
+    });
+    pair.relay_sql("DELETE FROM messages; UPDATE devices SET old_chats_wanted = 1");
+    pair.cut();
+    pair.until("both are back", |p| {
+        p.host.online.is_connected() && p.guest.online.is_connected()
+    });
+    let before = texts(&pair.host.online, guest);
+    assert_eq!(
+        before,
+        [(true, "hi mia".into()), (false, "hi clara".into())]
+    );
+
+    let mut phone = second_device(&mut pair);
+    let begun = Instant::now();
+    with_phone(
+        &mut pair,
+        &mut phone,
+        "the phone has the chat",
+        |_, phone| {
+            texts(phone, guest).len() == before.len() || begun.elapsed() > Duration::from_secs(10)
+        },
+    );
+    assert_eq!(texts(&phone, guest), before);
+    let first = &phone.conversation(guest).unwrap().entries[0];
+    assert_eq!(
+        first.id,
+        pair.host.online.conversation(guest).unwrap().entries[0].id
+    );
+    assert_eq!(phone.unread(guest), 0);
+    assert_eq!(texts(&pair.guest.online, host).len(), 2);
 }

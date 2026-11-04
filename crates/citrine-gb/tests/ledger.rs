@@ -2,19 +2,48 @@ mod archives;
 
 use archives::{Source, fetch, ledger_dir, read_entry, read_manifest, sha256_hex};
 use citrine_gb::ReadMemory;
+#[cfg(feature = "gba")]
+use citrine_gb::console::Keys;
+use citrine_gb::console::{ConsoleKind, detect};
 use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 use citrine_gb::gb::{GameBoy, GbModel};
+#[cfg(feature = "gba")]
+use citrine_gb::gba::bios::{Bios, Boot};
+#[cfg(feature = "gba")]
+use citrine_gb::gba::machine::{Fault, Gba};
 use citrine_gb::rom::Rom;
+use citrine_gb::rom::id::RomId;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 const LD_B_B: u8 = 0x40;
+#[cfg(feature = "gba")]
+const ARM_SPIN: u32 = 0xEAFF_FFFE;
+#[cfg(feature = "gba")]
+const THUMB_SPIN: u16 = 0xE7FE;
+#[cfg(feature = "gba")]
+const BG0CNT: u32 = 0x0400_0008;
+#[cfg(feature = "gba")]
+const VRAM: u32 = 0x0600_0000;
+#[cfg(feature = "gba")]
+const MAP_BLOCK: u32 = 0x800;
+#[cfg(feature = "gba")]
+const CONSOLE_ROWS: u32 = 20;
+#[cfg(feature = "gba")]
+const CONSOLE_COLUMNS: u32 = 30;
+#[cfg(feature = "gba")]
+const CONSOLE_PASS: &str = "congratulations!";
+#[cfg(feature = "gba")]
+const CONSOLE_DONE: &str = "total:";
+#[cfg(feature = "gba")]
+const CONSOLE_FAIL: &str = "FAIL";
 const PASS_REGS: [u8; 6] = [3, 5, 8, 13, 21, 34];
 const FAIL_REGS: [u8; 6] = [0x42; 6];
 const BLARGG_SIGNATURE: [u8; 3] = [0xDE, 0xB0, 0x61];
@@ -23,6 +52,10 @@ const MAX_JOBS: usize = 4;
 const PRESS_DELAY_FRAMES: u32 = 60;
 const PRESS_HOLD_FRAMES: u32 = 5;
 const PRESS_STEP_FRAMES: u32 = 10;
+const BIOS_END: u32 = 0x4000;
+#[cfg(feature = "gba")]
+const SPIN_START: u32 = 0x0200_0000;
+const BIOS_BOOT_CYCLES: u64 = 100_000_000;
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -36,6 +69,7 @@ struct Suite {
     root: String,
     rule: Rule,
     cycles: u32,
+    register: Option<u8>,
     roms: Vec<RomEntry>,
 }
 
@@ -43,13 +77,16 @@ struct Suite {
 struct RomEntry {
     path: String,
     sha256: String,
-    models: Vec<Model>,
+    consoles: Vec<Console>,
     #[serde(default)]
-    images: BTreeMap<Model, String>,
+    images: BTreeMap<Console, String>,
     cycles: Option<u32>,
+    register: Option<u8>,
     name: Option<String>,
     #[serde(default)]
     press: Vec<Button>,
+    finish: Option<String>,
+    unpassable: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -59,6 +96,18 @@ enum Rule {
     Blargg,
     Screenshot,
     Timed,
+    Register,
+    Console,
+}
+
+impl Rule {
+    fn runs_on(self, kind: ConsoleKind) -> bool {
+        match self {
+            Rule::Fibonacci | Rule::Blargg => matches!(kind, ConsoleKind::Gb | ConsoleKind::Gbc),
+            Rule::Screenshot | Rule::Timed => true,
+            Rule::Register | Rule::Console => kind == ConsoleKind::Gba,
+        }
+    }
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -91,25 +140,28 @@ impl Button {
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
-enum Model {
+enum Console {
     Dmg,
     Cgb,
+    Gba,
 }
 
-impl Model {
-    const ALL: [Model; 2] = [Model::Dmg, Model::Cgb];
+impl Console {
+    const ALL: [Console; 3] = [Console::Dmg, Console::Cgb, Console::Gba];
 
     fn name(self) -> &'static str {
         match self {
-            Model::Dmg => "dmg",
-            Model::Cgb => "cgb",
+            Console::Dmg => "dmg",
+            Console::Cgb => "cgb",
+            Console::Gba => "gba",
         }
     }
 
-    fn gb_model(self) -> GbModel {
+    fn kind(self) -> ConsoleKind {
         match self {
-            Model::Dmg => GbModel::Dmg,
-            Model::Cgb => GbModel::Cgb,
+            Console::Dmg => ConsoleKind::Gb,
+            Console::Cgb => ConsoleKind::Gbc,
+            Console::Gba => ConsoleKind::Gba,
         }
     }
 }
@@ -117,24 +169,53 @@ impl Model {
 struct Job {
     suite: String,
     line: String,
-    model: Model,
+    console: Console,
     rule: Rule,
+    register: Option<u8>,
     cycles: u32,
     rom: Vec<u8>,
     image: Option<Vec<u8>>,
     press: Vec<Button>,
+    finish: Option<String>,
+    unpassable: Option<String>,
+}
+
+enum Mode {
+    Skip,
+    Intro,
+    Bios(PathBuf),
+}
+
+impl Mode {
+    fn ledger_file(&self) -> &'static str {
+        match self {
+            Mode::Skip => "passing.txt",
+            Mode::Intro => "passing-intro.txt",
+            Mode::Bios(_) => "passing-bios.txt",
+        }
+    }
 }
 
 struct Args {
     write: bool,
     failures: bool,
     jobs: usize,
+    mode: Mode,
+    only: Vec<String>,
+}
+
+#[derive(Default)]
+struct Setup {
+    #[cfg(feature = "gba")]
+    bios: Option<Bios>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         write: false,
         failures: false,
+        mode: Mode::Skip,
+        only: Vec::new(),
         jobs: std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -145,6 +226,14 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--write" => args.write = true,
             "--failures" => args.failures = true,
+            "--bios" => {
+                args.mode = Mode::Bios(iter.next().ok_or("--bios needs a file")?.into());
+            }
+            "--intro" => args.mode = Mode::Intro,
+            "--only" => {
+                let names = iter.next().ok_or("--only needs ROM names")?;
+                args.only = names.split(',').map(str::to_string).collect();
+            }
             "--jobs" => {
                 args.jobs = iter
                     .next()
@@ -201,11 +290,54 @@ fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
                     entry.path, entry.sha256
                 ));
             }
-            for &model in &entry.models {
+            if RomId::new(&rom).sha256_hex_string().to_ascii_lowercase() != entry.sha256 {
+                return Err(format!("{suite_name}/{} has a different RomId", entry.path));
+            }
+            let reads_as_gba = detect(&rom, Some(entry.path.as_str())) == Some(ConsoleKind::Gba)
+                || detect(&rom, None) == Some(ConsoleKind::Gba);
+            let register = entry.register.or(suite.register);
+            match (suite.rule, register) {
+                (Rule::Register, Some(0..=15))
+                | (
+                    Rule::Fibonacci | Rule::Blargg | Rule::Screenshot | Rule::Timed | Rule::Console,
+                    None,
+                ) => {}
+                (Rule::Register, _) => {
+                    return Err(format!(
+                        "{suite_name}/{} needs a register from 0 to 15",
+                        entry.path
+                    ));
+                }
+                (_, Some(_)) => {
+                    return Err(format!(
+                        "{suite_name}/{} names a register its rule has no use for",
+                        entry.path
+                    ));
+                }
+            }
+            for &console in &entry.consoles {
+                if reads_as_gba != (console.kind() == ConsoleKind::Gba) {
+                    return Err(format!(
+                        "{suite_name}/{} does not read as a {} game",
+                        entry.path,
+                        console.name()
+                    ));
+                }
+                if !suite.rule.runs_on(console.kind()) {
+                    return Err(format!(
+                        "{suite_name}/{} uses a rule {} has no use for",
+                        entry.path,
+                        console.name()
+                    ));
+                }
                 let image = match suite.rule {
                     Rule::Screenshot | Rule::Timed => {
-                        let image = entry.images.get(&model).ok_or_else(|| {
-                            format!("{suite_name}/{} has no {} image", entry.path, model.name())
+                        let image = entry.images.get(&console).ok_or_else(|| {
+                            format!(
+                                "{suite_name}/{} has no {} image",
+                                entry.path,
+                                console.name()
+                            )
                         })?;
                         let data = read_entry(archive, &format!("{}/{image}", suite.root))?;
                         Some(decode_png(&data).map_err(|e| format!("{image}: {e}"))?)
@@ -216,15 +348,18 @@ fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
                     suite: suite_name.clone(),
                     line: format!(
                         "{} {suite_name}/{}",
-                        model.name(),
+                        console.name(),
                         entry.name.as_deref().unwrap_or(&entry.path)
                     ),
-                    model,
+                    console,
                     rule: suite.rule,
+                    register,
                     cycles: entry.cycles.unwrap_or(suite.cycles),
                     rom: rom.clone(),
                     image,
                     press: entry.press.clone(),
+                    finish: entry.finish.clone(),
+                    unpassable: entry.unpassable.clone(),
                 });
             }
         }
@@ -241,24 +376,23 @@ fn fibonacci(gb: &GameBoy) -> Result<(), String> {
     }
 }
 
-fn shade(model: Model, px: &[u8]) -> u16 {
-    match model {
-        Model::Dmg => (px[0] as u16 + px[1] as u16 + px[2] as u16 + 127) / 255,
-        Model::Cgb => {
+fn shade(kind: ConsoleKind, px: &[u8]) -> u16 {
+    match kind {
+        ConsoleKind::Gb => (px[0] as u16 + px[1] as u16 + px[2] as u16 + 127) / 255,
+        ConsoleKind::Gbc | ConsoleKind::Gba => {
             (px[0] >> 3) as u16 | ((px[1] >> 3) as u16) << 5 | ((px[2] >> 3) as u16) << 10
         }
     }
 }
 
-fn screenshot(gb: &GameBoy, model: Model, image: &[u8]) -> Result<(), String> {
-    let frame = gb.frame().as_slice();
+fn screenshot(frame: &[u8], kind: ConsoleKind, image: &[u8]) -> Result<(), String> {
     if frame.len() != image.len() {
         return Err("reference image has the wrong size".into());
     }
     let differing = frame
         .chunks(4)
         .zip(image.chunks(4))
-        .filter(|(a, b)| shade(model, a) != shade(model, b))
+        .filter(|(a, b)| shade(kind, a) != shade(kind, b))
         .count();
     match differing {
         0 => Ok(()),
@@ -310,8 +444,148 @@ impl Blargg {
     }
 }
 
-fn run(job: &Job) -> Result<(), String> {
-    let mut gb = GameBoy::new_empty(job.model.gb_model());
+fn run(job: &Job, setup: &Setup) -> Result<(), String> {
+    match job.console.kind() {
+        ConsoleKind::Gb => run_game_boy(job, GbModel::Dmg),
+        ConsoleKind::Gbc => run_game_boy(job, GbModel::Cgb),
+        #[cfg(feature = "gba")]
+        ConsoleKind::Gba => run_gba(job, setup),
+        #[cfg(not(feature = "gba"))]
+        ConsoleKind::Gba => Err("no GBA core to run it on".into()),
+    }
+}
+
+#[cfg(feature = "gba")]
+fn console_text(gba: &Gba) -> String {
+    let map = VRAM + u32::from(gba.bus().read16(BG0CNT) >> 8 & 0x1F) * MAP_BLOCK;
+    (0..CONSOLE_ROWS)
+        .map(|row| {
+            let line: String = (0..CONSOLE_COLUMNS)
+                .map(|column| {
+                    let tile = gba.bus().read16(map + (row * 32 + column) * 2) & 0x3FF;
+                    char::from_u32(u32::from(tile))
+                        .filter(char::is_ascii_graphic)
+                        .unwrap_or(' ')
+                })
+                .collect();
+            line.trim().to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[cfg(feature = "gba")]
+fn boot_gba(job: &Job, setup: &Setup) -> Result<(Gba, u64), String> {
+    let Some(bios) = &setup.bios else {
+        let gba = Gba::new(&job.rom);
+        let booted = gba.cycles();
+        return Ok((gba, booted));
+    };
+    let mut gba = Gba::with_bios(&job.rom, bios.clone(), Boot::Intro);
+    while gba.cpu().pc() < BIOS_END {
+        if gba.cycles() > BIOS_BOOT_CYCLES {
+            return Err(format!(
+                "the BIOS did not start the game within {BIOS_BOOT_CYCLES} cycles"
+            ));
+        }
+        gba.run_frame();
+        if let Some(fault) = gba.fault() {
+            return Err(describe_fault(fault));
+        }
+    }
+    let booted = gba.cycles();
+    Ok((gba, booted))
+}
+
+#[cfg(feature = "gba")]
+fn run_gba(job: &Job, setup: &Setup) -> Result<(), String> {
+    let (mut gba, booted) = boot_gba(job, setup)?;
+    let image = job.image.as_deref().unwrap_or_default();
+    let mut frames = 0;
+    let mut shown = String::new();
+    while gba.cycles() < booted + u64::from(job.cycles) {
+        gba.run_frame();
+        if let Some(fault) = gba.fault() {
+            return Err(describe_fault(fault));
+        }
+        frames += 1;
+        if let Some((button, down)) = press_step(&job.press, frames) {
+            gba.set_keys(if down {
+                Keys::from(button.state())
+            } else {
+                Keys::empty()
+            });
+        }
+        if let Rule::Console = job.rule {
+            let text = console_text(&gba);
+            if text.contains(CONSOLE_PASS) {
+                return Ok(());
+            }
+            if text.contains(CONSOLE_DONE) && text == shown {
+                return Err(text);
+            }
+            if let Some(finish) = job.finish.as_deref()
+                && text.contains(finish)
+                && text == shown
+            {
+                return if text.contains(CONSOLE_FAIL) {
+                    Err(text)
+                } else {
+                    Ok(())
+                };
+            }
+            shown = text;
+            continue;
+        }
+        if !spins(&gba) {
+            continue;
+        }
+        match (job.rule, job.register) {
+            (Rule::Register, Some(register)) => {
+                return match gba.cpu().reg(usize::from(register)) {
+                    0 => Ok(()),
+                    failed => Err(format!("test {failed} failed")),
+                };
+            }
+            (Rule::Screenshot, _) => return screenshot(gba.frame(), ConsoleKind::Gba, image),
+            _ => {}
+        }
+    }
+    match job.rule {
+        Rule::Timed => screenshot(gba.frame(), ConsoleKind::Gba, image),
+        Rule::Console => Err(format!("no result within {} cycles: {shown}", job.cycles)),
+        _ => Err(format!("no result within {} cycles", job.cycles)),
+    }
+}
+
+#[cfg(feature = "gba")]
+fn spins(gba: &Gba) -> bool {
+    let pc = gba.cpu().reg(15);
+    let thumb = gba.cpu().thumb();
+    let at = pc.wrapping_sub(if thumb { 4 } else { 8 });
+    if at < SPIN_START {
+        return false;
+    }
+    if thumb {
+        gba.bus().read16(at) == THUMB_SPIN
+    } else {
+        gba.bus().read32(at) == ARM_SPIN
+    }
+}
+
+#[cfg(feature = "gba")]
+fn describe_fault(fault: Fault) -> String {
+    match fault {
+        Fault::Unsupported(addr) => {
+            format!("stopped at {addr:08X}, an instruction the CPU can't run yet")
+        }
+    }
+}
+
+fn run_game_boy(job: &Job, model: GbModel) -> Result<(), String> {
+    let kind = job.console.kind();
+    let mut gb = GameBoy::new_empty(model);
     gb.load_rom(&Rom::new(&job.rom))
         .map_err(|e| format!("failed to load: {e:?}"))?;
     gb.ppu.dmg_theme = DmgTheme::GreyScale;
@@ -330,7 +604,11 @@ fn run(job: &Job) -> Result<(), String> {
         match job.rule {
             Rule::Fibonacci if gb.cpu.ir == LD_B_B => return fibonacci(&gb),
             Rule::Screenshot if gb.cpu.ir == LD_B_B => {
-                return screenshot(&gb, job.model, job.image.as_deref().unwrap_or_default());
+                return screenshot(
+                    gb.frame().as_slice(),
+                    kind,
+                    job.image.as_deref().unwrap_or_default(),
+                );
             }
             Rule::Blargg => {
                 if let Some(result) = blargg.poll(&mut gb) {
@@ -341,26 +619,34 @@ fn run(job: &Job) -> Result<(), String> {
         }
     }
     match job.rule {
-        Rule::Timed => screenshot(&gb, job.model, job.image.as_deref().unwrap_or_default()),
+        Rule::Timed => screenshot(
+            gb.frame().as_slice(),
+            kind,
+            job.image.as_deref().unwrap_or_default(),
+        ),
         _ => Err(format!("no result within {} cycles", job.cycles)),
     }
 }
 
-fn press(gb: &mut GameBoy, buttons: &[Button], frame: u32) {
-    let Some(since) = frame.checked_sub(PRESS_DELAY_FRAMES) else {
-        return;
-    };
-    let Some(button) = buttons.get((since / PRESS_STEP_FRAMES) as usize) else {
-        return;
-    };
+fn press_step(buttons: &[Button], frame: u32) -> Option<(Button, bool)> {
+    let since = frame.checked_sub(PRESS_DELAY_FRAMES)?;
+    let button = *buttons.get((since / PRESS_STEP_FRAMES) as usize)?;
     match since % PRESS_STEP_FRAMES {
-        0 => gb.press_button(button.state()),
-        PRESS_HOLD_FRAMES => gb.release_button(button.state()),
-        _ => {}
+        0 => Some((button, true)),
+        PRESS_HOLD_FRAMES => Some((button, false)),
+        _ => None,
     }
 }
 
-fn run_all(jobs: &[Job], threads: usize) -> Vec<Result<(), String>> {
+fn press(gb: &mut GameBoy, buttons: &[Button], frame: u32) {
+    match press_step(buttons, frame) {
+        Some((button, true)) => gb.press_button(button.state()),
+        Some((button, false)) => gb.release_button(button.state()),
+        None => {}
+    }
+}
+
+fn run_all(jobs: &[Job], setup: &Setup, threads: usize) -> Vec<Result<(), String>> {
     let next = AtomicUsize::new(0);
     let results = Mutex::new((0..jobs.len()).map(|_| None).collect::<Vec<_>>());
     std::thread::scope(|scope| {
@@ -369,7 +655,7 @@ fn run_all(jobs: &[Job], threads: usize) -> Vec<Result<(), String>> {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(job) = jobs.get(i) else { break };
-                    let result = std::panic::catch_unwind(|| run(job))
+                    let result = std::panic::catch_unwind(|| run(job, setup))
                         .unwrap_or_else(|_| Err("panicked".into()));
                     results.lock().unwrap()[i] = Some(result);
                 }
@@ -385,32 +671,71 @@ fn run_all(jobs: &[Job], threads: usize) -> Vec<Result<(), String>> {
 }
 
 fn print_summary(jobs: &[Job], results: &[Result<(), String>]) {
-    let mut counts: BTreeMap<&str, BTreeMap<Model, (usize, usize)>> = BTreeMap::new();
+    let mut counts: BTreeMap<&str, BTreeMap<Console, (usize, usize)>> = BTreeMap::new();
     for (job, result) in jobs.iter().zip(results) {
+        if job.unpassable.is_some() {
+            continue;
+        }
         for suite in [job.suite.as_str(), "total"] {
             let count = counts
                 .entry(suite)
                 .or_default()
-                .entry(job.model)
+                .entry(job.console)
                 .or_default();
             count.0 += result.is_ok() as usize;
             count.1 += 1;
         }
     }
     let total = counts.remove("total").unwrap_or_default();
-    println!("\n{:<12}{:>10}{:>10}", "suite", "dmg", "cgb");
-    for (suite, models) in counts.into_iter().chain([("total", total)]) {
-        let cells = Model::ALL.map(|model| match models.get(&model) {
-            Some((passed, all)) => format!("{passed}/{all}"),
-            None => "-".to_string(),
-        });
-        println!("{suite:<12}{:>10}{:>10}", cells[0], cells[1]);
+    let header: String = Console::ALL.map(|c| format!("{:>10}", c.name())).concat();
+    println!("\n{:<12}{header}", "suite");
+    for (suite, consoles) in counts.into_iter().chain([("total", total)]) {
+        let cells: String = Console::ALL
+            .map(|console| match consoles.get(&console) {
+                Some((passed, all)) => format!("{:>10}", format!("{passed}/{all}")),
+                None => format!("{:>10}", "-"),
+            })
+            .concat();
+        println!("{suite:<12}{cells}");
+    }
+}
+
+#[cfg(feature = "gba")]
+fn setup(args: &Args) -> Result<Option<Setup>, String> {
+    let path = match &args.mode {
+        Mode::Skip => return Ok(Some(Setup::default())),
+        Mode::Intro => {
+            return Ok(Some(Setup {
+                bios: Some(Bios::built_in()),
+            }));
+        }
+        Mode::Bios(path) => path,
+    };
+    let image = match std::fs::read(path) {
+        Ok(image) => image,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let bios = Bios::user(&image).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(Setup { bios: Some(bios) }))
+}
+
+#[cfg(not(feature = "gba"))]
+fn setup(args: &Args) -> Result<Option<Setup>, String> {
+    match args.mode {
+        Mode::Skip => Ok(Some(Setup::default())),
+        Mode::Intro => Err("--intro needs the gba feature".into()),
+        Mode::Bios(path) => Err(format!("--bios {} needs the gba feature", path.display())),
     }
 }
 
 fn ledger() -> Result<ExitCode, String> {
     let args = parse_args()?;
-    let ledger_path = ledger_dir().join("passing.txt");
+    let Some(setup) = setup(&args)? else {
+        println!("no BIOS file, skipping the BIOS ledger");
+        return Ok(ExitCode::SUCCESS);
+    };
+    let ledger_path = ledger_dir().join(args.mode.ledger_file());
     let manifest: Manifest = read_manifest()?;
     let listed: BTreeSet<String> = std::fs::read_to_string(&ledger_path)
         .unwrap_or_default()
@@ -419,36 +744,69 @@ fn ledger() -> Result<ExitCode, String> {
         .map(str::to_string)
         .collect();
 
-    let jobs = load_jobs(&manifest)?;
+    let mut jobs = load_jobs(&manifest)?;
+    if !matches!(args.mode, Mode::Skip) {
+        jobs.retain(|job| job.console == Console::Gba);
+    }
+    if !args.only.is_empty() {
+        jobs.retain(|job| {
+            args.only
+                .iter()
+                .any(|name| job.line.contains(name.as_str()))
+        });
+    }
     println!(
-        "running {} ROM and model pairs on {} threads",
+        "running {} ROM and console pairs on {} threads",
         jobs.len(),
         args.jobs
     );
     let start = Instant::now();
-    let results = run_all(&jobs, args.jobs);
+    let results = run_all(&jobs, &setup, args.jobs);
     println!("done in {:.1}s", start.elapsed().as_secs_f64());
 
     if args.failures {
         println!();
         for (job, result) in jobs.iter().zip(&results) {
-            if let Err(reason) = result {
+            if let Err(reason) = result
+                && job.unpassable.is_none()
+            {
                 println!("FAIL {}: {reason}", job.line);
             }
         }
     }
     print_summary(&jobs, &results);
 
+    let mut unpassable_passes = Vec::new();
+    for (job, result) in jobs.iter().zip(&results) {
+        let Some(why) = &job.unpassable else { continue };
+        if result.is_ok() {
+            unpassable_passes.push(job.line.as_str());
+        }
+        let outcome = match result {
+            Ok(()) => "PASSES".to_string(),
+            Err(reason) => reason.clone(),
+        };
+        println!(
+            "\nknown unpassable, not counted: {}\n  why: {why}\n  result: {outcome}",
+            job.line
+        );
+    }
+
     let mut outcomes: BTreeMap<&str, &Result<(), String>> = BTreeMap::new();
     for (job, result) in jobs.iter().zip(&results) {
-        outcomes.insert(job.line.as_str(), result);
+        if job.unpassable.is_none() {
+            outcomes.insert(job.line.as_str(), result);
+        }
     }
     let passing: BTreeSet<String> = outcomes
         .iter()
         .filter(|(_, result)| result.is_ok())
         .map(|(line, _)| line.to_string())
         .collect();
-    let dropped: Vec<&String> = listed.difference(&passing).collect();
+    let dropped: Vec<&String> = listed
+        .difference(&passing)
+        .filter(|line| args.only.is_empty() || outcomes.contains_key(line.as_str()))
+        .collect();
     let added: Vec<&String> = passing.difference(&listed).collect();
 
     if !added.is_empty() {
@@ -469,8 +827,20 @@ fn ledger() -> Result<ExitCode, String> {
         println!("run `make ledger` to add them");
     }
 
+    if !unpassable_passes.is_empty() {
+        println!("\n{} ROMs marked unpassable pass:", unpassable_passes.len());
+        for line in &unpassable_passes {
+            println!("  ! {line}");
+        }
+        println!("check the pass is real, then drop its unpassable mark in the manifest");
+    }
+
     if dropped.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(if unpassable_passes.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
     }
     println!("\n{} ledger lines no longer pass:", dropped.len());
     for line in &dropped {

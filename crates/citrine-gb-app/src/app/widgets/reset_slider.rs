@@ -9,6 +9,7 @@ pub struct ResetSlider<'a, V: Numeric> {
     default: V,
     step: Option<f64>,
     suffix: Option<&'static str>,
+    text: Option<fn(f64) -> String>,
 }
 
 impl<'a, V: Numeric> ResetSlider<'a, V> {
@@ -20,6 +21,7 @@ impl<'a, V: Numeric> ResetSlider<'a, V> {
             default,
             step: None,
             suffix: None,
+            text: None,
         }
     }
 
@@ -37,6 +39,11 @@ impl<'a, V: Numeric> ResetSlider<'a, V> {
         self.suffix = Some(suffix);
         self
     }
+
+    pub fn text(mut self, text: fn(f64) -> String) -> Self {
+        self.text = Some(text);
+        self
+    }
 }
 
 impl<V: Numeric> Widget for ResetSlider<'_, V> {
@@ -48,7 +55,15 @@ impl<V: Numeric> Widget for ResetSlider<'_, V> {
                 .step
                 .map_or(0, |step| (-step.log10()).ceil().max(0.0) as usize);
             let suffix = self.suffix.unwrap_or_default();
-            let widest = format!("{:.*}{suffix}", decimals, self.range.end().to_f64());
+            let (start, end) = (self.range.start().to_f64(), self.range.end().to_f64());
+            let widest = match self.text {
+                Some(text) => [start, end, start + 1.0, end - 1.0, self.default.to_f64()]
+                    .map(text)
+                    .into_iter()
+                    .max_by_key(String::len)
+                    .unwrap_or_default(),
+                None => format!("{:.*}{suffix}", decimals, end),
+            };
             let value_width = WidgetText::from(widest)
                 .into_galley(
                     ui,
@@ -71,6 +86,11 @@ impl<V: Numeric> Widget for ResetSlider<'_, V> {
                 .suffix(suffix);
             if let Some(step) = self.step {
                 slider = slider.step_by(step);
+            }
+            if let Some(text) = self.text {
+                slider = slider
+                    .custom_formatter(move |value, _| text(value))
+                    .custom_parser(|input| input.trim().trim_end_matches('h').trim().parse().ok());
             }
             let mut response = slider.ui(ui);
 

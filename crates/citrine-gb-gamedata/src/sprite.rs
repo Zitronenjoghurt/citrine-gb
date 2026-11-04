@@ -7,6 +7,7 @@ use crate::scan::{Pattern, bank_of, banked, byte, same_bank, word};
 const GEN2_PIC_RECORD: usize = 6;
 const UNOWN_LETTERS: usize = 26;
 const GEN2_BACK_SIZE: u8 = 6;
+const GEN1_DEX: usize = 151;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpriteTables {
@@ -70,6 +71,7 @@ impl SpriteTables {
         match game.generation() {
             Generation::One => load_gen1(game, rom, base, dex_order),
             Generation::Two => load_gen2(rom, base),
+            Generation::Three => Self::default(),
         }
     }
 
@@ -103,6 +105,7 @@ impl SpriteTables {
             (Generation::Two, Side::Back) => {
                 pic::decode_gen2(rom, pics.back, GEN2_BACK_SIZE, GEN2_BACK_SIZE)
             }
+            (Generation::Three, _) => Err(SpriteError::NoTable),
         }
     }
 
@@ -197,17 +200,8 @@ fn parse_gen1_banks(code: &[u8], mut at: usize) -> Option<Gen1Banks> {
 }
 
 fn gen1_palettes(game: Game, rom: &[u8], count: usize) -> Option<Vec<[Palette; 2]>> {
-    let ids = Pattern::new("5F 16 00 21 ?? ?? 19 7E C9")
-        .find_all(rom)
-        .find_map(|at| {
-            let table = same_bank(rom, at, 4)?;
-            let ids = rom.get(table..table + count + 1)?;
-            let distinct = ids.iter().collect::<std::collections::HashSet<_>>().len();
-            (ids.iter().all(|&id| id < 0x30) && distinct >= 8).then_some((table, ids))
-        })?;
-    let (table, ids) = ids;
-    let colors = gen1_cgb_colors(game, rom, bank_of(table))
-        .or_else(|| gen1_sgb_colors(rom, bank_of(table)))?;
+    let (table, ids) = gen1_palette_ids(rom, count)?;
+    let colors = gen1_colors(game, rom, bank_of(table))?;
     ids[1..]
         .iter()
         .map(|&id| {
@@ -215,6 +209,27 @@ fn gen1_palettes(game: Game, rom: &[u8], count: usize) -> Option<Vec<[Palette; 2
             Some([palette, palette])
         })
         .collect()
+}
+
+pub(crate) fn gen1_palette(game: Game, rom: &[u8], id: u8) -> Option<Palette> {
+    let (table, _) = gen1_palette_ids(rom, GEN1_DEX)?;
+    let colors = gen1_colors(game, rom, bank_of(table))?;
+    Palette::read(rom, colors + usize::from(id) * 8)
+}
+
+fn gen1_palette_ids(rom: &[u8], count: usize) -> Option<(usize, &[u8])> {
+    Pattern::new("5F 16 00 21 ?? ?? 19 7E C9")
+        .find_all(rom)
+        .find_map(|at| {
+            let table = same_bank(rom, at, 4)?;
+            let ids = rom.get(table..table + count + 1)?;
+            let distinct = ids.iter().collect::<std::collections::HashSet<_>>().len();
+            (ids.iter().all(|&id| id < 0x30) && distinct >= 8).then_some((table, ids))
+        })
+}
+
+fn gen1_colors(game: Game, rom: &[u8], bank: usize) -> Option<usize> {
+    gen1_cgb_colors(game, rom, bank).or_else(|| gen1_sgb_colors(rom, bank))
 }
 
 fn gen1_sgb_colors(rom: &[u8], bank: usize) -> Option<usize> {

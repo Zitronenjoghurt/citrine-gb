@@ -1,5 +1,6 @@
 use crate::app::events::AppEventQueue;
 use crate::app::ui_state::UiState;
+use crate::app::widgets::avatar;
 use crate::audio::Audio;
 use crate::emulator::Emulator;
 use crate::icons;
@@ -11,12 +12,11 @@ use std::collections::{HashMap, HashSet};
 use strum_macros::EnumIter;
 
 mod apu;
-mod apu_waves;
 mod audio_debug;
 pub mod chat;
 mod controller_debug;
 mod debug_actions;
-mod disassembly;
+mod debugger;
 mod e2e;
 pub mod friends;
 mod game_boy;
@@ -25,14 +25,16 @@ mod homebrew;
 mod info;
 pub mod linked;
 pub mod media;
+mod memory;
 mod performance;
 pub mod playing;
 mod registers;
 mod rom_info;
+pub mod room_chat;
 pub mod saves;
 pub(crate) mod settings;
 pub mod stats;
-mod time_control;
+mod video;
 
 pub const CONTENT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 8);
 
@@ -47,11 +49,54 @@ pub struct TabViewer<'a> {
     pub media: &'a mut MediaStore,
     pub online: &'a mut crate::online::Online,
     pub play: &'a mut crate::play::Play,
+    pub senses: &'a crate::senses::Senses,
     pub stats: &'a crate::stats::Stats,
     pub ui: &'a mut UiState,
 }
 
 impl TabViewer<'_> {
+    fn watched_face(&mut self, response: &egui::Response) {
+        let Some(session) = self.play.session() else {
+            return;
+        };
+        let who = playing::watched_friend(self.play, session);
+        let name = playing::watched_name(self.play, self.online, session);
+        let full = playing::full_name(self.play, self.online, who);
+        let ctx = &response.ctx;
+        let font = egui::TextStyle::Button.resolve(&ctx.style());
+        let measure = |text: String| {
+            ctx.fonts_mut(|f| {
+                f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
+        let room = measure(FACE_ROOM.to_owned());
+        let title = measure(format!("{FACE_ROOM}{name}"));
+        let close = if self.ui.tab_fit.no_close.contains(&Tab::Playing) {
+            0.0
+        } else {
+            TAB_CLOSE.min(response.rect.height())
+        };
+        let face = tab_face(response.rect, close, title, room);
+        let painter = ctx.layer_painter(response.layer_id);
+        avatar::paint_with(
+            &painter,
+            &ctx.style().visuals,
+            face,
+            &full,
+            who.value(),
+            None,
+        );
+        let on_face = response
+            .interact_pointer_pos()
+            .is_some_and(|at| face.expand(2.0).contains(at));
+        if response.clicked() && on_face {
+            self.ui.friends.show_profile(who);
+            self.events.open_tab(Tab::Friends);
+        }
+    }
+
     fn friends_waiting(&self) -> bool {
         self.online.needs_attention() || self.play.has_unseen_invite()
     }
@@ -64,21 +109,24 @@ impl TabViewer<'_> {
             Tab::Saves => saves::show(self, ui),
             Tab::Media => media::show(self, ui),
             Tab::Stats => stats::show(self, ui),
-            Tab::TimeControl => time_control::show(self, ui),
             Tab::Registers => registers::show(self, ui),
             Tab::RomInfo => rom_info::show(self, ui),
             Tab::E2ETest => e2e::show(self, ui),
             Tab::Friends => friends::show(self, ui),
             Tab::Playing => playing::show(self, ui),
+            Tab::RoomChat => room_chat::show(self, ui),
             Tab::Homebrew => homebrew::show(self, ui),
             Tab::Info => info::show(self, ui),
             Tab::AudioDebug => audio_debug::show(self, ui),
             Tab::ControllerDebug => controller_debug::show(self, ui),
             Tab::Apu => apu::show(self, ui),
-            Tab::ApuWaves => apu_waves::show(self, ui),
-            Tab::Disassembly => disassembly::show(self, ui),
+            Tab::ApuWaves => apu::show(self, ui),
+            Tab::Disassembly | Tab::TimeControl => debugger::show(self, ui),
             Tab::Performance => performance::show(self, ui),
             Tab::DebugActions => debug_actions::show(self, ui),
+            Tab::Tool(Tool::Memory) => memory::show(self, ui),
+            Tab::Tool(Tool::Video) => video::show(self, ui),
+            Tab::Tool(Tool::Unknown) => {}
         }
     }
 }
@@ -87,16 +135,17 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     type Tab = Tab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
+        let console = game_title(self.emulator);
         let recorder = &self.emulator.screen_recorder;
         if *tab == Tab::GameBoy && recorder.is_recording() {
             let time = recorder.elapsed_label();
-            return egui::RichText::new(format!("{}  {}  {time}", tab.title(), icons::RECORD))
+            return egui::RichText::new(format!("{}  {}  {time}", console, icons::RECORD))
                 .color(egui::Color32::RED)
                 .into();
         }
         let title = match self.ui.tab_fit.titles.get(tab) {
             Some(short) => short.as_str(),
-            None => tab.title(),
+            None => tab.shown_title(console),
         };
         if *tab == Tab::Friends && self.friends_waiting() {
             return format!("{title}    ").into();
@@ -107,7 +156,8 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
         if *tab == Tab::Playing
             && let Some(session) = self.play.session()
         {
-            return playing::friend_name(self.online, session.friend()).into();
+            let name = playing::watched_name(self.play, self.online, session);
+            return format!("{FACE_ROOM}{name}").into();
         }
         title.into()
     }
@@ -128,7 +178,12 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             );
         }
         if self.ui.tab_fit.titles.contains_key(tab) {
-            response.clone().on_hover_text(tab.title());
+            response
+                .clone()
+                .on_hover_text(tab.shown_title(game_title(self.emulator)));
+        }
+        if *tab == Tab::Playing {
+            self.watched_face(response);
         }
     }
 
@@ -176,14 +231,16 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
         [
             !matches!(
                 tab,
-                Tab::Saves
+                Tab::GameBoy
+                    | Tab::Saves
                     | Tab::Media
                     | Tab::Stats
                     | Tab::Info
                     | Tab::ControllerDebug
                     | Tab::Friends
+                    | Tab::RoomChat
             ) && !(*tab == Tab::Playing && self.play.session().is_some()),
-            *tab != Tab::Playing,
+            !matches!(tab, Tab::Playing | Tab::GameBoy),
         ]
     }
 }
@@ -208,11 +265,34 @@ pub enum Tab {
     Performance,
     Playing,
     Registers,
+    RoomChat,
     RomInfo,
     Saves,
     Settings,
     TimeControl,
     Stats,
+    Tool(Tool),
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, EnumIter,
+)]
+pub enum Tool {
+    Memory,
+    Video,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl Tool {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Tool::Memory => "Memory",
+            Tool::Video => "Video",
+            Tool::Unknown => "Unknown tool",
+        }
+    }
 }
 
 impl Tab {
@@ -224,21 +304,30 @@ impl Tab {
             Tab::Saves => "Saves",
             Tab::Media => "Media",
             Tab::Stats => "Stats",
-            Tab::TimeControl => "Time control",
+            Tab::TimeControl => "Debugger",
             Tab::Registers => "Registers",
             Tab::RomInfo => "ROM info",
             Tab::E2ETest => "E2E tests",
             Tab::Friends => "Friends",
             Tab::Homebrew => "Homebrew",
             Tab::Info => "About",
-            Tab::AudioDebug => "Audio debug",
-            Tab::ControllerDebug => "Controller debug",
+            Tab::AudioDebug => "Audio output",
+            Tab::ControllerDebug => "Controller input",
             Tab::Apu => "APU",
             Tab::ApuWaves => "APU waves",
-            Tab::Disassembly => "Disassembly",
+            Tab::Disassembly => "Debugger",
             Tab::Performance => "Performance",
             Tab::Playing => "Playing",
+            Tab::RoomChat => "Room chat",
             Tab::DebugActions => "Debug actions",
+            Tab::Tool(tool) => tool.title(),
+        }
+    }
+
+    pub fn shown_title(&self, console: &'static str) -> &'static str {
+        match self {
+            Tab::GameBoy => console,
+            other => other.title(),
         }
     }
 
@@ -256,13 +345,14 @@ impl Tab {
             self,
             Tab::GameBoy
                 | Tab::GameInfo
-                | Tab::Saves
                 | Tab::Media
                 | Tab::Stats
                 | Tab::Friends
                 | Tab::Settings
                 | Tab::Homebrew
                 | Tab::Disassembly
+                | Tab::Tool(Tool::Memory)
+                | Tab::Tool(Tool::Video)
         )
     }
 
@@ -271,8 +361,45 @@ impl Tab {
     }
 }
 
+pub fn retire_old_tabs(dock: &mut egui_dock::DockState<Tab>) {
+    for (old, new) in [
+        (Tab::TimeControl, Tab::Disassembly),
+        (Tab::ApuWaves, Tab::Apu),
+    ] {
+        while let Some(found) = dock.find_tab(&old) {
+            if dock.find_tab(&new).is_some() {
+                dock.remove_tab(found);
+                continue;
+            }
+            for (_, tab) in dock.iter_all_tabs_mut() {
+                if *tab == old {
+                    *tab = new;
+                    break;
+                }
+            }
+        }
+    }
+    while let Some(found) = dock.find_tab(&Tab::Tool(Tool::Unknown)) {
+        dock.remove_tab(found);
+    }
+}
+
 const TAB_PADDING: f32 = 16.0;
 const TAB_CLOSE: f32 = 24.0;
+const TAB_TEXT_INSET: f32 = 8.0;
+const FACE_ROOM: &str = "        ";
+
+fn tab_face(tab: egui::Rect, close: f32, title: f32, room: f32) -> egui::Rect {
+    let mut text = tab;
+    text.set_width(text.width() - close);
+    let text = text.shrink2(egui::vec2(TAB_TEXT_INSET, 0.0));
+    let left = text.center().x - title / 2.0;
+    let side = (room - 5.0).min(tab.height() - 6.0);
+    egui::Rect::from_center_size(
+        egui::pos2(left + side / 2.0, tab.center().y),
+        egui::Vec2::splat(side),
+    )
+}
 
 #[derive(Default)]
 pub struct TabFit {
@@ -280,7 +407,19 @@ pub struct TabFit {
     pub no_close: HashSet<Tab>,
 }
 
-pub fn fit_titles(ctx: &egui::Context, dock: &egui_dock::DockState<Tab>) -> TabFit {
+pub fn game_title(emulator: &Emulator) -> &'static str {
+    if emulator.has_game() {
+        crate::app::ui_state::settings::kind_name(emulator.kind())
+    } else {
+        Tab::GameBoy.title()
+    }
+}
+
+pub fn fit_titles(
+    ctx: &egui::Context,
+    dock: &egui_dock::DockState<Tab>,
+    console: &'static str,
+) -> TabFit {
     let font = egui::TextStyle::Button.resolve(&ctx.style());
     let measure = |text: &str| {
         ctx.fonts_mut(|fonts| {
@@ -297,7 +436,11 @@ pub fn fit_titles(ctx: &egui::Context, dock: &egui_dock::DockState<Tab>) -> TabF
             continue;
         }
         let available = leaf.rect.width() - 1.0;
-        let text: Vec<f32> = leaf.tabs.iter().map(|tab| measure(tab.title())).collect();
+        let text: Vec<f32> = leaf
+            .tabs
+            .iter()
+            .map(|tab| measure(tab.shown_title(console)))
+            .collect();
         let all_close = |index: usize| leaf.tabs[index].closable();
         let active_close = |index: usize| all_close(index) && index == leaf.active.0;
         let overhead = |close: bool| TAB_PADDING + if close { TAB_CLOSE } else { 0.0 };
@@ -319,7 +462,8 @@ pub fn fit_titles(ctx: &egui::Context, dock: &egui_dock::DockState<Tab>) -> TabF
             }
             if let Some(budget) = budgets[index] {
                 let room = budget - overhead(active_close(index));
-                fit.titles.insert(*tab, shorten(tab.title(), room, measure));
+                fit.titles
+                    .insert(*tab, shorten(tab.shown_title(console), room, measure));
             }
         }
     }
@@ -422,19 +566,36 @@ mod tests {
             let plural_acronym = letters
                 .strip_suffix('s')
                 .is_some_and(|stem| stem.len() > 1 && stem.chars().all(|c| !c.is_lowercase()));
+            let acronym_prefix = word
+                .split_once('-')
+                .is_some_and(|(head, _)| !head.is_empty() && head.chars().all(char::is_uppercase));
             if capital
                 && !sentence_start
                 && !acronym
                 && !plural_acronym
+                && !acronym_prefix
                 && !PROPER_NOUNS.contains(&letters.as_str())
             {
                 slips.push(word.to_owned());
             }
-            if !letters.is_empty() {
+            if (!letters.is_empty() || word.contains('{')) && word != "{icon}" {
                 sentence_start = word.ends_with(['.', '?', '!']);
             }
         }
         slips
+    }
+
+    fn call_literals(source: &str, call: &str) -> Vec<String> {
+        source
+            .split(call)
+            .skip(1)
+            .filter_map(|rest| {
+                let rest = rest.trim_start();
+                let rest = rest.strip_prefix("format!(").unwrap_or(rest).trim_start();
+                let rest = rest.strip_prefix('"')?;
+                Some(rest[..rest.find('"')?].to_owned())
+            })
+            .collect()
     }
 
     fn hover_literals(source: &str) -> Vec<String> {
@@ -447,6 +608,29 @@ mod tests {
             })
             .collect()
     }
+
+    const DEV_WIDGETS: [&str; 20] = [
+        "app/widgets/apu.rs",
+        "app/widgets/audio_debug.rs",
+        "app/widgets/breakpoints.rs",
+        "app/widgets/debug_actions.rs",
+        "app/widgets/debugger.rs",
+        "app/widgets/dev_menu.rs",
+        "app/widgets/disassembly.rs",
+        "app/widgets/memory.rs",
+        "app/widgets/performance.rs",
+        "app/widgets/registers.rs",
+        "app/tabs/apu.rs",
+        "app/tabs/audio_debug.rs",
+        "app/tabs/controller_debug.rs",
+        "app/tabs/debug_actions.rs",
+        "app/tabs/debugger.rs",
+        "app/tabs/e2e.rs",
+        "app/tabs/memory.rs",
+        "app/tabs/performance.rs",
+        "app/tabs/registers.rs",
+        "controller_debug.rs",
+    ];
 
     fn rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
@@ -464,7 +648,48 @@ mod tests {
         assert!(sentence_case_slips("ROM info").is_empty());
         assert!(sentence_case_slips("How Game Boy Color colours look. Like a GBC.").is_empty());
         assert!(sentence_case_slips("Game Boy ROMs").is_empty());
+        assert!(sentence_case_slips("Run this many M-cycles").is_empty());
         assert_eq!(sentence_case_slips("Homebrew Games"), vec!["Games"]);
+        assert_eq!(sentence_case_slips("{} Cycles"), vec!["Cycles"]);
+        assert!(sentence_case_slips("{icon} Copy report").is_empty());
+    }
+
+    #[test]
+    fn dev_widget_labels_and_buttons_are_in_sentence_case() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut slips = Vec::new();
+        for file in DEV_WIDGETS {
+            let source = std::fs::read_to_string(src.join(file)).expect(file);
+            for call in ["label(", "button("] {
+                for text in call_literals(&source, call) {
+                    if !sentence_case_slips(&text).is_empty() {
+                        slips.push(format!("{file}: {text}"));
+                    }
+                }
+            }
+        }
+        assert!(slips.is_empty(), "{slips:#?}");
+    }
+
+    #[test]
+    fn dev_widgets_reach_the_console_through_debug() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let readers: Vec<&str> = DEV_WIDGETS
+            .into_iter()
+            .filter(|file| {
+                std::fs::read_to_string(src.join(file))
+                    .expect(file)
+                    .contains("citrine_gb::gb::")
+            })
+            .collect();
+        assert!(readers.is_empty(), "{readers:#?}");
+    }
+
+    #[test]
+    fn the_label_check_reads_format_strings() {
+        let source = r#"ui.label(format!("{} Cycles", n)); ui.button("Run")"#;
+        assert_eq!(call_literals(source, "label("), vec!["{} Cycles"]);
+        assert_eq!(call_literals(source, "button("), vec!["Run"]);
     }
 
     #[test]
@@ -494,5 +719,39 @@ mod tests {
             }
         }
         assert!(slips.is_empty(), "{slips:#?}");
+    }
+
+    #[cfg(feature = "gba")]
+    mod gba {
+        use crate::app::files::tests::Opened;
+        use crate::app::tests::{info_frame_out, text_rect};
+        use crate::app::ui_state::settings::LayoutMode;
+        use egui::Context;
+
+        #[test]
+        fn the_game_tab_names_the_console_it_runs() {
+            let mut opened = Opened::new("tab-title");
+            opened.app.ui.settings.layout = LayoutMode::Desktop;
+            let ctx = Context::default();
+            let output = info_frame_out(&mut opened.app, &ctx, 1280.0, 900.0);
+            assert!(text_rect(&output, "Game Boy").is_some(), "no game");
+            let file = opened.picked();
+            opened.app.handle_load_rom(file);
+            info_frame_out(&mut opened.app, &ctx, 1280.0, 900.0);
+            let output = info_frame_out(&mut opened.app, &ctx, 1280.0, 900.0);
+            assert!(text_rect(&output, "Game Boy Advance").is_some());
+        }
+    }
+
+    #[test]
+    fn the_watched_face_sits_in_the_room_before_the_name() {
+        let tab = egui::Rect::from_min_size(egui::pos2(100.0, 0.0), egui::vec2(120.0, 30.0));
+        let (title, room) = (60.0, 20.0);
+        let face = tab_face(tab, TAB_CLOSE, title, room);
+        let text_left = 100.0 + (120.0 - TAB_CLOSE) / 2.0 - title / 2.0;
+        assert!(tab.contains_rect(face), "{face:?}");
+        assert!(face.left() >= text_left - 0.5, "{face:?}");
+        assert!(face.right() <= text_left + room - 2.0, "{face:?}");
+        assert!((face.center().y - tab.center().y).abs() < 0.5);
     }
 }

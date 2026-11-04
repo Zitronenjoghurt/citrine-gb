@@ -5,6 +5,7 @@ use crate::icons;
 use crate::media::{MediaId, MediaInfo, MediaStore};
 use crate::online::Online;
 use crate::online::chat::history::{decode_history, encode_history, merge_history};
+use crate::progress::Counter;
 use crate::stats::{Book, GameRecord, Stats};
 use crate::storage::SaveStore;
 use serde_json::Value;
@@ -15,6 +16,7 @@ pub const FILE_EXTENSION: &str = "zip";
 const MANIFEST: &str = "citrine-data.json";
 const FORMAT: u64 = 1;
 const MAX_FILE_BYTES: u64 = 1 << 30;
+pub const STEP_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
 
 const SAVES: &str = "saves/";
 const MEDIA: &str = "media/";
@@ -85,6 +87,8 @@ pub struct Parts<'a> {
     pub stats: &'a mut Stats,
     #[cfg(not(target_arch = "wasm32"))]
     pub recent: &'a mut RecentRoms,
+    #[cfg(feature = "gba")]
+    pub gba_bios: gba_bios::GbaBios<'a>,
 }
 
 impl Parts<'_> {
@@ -97,6 +101,8 @@ impl Parts<'_> {
         #[cfg(not(target_arch = "wasm32"))]
         visit(&mut Recent(&mut *self.recent));
         visit(&mut GameNames(&mut *self.settings));
+        #[cfg(feature = "gba")]
+        visit(&mut self.gba_bios);
     }
 
     pub fn tallies(&mut self) -> Vec<(Kind, Tally)> {
@@ -140,12 +146,6 @@ impl Parts<'_> {
     }
 }
 
-pub fn add_media_files(files: &mut Files, media: Vec<(MediaId, Vec<u8>)>) {
-    for (id, bytes) in media {
-        files.insert(format!("{MEDIA}{}", id.as_str()), bytes);
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReadError {
     NotZip,
@@ -164,26 +164,86 @@ impl ReadError {
     }
 }
 
+#[cfg(test)]
 pub fn pack(files: &Files) -> io::Result<Vec<u8>> {
-    let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
-    let manifest = serde_json::json!({
-        "format": FORMAT,
-        "made_by": format!("Citrine {}", env!("CARGO_PKG_VERSION")),
-        "made_at": crate::storage::now_unix(),
-    });
-    let packed = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .large_file(true);
-    let stored = packed.compression_method(zip::CompressionMethod::Stored);
-    zip.start_file(MANIFEST, packed).map_err(io::Error::other)?;
-    zip.write_all(&serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?)?;
-    for (path, bytes) in files {
-        let options = if already_packed(path) { stored } else { packed };
-        zip.start_file(path.as_str(), options)
-            .map_err(io::Error::other)?;
-        zip.write_all(bytes)?;
+    let mut packer = Packer::new(Counter::default());
+    packer.add_all(files);
+    packer.finish()
+}
+
+pub fn export_bytes(files: &Files, media: &[crate::media::MediaItem]) -> u64 {
+    let files: u64 = files.values().map(|bytes| bytes.len() as u64).sum();
+    files + media.iter().map(|item| item.info.bytes).sum::<u64>()
+}
+
+pub struct Packer {
+    zip: zip::ZipWriter<io::Cursor<Vec<u8>>>,
+    counter: Counter,
+    failed: Option<io::Error>,
+}
+
+impl Packer {
+    pub fn new(counter: Counter) -> Self {
+        let mut packer = Self {
+            zip: zip::ZipWriter::new(io::Cursor::new(Vec::new())),
+            counter,
+            failed: None,
+        };
+        let manifest = serde_json::json!({
+            "format": FORMAT,
+            "made_by": format!("Citrine {}", env!("CARGO_PKG_VERSION")),
+            "made_at": crate::storage::now_unix(),
+        });
+        match serde_json::to_vec_pretty(&manifest) {
+            Ok(bytes) => packer.write(MANIFEST, &bytes),
+            Err(err) => packer.failed = Some(io::Error::other(err)),
+        }
+        packer
     }
-    Ok(zip.finish().map_err(io::Error::other)?.into_inner())
+
+    pub fn add_all(&mut self, files: &Files) {
+        for (path, bytes) in files {
+            self.add(path, bytes);
+        }
+    }
+
+    pub fn add_media(&mut self, id: &MediaId, bytes: &[u8]) {
+        self.add(&format!("{MEDIA}{}", id.as_str()), bytes);
+    }
+
+    fn add(&mut self, path: &str, bytes: &[u8]) {
+        self.write(path, bytes);
+        self.counter.add(bytes.len() as u64);
+    }
+
+    fn write(&mut self, path: &str, bytes: &[u8]) {
+        if self.failed.is_some() {
+            return;
+        }
+        let packed = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
+        let options = if already_packed(path) {
+            packed.compression_method(zip::CompressionMethod::Stored)
+        } else {
+            packed
+        };
+        let result = self
+            .zip
+            .start_file(path, options)
+            .map_err(io::Error::other)
+            .and_then(|()| self.zip.write_all(bytes));
+        if let Err(err) = result {
+            self.failed = Some(err);
+        }
+    }
+
+    pub fn finish(self) -> io::Result<Vec<u8>> {
+        if let Some(err) = self.failed {
+            return Err(err);
+        }
+        Ok(self.zip.finish().map_err(io::Error::other)?.into_inner())
+    }
 }
 
 fn already_packed(path: &str) -> bool {
@@ -192,35 +252,89 @@ fn already_packed(path: &str) -> bool {
         .any(|ext| path.ends_with(ext))
 }
 
+#[cfg(test)]
 pub fn unpack(bytes: &[u8]) -> Result<Files, ReadError> {
-    let mut zip = zip::ZipArchive::new(io::Cursor::new(bytes)).map_err(|_| ReadError::NotZip)?;
-    let manifest: Value = {
-        let mut file = zip.by_name(MANIFEST).map_err(|_| ReadError::NotOurs)?;
-        let mut raw = Vec::new();
-        file.read_to_end(&mut raw).map_err(|_| ReadError::NotOurs)?;
-        serde_json::from_slice(&raw).map_err(|_| ReadError::NotOurs)?
-    };
-    let format = manifest["format"].as_u64().ok_or(ReadError::NotOurs)?;
-    if format > FORMAT {
-        return Err(ReadError::Newer);
+    unpack_counted(bytes.to_vec(), &Counter::default())
+}
+
+#[cfg(any(test, not(target_arch = "wasm32")))]
+pub fn unpack_counted(bytes: Vec<u8>, counter: &Counter) -> Result<Files, ReadError> {
+    let mut unpacker = Unpacker::new(bytes, counter.clone())?;
+    while unpacker.step_for(STEP_BUDGET)? {}
+    Ok(unpacker.finish())
+}
+
+pub struct Unpacker {
+    zip: zip::ZipArchive<io::Cursor<Vec<u8>>>,
+    next: usize,
+    total: u64,
+    files: Files,
+    counter: Counter,
+}
+
+impl Unpacker {
+    pub fn new(bytes: Vec<u8>, counter: Counter) -> Result<Self, ReadError> {
+        let mut zip =
+            zip::ZipArchive::new(io::Cursor::new(bytes)).map_err(|_| ReadError::NotZip)?;
+        let manifest: Value = {
+            let mut file = zip.by_name(MANIFEST).map_err(|_| ReadError::NotOurs)?;
+            let mut raw = Vec::new();
+            file.read_to_end(&mut raw).map_err(|_| ReadError::NotOurs)?;
+            serde_json::from_slice(&raw).map_err(|_| ReadError::NotOurs)?
+        };
+        let format = manifest["format"].as_u64().ok_or(ReadError::NotOurs)?;
+        if format > FORMAT {
+            return Err(ReadError::Newer);
+        }
+        let sizes = (0..zip.len()).filter_map(|i| zip.by_index_raw(i).ok().map(|f| f.size()));
+        counter.set_total(sizes.fold(0u64, u64::saturating_add));
+        Ok(Self {
+            zip,
+            next: 0,
+            total: 0,
+            files: Files::new(),
+            counter,
+        })
     }
-    let mut files = Files::new();
-    let mut total = 0u64;
-    for i in 0..zip.len() {
-        let mut file = zip.by_index(i).map_err(|_| ReadError::NotZip)?;
+
+    pub fn step_for(&mut self, budget: std::time::Duration) -> Result<bool, ReadError> {
+        let until = web_time::Instant::now() + budget;
+        while self.step()? {
+            if web_time::Instant::now() >= until {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn step(&mut self) -> Result<bool, ReadError> {
+        if self.next >= self.zip.len() {
+            return Ok(false);
+        }
+        let mut file = self
+            .zip
+            .by_index(self.next)
+            .map_err(|_| ReadError::NotZip)?;
+        self.next += 1;
         let name = file.name().map_err(|_| ReadError::NotZip)?.into_owned();
         if file.is_dir() || name == MANIFEST {
-            continue;
+            self.counter.add(file.size());
+            return Ok(true);
         }
-        total = total.saturating_add(file.size());
-        if total > MAX_FILE_BYTES {
+        self.total = self.total.saturating_add(file.size());
+        if self.total > MAX_FILE_BYTES {
             return Err(ReadError::TooLarge);
         }
         let mut raw = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut raw).map_err(|_| ReadError::NotZip)?;
-        files.insert(name, raw);
+        self.counter.add(raw.len() as u64);
+        self.files.insert(name, raw);
+        Ok(true)
     }
-    Ok(files)
+
+    pub fn finish(self) -> Files {
+        self.files
+    }
 }
 
 pub fn file_name(now: u64) -> String {
@@ -876,5 +990,7 @@ impl Part for Recent<'_> {
     }
 }
 
+#[cfg(feature = "gba")]
+pub mod gba_bios;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

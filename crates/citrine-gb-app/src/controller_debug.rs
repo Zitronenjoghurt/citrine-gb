@@ -1,7 +1,8 @@
 use crate::app::ui_state::keybinds::{
-    BindingKind, BindingTarget, GbButton, KeyBindings, PendingBinding,
+    BindingKind, BindingTarget, GbButton, KeyBindings, PendingBinding, Shoulder,
 };
 use crate::pad_input::{PadAction, PadAxis, PadInput};
+use citrine_gb::console::{ConsoleKind, Keys};
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter, Write};
 use std::time::Duration;
@@ -390,6 +391,7 @@ pub fn capture_text(pending: Option<PendingBinding>) -> String {
     };
     let target = match pending.target {
         BindingTarget::Button(button) => format!("Game Boy {button}"),
+        BindingTarget::Shoulder(shoulder) => shoulder.to_string(),
         BindingTarget::Shortcut(action) => action.label().to_string(),
         BindingTarget::LinkKey(half, button) => format!("{} {button}", half.label()),
     };
@@ -401,12 +403,51 @@ pub fn capture_text(pending: Option<PendingBinding>) -> String {
     format!("waiting for {kind} for {target}")
 }
 
-pub fn held_text(held: &[GbButton]) -> String {
-    if held.is_empty() {
-        return "none".to_string();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ButtonsHeld {
+    pub console: ConsoleKind,
+    pub keys: Keys,
+}
+
+impl ButtonsHeld {
+    pub fn title(self) -> &'static str {
+        match self.console {
+            ConsoleKind::Gba => "Game Boy Advance buttons held",
+            ConsoleKind::Gb | ConsoleKind::Gbc => "Game Boy buttons held",
+        }
     }
-    let names: Vec<String> = held.iter().map(|b| b.to_string()).collect();
-    names.join(", ")
+
+    pub fn buttons(self) -> Vec<(String, bool)> {
+        let mut shown: Vec<(String, Keys)> = GbButton::iter()
+            .map(|button| (button.to_string(), button.key()))
+            .collect();
+        if self.console == ConsoleKind::Gba {
+            shown.extend(Shoulder::iter().map(|shoulder| (shoulder.to_string(), shoulder.key())));
+        }
+        shown
+            .into_iter()
+            .map(|(name, key)| (name, self.keys.contains(key)))
+            .collect()
+    }
+
+    pub fn text(self) -> String {
+        let buttons = self.buttons();
+        names_or_none(
+            buttons
+                .iter()
+                .filter(|(_, lit)| *lit)
+                .map(|(name, _)| name.as_str())
+                .collect(),
+        )
+    }
+}
+
+fn names_or_none(items: Vec<&str>) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(", ")
+    }
 }
 
 pub fn steer_text(bindings: &KeyBindings) -> String {
@@ -423,7 +464,7 @@ pub struct Report<'a> {
     pub pads: &'a [PadInfo],
     pub bindings: &'a KeyBindings,
     pub capture: Option<PendingBinding>,
-    pub held: &'a [GbButton],
+    pub held: ButtonsHeld,
     pub log: Option<&'a PadLog>,
 }
 
@@ -441,7 +482,7 @@ impl Display for Report<'_> {
         let focus = self.focused.map_or("unknown", yes_no);
         writeln!(out, "Window focused: {focus}")?;
         writeln!(out, "Binding capture: {}", capture_text(self.capture))?;
-        writeln!(out, "Game Boy buttons held: {}", held_text(self.held))?;
+        writeln!(out, "{}: {}", self.held.title(), self.held.text())?;
         writeln!(out)?;
 
         let deadzone = self.bindings.deadzone();
@@ -519,18 +560,23 @@ impl Display for Report<'_> {
                 .iter()
                 .map(|p| p.short_name())
                 .collect();
-            let list = |items: Vec<&str>| {
-                if items.is_empty() {
-                    "none".to_string()
-                } else {
-                    items.join(", ")
-                }
-            };
             writeln!(
                 out,
                 "{button}: keys {}; controller {}",
-                list(keys),
-                list(pads)
+                names_or_none(keys),
+                names_or_none(pads)
+            )?;
+        }
+        for shoulder in crate::app::ui_state::keybinds::Shoulder::iter() {
+            let keys = self.bindings.shoulder_keys(shoulder);
+            let pads = self.bindings.shoulder_pads(shoulder);
+            let keys: Vec<&str> = keys.iter().map(|k| k.name()).collect();
+            let pads: Vec<&str> = pads.iter().map(|p| p.short_name()).collect();
+            writeln!(
+                out,
+                "{shoulder}: keys {}; controller {}",
+                names_or_none(keys),
+                names_or_none(pads)
             )?;
         }
         writeln!(out)?;
@@ -708,7 +754,10 @@ mod tests {
                 target: BindingTarget::Button(GbButton::B),
                 kind: BindingKind::Any,
             }),
-            held: &[GbButton::A],
+            held: ButtonsHeld {
+                console: ConsoleKind::Gb,
+                keys: Keys::A,
+            },
             log: Some(&log),
         }
         .to_string();
@@ -751,15 +800,66 @@ mod tests {
             pads: &[],
             bindings: &KeyBindings::default(),
             capture: None,
-            held: &[],
+            held: ButtonsHeld {
+                console: ConsoleKind::Gba,
+                keys: Keys::empty(),
+            },
             log: None,
         }
         .to_string();
         assert!(report.contains("== Controllers (0)\nnone found"));
         assert!(report.contains("Binding capture: none"));
+        assert!(report.contains("Game Boy Advance buttons held: none"));
         assert!(report.contains("Window focused: unknown"));
         assert!(report.contains("== Event log\nnot recording"));
         assert!(report.contains("Controller API: browser Gamepad API"));
         assert!(report.contains(&format!("Citrine: {}", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn a_gba_game_shows_its_shoulder_buttons_and_a_gb_game_does_not() {
+        let gba = ButtonsHeld {
+            console: ConsoleKind::Gba,
+            keys: Keys::L | Keys::A,
+        };
+        let names: Vec<String> = gba.buttons().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(
+            names,
+            [
+                "Up", "Down", "Left", "Right", "A", "B", "Start", "Select", "L", "R"
+            ]
+        );
+        assert_eq!(gba.title(), "Game Boy Advance buttons held");
+        assert_eq!(gba.text(), "A, L");
+
+        let gb = ButtonsHeld {
+            console: ConsoleKind::Gbc,
+            keys: Keys::L | Keys::A,
+        };
+        assert_eq!(gb.buttons().len(), 8);
+        assert_eq!(gb.title(), "Game Boy buttons held");
+        assert_eq!(gb.text(), "A");
+    }
+
+    #[test]
+    fn the_report_names_a_held_shoulder_button() {
+        let system = SystemInfo::current("SDL".to_string());
+        let report = Report {
+            system: &system,
+            focused: Some(true),
+            pads: &[],
+            bindings: &KeyBindings::default(),
+            capture: None,
+            held: ButtonsHeld {
+                console: ConsoleKind::Gba,
+                keys: Keys::R,
+            },
+            log: None,
+        }
+        .to_string();
+        assert!(
+            report.contains("Game Boy Advance buttons held: R"),
+            "{report}"
+        );
     }
 }

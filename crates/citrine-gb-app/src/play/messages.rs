@@ -5,8 +5,8 @@ use super::{
 use crate::online::Online;
 use citrine_gb::gb::serial::LinkMessage;
 use citrine_gb_net::{
-    CableByte, ClientMsg, GAME_PART_BYTES, GamePart, MAX_GAME_BYTES, PLAY_VERSION, PlayMsg,
-    PublicKey, SessionId,
+    CableByte, ClientMsg, GAME_PART_BYTES, GamePart, MAX_GAME_BYTES, OnlineId, PlayMsg, PublicKey,
+    SessionId, plays_with,
 };
 use web_time::Instant;
 
@@ -21,7 +21,7 @@ impl PlaySession {
                 round,
                 game,
             } => {
-                if version != PLAY_VERSION {
+                if !plays_with(version) {
                     self.end(Ending::Failed);
                     return;
                 }
@@ -36,7 +36,7 @@ impl PlaySession {
                 if self.round.theirs.is_some() {
                     return;
                 }
-                if let Some(game) = &game {
+                if let Some(game) = game.as_ref().filter(|_| !self.apart) {
                     let rom = self.known_rom(&game.hash, shelf);
                     let holds = rom.is_some();
                     if let Some(rom) = &rom {
@@ -89,6 +89,8 @@ impl PlaySession {
                 if self.role == Role::Guest
                     && start.round == self.round.number
                     && self.round.start.is_none()
+                    && start.power_on.len() == 2
+                    && start.start_frame == 0
                 {
                     self.launch(start, now);
                 }
@@ -114,6 +116,17 @@ impl PlaySession {
             msg @ (PlayMsg::Pads { .. } | PlayMsg::Check { .. } | PlayMsg::Resync { .. }) => {
                 if let Some(r) = self.round.rollback_mut() {
                     r.receive(msg);
+                }
+            }
+            msg @ (PlayMsg::LinkRequest(_) | PlayMsg::LinkGroup(_)) => self.links_in.push(msg),
+            PlayMsg::MemberLeft { .. }
+            | PlayMsg::Paused(_)
+            | PlayMsg::Away(_)
+            | PlayMsg::WatchFrom { .. }
+            | PlayMsg::WatchGroup(_) => {}
+            PlayMsg::Rejoin { round, from } => {
+                if round == self.round.number {
+                    self.round.their_rejoin = Some(from);
                 }
             }
         }
@@ -183,7 +196,7 @@ impl PlaySession {
             self.fill_borrowed(shelf);
         }
         self.send_parts();
-        if self.role == Role::Host && self.round.start.is_none() {
+        if self.role == Role::Host && self.round.start.is_none() && !self.grouped {
             self.try_start(now);
         }
     }
@@ -221,7 +234,7 @@ impl PlaySession {
         self.round.sending = (offset < total).then_some(offset);
     }
 
-    pub(super) fn flush(&mut self, online: &mut Online) {
+    pub(super) fn flush(&mut self, online: &mut Online, aware: bool) {
         let Some(id) = self.id else {
             return;
         };
@@ -231,12 +244,13 @@ impl PlaySession {
         if self.outbox.is_empty() && self.game_outbox.is_empty() {
             return;
         }
-        let Some(key) = online.friend(self.friend).map(|f| f.public_key) else {
+        let Some(key) = self.key(online) else {
             return;
         };
         send_all(
             online,
             id,
+            aware.then_some(self.friend),
             &key,
             std::mem::take(&mut self.outbox),
             std::mem::take(&mut self.game_outbox),
@@ -247,6 +261,7 @@ impl PlaySession {
 fn send_all(
     online: &mut Online,
     session: SessionId,
+    to: Option<OnlineId>,
     key: &PublicKey,
     msgs: Vec<PlayMsg>,
     parts: Vec<GamePart>,
@@ -254,13 +269,27 @@ fn send_all(
     let sealed: Vec<ClientMsg> = match online.keys() {
         Some(keys) => msgs
             .iter()
-            .map(|msg| ClientMsg::Play {
-                session,
-                sealed: msg.seal(keys, key),
+            .map(|msg| {
+                let sealed = msg.seal(keys, key);
+                match to {
+                    Some(to) => ClientMsg::RoomPlay {
+                        room: session,
+                        to,
+                        sealed,
+                    },
+                    None => ClientMsg::Play { session, sealed },
+                }
             })
-            .chain(parts.iter().map(|part| ClientMsg::Game {
-                session,
-                sealed: part.seal(keys, key),
+            .chain(parts.iter().map(|part| {
+                let sealed = part.seal(keys, key);
+                match to {
+                    Some(to) => ClientMsg::RoomGame {
+                        room: session,
+                        to,
+                        sealed,
+                    },
+                    None => ClientMsg::Game { session, sealed },
+                }
             }))
             .collect(),
         None => return,

@@ -3,7 +3,10 @@ use crate::app::ui_state::keybinds::PadButton;
 use crate::controller_debug::{
     AxisState, ButtonState, PadInfo, RawState, hex_bytes, usb_id, yes_no,
 };
+use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Repeat, Replay, Ticks};
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs, MappingSource, PowerInfo};
+
+const RUMBLE_MS: u32 = 200;
 
 const BUTTONS: [Button; 19] = [
     Button::South,
@@ -41,6 +44,7 @@ const AXES: [Axis; 8] = [
 pub struct GilrsPads {
     gil: Gilrs,
     ids: Vec<GamepadId>,
+    rumble: Option<Effect>,
 }
 
 impl GilrsPads {
@@ -52,11 +56,57 @@ impl GilrsPads {
         Self {
             gil,
             ids: Vec::new(),
+            rumble: None,
         }
     }
 }
 
 impl PadSource for GilrsPads {
+    fn rumble(&mut self, strength: f32) {
+        if let Some(effect) = self.rumble.take() {
+            let _ = effect.stop();
+        }
+        if strength <= 0.0 {
+            return;
+        }
+        let pads: Vec<GamepadId> = self
+            .gil
+            .gamepads()
+            .filter(|(_, pad)| pad.is_ff_supported())
+            .map(|(id, _)| id)
+            .collect();
+        if pads.is_empty() {
+            return;
+        }
+        let magnitude = (strength.min(1.0) * f32::from(u16::MAX)) as u16;
+        let scheduling = Replay {
+            play_for: Ticks::from_ms(RUMBLE_MS),
+            ..Replay::default()
+        };
+        let effect = EffectBuilder::new()
+            .add_effect(BaseEffect {
+                kind: BaseEffectType::Strong { magnitude },
+                scheduling,
+                ..BaseEffect::default()
+            })
+            .add_effect(BaseEffect {
+                kind: BaseEffectType::Weak { magnitude },
+                scheduling,
+                ..BaseEffect::default()
+            })
+            .gamepads(&pads)
+            .repeat(Repeat::Infinitely)
+            .finish(&mut self.gil);
+        match effect {
+            Ok(effect) => {
+                if effect.play().is_ok() {
+                    self.rumble = Some(effect);
+                }
+            }
+            Err(err) => log::warn!("controller rumble failed: {err}"),
+        }
+    }
+
     fn next_event(&mut self) -> Option<PadEvent> {
         let gilrs::Event { id, event, .. } = self.gil.next_event()?;
         if !self.ids.contains(&id) {

@@ -526,6 +526,9 @@ pub fn chip(play: &crate::play::Play, online: &Online, friend: OnlineId) -> Opti
     if let Some(invite) = play.invites().iter().find(|invite| invite.from == friend) {
         return Some(Chip::Join(invite.clone()));
     }
+    if crate::app::tabs::playing::invite_closed(play, online, friend) {
+        return None;
+    }
     match crate::app::tabs::playing::play_button(play, online, friend) {
         Some(crate::app::tabs::playing::PlayButton::Ready) => Some(Chip::Play),
         _ => None,
@@ -677,9 +680,7 @@ fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
     let online = &*viewer.online;
     let rom = viewer
         .emulator
-        .gb
-        .cartridge
-        .has_rom_loaded
+        .has_game()
         .then(|| viewer.emulator.rom_key())
         .flatten();
     let jump = std::mem::take(&mut state.jump);

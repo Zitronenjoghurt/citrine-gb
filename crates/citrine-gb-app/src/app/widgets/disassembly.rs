@@ -1,387 +1,283 @@
-use citrine_gb::disassembly::{Confidence, Disassembly, DisassemblySource};
-use citrine_gb::gb::cartridge::{Cartridge, RomLocation};
-use citrine_gb::gb::cpu::Cpu;
-use citrine_gb::instructions::{Instruction, Operand};
-use egui::{Response, ScrollArea, Stroke, Ui, Widget};
-use std::collections::HashSet;
+use crate::app::ui_state::ui_theme::CodeColours;
+use crate::icons;
+use citrine_gb::debug::Debug;
+use citrine_gb::debug::code::{Address, Line};
+use citrine_gb::debug::disassembly::Confidence;
+use egui::{Align2, Color32, FontId, Pos2, Rect, ScrollArea, Sense, Stroke, TextStyle, Ui, vec2};
+
+const GUTTER: f32 = 16.0;
+const GAP: f32 = 8.0;
+const MARK_RADIUS: f32 = 3.5;
+const MARK_SLOT: f32 = 14.0;
+
+pub enum CodeAction {
+    ToggleBreakpoint(Address),
+}
 
 pub struct DisassemblyView<'a> {
-    cpu: &'a Cpu,
-    cartridge: &'a Cartridge,
-    disassembly: &'a Disassembly,
-    breakpoints: &'a mut HashSet<RomLocation>,
-    static_analysis_enabled: &'a mut bool,
-    track_pc: &'a mut bool,
+    gb: &'a mut dyn Debug,
+    track_pc: bool,
+    colours: CodeColours,
+}
+
+struct Columns {
+    font: FontId,
     row_height: f32,
+    char_width: f32,
+    address: f32,
+    mnemonic: f32,
+}
+
+impl Columns {
+    fn measure(ui: &Ui, lines: &[Line]) -> Self {
+        let font = TextStyle::Monospace.resolve(ui.style());
+        let char_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font, '0'));
+        let widest = |texts: &mut dyn Iterator<Item = usize>, least: usize| {
+            texts.max().unwrap_or(0).max(least) as f32 * char_width
+        };
+        let address = widest(
+            &mut lines.iter().map(|line| line.at.to_string().len()),
+            "00:0000".len(),
+        );
+        let mnemonic = widest(&mut lines.iter().map(|line| line.mnemonic.len()), 4);
+        Self {
+            row_height: row_height(ui),
+            font,
+            char_width,
+            address,
+            mnemonic,
+        }
+    }
+}
+
+pub fn row_height(ui: &Ui) -> f32 {
+    ui.text_style_height(&TextStyle::Monospace) + 4.0
 }
 
 impl<'a> DisassemblyView<'a> {
-    pub fn new(
-        cpu: &'a Cpu,
-        cartridge: &'a Cartridge,
-        disassembly: &'a Disassembly,
-        breakpoints: &'a mut HashSet<RomLocation>,
-        static_analysis_enabled: &'a mut bool,
-        track_pc: &'a mut bool,
-    ) -> Self {
+    pub fn new(gb: &'a mut dyn Debug, track_pc: bool, colours: CodeColours) -> Self {
         Self {
-            cpu,
-            cartridge,
-            disassembly,
-            breakpoints,
-            static_analysis_enabled,
+            gb,
             track_pc,
-            row_height: 20.0,
+            colours,
         }
     }
 
-    fn draw_row(
-        &mut self,
-        ui: &mut Ui,
-        index: usize,
-        current_loc: RomLocation,
-        font: &egui::FontId,
-        is_dark_mode: bool,
-    ) {
-        let Some(decoded) = self.disassembly.get_by_index(index) else {
-            return;
-        };
+    pub fn show(self, ui: &mut Ui) -> Option<CodeAction> {
+        let mut action = None;
+        let rows = self.gb.code_rows();
+        let pc = self.gb.pc();
+        let row_height = Columns::measure(ui, &[]).row_height;
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut scroll = ScrollArea::vertical().auto_shrink(false);
+        if self.track_pc
+            && let Some(row) = pc.and_then(|pc| self.gb.code_row_of(pc))
+        {
+            let top = row as f32 * row_height - ui.available_height() / 2.0 + row_height / 2.0;
+            scroll = scroll.vertical_scroll_offset(top.max(0.0));
+        }
 
-        let end_loc = decoded.loc.offset(decoded.instruction.length() as i16);
-        let is_pc = current_loc >= decoded.loc && current_loc < end_loc;
-        let is_bp = self.breakpoints.contains(&decoded.loc);
-
-        let (rect, row_response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), self.row_height),
-            egui::Sense::click(),
-        );
-
-        row_response.context_menu(|ui| {
-            ui.label(format!("Location: {}", decoded.loc));
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.small(
-                    decoded
-                        .instruction_bytes()
-                        .iter()
-                        .map(|b| format!("0x{:02X}", b))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                );
-                ui.small("•");
-                ui.small(format!("{} machine cycles", decoded.machine_cycles()));
-                ui.small("•");
-                match decoded.confidence {
-                    Confidence::Fetched => ui.small("Was fetched by the CPU"),
-                    Confidence::Unconditional => {
-                        ui.small("Reachable through unconditional branching")
-                    }
-                    Confidence::Conditional => ui.small("Reachable through conditional branching"),
+        let mut lines = Vec::new();
+        scroll.show_rows(ui, row_height, rows, |ui, range| {
+            let first = range.start;
+            self.gb.disassemble(range, &mut lines);
+            let breakpoints = self.gb.breakpoints();
+            let columns = Columns::measure(ui, &lines);
+            for (offset, line) in lines.iter().enumerate() {
+                let index = first + offset;
+                let is_pc = pc.is_some_and(|pc| line.at <= pc && pc < line.end());
+                let row = Row {
+                    line,
+                    index,
+                    is_pc,
+                    is_breakpoint: breakpoints.contains(&line.at),
+                    columns: &columns,
+                    colours: &self.colours,
+                };
+                if row.show(ui) {
+                    action = Some(CodeAction::ToggleBreakpoint(line.at));
                 }
-            });
-            ui.label(decoded.educational_text());
-        });
-
-        let gutter_width = 24.0;
-        let bp_rect = egui::Rect::from_min_size(rect.min, egui::vec2(gutter_width, rect.height()));
-        let bp_hovered = ui.rect_contains_pointer(bp_rect);
-
-        if bp_hovered && row_response.clicked() && !self.breakpoints.remove(&decoded.loc) {
-            self.breakpoints.insert(decoded.loc);
-        }
-
-        let row_hovered = row_response.hovered() && !bp_hovered;
-        let bg = if is_pc {
-            ui.visuals().selection.bg_fill
-        } else if row_hovered {
-            if is_dark_mode {
-                egui::Color32::from_white_alpha(15)
-            } else {
-                egui::Color32::from_black_alpha(10)
             }
-        } else if index.is_multiple_of(2) {
-            ui.visuals().faint_bg_color
-        } else {
-            egui::Color32::TRANSPARENT
-        };
+        });
+        action
+    }
+}
 
-        if bg != egui::Color32::TRANSPARENT {
-            ui.painter().rect_filled(rect, 0.0, bg);
+struct Row<'a> {
+    line: &'a Line,
+    index: usize,
+    is_pc: bool,
+    is_breakpoint: bool,
+    columns: &'a Columns,
+    colours: &'a CodeColours,
+}
+
+impl Row<'_> {
+    fn show(&self, ui: &mut Ui) -> bool {
+        let line = self.line;
+        let columns = self.columns;
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), columns.row_height),
+            Sense::click(),
+        );
+        let gutter = Rect::from_min_size(rect.min, vec2(GUTTER, rect.height()));
+        let on_gutter = ui.rect_contains_pointer(gutter);
+
+        response.context_menu(|ui| context_menu(ui, line));
+
+        if !ui.is_rect_visible(rect) {
+            return on_gutter && response.clicked();
         }
 
-        let bp_center = egui::pos2(rect.left() + 10.0, rect.center().y);
-        if is_bp {
-            ui.painter()
-                .circle_filled(bp_center, 4.0, ui.visuals().error_fg_color);
-        } else if bp_hovered {
-            ui.painter().circle_stroke(
-                bp_center,
-                4.0,
-                Stroke::new(1.0f32, ui.visuals().error_fg_color),
-            );
+        let visuals = ui.visuals();
+        let fill = if self.is_pc {
+            visuals.selection.bg_fill
+        } else if response.hovered() && !on_gutter {
+            visuals.widgets.hovered.weak_bg_fill
+        } else if self.index.is_multiple_of(2) {
+            visuals.faint_bg_color
+        } else {
+            Color32::TRANSPARENT
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, fill);
+
+        let dot = Pos2::new(rect.left() + GUTTER / 2.0, rect.center().y);
+        if self.is_breakpoint {
+            painter.circle_filled(dot, 4.0, visuals.error_fg_color);
+        } else if on_gutter {
+            painter.circle_stroke(dot, 4.0, Stroke::new(1.0_f32, visuals.error_fg_color));
         }
 
         let y = rect.center().y;
-
-        ui.painter().text(
-            egui::pos2(rect.left() + gutter_width, y),
-            egui::Align2::LEFT_CENTER,
-            decoded.loc.to_string(),
-            font.clone(),
-            ui.visuals().weak_text_color(),
+        let mut x = rect.left() + GUTTER;
+        let text_painter = painter.with_clip_rect(
+            rect.with_max_x(rect.right() - MARK_SLOT)
+                .intersect(painter.clip_rect()),
         );
-
-        let mnemonic_color = instruction_color(&decoded.instruction, is_dark_mode);
-        ui.painter().text(
-            egui::pos2(rect.left() + gutter_width + 70.0, y),
-            egui::Align2::LEFT_CENTER,
-            decoded.instruction.mnemonic(),
-            font.clone(),
-            mnemonic_color,
-        );
-
-        let operands = decoded.instruction.operands(&decoded.ctx);
-        let mut op_x = gutter_width + 115.0;
-        for op in operands.iter().flatten() {
-            ui.painter().text(
-                egui::pos2(rect.left() + op_x, y),
-                egui::Align2::LEFT_CENTER,
-                op.to_string(),
-                font.clone(),
-                operand_color(op, is_dark_mode),
-            );
-            op_x += 45.0;
-        }
-
-        let (conf_str, conf_color) = match decoded.confidence {
-            Confidence::Fetched => ("Fetch", egui::Color32::from_rgb(100, 200, 100)),
-            Confidence::Unconditional => ("Uncond", egui::Color32::from_rgb(200, 200, 100)),
-            Confidence::Conditional => ("Cond", egui::Color32::from_rgb(200, 150, 100)),
+        let text = |x: f32, text: &str, colour: Color32| {
+            text_painter
+                .text(
+                    Pos2::new(x, y),
+                    Align2::LEFT_CENTER,
+                    text,
+                    columns.font.clone(),
+                    colour,
+                )
+                .width()
         };
+        text(x, &line.at.to_string(), visuals.weak_text_color());
+        x += columns.address + GAP / 2.0;
 
-        ui.painter().text(
-            egui::pos2(rect.right() - 8.0, y),
-            egui::Align2::RIGHT_CENTER,
-            conf_str,
-            font.clone(),
-            conf_color,
+        let ram_slot = Rect::from_center_size(
+            Pos2::new(x + columns.char_width, y),
+            vec2(columns.char_width * 2.0, rect.height()),
         );
+        if line.at.is_ram() {
+            painter.text(
+                ram_slot.center(),
+                Align2::CENTER_CENTER,
+                icons::MEMORY,
+                FontId::proportional(columns.font.size),
+                visuals.weak_text_color(),
+            );
+            ui.interact(ram_slot, ui.id().with(("ram", line.at)), Sense::hover())
+                .on_hover_text("Code in RAM, read again each frame");
+        }
+        x = ram_slot.right() + GAP / 2.0;
+
+        text(x, line.mnemonic, self.colours.class(line.class));
+        x += columns.mnemonic + GAP;
+
+        let mut pieces = Vec::new();
+        for (position, operand) in line.operands.iter().enumerate() {
+            if position > 0 {
+                pieces.push((", ", visuals.weak_text_color()));
+            }
+            pieces.push((operand.text.as_str(), self.colours.operand(operand.kind)));
+        }
+        let room = ((rect.right() - MARK_SLOT - x) / columns.char_width).floor() as usize;
+        let total: usize = pieces.iter().map(|(piece, _)| piece.chars().count()).sum();
+        let cut = total > room;
+        let mut left = if cut { room.saturating_sub(1) } else { total };
+        for (piece, colour) in &pieces {
+            if left == 0 {
+                break;
+            }
+            let shown: String = piece.chars().take(left).collect();
+            left -= shown.chars().count();
+            x += text(x, &shown, *colour);
+        }
+        if cut {
+            text(x, "…", visuals.weak_text_color());
+            let operands: String = pieces.iter().map(|(piece, _)| *piece).collect();
+            response
+                .clone()
+                .on_hover_text(format!("{} {operands}", line.mnemonic));
+        }
+
+        let mark = Pos2::new(rect.right() - MARK_SLOT / 2.0, y);
+        let colour = visuals.weak_text_color();
+        match line.confidence {
+            Confidence::Fetched => {
+                painter.circle_filled(mark, MARK_RADIUS, colour);
+            }
+            Confidence::Unconditional => {
+                painter.circle_stroke(mark, MARK_RADIUS, Stroke::new(1.5_f32, colour));
+            }
+            Confidence::Conditional => {
+                painter.circle_stroke(mark, MARK_RADIUS - 1.0, Stroke::new(1.0_f32, colour));
+            }
+        }
+        let mark_rect = Rect::from_center_size(mark, vec2(MARK_SLOT, rect.height()));
+        ui.interact(
+            mark_rect,
+            ui.id().with(("confidence", line.at)),
+            Sense::hover(),
+        )
+        .on_hover_text(confidence_text(line.confidence));
+
+        on_gutter && response.clicked()
     }
 }
 
-impl Widget for DisassemblyView<'_> {
-    fn ui(mut self, ui: &mut Ui) -> Response {
-        let active_pc = self.cpu.pc.saturating_sub(1);
-        let current_loc = self.cartridge.probe_rom_location(active_pc);
-        let row_count = self.disassembly.len();
-        let font = egui::TextStyle::Monospace.resolve(ui.style());
-        let is_dark_mode = ui.visuals().dark_mode;
-
-        ui.horizontal(|ui| {
-            ui.toggle_value(self.track_pc, "Follow PC");
-            ui.separator();
-            ui.checkbox(self.static_analysis_enabled, "Static analysis");
-            ui.separator();
-            ui.label(format!("{} Instructions", row_count));
-        });
-
+fn context_menu(ui: &mut Ui, line: &Line) {
+    let bytes: Vec<String> = line.bytes().iter().map(|b| format!("{b:02X}")).collect();
+    ui.label(format!("{}  {}", line.at, bytes.join(" ")));
+    if line.cycles > 0 {
+        ui.small(format!("{} machine cycles", line.cycles));
+    }
+    ui.small(confidence_text(line.confidence));
+    if let Some(note) = &line.note {
         ui.separator();
-
-        let item_spacing = ui.spacing().item_spacing.y;
-        let effective_row_height = self.row_height + item_spacing;
-
-        let mut scroll_area = ScrollArea::vertical().auto_shrink(false);
-
-        if *self.track_pc
-            && let Some(pc_index) = self.disassembly.iter().position(|d| {
-                let end_loc = d.loc.offset(d.instruction.length() as i16);
-                current_loc >= d.loc && current_loc < end_loc
-            })
-        {
-            let item_top = pc_index as f32 * effective_row_height;
-            let half_screen = ui.available_height() / 2.0;
-            let center_offset = item_top - half_screen + (effective_row_height / 2.0);
-            scroll_area = scroll_area.vertical_scroll_offset(center_offset.max(0.0));
-        }
-
-        let row_height = self.row_height;
-        let output = scroll_area.show_rows(ui, row_height, row_count, |ui, range| {
-            for i in range {
-                ui.push_id(i, |ui| {
-                    self.draw_row(ui, i, current_loc, &font, is_dark_mode);
-                });
-            }
-        });
-
-        ui.allocate_rect(output.inner_rect, egui::Sense::hover())
+        ui.label(note);
     }
 }
 
-fn instruction_color(instr: &Instruction, is_dark_mode: bool) -> egui::Color32 {
-    match instr {
-        Instruction::JP_nn
-        | Instruction::JP_c_nn(_)
-        | Instruction::JR_n
-        | Instruction::JR_c_n(_)
-        | Instruction::JP_HL => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(150, 255, 150)
-            } else {
-                egui::Color32::from_rgb(0, 150, 0)
-            }
-        }
-        Instruction::CALL_nn | Instruction::CALL_c_nn(_) | Instruction::RST_n(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(150, 200, 255)
-            } else {
-                egui::Color32::from_rgb(0, 0, 200)
-            }
-        }
-        Instruction::RET | Instruction::RETI | Instruction::RET_c(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(255, 150, 150)
-            } else {
-                egui::Color32::from_rgb(200, 0, 0)
-            }
-        }
-        Instruction::PUSH(_) | Instruction::POP(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(220, 150, 255)
-            } else {
-                egui::Color32::from_rgb(120, 0, 150)
-            }
-        }
-        Instruction::LD_rr_nn(_)
-        | Instruction::LD_rr_A(_)
-        | Instruction::LD_A_rr(_)
-        | Instruction::LD_nn_SP
-        | Instruction::LD_r_n(_)
-        | Instruction::LD_r_r(_, _)
-        | Instruction::LDH_C_A
-        | Instruction::LDH_A_C
-        | Instruction::LDH_n_A
-        | Instruction::LDH_A_n
-        | Instruction::LD_nn_A
-        | Instruction::LD_A_nn
-        | Instruction::LD_HL_SP_n
-        | Instruction::LD_SP_HL => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(120, 255, 255)
-            } else {
-                egui::Color32::from_rgb(0, 120, 120)
-            }
-        }
-        Instruction::INC_rr(_)
-        | Instruction::DEC_rr(_)
-        | Instruction::ADD_HL_rr(_)
-        | Instruction::INC_r(_)
-        | Instruction::DEC_r(_)
-        | Instruction::ADD_r(_)
-        | Instruction::ADC_r(_)
-        | Instruction::SUB_r(_)
-        | Instruction::SBC_r(_)
-        | Instruction::AND_r(_)
-        | Instruction::XOR_r(_)
-        | Instruction::OR_r(_)
-        | Instruction::CP_r(_)
-        | Instruction::ADD_n
-        | Instruction::ADC_n
-        | Instruction::SUB_n
-        | Instruction::SBC_n
-        | Instruction::AND_n
-        | Instruction::XOR_n
-        | Instruction::OR_n
-        | Instruction::CP_n
-        | Instruction::ADD_SP_n
-        | Instruction::DAA => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(255, 200, 120)
-            } else {
-                egui::Color32::from_rgb(160, 80, 0)
-            }
-        }
-        Instruction::RLCA
-        | Instruction::RRCA
-        | Instruction::RLA
-        | Instruction::RRA
-        | Instruction::RLC_r(_)
-        | Instruction::RRC_r(_)
-        | Instruction::RL_r(_)
-        | Instruction::RR_r(_)
-        | Instruction::SLA_r(_)
-        | Instruction::SRA_r(_)
-        | Instruction::SWAP_r(_)
-        | Instruction::SRL_r(_)
-        | Instruction::BIT_r(_, _)
-        | Instruction::RES_r(_, _)
-        | Instruction::SET_r(_, _)
-        | Instruction::CPL
-        | Instruction::SCF
-        | Instruction::CCF => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(255, 150, 200)
-            } else {
-                egui::Color32::from_rgb(180, 0, 120)
-            }
-        }
-        Instruction::NOP
-        | Instruction::STOP
-        | Instruction::HALT
-        | Instruction::DI
-        | Instruction::EI => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(150, 150, 150)
-            } else {
-                egui::Color32::from_rgb(100, 100, 100)
-            }
-        }
-        Instruction::Invalid(_) => egui::Color32::RED,
+fn confidence_text(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Fetched => "Run by the CPU",
+        Confidence::Unconditional => "Reached from run code without a condition",
+        Confidence::Conditional => "Reached only through a conditional jump",
     }
 }
 
-fn operand_color(op: &Operand, is_dark_mode: bool) -> egui::Color32 {
-    match op {
-        Operand::Reg(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(255, 180, 140)
-            } else {
-                egui::Color32::from_rgb(180, 100, 30)
-            }
-        }
-        Operand::Cond(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(220, 220, 160)
-            } else {
-                egui::Color32::from_rgb(130, 130, 0)
-            }
-        }
-        Operand::MemReg(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(160, 220, 255)
-            } else {
-                egui::Color32::from_rgb(0, 120, 180)
-            }
-        }
-        Operand::Imm8(_) | Operand::Imm16(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(180, 255, 180)
-            } else {
-                egui::Color32::from_rgb(30, 130, 30)
-            }
-        }
-        Operand::Address(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(240, 180, 255)
-            } else {
-                egui::Color32::from_rgb(140, 30, 160)
-            }
-        }
-        Operand::Offset(_) | Operand::SpOffset(_) => {
-            if is_dark_mode {
-                egui::Color32::from_rgb(160, 255, 230)
-            } else {
-                egui::Color32::from_rgb(0, 140, 120)
-            }
-        }
+pub fn instruction_count(rows: usize) -> String {
+    if rows == 1 {
+        "1 instruction".to_string()
+    } else {
+        format!("{rows} instructions")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_count_names_its_unit() {
+        assert_eq!(instruction_count(0), "0 instructions");
+        assert_eq!(instruction_count(1), "1 instruction");
+        assert_eq!(instruction_count(2048), "2048 instructions");
     }
 }

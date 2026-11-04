@@ -39,7 +39,7 @@ pub fn bindings(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCaptu
     apply_capture(settings, capture);
     capture_banner(ui, capture);
     let mut debug = false;
-    section(ui, icons::GAME_CONTROLLER, "Game Boy buttons", |ui| {
+    section(ui, icons::GAME_CONTROLLER, BUTTONS_HEADING, |ui| {
         let unbound = settings.bindings.unbound();
         if !unbound.is_empty() {
             let names: Vec<String> = unbound.iter().map(|b| b.to_string()).collect();
@@ -140,6 +140,13 @@ fn apply_capture(settings: &mut Settings, capture: &mut BindingCapture) {
             settings.hotkeys.unbind_pad(pad);
             settings.bindings.bind_pad(pad, button);
         }
+        (BindingTarget::Shoulder(shoulder), Captured::Key(key, _)) => {
+            settings.bindings.bind_shoulder_key(key, shoulder);
+        }
+        (BindingTarget::Shoulder(shoulder), Captured::Pad(pad)) => {
+            settings.hotkeys.unbind_pad(pad);
+            settings.bindings.bind_shoulder_pad(pad, shoulder);
+        }
         (BindingTarget::Shortcut(action), Captured::Pad(pad)) => {
             if action.is_hold() {
                 return;
@@ -208,53 +215,68 @@ const ACTION_NAME: NameCell = NameCell {
 
 const ADD_WIDTH: f32 = 26.0;
 
+#[cfg(feature = "gba")]
+const BUTTONS_HEADING: &str = "Buttons";
+#[cfg(not(feature = "gba"))]
+const BUTTONS_HEADING: &str = "Game Boy buttons";
+
 const STACK_BELOW: f32 = 130.0;
 
 fn buttons_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) {
-    for (index, button) in GbButton::iter().enumerate() {
-        let target = BindingTarget::Button(button);
-
-        striped_row(ui, index, |ui| {
-            let name = |ui: &mut Ui| {
-                ui.label(RichText::new(button.to_string()).strong());
-            };
-            let chips = |ui: &mut Ui, settings: &mut Settings| {
-                let keys = settings.bindings.keys_for(button);
-                let pads = settings.bindings.pads_for(button);
-                if keys.is_empty() && pads.is_empty() {
-                    ui.label(faint("Nothing bound"));
-                }
-                for key in keys {
-                    if chip(ui, icons::KEYBOARD, &key_label(key), key.name()) {
-                        settings.bindings.unbind_key(key);
-                        settings.dirty = true;
-                    }
-                }
-                for pad in pads {
-                    if chip(
-                        ui,
-                        icons::GAME_CONTROLLER,
-                        pad.short_name(),
-                        &pad.to_string(),
-                    ) {
-                        settings.bindings.unbind_pad(pad);
-                        settings.dirty = true;
-                    }
-                }
-            };
-
-            if binding_row(
-                ui,
-                settings,
-                name,
-                BUTTON_NAME,
-                chips,
-                capture.waiting_for(target),
-            ) {
-                capture.start(target, BindingKind::Any);
-            }
-        });
+    for (index, target) in BindingTarget::buttons().enumerate() {
+        button_row(ui, settings, capture, index, target);
     }
+}
+
+fn button_row(
+    ui: &mut Ui,
+    settings: &mut Settings,
+    capture: &mut BindingCapture,
+    index: usize,
+    target: BindingTarget,
+) {
+    let Some(label) = target.button_name() else {
+        return;
+    };
+    striped_row(ui, index, |ui| {
+        let name = |ui: &mut Ui| {
+            ui.label(RichText::new(&label).strong());
+        };
+        let chips = |ui: &mut Ui, settings: &mut Settings| {
+            let (keys, pads) = settings.bindings.bound_inputs(target);
+            if keys.is_empty() && pads.is_empty() {
+                ui.label(faint("Nothing bound"));
+            }
+            for key in keys {
+                if chip(ui, icons::KEYBOARD, &key_label(key), key.name()) {
+                    settings.bindings.unbind_key(key);
+                    settings.dirty = true;
+                }
+            }
+            for pad in pads {
+                if chip(
+                    ui,
+                    icons::GAME_CONTROLLER,
+                    pad.short_name(),
+                    &pad.to_string(),
+                ) {
+                    settings.bindings.unbind_pad(pad);
+                    settings.dirty = true;
+                }
+            }
+        };
+
+        if binding_row(
+            ui,
+            settings,
+            name,
+            BUTTON_NAME,
+            chips,
+            capture.waiting_for(target),
+        ) {
+            capture.start(target, BindingKind::Any);
+        }
+    });
 }
 
 fn split_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture, half: Half) {
@@ -293,7 +315,9 @@ fn split_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCaptur
 }
 
 fn shortcuts_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) {
-    for (index, action) in HotkeyAction::iter().enumerate() {
+    let dev_mode = settings.dev_mode;
+    let actions = HotkeyAction::iter().filter(|action| dev_mode || !action.is_debugger());
+    for (index, action) in actions.enumerate() {
         let target = BindingTarget::Shortcut(action);
 
         striped_row(ui, index, |ui| {
@@ -452,7 +476,8 @@ fn touch_grid(ui: &mut Ui, settings: &mut Settings) -> Response {
         .scope(|ui| {
             Form::show(ui, "controls", |form| {
                 form.row("Show buttons", |ui| {
-                    dirty |= ui.checkbox(&mut s.show_controls, "").changed();
+                    dirty |= crate::app::widgets::check::checkbox(ui, &mut s.show_controls, "")
+                        .changed();
                 });
 
                 form.row("Button size", |ui| {
@@ -515,16 +540,17 @@ fn touch_grid(ui: &mut Ui, settings: &mut Settings) -> Response {
                 });
 
                 form.row_with_hint("Left-handed", "Puts the d-pad on the right.", |ui| {
-                    dirty |= ui.checkbox(&mut s.mirrored, "").changed();
+                    dirty |=
+                        crate::app::widgets::check::checkbox(ui, &mut s.mirrored, "").changed();
                 });
 
                 #[cfg(target_arch = "wasm32")]
                 form.row_with_hint("Vibrate on press", RINGER_HINT, |ui| {
-                    dirty |= ui.checkbox(&mut s.haptics, "").changed();
+                    dirty |= crate::app::widgets::check::checkbox(ui, &mut s.haptics, "").changed();
                 });
                 #[cfg(not(target_arch = "wasm32"))]
                 form.row("Vibrate on press", |ui| {
-                    dirty |= ui.checkbox(&mut s.haptics, "").changed();
+                    dirty |= crate::app::widgets::check::checkbox(ui, &mut s.haptics, "").changed();
                 });
             })
         })

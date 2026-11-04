@@ -1,23 +1,23 @@
 use crate::app::events::AppEventQueue;
 use crate::app::tabs::TabViewer;
-use crate::app::ui_state::settings::{SettingsTab, console_name};
+use crate::app::ui_state::settings::{SettingsTab, kind_name};
 use crate::app::widgets::action::wide_button;
 use crate::app::widgets::homebrew::{self, HomebrewList};
 use crate::emulator::Emulator;
 use crate::icons;
 use crate::local_link::{Controls, Game, Half, LocalLink};
 use crate::utils::file_loader::FileLoader;
-use citrine_gb::gb::GameBoy;
+use crate::utils::save_files::ROM_FILTER;
+use citrine_gb::console::{Console, VideoSpec};
+use citrine_gb::machine::Machine;
 use egui::{Label, RichText, Ui};
 use strum::IntoEnumIterator;
 
 pub mod partner;
 
 pub const LINK_ICON: &str = icons::PLUGS_CONNECTED;
-const SCREEN_WIDTH: usize = 160;
-const SCREEN_HEIGHT: usize = 144;
 const MAX_SCREEN_SCALE: f32 = 3.0;
-const MIN_SCREEN_HEIGHT: f32 = SCREEN_HEIGHT as f32 / 2.0;
+const MIN_SCREEN_HEIGHT: f32 = 72.0;
 const ROW_HEIGHT: f32 = 36.0;
 
 #[derive(Default)]
@@ -68,14 +68,13 @@ pub fn driver(link: &LocalLink, game: Game, touch: bool) -> String {
     }
 }
 
-fn texture(link_ui: &mut LinkUi, ctx: &egui::Context, gb: &GameBoy) -> egui::TextureId {
+fn texture(link_ui: &mut LinkUi, ctx: &egui::Context, machine: &Machine) -> egui::TextureId {
     let pass = ctx.cumulative_pass_nr();
     if link_ui.painted_pass != pass || link_ui.screen.is_none() {
         link_ui.painted_pass = pass;
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [SCREEN_WIDTH, SCREEN_HEIGHT],
-            gb.frame().as_slice(),
-        );
+        let video = machine.video();
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([video.width, video.height], machine.frame());
         match &mut link_ui.screen {
             Some(texture) => texture.set(image, egui::TextureOptions::NEAREST),
             None => {
@@ -93,21 +92,22 @@ fn texture(link_ui: &mut LinkUi, ctx: &egui::Context, gb: &GameBoy) -> egui::Tex
 pub fn paint_screen(
     link_ui: &mut LinkUi,
     ui: &mut Ui,
-    gb: &GameBoy,
+    machine: &Machine,
     area: egui::Rect,
     max_scale: f32,
 ) -> egui::Rect {
-    let texture = texture(link_ui, ui.ctx(), gb);
-    let rect = fit(area, max_scale);
+    let texture = texture(link_ui, ui.ctx(), machine);
+    let rect = fit(area, max_scale, machine.video());
     egui::Image::new(egui::load::SizedTexture::new(texture, rect.size())).paint_at(ui, rect);
     rect
 }
 
-pub fn fit(area: egui::Rect, max_scale: f32) -> egui::Rect {
-    let scale = (area.width() / SCREEN_WIDTH as f32)
-        .min(area.height() / SCREEN_HEIGHT as f32)
+pub fn fit(area: egui::Rect, max_scale: f32, video: VideoSpec) -> egui::Rect {
+    let screen = egui::vec2(video.width as f32, video.height as f32);
+    let scale = (area.width() / screen.x)
+        .min(area.height() / screen.y)
         .min(max_scale);
-    let size = egui::vec2(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32) * scale;
+    let size = screen * scale;
     let min = area.center() - size / 2.0;
     egui::Rect::from_min_size(min.round(), size.round())
 }
@@ -135,7 +135,7 @@ fn shelf(viewer: &mut TabViewer, ui: &mut Ui) {
     {
         FileLoader::new()
             .title("Link a second game")
-            .add_filter("Game Boy ROMs", &["gb", "gbc"])
+            .add_filter(ROM_FILTER.0, ROM_FILTER.1)
             .dispatch(viewer.files.second_rom_tx.clone());
     }
     ui.add_space(8.0);
@@ -157,6 +157,9 @@ fn shelf(viewer: &mut TabViewer, ui: &mut Ui) {
             let titled = recent_rows(viewer, ui, button_width) || partnered;
             #[cfg(target_arch = "wasm32")]
             let titled = partnered;
+            if viewer.emulator.kind() == citrine_gb::console::ConsoleKind::Gba {
+                return;
+            }
             if titled {
                 heading(ui, "Homebrew games");
             }
@@ -171,12 +174,20 @@ fn shelf(viewer: &mut TabViewer, ui: &mut Ui) {
 fn recent_rows(viewer: &mut TabViewer, ui: &mut Ui, button_width: f32) -> bool {
     viewer.ui.recent.prune();
     viewer.ui.recent.name_from_files();
-    if viewer.ui.recent.is_empty() {
+    let gba = viewer.emulator.kind() == citrine_gb::console::ConsoleKind::Gba;
+    let links: Vec<_> = viewer
+        .ui
+        .recent
+        .entries()
+        .iter()
+        .filter(|entry| entry.is_gba() == gba)
+        .collect();
+    if links.is_empty() {
         return false;
     }
     heading(ui, "Recent");
     let mut chosen = None;
-    for entry in viewer.ui.recent.entries() {
+    for entry in links {
         let folder = entry
             .path
             .parent()
@@ -256,7 +267,7 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
     egui::Sides::new().shrink_left().truncate().show(
         ui,
         |ui| {
-            ui.label(RichText::new(console_name(link.model())).weak());
+            ui.label(RichText::new(kind_name(link.kind())).weak());
         },
         |ui| {
             ui.label(RichText::new(driver(link, Game::Second, touch)).weak());
@@ -265,8 +276,9 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
     ui.add_space(6.0);
 
     let width = ui.available_width();
-    let scale = (width / SCREEN_WIDTH as f32).min(MAX_SCREEN_SCALE);
-    let mut height = SCREEN_HEIGHT as f32 * scale;
+    let video = link.machine.video();
+    let scale = (width / video.width as f32).min(MAX_SCREEN_SCALE);
+    let mut height = video.height as f32 * scale;
     if fit_height && let Some(fitted) = viewer.ui.linked.fitted_height {
         height = height.min(fitted);
     }
@@ -278,7 +290,13 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
         egui::Sense::hover()
     };
     let (area, response) = ui.allocate_exact_size(egui::vec2(width, height), sense);
-    paint_screen(&mut viewer.ui.linked, ui, &link.gb, area, MAX_SCREEN_SCALE);
+    paint_screen(
+        &mut viewer.ui.linked,
+        ui,
+        &link.machine,
+        area,
+        MAX_SCREEN_SCALE,
+    );
     if clicks
         && response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -293,7 +311,7 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
         return;
     };
     let mut plugged = link.plugged();
-    if ui.checkbox(&mut plugged, "Link cable plugged in").changed() {
+    if crate::app::widgets::check::checkbox(ui, &mut plugged, "Link cable plugged in").changed() {
         link.set_plugged(plugged);
     }
 

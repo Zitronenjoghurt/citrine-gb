@@ -1,5 +1,7 @@
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::{RAM_BANK_SIZE, ROM_BANK_SIZE};
+#[cfg(feature = "rom-id")]
+use crate::rom::id::RomId;
 use crate::utils::formatting::format_byte_size;
 use std::fmt::Display;
 
@@ -26,16 +28,51 @@ pub struct RomHeader {
     pub actual_header_checksum: u8,
     pub provided_global_checksum: u16,
     pub actual_global_checksum: u16,
-    #[cfg(feature = "crc32fast")]
+    #[cfg(feature = "rom-id")]
     pub crc32: u32,
-    #[cfg(feature = "sha1")]
+    #[cfg(feature = "rom-id")]
     pub sha1: [u8; 20],
-    #[cfg(feature = "sha2")]
+    #[cfg(feature = "rom-id")]
     pub sha256: [u8; 32],
 }
 
 impl RomHeader {
+    pub fn short_title(&self) -> &str {
+        let title = self.title.trim();
+        match title.char_indices().nth(11) {
+            Some((cut, _))
+                if self.cgb_mode.is_cgb()
+                    && title.len() == 15
+                    && title[cut..]
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) =>
+            {
+                &title[..cut]
+            }
+            _ => title,
+        }
+    }
+
     pub fn new(data: &[u8]) -> GbResult<Self> {
+        Ok(Self::parse(data)?.with_unheadered_mapper(data))
+    }
+
+    fn with_unheadered_mapper(mut self, data: &[u8]) -> Self {
+        let banks = (data.len().div_ceil(0x4000)).next_power_of_two().max(2);
+        if let Some(menu) = mmm01_menu(data) {
+            self.cartridge_type = Self::parse_cartridge_type(menu).ok().flatten();
+            self.ram_banks = Self::parse_ram_banks(menu).unwrap_or(self.ram_banks);
+            self.rom_banks = banks;
+        } else if is_wisdom_tree(data) {
+            self.cartridge_type = Some(RomCartridgeType::WisdomTree);
+            self.rom_banks = banks;
+        }
+        self
+    }
+
+    fn parse(data: &[u8]) -> GbResult<Self> {
+        #[cfg(feature = "rom-id")]
+        let id = RomId::new(data);
         Ok(Self {
             title: Self::parse_title(data)?,
             valid_nintendo_logo: Self::parse_valid_nintendo_logo(data)?,
@@ -51,12 +88,12 @@ impl RomHeader {
             actual_header_checksum: Self::calculate_header_checksum(data)?,
             provided_global_checksum: Self::parse_global_checksum(data)?,
             actual_global_checksum: Self::calculate_global_checksum(data)?,
-            #[cfg(feature = "crc32fast")]
-            crc32: Self::calculate_crc32(data),
-            #[cfg(feature = "sha1")]
-            sha1: Self::calculate_sha1(data),
-            #[cfg(feature = "sha2")]
-            sha256: Self::calculate_sha256(data),
+            #[cfg(feature = "rom-id")]
+            crc32: id.crc32,
+            #[cfg(feature = "rom-id")]
+            sha1: id.sha1,
+            #[cfg(feature = "rom-id")]
+            sha256: id.sha256,
         })
     }
 
@@ -263,7 +300,10 @@ impl RomHeader {
     }
 
     fn parse_new_licensee(data: &[u8]) -> RomLicensee {
-        let code = [data[0x144], data[0x145]];
+        Self::licensee_for_code([data[0x144], data[0x145]])
+    }
+
+    pub fn licensee_for_code(code: [u8; 2]) -> RomLicensee {
         match &code {
             b"00" => RomLicensee::None,
             b"01" => RomLicensee::NintendoRd1,
@@ -452,36 +492,28 @@ impl RomHeader {
         Ok(u16::from_be_bytes([data[0x14E], data[0x14F]]))
     }
 
-    #[cfg(feature = "crc32fast")]
-    pub fn calculate_crc32(data: &[u8]) -> u32 {
-        crc32fast::hash(data)
+    #[cfg(feature = "rom-id")]
+    pub fn id(&self) -> RomId {
+        RomId {
+            crc32: self.crc32,
+            sha1: self.sha1,
+            sha256: self.sha256,
+        }
     }
 
-    #[cfg(feature = "sha2")]
+    #[cfg(feature = "rom-id")]
     pub fn crc32_hex_string(&self) -> String {
-        format!("{:08X}", self.crc32)
+        self.id().crc32_hex_string()
     }
 
-    #[cfg(feature = "sha1")]
-    pub fn calculate_sha1(data: &[u8]) -> [u8; 20] {
-        use sha1::Digest;
-        sha1::Sha1::digest(data).into()
-    }
-
-    #[cfg(feature = "sha2")]
+    #[cfg(feature = "rom-id")]
     pub fn sha1_hex_string(&self) -> String {
-        self.sha1.iter().map(|b| format!("{:02X}", b)).collect()
+        self.id().sha1_hex_string()
     }
 
-    #[cfg(feature = "sha2")]
-    pub fn calculate_sha256(data: &[u8]) -> [u8; 32] {
-        use sha2::Digest;
-        sha2::Sha256::digest(data).into()
-    }
-
-    #[cfg(feature = "sha2")]
+    #[cfg(feature = "rom-id")]
     pub fn sha256_hex_string(&self) -> String {
-        self.sha256.iter().map(|b| format!("{:02X}", b)).collect()
+        self.id().sha256_hex_string()
     }
 
     pub fn rom_size_bytes(&self) -> usize {
@@ -808,6 +840,27 @@ impl std::fmt::Display for RomLicensee {
     }
 }
 
+fn mmm01_menu(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 0x10000 || !data.len().is_multiple_of(0x8000) {
+        return None;
+    }
+    let menu = &data[data.len() - 0x8000..];
+    let is_mmm01 = (0x0B..=0x0D).contains(&menu[0x147]);
+    let logo = RomHeader::parse_valid_nintendo_logo(menu).unwrap_or(false);
+    (is_mmm01 && logo && !(0x0B..=0x0D).contains(&data[0x147])).then_some(menu)
+}
+
+fn is_wisdom_tree(data: &[u8]) -> bool {
+    if data.len() < 0x150 {
+        return false;
+    }
+    let title = &data[0x134..0x13F];
+    let named = title == b"WISDOM TREE" || title == b"WISDOM\0TREE";
+    let plain = data[0x147] == 0x00 && data[0x148] == 0x00 && data.len() > 0x8000;
+    let blank = data[0x104..=0x133] == NINTENDO_LOGO && data[0x134..0x14D].iter().all(|&b| b == 0);
+    (named && plain) || (blank && plain) || (data[0x147] == 0xC0 && data[0x14A] == 0xD1)
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RomCartridgeType {
@@ -839,6 +892,7 @@ pub enum RomCartridgeType {
     BandaiTama5 = 0xFD,
     HuC3 = 0xFE,
     HuC1RamBattery = 0xFF,
+    WisdomTree = 0xC0,
 }
 
 impl RomCartridgeType {
@@ -853,6 +907,11 @@ impl RomCartridgeType {
                 | Self::Mbc5RamBattery
                 | Self::Mbc5RumbleRamBattery
                 | Self::Mbc7SensorRumbleRamBattery
+                | Self::Mmm01RamBattery
+                | Self::Mbc6
+                | Self::PocketCamera
+                | Self::BandaiTama5
+                | Self::HuC3
                 | Self::HuC1RamBattery
         )
     }
@@ -889,6 +948,7 @@ impl std::fmt::Display for RomCartridgeType {
             Self::BandaiTama5 => write!(f, "Bandai TAMA5"),
             Self::HuC3 => write!(f, "HuC3"),
             Self::HuC1RamBattery => write!(f, "HuC1 + RAM + Battery"),
+            Self::WisdomTree => write!(f, "Wisdom Tree"),
         }
     }
 }
@@ -903,6 +963,68 @@ mod tests {
         data
     }
 
+    fn sized(title: &[u8], cartridge_type: u8, size: usize) -> Vec<u8> {
+        let mut data = vec![0; size];
+        data[0x134..0x134 + title.len()].copy_from_slice(title);
+        data[0x147] = cartridge_type;
+        data
+    }
+
+    #[test]
+    fn wisdom_tree_is_found_by_the_documented_headers() {
+        let found = |data: &[u8]| RomHeader::new(data).unwrap().cartridge_type;
+        let wisdom = Some(RomCartridgeType::WisdomTree);
+        assert_eq!(found(&sized(b"WISDOM TREE", 0x00, 0x10000)), wisdom);
+        assert_eq!(found(&sized(b"WISDOM\0TREE", 0x00, 0x10000)), wisdom);
+        assert_eq!(
+            RomHeader::new(&sized(b"WISDOM TREE", 0x00, 0x20000))
+                .unwrap()
+                .rom_banks,
+            8
+        );
+        assert_ne!(found(&sized(b"WISDOM TREE", 0x00, 0x8000)), wisdom);
+        assert_ne!(found(&sized(b"TETRIS", 0x00, 0x10000)), wisdom);
+        let mut data = sized(b"", 0xC0, 0x10000);
+        data[0x14A] = 0xD1;
+        assert_eq!(found(&data), wisdom);
+    }
+
+    #[test]
+    fn wisdom_tree_dumps_with_a_blank_header_are_found() {
+        let found = |data: &[u8]| RomHeader::new(data).unwrap().cartridge_type;
+        let wisdom = Some(RomCartridgeType::WisdomTree);
+        let mut data = sized(b"", 0x00, 0x20000);
+        assert_ne!(found(&data), wisdom);
+        data[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        assert_eq!(found(&data), wisdom);
+        assert_eq!(RomHeader::new(&data).unwrap().rom_banks, 8);
+        data[0x14D] = 0xE7;
+        assert_eq!(found(&data), wisdom);
+        let mut small = sized(b"", 0x00, 0x8000);
+        small[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        assert_ne!(found(&small), wisdom);
+    }
+
+    #[test]
+    fn mmm01_is_found_by_the_menu_header_in_the_last_32k() {
+        let mut data = sized(b"GAME", 0x01, 0x40000);
+        let menu = data.len() - 0x8000;
+        data[menu + 0x104..menu + 0x134].copy_from_slice(&NINTENDO_LOGO);
+        data[menu + 0x147] = 0x0D;
+        data[menu + 0x149] = 0x03;
+        let header = RomHeader::new(&data).unwrap();
+        assert_eq!(
+            header.cartridge_type,
+            Some(RomCartridgeType::Mmm01RamBattery)
+        );
+        assert_eq!((header.rom_banks, header.ram_banks), (16, 4));
+        data[menu + 0x104] ^= 0xFF;
+        assert_eq!(
+            RomHeader::new(&data).unwrap().cartridge_type,
+            Some(RomCartridgeType::Mbc1)
+        );
+    }
+
     #[test]
     fn title_drops_the_cgb_flag() {
         let data = rom_with_title(b"MBC3RTCTESTRTC3\x80");
@@ -913,5 +1035,35 @@ mod tests {
     fn title_keeps_only_printable_characters() {
         let data = rom_with_title(b"POKEMON\x01 RED\xff\0J");
         assert_eq!(RomHeader::parse_title(&data).unwrap(), "POKEMON RED");
+    }
+
+    fn header(title: &str, cgb_mode: RomCgbMode) -> RomHeader {
+        RomHeader {
+            title: title.to_string(),
+            cgb_mode,
+            ..RomHeader::default()
+        }
+    }
+
+    #[test]
+    fn a_color_title_loses_its_maker_code() {
+        let pokemon = header("POKEMON_SLVAAXE", RomCgbMode::CgbAndGb);
+        assert_eq!(pokemon.short_title(), "POKEMON_SLV");
+    }
+
+    #[test]
+    fn a_title_without_a_maker_code_stays_whole() {
+        assert_eq!(
+            header("POKEMON_SLVAAXE", RomCgbMode::None).short_title(),
+            "POKEMON_SLVAAXE"
+        );
+        assert_eq!(
+            header("SUPER MARIOland", RomCgbMode::CgbOnly).short_title(),
+            "SUPER MARIOland"
+        );
+        assert_eq!(
+            header("  DR.MARIO ", RomCgbMode::None).short_title(),
+            "DR.MARIO"
+        );
     }
 }

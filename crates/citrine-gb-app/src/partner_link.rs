@@ -90,17 +90,17 @@ impl PartnerLink {
         let moves = event
             .moves
             .iter()
-            .filter_map(|&id| tables.move_name(id).map(str::to_owned))
+            .filter_map(|&id| tables.move_name(u16::from(id)).map(str::to_owned))
             .collect();
         let held = match game.generation() {
-            Generation::One => None,
-            Generation::Two => event.item.and_then(|id| tables.item_name(id)),
+            Generation::One | Generation::Three => None,
+            Generation::Two => event.item.and_then(|id| tables.item_name(u16::from(id))),
         };
         let partner = Partner::new(game, rom, event, seed)?;
         let desk = match (game.generation(), partner.through_time_capsule()) {
             (Generation::One, _) => Desk::CableClub,
             (Generation::Two, true) => Desk::TimeCapsule,
-            (Generation::Two, false) => Desk::Trade,
+            (Generation::Two, false) | (Generation::Three, _) => Desk::Trade,
         };
         let mut cable = PeerCable::new();
         cable.set_plugged(true);

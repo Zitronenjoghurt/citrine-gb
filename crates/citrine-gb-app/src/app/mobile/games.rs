@@ -3,6 +3,7 @@ use super::nav::Place;
 use crate::app::Citrine;
 use crate::app::tabs::{Tab, playing, stats};
 use crate::app::ui_state::recent::RecentRom;
+use crate::app::ui_state::settings;
 use crate::app::widgets::action::main_button;
 use crate::icons;
 use egui::{Align, CornerRadius, Layout, RichText, Ui, vec2};
@@ -58,7 +59,11 @@ pub fn recent_games(
                 detail: if gone {
                     "File not found".to_owned()
                 } else {
-                    stats::capitalized(&stats::last_played(entry.last_played, today))
+                    let played = stats::last_played(entry.last_played, today);
+                    match entry.console {
+                        Some(kind) => format!("{}, {played}", settings::kind_name(kind)),
+                        None => stats::capitalized(&played),
+                    }
                 },
                 gone,
                 path: entry.path.clone(),
@@ -271,7 +276,10 @@ impl Citrine {
             kit::section_label(ui, &label);
             kit::card(ui, |ui| {
                 kit::padded(ui, |ui| {
-                    ui.label(RichText::new("Reading the folder").weak())
+                    ui.add(crate::app::widgets::progress::ProgressBar::new(
+                        "Reading the folder",
+                        crate::progress::Progress::unknown(),
+                    ))
                 })
             });
             return None;
@@ -297,7 +305,7 @@ impl Citrine {
         if shown.is_empty() {
             kit::card(ui, |ui| {
                 kit::padded(ui, |ui| {
-                    ui.label(RichText::new("No Game Boy games in this folder").weak())
+                    ui.label(RichText::new("No games in this folder").weak())
                 })
             });
             return None;
@@ -319,7 +327,7 @@ impl Citrine {
         kit::card(ui, |ui| {
             kit::padded(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let height = THUMB_WIDTH * 144.0 / 160.0;
+                    let height = THUMB_WIDTH * self.emulator.video().aspect();
                     match self.emulator.screen_texture() {
                         Some(texture) => {
                             ui.add(
@@ -370,12 +378,12 @@ impl Citrine {
     }
 
     fn now_playing_title(&self) -> String {
-        if self.emulator.gb.cartridge.has_rom_loaded {
+        if self.emulator.has_game() {
             return self.emulator.game_name().to_owned();
         }
         match self.play.session() {
             Some(session) => {
-                let name = playing::friend_name(&self.online, session.friend());
+                let name = playing::member_name(&self.play, &self.online, session.friend());
                 format!("Playing with {name}")
             }
             None => "Linked game".to_owned(),

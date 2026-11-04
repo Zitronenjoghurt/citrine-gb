@@ -107,10 +107,13 @@ pub fn my_unit<'a>(
     solo: Option<Unit<'a>>,
 ) -> Option<Unit<'a>> {
     match session.filter(|s| s.is_live()) {
-        Some(s) if s.runs_engine() => s.console(true).map(|gb| Unit {
-            game: format!("together {}", gb.cartridge.header.sha256_hex_string()),
+        Some(s) if s.runs_engine() => s.console(true).map(|console| Unit {
+            game: format!(
+                "together {}",
+                citrine_gb::console::Console::rom_id(console).sha256_hex_string()
+            ),
             running: true,
-            frame: gb.frame().as_slice(),
+            frame: citrine_gb::console::Console::frame(console),
         }),
         Some(s) if s.holds_my_game() || s.watching_only() => None,
         _ => solo,

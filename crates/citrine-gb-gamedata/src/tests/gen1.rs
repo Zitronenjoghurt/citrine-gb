@@ -1,6 +1,6 @@
 use super::*;
 use crate::gen1::checksum;
-use crate::{Pokemon, ReadError, RomTables, SaveCopy, read_live, read_save};
+use crate::{Genes, Pokemon, ReadError, RomTables, SaveCopy, read_live, read_save};
 
 pub(crate) fn mon(species: u8, level: u8, party: bool) -> Vec<u8> {
     let mut m = vec![0u8; if party { 44 } else { 33 }];
@@ -132,10 +132,13 @@ fn reads_an_international_save() {
     assert_eq!(first.level, 5);
     assert_eq!(first.exp, 300);
     assert_eq!(first.hp, Some(35));
-    assert_eq!(first.stat_exp[0], 500);
-    assert_eq!(first.dvs.attack, 0xA);
-    assert_eq!(first.dvs.defense, 0x5);
-    assert_eq!(first.dvs.hp(), 0b0110);
+    let Genes::Gb { dvs, stat_exp } = first.genes else {
+        panic!("gb genes");
+    };
+    assert_eq!(stat_exp[0], 500);
+    assert_eq!(dvs.attack, 0xA);
+    assert_eq!(dvs.defense, 0x5);
+    assert_eq!(dvs.hp(), 0b0110);
     assert_eq!(first.moves.len(), 2);
     assert_eq!(
         (first.moves[0].id, first.moves[0].pp, first.moves[0].pp_ups),

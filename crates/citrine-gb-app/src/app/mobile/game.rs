@@ -1,19 +1,19 @@
 use super::hide;
-use super::strip::{STRIP_HEIGHT, STRIP_INSET};
+use super::strip::{STRIP_HEIGHT, STRIP_INSET, plan, strip_height};
 use crate::app::Citrine;
 use crate::app::tabs::{Tab, linked, playing};
 use crate::app::ui_state::touch::TouchSettings;
+use crate::app::widgets::tilt;
 use crate::app::widgets::touch_controls::{self as touch, TouchLayout};
 use crate::held::InputSource;
 use crate::icons;
 use crate::local_link::Game;
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::console::{ConsoleKind, Keys, VideoSpec};
 use egui::{Rect, Ui, vec2};
 
 const OVERLAY_COLUMN: f32 = 0.28;
 
 const CONTROL_BREATHING_ROOM: f32 = 1.15;
-const SCREEN_ASPECT: f32 = 144.0 / 160.0;
 
 const WATCH_GAP: f32 = 8.0;
 const WATCH_CAPTION: f32 = 16.0;
@@ -27,6 +27,7 @@ impl Citrine {
         if !columns && !hidden {
             self.strip(ui, false);
         }
+        self.room_row(ui);
         self.banners(ui);
         let area = ui.available_rect_before_wrap();
         let (buttons, screen) = self.mobile_play(ui, area, landscape);
@@ -56,14 +57,20 @@ impl Citrine {
 
     fn mobile_play(&mut self, ui: &mut Ui, area: Rect, landscape: bool) -> (Option<Rect>, Rect) {
         let settings = &self.ui.settings;
+        let video = self.emulator.video();
+        let shoulders = self.emulator.kind() == ConsoleKind::Gba;
         let watching = self.play.session().is_some_and(|s| s.watching_only());
         let hidden = self.mobile.hidden.on();
         let wanted = settings.touch.show_controls && !watching;
-        let one_screen = self.emulator.link.is_none() && self.emulator.partner.is_none();
-        let split =
-            (landscape && wanted).then(|| landscape_split(area, settings.touch.landscape, !hidden));
+        let one_screen =
+            self.emulator.link.is_none() && self.emulator.partner.is_none() && !self.friend_shown();
+        let strip_buttons = (!hidden).then(|| plan(&self.strip_facts()).buttons.len());
+        let split = (landscape && wanted)
+            .then(|| landscape_split(area, settings.touch.landscape, video, strip_buttons));
         let kept = match split {
-            _ if !landscape => portrait_split(area, &settings.touch, one_screen).0,
+            _ if !landscape => {
+                portrait_split(area, &settings.touch, one_screen, video, shoulders).0
+            }
             Some((screen, ..)) => screen,
             None => area,
         };
@@ -86,21 +93,27 @@ impl Citrine {
         } else if !self.mobile.hidden.buttons(settings.touch.hidden_buttons) {
             (kept, None, kept)
         } else if let Some((screen, left, right, strip)) = split {
-            let right = right.with_min_y(area.top() + STRIP_HEIGHT);
+            let right = right.with_min_y(strip.bottom().max(area.top() + STRIP_HEIGHT));
             buttons = Some(strip);
             (
                 screen,
-                Some(TouchLayout::columns(left, right, &settings.touch)),
+                Some(TouchLayout::columns(
+                    left,
+                    right,
+                    &settings.touch,
+                    shoulders,
+                )),
                 Rect::from_min_max(egui::pos2(left.right(), area.top()), right.left_bottom()),
             )
         } else {
-            let (screen, mut controls) = portrait_split(area, &settings.touch, one_screen);
+            let (screen, mut controls) =
+                portrait_split(area, &settings.touch, one_screen, video, shoulders);
             if hidden {
                 controls = hide::below_eye(controls, hide::eye_rect(screen, area, false), area);
             }
             (
                 screen,
-                Some(TouchLayout::bar(controls, &settings.touch)),
+                Some(TouchLayout::bar(controls, &settings.touch, shoulders)),
                 screen,
             )
         };
@@ -135,19 +148,26 @@ impl Citrine {
         (buttons, screen)
     }
 
+    fn friend_shown(&self) -> bool {
+        self.play
+            .session()
+            .is_some_and(|s| playing::friend_console(&self.play, s).is_some() && !s.watching_only())
+    }
+
     fn paint_screen(&mut self, ui: &mut Ui, area: Rect, portrait: bool) {
         if let Some(session) = self.play.session()
-            && let Some((got, total)) = playing::receiving(session)
+            && let Some((label, progress)) = playing::transfer(
+                session,
+                &playing::member_name(&self.play, &self.online, session.friend()),
+            )
         {
-            let title = playing::game_title(session);
-            let name = playing::friend_name(&self.online, session.friend());
-            playing::arriving(ui, area, &title, &name, got, total);
+            playing::arriving(ui, area, &label, progress);
             return;
         }
         let linked = self.play.session().is_some_and(|s| s.runs_engine());
         if let Some(session) = self.play.session()
             && let Some(line) = playing::screen_note(
-                &playing::friend_name(&self.online, session.friend()),
+                &playing::member_name(&self.play, &self.online, session.friend()),
                 session,
             )
         {
@@ -158,7 +178,7 @@ impl Citrine {
             }
             return;
         }
-        if !self.emulator.gb.cartridge.has_rom_loaded && !linked {
+        if !self.emulator.has_game() && !linked {
             return;
         }
         if self.emulator.link.is_some() {
@@ -166,7 +186,7 @@ impl Citrine {
             return;
         }
         if self.emulator.partner.is_some() && portrait {
-            let (main, small) = watch_split(area);
+            let (main, small) = watch_split(area, self.emulator.video());
             self.emulator.ui_at(ui, main);
             if let Some(small) = small
                 && let Some(partner) = &self.emulator.partner
@@ -182,12 +202,10 @@ impl Citrine {
             return;
         }
         if portrait
-            && let Some(session) = self
-                .play
-                .session()
-                .filter(|s| playing::watching(s) && !s.watching_only())
+            && self.friend_shown()
+            && let Some(session) = self.play.session()
         {
-            let (main, friend) = watch_split(area);
+            let (main, friend) = watch_split(area, self.emulator.video());
             let Some(friend) = friend else {
                 self.emulator.ui_at(ui, main);
                 return;
@@ -199,29 +217,48 @@ impl Citrine {
                 (main, friend)
             };
             self.emulator.ui_at(ui, mine);
-            let name = playing::friend_name(&self.online, session.friend());
-            if let Some(shown) =
-                playing::paint_friend_screen(&mut self.ui.playing, ui, session, theirs)
-            {
-                let small = if swapped { friend } else { shown };
-                let caption = if swapped { "You".to_owned() } else { name };
-                ui.painter().text(
-                    egui::pos2(small.center().x, small.bottom() + 3.0),
-                    egui::Align2::CENTER_TOP,
-                    caption,
-                    egui::TextStyle::Small.resolve(ui.style()),
-                    ui.visuals().weak_text_color(),
-                );
-                let tapped = ui
-                    .interact(small, egui::Id::new("friend_small"), egui::Sense::click())
-                    .clicked();
-                if tapped {
-                    self.ui.playing.swapped = !swapped;
+            let watched = playing::watched_friend(&self.play, session);
+            let name = playing::watched_name(&self.play, &self.online, session);
+            let full = playing::full_name(&self.play, &self.online, watched);
+            let own = self.online.account();
+            let console = playing::friend_console(&self.play, session);
+            let Some(shown) =
+                playing::paint_friend_screen(&mut self.ui.playing, ui, console, theirs)
+            else {
+                return;
+            };
+            let caption = if swapped {
+                playing::WatchCaption {
+                    label: "You",
+                    name: own.map_or("You", |a| a.display_name.as_str()),
+                    seed: own.map_or(0, |a| a.online_id.value()),
+                    own: true,
                 }
+            } else {
+                playing::WatchCaption {
+                    label: &name,
+                    name: &full,
+                    seed: watched.value(),
+                    own: false,
+                }
+            };
+            let small = if swapped { friend } else { shown };
+            match playing::watch_thumbnail(ui, small, &caption) {
+                Some(playing::WatchTap::Swap) => self.ui.playing.swapped = !swapped,
+                Some(playing::WatchTap::Profile) => {
+                    self.ui.friends.show_profile(watched);
+                    self.mobile.open(Tab::Friends);
+                    self.release_touch();
+                }
+                None => {}
             }
             return;
         }
-        self.emulator.ui_at(ui, area);
+        let tilting = self.emulator.cart().motion();
+        let screen = self.emulator.ui_at(ui, tilt::screen_area(area, tilting));
+        if tilting && tilt::badge(ui, self.emulator.gimmicks.motion, screen, area) {
+            self.centre_tilt();
+        }
     }
 
     fn paint_linked(&mut self, ui: &mut Ui, area: Rect, portrait: bool) {
@@ -229,7 +266,7 @@ impl Citrine {
             return;
         };
         let (main, small) = if portrait {
-            watch_split(area)
+            watch_split(area, self.emulator.video())
         } else {
             (area, None)
         };
@@ -237,14 +274,13 @@ impl Citrine {
             if small.is_some_and(|small| small == rect) {
                 return this.emulator.paint_fitted(ui, rect);
             }
-            this.emulator.ui_at(ui, rect);
-            linked::fit(rect, f32::MAX)
+            this.emulator.ui_at(ui, rect)
         };
         let paint_second = |this: &mut Self, ui: &mut Ui, rect: Rect| {
             let Some(link) = &this.emulator.link else {
                 return rect;
             };
-            linked::paint_screen(&mut this.ui.linked, ui, &link.gb, rect, f32::MAX)
+            linked::paint_screen(&mut this.ui.linked, ui, &link.machine, rect, f32::MAX)
         };
         match control {
             Game::First => paint_first(self, ui, main),
@@ -305,7 +341,9 @@ impl Citrine {
                 self.release_touch();
             }
         } else if let Some(invite) = playing::pending_ask(&self.play) {
-            match inset(ui, |ui| playing::ask_banner(ui, &self.online, &invite)) {
+            match inset(ui, |ui| {
+                playing::ask_banner(ui, &self.play, &self.online, &invite)
+            }) {
                 Some(playing::Answer::Join) => self.answer_ask(&invite),
                 Some(playing::Answer::Pick) => {
                     self.ui.playing.picking = Some(playing::PickFor::Join(invite));
@@ -339,19 +377,21 @@ fn inset<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
-const ALL_BUTTONS: [JoypadState; 8] = [
-    JoypadState::UP,
-    JoypadState::DOWN,
-    JoypadState::LEFT,
-    JoypadState::RIGHT,
-    JoypadState::A,
-    JoypadState::B,
-    JoypadState::START,
-    JoypadState::SELECT,
+const ALL_BUTTONS: [Keys; 10] = [
+    Keys::UP,
+    Keys::DOWN,
+    Keys::LEFT,
+    Keys::RIGHT,
+    Keys::A,
+    Keys::B,
+    Keys::START,
+    Keys::SELECT,
+    Keys::L,
+    Keys::R,
 ];
 
-fn watch_split(area: Rect) -> (Rect, Option<Rect>) {
-    let main_height = (area.width() * 144.0 / 160.0).min(area.height());
+fn watch_split(area: Rect, video: VideoSpec) -> (Rect, Option<Rect>) {
+    let main_height = (area.width() * video.height as f32 / video.width as f32).min(area.height());
     let main = Rect::from_min_size(area.min, vec2(area.width(), main_height));
     let below = Rect::from_min_max(
         egui::pos2(area.left(), main.bottom() + WATCH_GAP),
@@ -361,14 +401,20 @@ fn watch_split(area: Rect) -> (Rect, Option<Rect>) {
     (main, friend)
 }
 
-fn portrait_split(area: Rect, settings: &TouchSettings, one_screen: bool) -> (Rect, Rect) {
-    let needed = TouchLayout::bar_height(area.width(), settings);
+fn portrait_split(
+    area: Rect,
+    settings: &TouchSettings,
+    one_screen: bool,
+    video: VideoSpec,
+    shoulders: bool,
+) -> (Rect, Rect) {
+    let needed = TouchLayout::bar_height(area.width(), settings, shoulders);
     let controls_height = (needed * CONTROL_BREATHING_ROOM)
         .max(needed)
         .clamp(0.0, area.height() * 0.6);
     let room = area.height() - controls_height;
     let screen_height = if one_screen {
-        room.min(area.width() * SCREEN_ASPECT)
+        room.min(area.width() * video.aspect())
     } else {
         room
     };
@@ -386,14 +432,15 @@ fn portrait_split(area: Rect, settings: &TouchSettings, one_screen: bool) -> (Re
 fn landscape_split(
     area: Rect,
     mode: crate::app::ui_state::touch::LandscapeControls,
-    strip_shown: bool,
+    video: VideoSpec,
+    strip_buttons: Option<usize>,
 ) -> (Rect, Rect, Rect, Rect) {
     use crate::app::ui_state::touch::LandscapeControls;
 
     let column = match mode {
         LandscapeControls::Overlay => area.width() * OVERLAY_COLUMN,
         LandscapeControls::Beside => {
-            let wanted = area.height() / 144.0 * 160.0;
+            let wanted = area.height() / video.height as f32 * video.width as f32;
             ((area.width() - wanted) / 2.0).clamp(area.width() * 0.16, area.width() * 0.32)
         }
     };
@@ -403,11 +450,11 @@ fn landscape_split(
         egui::pos2(area.right() - column, area.top()),
         vec2(column, area.height()),
     );
-    let band = if strip_shown {
-        area.top() + STRIP_HEIGHT
-    } else {
-        area.top()
+    let strip_width = match mode {
+        LandscapeControls::Overlay => right.width(),
+        LandscapeControls::Beside => right.right() - left.right(),
     };
+    let band = area.top() + strip_buttons.map_or(0.0, |n| strip_height(n, strip_width - 8.0));
     let (screen, strip) = match mode {
         LandscapeControls::Overlay => (area, right.with_max_y(band)),
         LandscapeControls::Beside => (

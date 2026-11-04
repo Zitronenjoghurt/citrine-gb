@@ -2,12 +2,12 @@ use super::{Online, Phase};
 use crate::storage::Backend;
 use citrine_gb_net::{
     Body, CHUNK_BYTES, ChatMessage, ClientMsg, Edit, Envelope, ErrorCode, FileId, FileInfo,
-    FriendState, MAX_PALETTE_BYTES, MAX_RECEIPT_IDS, MAX_TEXT_CHARS, MessageId, OnlineId, Receipt,
-    STORAGE_BLOCK, ServerMsg, Share, ShareKind, Tag,
+    FriendState, MAX_PALETTE_BYTES, MAX_RECEIPT_IDS, MAX_TEXT_CHARS, MessageId, OldChat, OnlineId,
+    Receipt, STORAGE_BLOCK, ServerMsg, Share, ShareKind, Tag,
 };
 use history::{decode_history, encode_history, history_name, is_history_name};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -22,6 +22,9 @@ const CHATS_PER_SECOND: f64 = 4.0;
 const CHAT_BURST: f64 = 20.0;
 const RATE_LIMITED_PAUSE: Duration = Duration::from_secs(2);
 const NO_FILE: FileId = FileId([0; 16]);
+const CHAT_ONCE_PROTOCOL: u16 = 3;
+const OLD_CHATS_PER_BATCH: usize = 400;
+const OLD_CHAT_BATCH_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Failure {
@@ -119,6 +122,10 @@ impl ChatEntry {
     fn reached_relay(&self, sending: bool) -> bool {
         sending || self.delivery.rank() > 0
     }
+
+    fn reached_anyone(&self) -> bool {
+        !matches!(self.delivery, Delivery::Sending | Delivery::Failed(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -182,6 +189,7 @@ pub struct ChatState {
     owner: Option<String>,
     next_tag: Tag,
     sending: HashMap<Tag, Out>,
+    unconfirmed: HashSet<(OnlineId, u64)>,
     uploads: HashMap<Tag, Upload>,
     held: HashMap<u64, Vec<u8>>,
     downloads: HashMap<FileId, Download>,
@@ -203,6 +211,8 @@ pub struct ChatState {
     chat_tokens: f64,
     chat_tokens_at: Option<Instant>,
     paused_until: Option<Instant>,
+    old_out: VecDeque<OldChat>,
+    old_more: bool,
 }
 
 fn take_first(ids: &mut Vec<u64>) -> Vec<u64> {
@@ -359,6 +369,17 @@ impl ChatState {
         self.dirty = true;
     }
 
+    fn insert_old(&mut self, friend: OnlineId, mut entry: ChatEntry) {
+        let chat = self.chats.entry(friend).or_default();
+        if chat.entries.iter().any(|e| e.id == entry.id) {
+            return;
+        }
+        entry.change = entry.change.told();
+        let at = chat.entries.partition_point(|e| e.at <= entry.at);
+        chat.entries.insert(at, entry);
+        self.dirty = true;
+    }
+
     fn push(&mut self, friend: OnlineId, entry: ChatEntry) {
         let chat = self.chats.entry(friend).or_default();
         chat.entries.push(entry);
@@ -371,6 +392,7 @@ impl ChatState {
         }
         self.chats.clear();
         self.held.clear();
+        self.unconfirmed.clear();
         self.files = None;
         if let Some(store) = &self.store
             && let Some(bytes) = store.read(NAMESPACE, &history_name(&owner))
@@ -453,6 +475,11 @@ impl ChatState {
             .map(|(_, u)| (u.to, u.id, u.bytes))
             .collect();
         let queued: Vec<Out> = std::mem::take(&mut self.queued).into_values().collect();
+        for out in &sending {
+            if let Out::Entry(friend, id) = *out {
+                self.unconfirmed.insert((friend, id));
+            }
+        }
         for out in sending.into_iter().chain(queued) {
             if let Out::Entry(friend, id) = out {
                 self.set_delivery(friend, id, Delivery::Failed(Failure::NotConnected));
@@ -539,6 +566,8 @@ impl Online {
         self.chat.save(Instant::now(), true);
         self.chat.fetched.clear();
         self.chat.files = None;
+        self.chat.old_out.clear();
+        self.chat.old_more = false;
     }
 
     pub(super) fn chat_receive(&mut self, msg: ServerMsg) -> Option<ServerMsg> {
@@ -548,8 +577,16 @@ impl Online {
         match msg {
             ServerMsg::Chat(message) => self.chat_message(message),
             ServerMsg::ChatCopy { to, message } => self.chat_copy(to, message),
+            ServerMsg::OldChat { id, chat } => self.old_chat(id, chat),
+            ServerMsg::OldChatsWanted => self.old_chats_wanted(),
+            ServerMsg::OldChatsKept => {
+                if self.chat.old_more {
+                    self.send_old_chats();
+                }
+            }
             ServerMsg::ChatSent { tag, id: relay, at } => match self.chat.sending.remove(&tag) {
                 Some(Out::Entry(friend, id)) => {
+                    self.chat.unconfirmed.remove(&(friend, id));
                     if let Some(entry) = self.chat.entry_mut(friend, id) {
                         entry.delivery = Delivery::Sent;
                         entry.at = at;
@@ -750,6 +787,65 @@ impl Online {
                 change: Change::Kept,
             },
         );
+    }
+
+    fn old_chat(&mut self, relay: MessageId, chat: OldChat) {
+        self.chat.acks.push(relay);
+        let Some(keys) = &self.keys else {
+            return;
+        };
+        let Ok(plain) = keys.open_kept(&chat.sealed) else {
+            return;
+        };
+        let Ok(entry) = postcard::from_bytes::<ChatEntry>(&plain) else {
+            return;
+        };
+        if entry.id == chat.key && entry.reached_anyone() {
+            self.chat.insert_old(chat.friend, entry);
+        }
+    }
+
+    fn old_chats_wanted(&mut self) {
+        let Some(keys) = &self.keys else {
+            return;
+        };
+        let mut out = VecDeque::new();
+        for (friend, chat) in &self.chat.chats {
+            for entry in &chat.entries {
+                if !entry.reached_anyone() {
+                    continue;
+                }
+                let Ok(plain) = postcard::to_allocvec(entry) else {
+                    continue;
+                };
+                out.push_back(OldChat {
+                    friend: *friend,
+                    key: entry.id,
+                    at: entry.at,
+                    sealed: keys.seal_kept(&plain),
+                });
+            }
+        }
+        self.chat.old_out = out;
+        self.send_old_chats();
+    }
+
+    fn send_old_chats(&mut self) {
+        let mut chats = Vec::new();
+        let mut bytes = 0;
+        while let Some(next) = self.chat.old_out.front() {
+            let size = next.sealed.ciphertext.len() + 64;
+            if !chats.is_empty()
+                && (chats.len() == OLD_CHATS_PER_BATCH || bytes + size > OLD_CHAT_BATCH_BYTES)
+            {
+                break;
+            }
+            bytes += size;
+            chats.extend(self.chat.old_out.pop_front());
+        }
+        let done = self.chat.old_out.is_empty();
+        self.chat.old_more = !done;
+        self.send(ClientMsg::KeepOldChats { chats, done });
     }
 
     fn restate(&mut self, friend: OnlineId, id: u64) {
@@ -1086,11 +1182,21 @@ impl Online {
             }
         };
         let tag = self.chat.tag();
-        if self.send(ClientMsg::Chat {
-            tag,
-            to: friend,
-            sealed,
-        }) {
+        let msg = if self.protocol >= CHAT_ONCE_PROTOCOL {
+            ClientMsg::ChatOnce {
+                tag,
+                to: friend,
+                key: id,
+                sealed,
+            }
+        } else {
+            ClientMsg::Chat {
+                tag,
+                to: friend,
+                sealed,
+            }
+        };
+        if self.send(msg) {
             self.chat.sending.insert(tag, Out::Entry(friend, id));
         } else {
             self.chat
@@ -1215,10 +1321,12 @@ impl Online {
     }
 
     fn in_flight(&self, friend: OnlineId, id: u64) -> bool {
-        self.chat
-            .sending
-            .values()
-            .any(|out| *out == Out::Entry(friend, id))
+        self.chat.unconfirmed.contains(&(friend, id))
+            || self
+                .chat
+                .sending
+                .values()
+                .any(|out| *out == Out::Entry(friend, id))
     }
 
     pub fn can_edit(&self, friend: OnlineId, id: u64) -> bool {
@@ -1315,6 +1423,7 @@ impl Online {
         if let Some(chat) = self.chat.chats.get_mut(&friend) {
             chat.entries.retain(|e| e.id != id);
             self.chat.held.remove(&id);
+            self.chat.unconfirmed.remove(&(friend, id));
             self.chat.dirty = true;
         }
     }

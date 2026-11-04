@@ -57,18 +57,32 @@ impl Client {
         Ok(())
     }
 
+    async fn blocked_with(&self, user: i64, room: SessionId) -> Result<bool, ErrorCode> {
+        for other in self.app.hub.room_users(room) {
+            if other == user {
+                continue;
+            }
+            if db(self.app.db.is_blocked(user, other).await)?
+                || db(self.app.db.is_blocked(other, user).await)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) async fn answer_invite(
         &mut self,
         session: SessionId,
         accept: bool,
     ) -> Result<(), ErrorCode> {
-        let me = self.me()?;
-        let (me_id, me_online) = (me.id, me.online_id);
-        let found = self
+        let me_id = self.me()?.id;
+        let blocked = accept && self.blocked_with(me_id, session).await?;
+        let max = self.app.config.limits.room_members;
+        let out = self
             .app
             .hub
-            .answer(session, me_id, self.conn_id, accept)
-            .ok_or(ErrorCode::UnknownSession)?;
+            .answer(session, me_id, self.conn_id, accept, blocked, max)?;
         self.app.hub.send_others(
             me_id,
             self.conn_id,
@@ -77,31 +91,100 @@ impl Client {
                 reason: citrine_gb_net::EndReason::Left,
             },
         );
-        if !accept {
-            self.app.hub.send_conn(
-                found.host,
-                found.host_conn,
-                ServerMsg::SessionEnded {
-                    session,
-                    reason: citrine_gb_net::EndReason::Declined,
-                },
-            );
+        self.app.hub.deliver(out);
+        Ok(())
+    }
+
+    pub(super) async fn room_invite(
+        &mut self,
+        room: SessionId,
+        to: OnlineId,
+        sealed: Sealed,
+    ) -> Result<(), ErrorCode> {
+        let me = self.me()?;
+        let (me_id, me_online) = (me.id, me.online_id);
+        let other = self.user(to).await?;
+        if !db(self.app.db.are_friends(me_id, other.id).await)? {
+            return Err(ErrorCode::NotFriends);
+        }
+        if !self.app.hub.is_online(other.id) {
+            return Err(ErrorCode::Offline);
+        }
+        if self.blocked_with(other.id, room).await? {
+            return Err(ErrorCode::CantJoin);
+        }
+        let max = self.app.config.limits.room_members;
+        let out = self.app.hub.room_invite(
+            room,
+            me_id,
+            self.conn_id,
+            other.id,
+            me_online,
+            sealed,
+            max,
+        )?;
+        self.send(ServerMsg::Invited { session: room, to }).await;
+        self.app.hub.deliver(out);
+        Ok(())
+    }
+
+    pub(super) async fn room_play(
+        &mut self,
+        room: SessionId,
+        to: OnlineId,
+        sealed: Sealed,
+        game: bool,
+    ) -> Result<(), ErrorCode> {
+        if game && !self.app.settings.get().game_sharing {
+            return Err(ErrorCode::GameSharingOff);
+        }
+        let me = self.me()?.id;
+        let (from, target) = self.app.hub.route(room, me, self.conn_id, to)?;
+        if !self.session_room(room, &sealed) {
+            self.refused(Refused::Play);
+            self.rate_limited().await;
             return Ok(());
         }
-        let host = db(self.app.db.account(found.host).await)?.ok_or(ErrorCode::Server)?;
-        self.send(ServerMsg::SessionStarted {
-            session,
-            with: host.online_id,
-        })
-        .await;
-        self.app.hub.send_conn(
-            found.host,
-            found.host_conn,
-            ServerMsg::SessionStarted {
-                session,
-                with: me_online,
-            },
-        );
+        let Some(target) = target else {
+            return Ok(());
+        };
+        let msg = if game {
+            ServerMsg::RoomGame { room, from, sealed }
+        } else {
+            ServerMsg::RoomPlay { room, from, sealed }
+        };
+        self.app.hub.deliver(vec![(target, msg)]);
+        Ok(())
+    }
+
+    pub(super) async fn room_chat(
+        &mut self,
+        room: SessionId,
+        copies: Vec<(OnlineId, Sealed)>,
+    ) -> Result<(), ErrorCode> {
+        let me = self.me()?.id;
+        if copies.len() > self.app.config.limits.room_members {
+            return Err(ErrorCode::BadMessage);
+        }
+        let max = self.app.settings.get().max_message_bytes;
+        if copies
+            .iter()
+            .any(|(_, sealed)| sealed.ciphertext.len() as u64 > max)
+        {
+            return Err(ErrorCode::TooLarge);
+        }
+        let size: u64 = copies
+            .iter()
+            .map(|(_, sealed)| sealed.ciphertext.len() as u64)
+            .sum();
+        if !self.app.rates.chat(me, size) {
+            return Err(ErrorCode::RateLimited);
+        }
+        let out = self
+            .app
+            .hub
+            .room_chat(room, me, self.conn_id, copies, crate::now())?;
+        self.app.hub.deliver(out);
         Ok(())
     }
 

@@ -156,3 +156,45 @@ fn last_seen_reads_plainly() {
         "30 Oct 2025"
     );
 }
+
+#[test]
+fn a_failed_invite_keeps_the_presence_line_and_adds_the_note_in_warning_colour() {
+    let ctx = egui::Context::default();
+    let warn = ctx.style().visuals.warn_fg_color;
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(217.0, 300.0),
+        )),
+        ..Default::default()
+    };
+    let output = ctx.run(input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let line = Subtitle {
+                line: Line::Text("Online"),
+                note: Some("Couldn't invite"),
+            };
+            person_row(ui, &mia(), None, 0, RowMode::Chat, line, |_| {});
+        });
+    });
+    let texts: Vec<(String, egui::Pos2, egui::Color32)> = output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => {
+                Some((text.galley.text().to_owned(), text.pos, text.fallback_color))
+            }
+            _ => None,
+        })
+        .collect();
+    let find = |wanted: &str| {
+        texts
+            .iter()
+            .find(|(text, _, _)| text == wanted)
+            .unwrap_or_else(|| panic!("{wanted} is drawn: {texts:?}"))
+    };
+    let online = find("Online");
+    let note = find("Couldn't invite");
+    assert!(note.1.y > online.1.y);
+    assert_eq!(note.2, warn);
+}

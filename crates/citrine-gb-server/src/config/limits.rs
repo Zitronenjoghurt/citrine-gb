@@ -38,6 +38,9 @@ pub const VARS: &[&str] = &[
     "CITRINE_FRIEND_REQUESTS_OUT",
     "CITRINE_FRIEND_REQUESTS_IN",
     "CITRINE_FRIEND_REQUEST_DAYS",
+    "CITRINE_ROOM_MEMBERS",
+    "CITRINE_ROOM_PLAYERS",
+    "CITRINE_ROOM_GRACE_SECS",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +81,9 @@ pub struct Limits {
     pub friend_requests_out: u64,
     pub friend_requests_in: u64,
     pub friend_request_age: Duration,
+    pub room_members: usize,
+    pub room_players: usize,
+    pub room_grace: Duration,
 }
 
 const MB: u64 = 1 << 20;
@@ -136,6 +142,10 @@ impl Limits {
                     .max(1)
                     .saturating_mul(86_400),
             ),
+            room_members: get("CITRINE_ROOM_MEMBERS", citrine_gb_net::ROOM_MEMBERS as u64)?
+                .clamp(2, 64) as usize,
+            room_players: get("CITRINE_ROOM_PLAYERS", 8)?.clamp(2, 64) as usize,
+            room_grace: Duration::from_secs(get("CITRINE_ROOM_GRACE_SECS", 60)?.clamp(1, 600)),
         })
     }
 }
@@ -275,5 +285,21 @@ mod tests {
         assert_eq!(l.send_timeout, Duration::from_secs(3));
         assert_eq!(l.downloads_at_once, 1);
         assert_eq!(l.downloads_waiting, 0);
+    }
+
+    #[test]
+    fn room_defaults_and_vars() {
+        let l = limits(&[]);
+        assert_eq!(l.room_members, 16);
+        assert_eq!(l.room_players, 8);
+        assert_eq!(l.room_grace, Duration::from_secs(60));
+        let l = limits(&[
+            ("CITRINE_ROOM_MEMBERS", "4"),
+            ("CITRINE_ROOM_PLAYERS", "1"),
+            ("CITRINE_ROOM_GRACE_SECS", "0"),
+        ]);
+        assert_eq!(l.room_members, 4);
+        assert_eq!(l.room_players, 2);
+        assert_eq!(l.room_grace, Duration::from_secs(1));
     }
 }

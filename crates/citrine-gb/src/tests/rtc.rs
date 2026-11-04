@@ -1,3 +1,4 @@
+use crate::console::Console;
 use crate::gb::cartridge::{RAM_BANK_SIZE, RTC_CYCLES_PER_SECOND};
 use crate::gb::{GameBoy, GbModel};
 use crate::persistence::rtc_footer::{RTC_FILE_LEN, RTC_FOOTER_LEN, RtcFooter};
@@ -281,4 +282,31 @@ fn a_cartridge_without_a_clock_refuses_an_rtc_file() {
     let mut gb = loaded(&rtc_rom(0x03, 0x02));
     assert!(!gb.cartridge.put_rtc_footer(footer, footer.timestamp));
     assert!(gb.cartridge.rtc_footer(footer.timestamp).is_none());
+}
+
+#[test]
+fn a_battery_save_keeps_the_clock_apart_from_the_ram() {
+    let mut gb = rtc_cart();
+    set_clock(&mut gb, [5, 4, 3, 2, 0]);
+    let save = gb.battery(true, NOW).expect("battery");
+    assert_eq!(save.ram.len(), RAM_BANK_SIZE);
+    assert!(save.clock.is_some());
+
+    let file = save.to_file();
+    assert_eq!(file.len(), save.ram.len() + RTC_FOOTER_LEN);
+    assert!(file == gb.poll_sram_dump(true, NOW).expect("dump").as_slice());
+    assert_eq!(gb.battery_from_file(&file), save);
+
+    let mut later = rtc_cart();
+    later.put_battery(later.battery_from_file(&file), NOW);
+    assert_eq!(later.battery(true, NOW), Some(save));
+}
+
+#[test]
+fn a_battery_save_without_a_clock_is_only_ram() {
+    let mut gb = loaded(&rtc_rom(0x13, 0x02));
+    let save = gb.battery(true, NOW).expect("battery");
+    assert_eq!(save.clock, None);
+    assert_eq!(save.to_file(), save.ram);
+    assert_eq!(gb.battery_from_file(&save.ram), save);
 }

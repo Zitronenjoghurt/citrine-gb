@@ -1,27 +1,30 @@
-use crate::gb::joypad::JoypadState;
+use crate::console::Keys;
 
 pub(crate) const LOG_LEN: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Player {
-    One,
-    Two,
-}
+pub const MAX_UNITS: usize = 4;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Player(u8);
+
+#[expect(
+    non_upper_case_globals,
+    reason = "players read as Player::One to Player::Four"
+)]
 impl Player {
+    pub const One: Self = Self(0);
+    pub const Two: Self = Self(1);
+    pub const Three: Self = Self(2);
+    pub const Four: Self = Self(3);
+    pub const ALL: [Self; MAX_UNITS] = [Self::One, Self::Two, Self::Three, Self::Four];
+
     pub fn index(self) -> usize {
-        match self {
-            Player::One => 0,
-            Player::Two => 1,
-        }
+        usize::from(self.0)
     }
 
     pub fn other(self) -> Self {
-        match self {
-            Player::One => Player::Two,
-            Player::Two => Player::One,
-        }
+        Self(self.0 ^ 1)
     }
 }
 
@@ -35,12 +38,12 @@ pub enum CableEvent {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Input {
-    pub buttons: JoypadState,
+    pub buttons: Keys,
     pub cable: Option<CableEvent>,
 }
 
 impl Input {
-    pub const fn new(buttons: JoypadState) -> Self {
+    pub const fn new(buttons: Keys) -> Self {
         Self {
             buttons,
             cable: None,
@@ -66,11 +69,11 @@ pub(crate) struct InputLog {
 }
 
 impl InputLog {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn starting_at(frame: u32) -> Self {
         Self {
             entries: vec![None; LOG_LEN].into_boxed_slice(),
-            frontier: 0,
-            latest: None,
+            frontier: frame,
+            latest: frame.checked_sub(1),
         }
     }
 

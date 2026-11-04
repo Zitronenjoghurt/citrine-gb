@@ -1,7 +1,7 @@
 use super::h264::{split_annex_b, upscale_to_i420};
-use super::{FinishedRecording, Outcome, ScreenRecorder, StopReason, fps};
+use super::{FinishedRecording, Outcome, ScreenRecorder, Source, StopReason};
 use crate::media::{Frame, MediaKind, NewMedia};
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::console::Keys;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::rom::Rom;
 use std::io::BufReader;
@@ -42,11 +42,11 @@ fn game(rom: &[u8]) -> GameBoy {
 }
 
 fn play(gb: &mut GameBoy, frame: usize) {
-    if (frame / 30) % 4 == 1 {
-        gb.joypad.press(JoypadState::START);
+    gb.set_keys(if (frame / 30) % 4 == 1 {
+        Keys::START
     } else {
-        gb.joypad.release(JoypadState::START);
-    }
+        Keys::empty()
+    });
     gb.run_frame();
 }
 
@@ -58,7 +58,13 @@ pub(crate) struct Recorded {
 
 pub(crate) fn record(rom: &[u8], name: &str, frames: usize) -> Recorded {
     record_with(rom, frames, |recorder, gb| {
-        recorder.start_into(temp_file(name), new_media(gb), RATE, super::DEFAULT_SCALE)
+        recorder.start_into(
+            temp_file(name),
+            new_media(gb),
+            Source::of(gb),
+            RATE,
+            super::DEFAULT_SCALE,
+        )
     })
 }
 
@@ -138,7 +144,7 @@ fn five_seconds_of_homebrew_make_an_mp4_that_plays() {
         rec.done.frames
     );
     let video_secs = video.duration().as_secs_f64();
-    let expected = rec.done.frames as f64 / fps();
+    let expected = rec.done.frames as f64 / gb_fps();
     assert!((video_secs - expected).abs() < 0.001, "{video_secs} s");
 
     let audio = &mp4.tracks()[&2];
@@ -159,7 +165,7 @@ fn five_seconds_of_homebrew_make_an_mp4_that_plays() {
     let sound_secs = rec.sound_frames as f64 / RATE as f64;
     assert!((audio_secs - sound_secs).abs() < 0.002, "{audio_secs} s");
     assert!(
-        (audio_secs - video_secs).abs() < 1.0 / fps(),
+        (audio_secs - video_secs).abs() < 1.0 / gb_fps(),
         "sound {audio_secs} s against video {video_secs} s"
     );
     let audio_media = audio.duration().as_secs_f64();
@@ -239,6 +245,7 @@ fn a_paused_stretch_is_left_out() {
         .start_into(
             temp_file("paused.mp4"),
             new_media(&gb),
+            Source::of(&gb),
             RATE,
             super::DEFAULT_SCALE,
         )
@@ -274,7 +281,13 @@ fn a_recording_stopped_while_paused_is_not_kept() {
     let mut recorder = ScreenRecorder::default();
     let path = temp_file("empty.mp4");
     recorder
-        .start_into(path.clone(), new_media(&gb), RATE, super::DEFAULT_SCALE)
+        .start_into(
+            path.clone(),
+            new_media(&gb),
+            Source::of(&gb),
+            RATE,
+            super::DEFAULT_SCALE,
+        )
         .unwrap();
     recorder.stop();
     assert!(matches!(recorder.wait().remove(0), Outcome::Empty));
@@ -289,6 +302,7 @@ fn a_new_sound_rate_ends_the_recording() {
         .start_into(
             temp_file("rate.mp4"),
             new_media(&gb),
+            Source::of(&gb),
             RATE,
             super::DEFAULT_SCALE,
         )
@@ -322,7 +336,13 @@ fn cisco_s_downloaded_codec_records_an_mp4() {
     let api = codec.load().unwrap();
     assert!(matches!(api, openh264::OpenH264API::Libloading(_)));
     let rec = record_with(include_bytes!("../../../homebrew/tobu.gb"), 300, |r, gb| {
-        r.start_with(api, temp_file("cisco.mp4"), new_media(gb), RATE)
+        r.start_with(
+            api,
+            temp_file("cisco.mp4"),
+            new_media(gb),
+            Source::of(gb),
+            RATE,
+        )
     });
     assert!(rec.done.frames.abs_diff(300) <= 1);
     if let Some(keep) = std::env::var_os("CITRINE_KEEP_RECORDING") {
@@ -350,7 +370,13 @@ fn recording_cost_per_frame() {
     let mut recorder = ScreenRecorder::default();
     let path = temp_file("cost.mp4");
     recorder
-        .start_into(path.clone(), new_media(&gb), RATE, super::DEFAULT_SCALE)
+        .start_into(
+            path.clone(),
+            new_media(&gb),
+            Source::of(&gb),
+            RATE,
+            super::DEFAULT_SCALE,
+        )
         .unwrap();
     let mut recording = Duration::ZERO;
     let mut worst = Duration::ZERO;
@@ -363,7 +389,7 @@ fn recording_cost_per_frame() {
         let spent = t.elapsed();
         recording += spent;
         worst = worst.max(spent);
-        let due = Duration::from_secs_f64((frame + 1) as f64 / fps());
+        let due = Duration::from_secs_f64((frame + 1) as f64 / gb_fps());
         if let Some(wait) = due.checked_sub(started.elapsed()) {
             std::thread::sleep(wait);
         }
@@ -385,4 +411,8 @@ fn recording_cost_per_frame() {
         drain.as_secs_f64() * 1e3
     );
     std::fs::remove_file(path).unwrap();
+}
+
+fn gb_fps() -> f64 {
+    Source::from(citrine_gb::console::ConsoleKind::Gb).fps()
 }

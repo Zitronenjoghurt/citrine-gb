@@ -1,11 +1,11 @@
-use crate::disassembly::{Confidence, Disassembly};
+use crate::debug::disassembly::{Confidence, Disassembly};
 use crate::gb::{GameBoy, GbModel};
 use crate::rom::Rom;
 
-fn bytes_at(disassembly: &Disassembly, offset: u16) -> Vec<u8> {
+fn bytes_at(disassembly: &Disassembly, offset: u32) -> Vec<u8> {
     disassembly
         .iter()
-        .find(|entry| entry.loc.offset == offset)
+        .find(|entry| entry.at.offset == offset)
         .map(|entry| entry.instruction_bytes().to_vec())
         .unwrap_or_else(|| panic!("no entry at {offset:04X}"))
 }
@@ -38,10 +38,10 @@ fn overlap_rom() -> GameBoy {
     gb
 }
 
-fn offsets_from(disassembly: &Disassembly, start: u16, end: u16) -> Vec<u16> {
+fn offsets_from(disassembly: &Disassembly, start: u32, end: u32) -> Vec<u32> {
     disassembly
         .iter()
-        .map(|entry| entry.loc.offset)
+        .map(|entry| entry.at.offset)
         .filter(|offset| (start..end).contains(offset))
         .collect()
 }

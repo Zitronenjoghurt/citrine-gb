@@ -107,10 +107,12 @@ impl Widget for InfoPanel<'_> {
                     }
                     Block::Table(table) => {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
+                            let rows = table_rows(&table);
+                            let widest_word = widest_word(ui, &rows);
                             Form::show(ui, ("info_table", index), |form| {
                                 form.striped();
-                                form.text_only();
-                                let mut rows = table_rows(&table).into_iter();
+                                form.text_only(widest_word);
+                                let mut rows = rows.into_iter();
                                 if let Some((label, value)) = rows.next() {
                                     form.header(&label, &value);
                                 }
@@ -296,6 +298,22 @@ fn list(ui: &mut Ui, commonmark: &mut egui_commonmark::CommonMarkCache, items: &
             });
         });
     }
+}
+
+fn widest_word(ui: &Ui, rows: &[(String, String)]) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let colour = ui.visuals().text_color();
+    ui.fonts_mut(|fonts| {
+        rows.iter()
+            .flat_map(|(_, value)| value.split_whitespace())
+            .map(|word| {
+                fonts
+                    .layout_no_wrap(word.to_owned(), font.clone(), colour)
+                    .size()
+                    .x
+            })
+            .fold(0.0, f32::max)
+    })
 }
 
 fn table_rows(table: &str) -> Vec<(String, String)> {
@@ -523,6 +541,79 @@ mod tests {
         assert!(!about.contains("F5"));
         assert!(!about.contains("(default)"));
         assert!(about.contains("Tabs, panels and windows"));
+    }
+
+    #[test]
+    fn about_lists_every_button_the_settings_bind() {
+        use crate::app::ui_state::keybinds::BindingTarget;
+        let about = welcome(&Controls::Desktop {
+            bindings: &KeyBindings::default(),
+            hotkeys: &Hotkeys::default(),
+        });
+        for target in BindingTarget::buttons() {
+            let name = target.button_name().expect("a button");
+            let row = format!("| {name} |");
+            assert_eq!(about.matches(&row).count(), 2, "{name}: {about}");
+        }
+    }
+
+    #[cfg(feature = "gba")]
+    #[test]
+    fn about_shows_the_shoulder_buttons() {
+        let about = welcome(&Controls::Desktop {
+            bindings: &KeyBindings::default(),
+            hotkeys: &Hotkeys::default(),
+        });
+        assert!(about.contains("| L | 1 |"), "{about}");
+        assert!(about.contains("| R | 3 |"), "{about}");
+        assert!(about.contains("| L | L1, L2 |"), "{about}");
+        assert!(about.contains("| R | R1, R2 |"), "{about}");
+    }
+
+    fn wrapped_words(width: f32) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut state = InfoState::default();
+        let mut cache = egui_commonmark::CommonMarkCache::default();
+        let (bindings, hotkeys) = (KeyBindings::default(), Hotkeys::default());
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 60000.0),
+                )),
+                ..Default::default()
+            };
+            shapes = ctx
+                .run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let controls = Controls::Desktop {
+                            bindings: &bindings,
+                            hotkeys: &hotkeys,
+                        };
+                        InfoPanel::new(&mut state, &mut cache, controls).ui(ui);
+                    });
+                })
+                .shapes;
+        }
+        shapes
+            .into_iter()
+            .filter_map(|clipped| match clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley),
+                _ => None,
+            })
+            .filter(|galley| ["Keyboard", "Controller", "Backspace"].contains(&galley.text()))
+            .filter(|galley| galley.rows.len() > 1)
+            .map(|galley| galley.text().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn controls_tables_never_break_a_word_in_a_narrow_pane() {
+        for width in [110.0, 130.0, 150.0, 180.0, 240.0, 412.0] {
+            let broken = wrapped_words(width);
+            assert!(broken.is_empty(), "at {width}: {broken:?}");
+        }
     }
 
     #[test]

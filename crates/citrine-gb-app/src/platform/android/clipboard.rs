@@ -21,7 +21,7 @@ pub fn copy(
 
 fn mime(kind: MediaKind) -> &'static str {
     match kind {
-        MediaKind::Screenshot => "image/png",
+        MediaKind::Screenshot | MediaKind::Print => "image/png",
         MediaKind::Recording => "video/mp4",
     }
 }

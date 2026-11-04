@@ -1,19 +1,50 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use web_sys::wasm_bindgen::closure::Closure;
 use web_sys::wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbRequest, IdbTransaction};
+
+thread_local! {
+    static OPENED: RefCell<HashMap<String, js_sys::Promise>> = RefCell::default();
+}
 
 pub async fn open(
     name: &str,
     version: u32,
     stores: &[&'static str],
 ) -> Result<IdbDatabase, JsValue> {
+    let promise = match OPENED.with_borrow(|opened| opened.get(name).cloned()) {
+        Some(promise) => promise,
+        None => {
+            let promise = wasm_bindgen_futures::future_to_promise(connect(
+                name.to_owned(),
+                version,
+                stores.to_vec(),
+            ));
+            OPENED.with_borrow_mut(|opened| opened.insert(name.to_owned(), promise.clone()));
+            promise
+        }
+    };
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+        Ok(db) => Ok(db.unchecked_into()),
+        Err(err) => {
+            OPENED.with_borrow_mut(|opened| opened.remove(name));
+            Err(err)
+        }
+    }
+}
+
+async fn connect(
+    name: String,
+    version: u32,
+    stores: Vec<&'static str>,
+) -> Result<JsValue, JsValue> {
     let factory = web_sys::window()
         .ok_or("no window")?
         .indexed_db()?
         .ok_or("no IndexedDB")?;
-    let request = factory.open_with_u32(name, version)?;
+    let request = factory.open_with_u32(&name, version)?;
     let target = request.clone();
-    let stores = stores.to_vec();
     let upgrade = Closure::once_into_js(move || {
         if let Ok(db) = target.result() {
             let db: IdbDatabase = db.unchecked_into();
@@ -26,7 +57,14 @@ pub async fn open(
         }
     });
     request.set_onupgradeneeded(Some(upgrade.unchecked_ref()));
-    Ok(wait(&request).await?.unchecked_into())
+    let db: IdbDatabase = wait(&request).await?.unchecked_into();
+    let closing = db.clone();
+    let on_change = Closure::once_into_js(move || {
+        closing.close();
+        OPENED.with_borrow_mut(|opened| opened.remove(&name));
+    });
+    db.set_onversionchange(Some(on_change.unchecked_ref()));
+    Ok(db.into())
 }
 
 pub async fn wait(request: &IdbRequest) -> Result<JsValue, JsValue> {

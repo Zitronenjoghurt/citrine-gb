@@ -5,8 +5,8 @@
 //! fresh load (cycle 0), so absolute cycles line up with the reconstructed state, provided
 //! recording starts right after a ROM load / soft reset.
 
-use citrine_gb::gb::GameBoy;
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::console::{Console, Keys};
+use citrine_gb::gb::GbModel;
 use citrine_gb::recording::{Button, Recording};
 
 #[derive(Default)]
@@ -29,9 +29,12 @@ impl InputRecorder {
     }
 
     /// Begin a fresh recording, capturing the ROM identity and model from `gb`.
-    pub fn start(&mut self, gb: &GameBoy) {
-        let sha = gb.cartridge.header.sha256_hex_string();
-        self.data = Some(Recording::new(sha, gb.model));
+    pub fn start(&mut self, console: &impl Console) {
+        let Ok(model) = GbModel::try_from(console.kind()) else {
+            return;
+        };
+        let sha = console.rom_id().sha256_hex_string();
+        self.data = Some(Recording::new(sha, model));
         self.active = true;
     }
 
@@ -41,11 +44,11 @@ impl InputRecorder {
 
     /// Record a single-button event. `total_cycles` is the absolute `gb.debugger.total_cycles`
     /// (M-cycles); it is converted to absolute T-cycles for the recording.
-    pub fn record(&mut self, total_cycles: u128, state: JoypadState, pressed: bool) {
+    pub fn record(&mut self, total_cycles: u128, state: Keys, pressed: bool) {
         if !self.active {
             return;
         }
-        let Some(button) = Button::from_joypad_state(state) else {
+        let Some(button) = Button::from_keys(state) else {
             return;
         };
         if let Some(data) = &mut self.data {

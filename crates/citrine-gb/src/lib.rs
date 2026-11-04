@@ -1,9 +1,12 @@
+pub mod console;
 #[cfg(feature = "debug")]
-mod debug;
-pub mod disassembly;
+pub mod debug;
 pub mod error;
 pub mod gb;
+#[cfg(feature = "gba")]
+pub mod gba;
 pub mod instructions;
+pub mod machine;
 #[cfg(feature = "persistence")]
 pub mod netplay;
 #[cfg(feature = "persistence")]

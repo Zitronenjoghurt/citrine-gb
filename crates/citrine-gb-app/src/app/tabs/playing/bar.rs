@@ -1,4 +1,4 @@
-use super::lines::{card_name, game_title, quality, short_name, watched_line};
+use super::lines::{card_name, full_name, game_title, quality, short_name, watched_line};
 use super::sound::{FriendSound, friend_sound};
 use super::{BarAction, PickFor, PlayingUi, STRIP_AVATAR, needs_copy, watching};
 use crate::app::widgets::avatar;
@@ -187,7 +187,7 @@ pub(super) fn bar_line(ui: &mut Ui, name: &str, title: Option<&str>, tail: Tail)
     }
 }
 
-pub fn latency(ui: &mut Ui, ms: u32) {
+pub fn server_latency(ui: &mut Ui, ms: u32) {
     let (word, color) = quality(ms, ui.visuals().dark_mode);
     let font = egui::TextStyle::Body.resolve(ui.style());
     let weak = ui.visuals().weak_text_color();
@@ -197,16 +197,21 @@ pub fn latency(ui: &mut Ui, ms: u32) {
         valign: egui::Align::Center,
         ..Default::default()
     };
+    let measured = server_line(ms);
     let mut job = egui::text::LayoutJob::default();
     job.append(word, 0.0, format(&font, color));
-    job.append(&format!(" \u{b7} {ms} ms"), 0.0, format(&font, weak));
+    job.append(&format!(" \u{b7} {measured}"), 0.0, format(&font, weak));
     let width = ui.fonts_mut(|f| f.layout_job(job.clone())).size().x;
     if width <= ui.available_width() {
         ui.add(Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
         return;
     }
     ui.add(Label::new(RichText::new(word).color(color)).wrap_mode(egui::TextWrapMode::Extend))
-        .on_hover_text(format!("{ms} ms"));
+        .on_hover_text(measured);
+}
+
+fn server_line(ms: u32) -> String {
+    format!("{ms} ms to the server")
 }
 
 pub fn bar_switches(session: &PlaySession, name: &str) -> Vec<BarSwitch> {
@@ -230,7 +235,7 @@ pub fn bar_switches(session: &PlaySession, name: &str) -> Vec<BarSwitch> {
             let title = session.my_game().map(card_name).unwrap_or_default();
             Some(format!("{name} doesn't have {title}"))
         } else if missing {
-            Some(format!("You don't have {}", game_title(session)))
+            Some(format!("Needs {}", game_title(session)))
         } else if !session.friend_lets_me_watch() && session.stage() == Stage::Playing {
             Some(format!("{name} isn't showing their screen"))
         } else {
@@ -264,18 +269,22 @@ fn switch_icon(switch: Switch) -> &'static str {
     }
 }
 
-fn switch_ui(ui: &mut Ui, item: &BarSwitch, missing: bool) -> Option<BarAction> {
-    let mut on = item.on;
+pub(super) fn switch_ui(ui: &mut Ui, item: &BarSwitch, missing: bool) -> Option<BarAction> {
     let text = format!("{}  {}", switch_icon(item.switch), item.label);
-    let response = ui.add_enabled(!missing, egui::Checkbox::new(&mut on, text));
+    let response = ui
+        .add_enabled_ui(!missing, |ui| {
+            crate::app::widgets::menu_row::menu_row(ui, text, Some(item.on))
+        })
+        .inner;
     let response = match &item.why_off {
         Some(why) if missing => response.on_disabled_hover_text(why),
         Some(why) => response.on_hover_text(why),
         None => response,
     };
-    if !response.changed() {
+    if !response.clicked() {
         return None;
     }
+    let on = !item.on;
     Some(match item.switch {
         Switch::Show => BarAction::Show(on),
         Switch::Watch => BarAction::Watch(on),
@@ -283,14 +292,19 @@ fn switch_ui(ui: &mut Ui, item: &BarSwitch, missing: bool) -> Option<BarAction> 
     })
 }
 
-fn switch_missing(session: &PlaySession, item: &BarSwitch) -> bool {
+pub(super) fn switch_missing(session: &PlaySession, item: &BarSwitch) -> bool {
     item.switch == Switch::Watch
         && session.stage() == Stage::Playing
         && session.console(false).is_none()
 }
 
-fn change_button(ui: &mut Ui) -> bool {
+pub(super) fn change_button(ui: &mut Ui) -> bool {
     ui.button(format!("{}  Change game", icons::SIM_CARD))
+        .clicked()
+}
+
+pub(super) fn change_entry(ui: &mut Ui) -> bool {
+    crate::app::widgets::menu_row::menu_row(ui, format!("{}  Change game", icons::SIM_CARD), None)
         .clicked()
 }
 
@@ -359,11 +373,18 @@ impl BarButtons<'_> {
                         ui.label(format!("{}'s sound", self.name));
                     });
                 }
-                if change_button(ui) {
+                if change_entry(ui) {
                     action = Some(BarAction::ChangeGame);
                     ui.close();
                 }
-                if tight && ui.button(format!("{}  {leave}", icons::SIGN_OUT)).clicked() {
+                if tight
+                    && crate::app::widgets::menu_row::menu_row(
+                        ui,
+                        format!("{}  {leave}", icons::SIGN_OUT),
+                        None,
+                    )
+                    .clicked()
+                {
                     action = Some(BarAction::Leave);
                     ui.close();
                 }
@@ -399,12 +420,13 @@ impl BarButtons<'_> {
 
 pub fn bar(
     ui: &mut Ui,
+    play: &Play,
     online: &Online,
     session: &PlaySession,
     facts: BarFacts,
 ) -> Option<BarAction> {
     let friend = session.friend();
-    let full_name = online.display_name(friend);
+    let full_name = full_name(play, online, friend);
     let name = short_name(&full_name).to_owned();
     let presence = online.friend_presence(friend);
     let inviting = session.stage() == Stage::Inviting;
@@ -473,14 +495,28 @@ pub fn settle_bar(
         }
         return;
     }
+    if let BarAction::Show(on) = action {
+        play.set_let_watch(on);
+        return;
+    }
     let Some(session) = play.session_mut() else {
         return;
     };
     match action {
         BarAction::ChangeGame => playing.picking = Some(PickFor::Change),
-        BarAction::Show(on) => session.set_let_watch(on),
+        BarAction::Show(_) => {}
         BarAction::Watch(on) => session.set_watch_friend(on),
         BarAction::Cable(on) => session.set_cable(on),
         BarAction::Leave | BarAction::Mute | BarAction::Chat | BarAction::FriendSound(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_line;
+
+    #[test]
+    fn the_server_time_names_the_server() {
+        assert_eq!(server_line(12), "12 ms to the server");
     }
 }

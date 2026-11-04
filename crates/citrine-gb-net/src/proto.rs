@@ -6,7 +6,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
+pub const OLDEST_PROTOCOL_VERSION: u16 = 2;
+pub const ROOM_MEMBERS: usize = 16;
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
 pub const CHUNK_BYTES: usize = 256 * 1024;
 pub const MAX_SCREEN_BYTES: usize = 64 * 1024;
@@ -95,6 +97,14 @@ pub struct ChatMessage {
     pub sealed: Sealed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OldChat {
+    pub friend: OnlineId,
+    pub key: u64,
+    pub at: u64,
+    pub sealed: Sealed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileInfo {
     pub id: FileId,
@@ -109,6 +119,27 @@ pub struct DeviceInfo {
     pub added: u64,
     pub last_seen: u64,
     pub online: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MemberState {
+    pub shows_screen: bool,
+    pub playing: bool,
+    pub reconnecting: bool,
+    pub round_trip_ms: Option<u16>,
+    pub old_client: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    pub who: OnlineId,
+    pub display_name: String,
+    pub public_key: PublicKey,
+    pub state: MemberState,
+}
+
+pub fn speaks_protocol(version: u16) -> bool {
+    (OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +227,12 @@ pub enum ErrorCode {
     SignedOut,
     #[error("no such device")]
     UnknownDevice,
+    #[error("the room is full")]
+    RoomFull,
+    #[error("they can't join this room")]
+    CantJoin,
+    #[error("someone in the room needs a newer app")]
+    NeedsUpdate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +342,40 @@ pub enum ClientMsg {
     Typing {
         to: OnlineId,
         typing: bool,
+    },
+    RoomInvite {
+        room: SessionId,
+        to: OnlineId,
+        sealed: Sealed,
+    },
+    MemberUpdate {
+        room: SessionId,
+        shows_screen: bool,
+        playing: bool,
+    },
+    RoomPlay {
+        room: SessionId,
+        to: OnlineId,
+        sealed: Sealed,
+    },
+    RoomGame {
+        room: SessionId,
+        to: OnlineId,
+        sealed: Sealed,
+    },
+    RoomChat {
+        room: SessionId,
+        copies: Vec<(OnlineId, Sealed)>,
+    },
+    ChatOnce {
+        tag: Tag,
+        to: OnlineId,
+        key: u64,
+        sealed: Sealed,
+    },
+    KeepOldChats {
+        chats: Vec<OldChat>,
+        done: bool,
     },
 }
 
@@ -429,6 +500,41 @@ pub enum ServerMsg {
         from: OnlineId,
         typing: bool,
     },
+    RoomJoined {
+        room: SessionId,
+        members: Vec<Member>,
+    },
+    MemberUpdate {
+        room: SessionId,
+        member: Member,
+    },
+    MemberGone {
+        room: SessionId,
+        who: OnlineId,
+        reason: EndReason,
+    },
+    RoomPlay {
+        room: SessionId,
+        from: OnlineId,
+        sealed: Sealed,
+    },
+    RoomGame {
+        room: SessionId,
+        from: OnlineId,
+        sealed: Sealed,
+    },
+    RoomChat {
+        room: SessionId,
+        from: OnlineId,
+        at: u64,
+        sealed: Sealed,
+    },
+    OldChatsWanted,
+    OldChatsKept,
+    OldChat {
+        id: MessageId,
+        chat: OldChat,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -547,6 +653,13 @@ mod tests {
             ClientMsg::SignOutDevice(_) => "SignOutDevice",
             ClientMsg::Restate { .. } => "Restate",
             ClientMsg::Typing { .. } => "Typing",
+            ClientMsg::RoomInvite { .. } => "RoomInvite",
+            ClientMsg::MemberUpdate { .. } => "MemberUpdate",
+            ClientMsg::RoomPlay { .. } => "RoomPlay",
+            ClientMsg::RoomGame { .. } => "RoomGame",
+            ClientMsg::RoomChat { .. } => "RoomChat",
+            ClientMsg::ChatOnce { .. } => "ChatOnce",
+            ClientMsg::KeepOldChats { .. } => "KeepOldChats",
         }
     }
 
@@ -596,6 +709,30 @@ mod tests {
             ServerMsg::ChatCopy { .. } => "ChatCopy",
             ServerMsg::SavesChanged => "SavesChanged",
             ServerMsg::Typing { .. } => "Typing",
+            ServerMsg::RoomJoined { .. } => "RoomJoined",
+            ServerMsg::MemberUpdate { .. } => "MemberUpdate",
+            ServerMsg::MemberGone { .. } => "MemberGone",
+            ServerMsg::RoomPlay { .. } => "RoomPlay",
+            ServerMsg::RoomGame { .. } => "RoomGame",
+            ServerMsg::RoomChat { .. } => "RoomChat",
+            ServerMsg::OldChatsWanted => "OldChatsWanted",
+            ServerMsg::OldChatsKept => "OldChatsKept",
+            ServerMsg::OldChat { .. } => "OldChat",
+        }
+    }
+
+    fn member() -> Member {
+        Member {
+            who: friend_id(),
+            display_name: "Jonas".into(),
+            public_key: RelayId::from_bytes([5; 32]).keys().public_key(),
+            state: MemberState {
+                shows_screen: false,
+                playing: true,
+                reconnecting: false,
+                round_trip_ms: Some(48),
+                old_client: false,
+            },
         }
     }
 
@@ -703,6 +840,45 @@ mod tests {
             ClientMsg::Typing {
                 to: friend_id(),
                 typing: false,
+            },
+            ClientMsg::RoomInvite {
+                room: 7,
+                to: friend_id(),
+                sealed: sealed(),
+            },
+            ClientMsg::MemberUpdate {
+                room: 7,
+                shows_screen: true,
+                playing: true,
+            },
+            ClientMsg::RoomPlay {
+                room: 7,
+                to: friend_id(),
+                sealed: sealed(),
+            },
+            ClientMsg::RoomGame {
+                room: 7,
+                to: friend_id(),
+                sealed: sealed(),
+            },
+            ClientMsg::RoomChat {
+                room: 7,
+                copies: vec![(friend_id(), sealed()), (friend_id(), sealed())],
+            },
+            ClientMsg::ChatOnce {
+                tag: 9,
+                to: friend_id(),
+                key: u64::MAX,
+                sealed: sealed(),
+            },
+            ClientMsg::KeepOldChats {
+                chats: vec![OldChat {
+                    friend: friend_id(),
+                    key: 7,
+                    at: 1_700_000_000,
+                    sealed: sealed(),
+                }],
+                done: true,
             },
         ]
     }
@@ -881,6 +1057,55 @@ mod tests {
                 from: friend_id(),
                 typing: true,
             },
+            ServerMsg::RoomJoined {
+                room: 7,
+                members: vec![member(), member()],
+            },
+            ServerMsg::MemberUpdate {
+                room: 7,
+                member: Member {
+                    state: MemberState {
+                        shows_screen: true,
+                        playing: false,
+                        reconnecting: true,
+                        round_trip_ms: None,
+                        old_client: true,
+                    },
+                    ..member()
+                },
+            },
+            ServerMsg::MemberGone {
+                room: 7,
+                who: friend_id(),
+                reason: EndReason::Disconnected,
+            },
+            ServerMsg::RoomPlay {
+                room: 7,
+                from: friend_id(),
+                sealed: sealed(),
+            },
+            ServerMsg::RoomGame {
+                room: 7,
+                from: friend_id(),
+                sealed: sealed(),
+            },
+            ServerMsg::RoomChat {
+                room: 7,
+                from: friend_id(),
+                at: 1_700_000_000,
+                sealed: sealed(),
+            },
+            ServerMsg::OldChatsWanted,
+            ServerMsg::OldChatsKept,
+            ServerMsg::OldChat {
+                id: 6,
+                chat: OldChat {
+                    friend: friend_id(),
+                    key: 7,
+                    at: 1_700_000_000,
+                    sealed: sealed(),
+                },
+            },
         ]
     }
 
@@ -888,7 +1113,7 @@ mod tests {
     fn every_client_message_round_trips() {
         let all = all_client();
         let names: BTreeSet<_> = all.iter().map(client_name).collect();
-        assert_eq!(names.len(), 37);
+        assert_eq!(names.len(), 44);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -900,7 +1125,7 @@ mod tests {
     fn every_server_message_round_trips() {
         let all = all_server();
         let names: BTreeSet<_> = all.iter().map(server_name).collect();
-        assert_eq!(names.len(), 44);
+        assert_eq!(names.len(), 53);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -952,6 +1177,9 @@ mod tests {
             ErrorCode::CodeWrong,
             ErrorCode::SignedOut,
             ErrorCode::UnknownDevice,
+            ErrorCode::RoomFull,
+            ErrorCode::CantJoin,
+            ErrorCode::NeedsUpdate,
         ];
         for error in errors {
             let msg = ServerMsg::Error(error);
@@ -979,6 +1207,43 @@ mod tests {
             let msg = ServerMsg::SessionEnded { session: 1, reason };
             assert_eq!(ServerMsg::decode(&msg.encode().unwrap()), Ok(msg));
         }
+    }
+
+    #[test]
+    fn room_messages_take_new_tags_after_the_old_ones() {
+        let all = all_client();
+        let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
+        assert_eq!(tags, (0..44).collect::<Vec<u8>>());
+        assert_eq!(client_name(&all[10]), "Chat");
+        assert_eq!(client_name(&all[35]), "Restate");
+        assert_eq!(client_name(&all[36]), "Typing");
+        assert_eq!(client_name(&all[42]), "ChatOnce");
+        let all = all_server();
+        let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
+        assert_eq!(tags, (0..53).collect::<Vec<u8>>());
+        assert_eq!(server_name(&all[42]), "SavesChanged");
+        assert_eq!(server_name(&all[43]), "Typing");
+    }
+
+    #[test]
+    fn this_build_speaks_protocol_two_and_three() {
+        assert!(!speaks_protocol(1));
+        assert!(speaks_protocol(2));
+        assert!(speaks_protocol(3));
+        assert!(!speaks_protocol(4));
+    }
+
+    #[test]
+    fn a_room_pad_batch_stays_small() {
+        let msg = ClientMsg::RoomPlay {
+            room: u64::MAX,
+            to: friend_id(),
+            sealed: Sealed {
+                nonce: [0xFF; crate::NONCE_BYTES],
+                ciphertext: vec![0xFF; crate::SEAL_OVERHEAD + 9],
+            },
+        };
+        assert!(msg.encode().unwrap().len() <= 76);
     }
 
     #[test]

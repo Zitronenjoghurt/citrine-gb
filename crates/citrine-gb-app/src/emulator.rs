@@ -10,18 +10,21 @@ use crate::media::recording::ScreenRecorder;
 use crate::online::OnlineSettings;
 use crate::pad_input::PadSource;
 use crate::partner_link::PartnerLink;
-use crate::play::{GameFile, LinkedSave, PlaySession, SaveKey};
+use crate::play::{DropHistory, GameFile, LinkedSave, PlaySession, SaveKey};
 use crate::recorder::InputRecorder;
 use crate::storage::{SaveStore, now_unix};
 use crate::utils::avg_timer::AvgTimer;
+use citrine_gb::console::{Console, ConsoleKind, Keys, Timing, VideoSpec};
+use citrine_gb::debug::Debug;
+use citrine_gb::debug::step::{Step, Stop};
 use citrine_gb::error::GbResult;
-use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::gb::{GameBoy, GbModel};
-use citrine_gb::persistence::sram_dump::SramDump;
+use citrine_gb::machine::{Firmware, Machine};
 use citrine_gb::rom::Rom;
 use link::borrowed_key;
 
 mod audio;
+pub mod gimmicks;
 mod input;
 mod link;
 mod replay;
@@ -69,11 +72,9 @@ pub struct SaveStatus {
 }
 const FAST_FORWARD: usize = 3;
 
-const GB_WIDTH: usize = 160;
-const GB_HEIGHT: usize = 144;
-
 pub struct Emulator {
-    pub gb: GameBoy,
+    machine: Machine,
+    audio: Vec<f32>,
     pub running: bool,
     pub fast_forward: bool,
     audio_feed: Option<AudioFeed>,
@@ -86,6 +87,7 @@ pub struct Emulator {
     /// 0.0 (pure smear) to 1.0 (instant, no ghosting)
     pub ghosting_blend: f32,
     pub scaling: ScalingMode,
+    pub reserve: f32,
     held: HeldButtons,
     pressed_by: Option<InputSource>,
     texture: Option<egui::TextureHandle>,
@@ -98,6 +100,8 @@ pub struct Emulator {
     pub total_frames: u128,
     last_frame: Vec<u8>,
     linked_frame: Option<Vec<u8>>,
+    linked_video: VideoSpec,
+    stepped: bool,
     linked_audio: Vec<f32>,
     friend_audio: Vec<f32>,
     mixer: Mixer,
@@ -120,16 +124,25 @@ pub struct Emulator {
     pub autosave_keep: usize,
     play: PlayClock,
     pub last_good: LastGood,
+    drop_history: Option<DropHistory>,
+    handed_back: Option<citrine_gb_net::OnlineId>,
     console_switched: Option<GbModel>,
     pub link: Option<LocalLink>,
     pub partner: Option<PartnerLink>,
     stat_events: StatEvents,
+    pub gimmicks: gimmicks::Gimmicks,
+    gimmick_settings: gimmicks::GimmickSettings,
+    pub firmware: Firmware,
+    pub gba_bios_name: String,
 }
 
 impl Default for Emulator {
     fn default() -> Self {
+        let machine = Machine::Gb(Box::new(GameBoy::new_empty(GbModel::Dmg)));
+        let video = machine.video();
         Self {
-            gb: GameBoy::new_empty(GbModel::Dmg),
+            machine,
+            audio: Vec::new(),
             running: true,
             fast_forward: false,
             audio_feed: None,
@@ -139,6 +152,7 @@ impl Default for Emulator {
             enable_ghosting: true,
             ghosting_blend: 0.7,
             scaling: ScalingMode::default(),
+            reserve: 0.0,
             held: HeldButtons::default(),
             pressed_by: None,
             texture: None,
@@ -149,8 +163,10 @@ impl Default for Emulator {
             update_avg_timer: AvgTimer::default(),
             frame_avg_timer: AvgTimer::default(),
             total_frames: 0,
-            last_frame: vec![0; GB_WIDTH * GB_HEIGHT * 4],
+            last_frame: vec![0; video.width * video.height * 4],
             linked_frame: None,
+            linked_video: video,
+            stepped: false,
             linked_audio: Vec::new(),
             friend_audio: Vec::new(),
             mixer: Mixer::default(),
@@ -175,10 +191,16 @@ impl Default for Emulator {
             autosave_keep: crate::autosave::DEFAULT_KEEP,
             play: PlayClock::default(),
             last_good: LastGood::default(),
+            drop_history: None,
+            handed_back: None,
             console_switched: None,
             link: None,
             partner: None,
             stat_events: StatEvents::default(),
+            gimmicks: gimmicks::Gimmicks::default(),
+            gimmick_settings: gimmicks::GimmickSettings::default(),
+            firmware: Firmware::default(),
+            gba_bios_name: String::new(),
         }
     }
 }
@@ -212,17 +234,17 @@ impl Emulator {
     }
 
     pub fn game_file(&mut self) -> Option<GameFile> {
-        if !self.gb.cartridge.has_rom_loaded {
+        if !self.has_game() {
             return None;
         }
         Some(GameFile {
-            rom: self.gb.cartridge.rom_bytes(),
+            rom: self.machine.rom_bytes(),
             title: self.game_name.clone(),
-            model: self.console(),
+            kind: self.machine.kind(),
             save: self
-                .gb
-                .poll_sram_dump(true, now_unix())
-                .map(|dump| dump.as_slice().to_vec()),
+                .machine
+                .battery(true, now_unix())
+                .map(|save| save.to_file()),
             running: true,
         })
     }
@@ -232,13 +254,12 @@ impl Emulator {
     }
 
     pub fn battery_for(&self, rom: &[u8]) -> Option<Vec<u8>> {
-        let header = Rom::new(rom).header().ok()?;
-        self.store.load_battery(&header.sha256_hex_string())
+        let key = citrine_gb::rom::id::RomId::new(rom).sha256_hex_string();
+        self.store.load_battery(&key)
     }
 
     pub fn open_game(&self) -> Option<citrine_gb_net::GameHash> {
-        let cartridge = &self.gb.cartridge;
-        cartridge.has_rom_loaded.then_some(cartridge.header.sha1)
+        self.has_game().then(|| self.machine.rom_id().sha1)
     }
 
     pub(crate) fn advance(
@@ -246,8 +267,12 @@ impl Emulator {
         now: web_time::Instant,
         mut cable: Option<&mut PlaySession>,
     ) -> bool {
+        if self.last_good.take_written() {
+            self.play.copy_written();
+        }
         if !self.running {
-            self.gb.apu.audio_buffer.clear();
+            self.gimmicks.stop_rumble();
+            self.drop_audio();
             if let Some(link) = &mut self.link {
                 link.clear_audio();
             }
@@ -267,36 +292,43 @@ impl Emulator {
         };
         self.last_update = Some(now);
 
+        self.gimmicks.follow_clock(&mut self.machine, now_unix());
+        self.gimmicks.feed(&mut self.machine);
         let mut ran_frame = false;
-        let mut heard = self.gb.apu.audio_buffer.len();
-        let due = self.clock.advance(dt);
+        let mut heard = self.audio.len();
+        let due = self.clock.advance(dt, self.machine.timing());
         let frames = if self.fast_forward {
             due * FAST_FORWARD
         } else {
             due
         };
         for _ in 0..frames {
-            if let Some(session) = cable.as_deref_mut() {
-                session.pump_link(&mut self.gb);
+            if let Some(session) = cable.as_deref_mut()
+                && let Some(gb) = self.machine.as_gb_mut()
+            {
+                session.pump_link(gb);
             }
             self.feed_replay();
             self.frame_avg_timer.start();
             match (self.link.as_mut(), self.partner.as_mut()) {
-                (Some(link), _) => link.run_frame(&mut self.gb, self.held.held()),
-                (None, Some(partner)) => partner.run_frame(&mut self.gb),
-                (None, None) => self.gb.run_frame(),
+                (Some(link), _) => link.run_frame(&mut self.machine, self.held.held()),
+                (None, Some(partner)) => match self.machine.as_gb_mut() {
+                    Some(gb) => partner.run_frame(gb),
+                    None => self.machine.run_frame(),
+                },
+                (None, None) => self.machine.run_frame(),
             }
             self.frame_avg_timer.stop();
+            self.gimmicks.collect(&mut self.machine);
             let owed = self.held.take_owed();
             self.apply(Change {
-                pressed: JoypadState::empty(),
+                pressed: Keys::empty(),
                 released: owed,
             });
             ran_frame = true;
             heard = self.capture_frame(heard);
 
-            if self.gb.debugger.hit_breakpoint {
-                self.gb.debugger.hit_breakpoint = false;
+            if self.take_breakpoint_hit() {
                 self.running = false;
                 break;
             }
@@ -317,6 +349,20 @@ impl Emulator {
         model: GbModel,
         #[cfg(not(target_arch = "wasm32"))] path: Option<&std::path::Path>,
     ) -> GbResult<()> {
+        self.load_game(
+            rom,
+            model.into(),
+            #[cfg(not(target_arch = "wasm32"))]
+            path,
+        )
+    }
+
+    pub fn load_game(
+        &mut self,
+        rom: &Rom,
+        kind: ConsoleKind,
+        #[cfg(not(target_arch = "wasm32"))] path: Option<&std::path::Path>,
+    ) -> GbResult<()> {
         self.screen_recorder.stop();
         self.replay = None;
         if let Err(err) = self.autosave_if_played() {
@@ -327,13 +373,19 @@ impl Emulator {
         self.save_loaded = false;
         self.imported_legacy_save = false;
         self.console_switched = None;
-        if let Some(partner) = self.partner.take() {
-            partner.finish(&mut self.gb);
+        if let (Some(partner), Some(gb)) = (self.partner.take(), self.machine.as_gb_mut()) {
+            partner.finish(gb);
         }
-        self.gb.load_rom_with_model(rom, model)?;
+        match (GbModel::try_from(kind), self.machine.as_gb_mut()) {
+            (Ok(model), Some(gb)) => gb.load_rom_with_model(rom, model)?,
+            _ => self.replace_machine(Machine::load(rom, kind, &self.firmware)?),
+        }
         self.sync_joypad();
 
-        let key = self.gb.cartridge.header.sha256_hex_string();
+        let key = self.machine.rom_id().sha256_hex_string();
+        if let Err(err) = self.store.set_game_console(&key, self.machine.kind()) {
+            log::warn!("could not note the console of the game: {err}");
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.rom_path = path.map(|p| p.to_owned());
@@ -342,9 +394,8 @@ impl Emulator {
             }
         }
 
-        if let Some(data) = self.store.load_battery(&key) {
-            self.gb
-                .put_sram_dump(SramDump::from_slice(&data), now_unix());
+        if let Some(save) = self.store.load_battery_save(&key, &self.machine) {
+            self.machine.put_battery(save, now_unix());
             self.save_loaded = true;
         }
 
@@ -356,11 +407,123 @@ impl Emulator {
         self.started_at = Some(web_time::Instant::now());
         self.play = PlayClock::default();
         self.last_good.clear();
+        self.start_gimmicks();
         Ok(())
     }
 
+    pub fn kind(&self) -> ConsoleKind {
+        self.machine.kind()
+    }
+
     pub fn console(&self) -> GbModel {
-        self.gb.model
+        self.as_gb().map_or(GbModel::Dmg, |gb| gb.model)
+    }
+
+    pub fn debug(&self) -> &Machine {
+        &self.machine
+    }
+
+    pub fn debug_mut(&mut self) -> &mut Machine {
+        &mut self.machine
+    }
+
+    #[cfg(all(test, feature = "gba"))]
+    pub fn load_gba(&mut self, data: &[u8]) -> GbResult<()> {
+        self.screen_recorder.stop();
+        self.replay = None;
+        self.running = false;
+        self.fast_forward = false;
+        self.console_switched = None;
+        let machine = Machine::load(&Rom::new(data), ConsoleKind::Gba, &self.firmware)?;
+        self.replace_machine(machine);
+        Ok(())
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn gba_bios_name(&self) -> Option<&str> {
+        self.firmware
+            .gba_bios
+            .as_ref()
+            .map(|_| self.gba_bios_name.as_str())
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn gba_bios_kind(&self) -> citrine_gb::gba::bios::BiosKind {
+        self.firmware
+            .gba_bios
+            .as_ref()
+            .map_or(citrine_gb::gba::bios::BiosKind::BuiltIn, |bios| bios.kind())
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn as_gba(&self) -> Option<&citrine_gb::gba::machine::Gba> {
+        match &self.machine {
+            Machine::Gba(gba) => Some(gba),
+            Machine::Gb(_) => None,
+        }
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn set_gba_color_correction(
+        &mut self,
+        correction: citrine_gb::gb::ppu::types::color::ColorCorrection,
+    ) {
+        if let Machine::Gba(gba) = &mut self.machine {
+            gba.bus_mut().ppu_mut().set_color_correction(correction);
+        }
+    }
+
+    pub fn as_gb(&self) -> Option<&GameBoy> {
+        self.machine.as_gb()
+    }
+
+    pub fn as_gb_mut(&mut self) -> Option<&mut GameBoy> {
+        self.machine.as_gb_mut()
+    }
+
+    pub fn debug_console(&self) -> &dyn Debug {
+        &self.machine
+    }
+
+    pub fn has_game(&self) -> bool {
+        self.as_gb().is_none_or(|gb| gb.cartridge.has_rom_loaded)
+    }
+
+    pub fn video(&self) -> VideoSpec {
+        match self.linked_frame {
+            Some(_) => self.linked_video,
+            None => self.machine.video(),
+        }
+    }
+
+    pub fn timing(&self) -> Timing {
+        self.machine.timing()
+    }
+
+    pub fn frame(&self) -> &[u8] {
+        self.machine.frame()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gb(&self) -> &GameBoy {
+        self.as_gb().expect("a game boy")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gb_mut(&mut self) -> &mut GameBoy {
+        self.as_gb_mut().expect("a game boy")
+    }
+
+    #[cfg(all(test, feature = "gba"))]
+    pub(crate) fn put_gba(&mut self, rom: &[u8], rom_key: &str) {
+        let gba = citrine_gb::gba::machine::Gba::new(rom);
+        self.replace_machine(Machine::Gba(Box::new(gba)));
+        self.rom_key = Some(rom_key.to_owned());
+        self.running = true;
+    }
+
+    fn take_breakpoint_hit(&mut self) -> bool {
+        self.machine.take_breakpoint_hit()
     }
 
     pub fn take_console_switch(&mut self) -> Option<GbModel> {
@@ -372,7 +535,10 @@ impl Emulator {
             return Ok(());
         }
         self.flush_save()?;
-        let rom = Rom::new(&self.gb.cartridge.rom_bytes());
+        let Some(gb) = self.as_gb() else {
+            return Ok(());
+        };
+        let rom = Rom::new(&gb.cartridge.rom_bytes());
         let name = self.game_name.clone();
         let launched = self.stat_events.launched;
         #[cfg(not(target_arch = "wasm32"))]
@@ -397,6 +563,9 @@ impl Emulator {
             audio_feed: self.audio_feed.take(),
             sound: self.sound,
             running: false,
+            gimmick_settings: std::mem::take(&mut self.gimmick_settings),
+            firmware: std::mem::take(&mut self.firmware),
+            gba_bios_name: std::mem::take(&mut self.gba_bios_name),
             ..Self::default()
         };
     }
@@ -413,20 +582,75 @@ impl Emulator {
         std::mem::take(&mut self.stat_events)
     }
 
-    pub fn force_step(&mut self, ctx: &egui::Context, cycle_count: u32) {
-        self.gb.step_cycles(cycle_count);
+    pub fn is_running(&self) -> bool {
+        self.running || self.step_pending()
+    }
+
+    pub fn toggle_running(&mut self) {
+        if self.machine.step_pending() {
+            self.machine.cancel_step();
+            return;
+        }
+        self.running = !self.running;
+        if !self.running {
+            self.release_all();
+        }
+    }
+
+    pub fn step(&mut self, step: Step) -> Stop {
+        if self.running {
+            self.running = false;
+            self.release_all();
+        }
+        let stop = Debug::step(&mut self.machine, step);
+        self.stepped = true;
+        stop
+    }
+
+    fn continue_step(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.stepped) {
+            self.update_texture(ctx);
+        }
+        if self.running || !self.step_pending() {
+            return;
+        }
+        self.machine.resume_step();
         self.update_texture(ctx);
+        ctx.request_repaint();
+    }
+
+    fn step_pending(&self) -> bool {
+        self.machine.step_pending()
+    }
+
+    fn replace_machine(&mut self, machine: Machine) {
+        let enabled: [bool; 4] = std::array::from_fn(|index| {
+            self.as_gb().is_none_or(|gb| gb.apu.channel_enabled(index))
+        });
+        let same_channels = self.machine.audio_channels().len() == machine.audio_channels().len();
+        self.machine = machine;
+        self.drop_history = None;
+        if same_channels {
+            for (index, enabled) in enabled.into_iter().enumerate() {
+                self.machine.set_channel_enabled(index, enabled);
+            }
+        }
+        self.start_gimmicks();
     }
 
     pub fn soft_reset(&mut self, ctx: &egui::Context) {
-        self.gb.soft_reset();
+        self.machine.soft_reset();
         self.update_texture(ctx);
     }
 
     pub fn reset_to(&mut self, ctx: &egui::Context, start_cycles: u32) {
-        self.gb.soft_reset();
+        self.machine.soft_reset();
         self.started_at = Some(web_time::Instant::now());
-        self.gb.run_cycles(start_cycles);
+        if let Some(gb) = self.as_gb_mut() {
+            gb.run_for(start_cycles);
+        } else {
+            Debug::step(&mut self.machine, Step::Cycles(start_cycles));
+        }
         self.update_texture(ctx);
     }
 }

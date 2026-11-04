@@ -1,4 +1,4 @@
-use crate::gb::joypad::JoypadState;
+use crate::console::Keys;
 use crate::gb::{GameBoy, GbModel};
 use crate::netplay::LocalCable;
 use crate::rom::Rom;
@@ -6,8 +6,8 @@ use crate::{ReadMemory, WriteMemory};
 
 pub(super) const COUNT: u16 = 300;
 const NOW: u64 = 1_790_000_000;
-const IDLE: [JoypadState; 2] = [JoypadState::empty(); 2];
-const GO: [JoypadState; 2] = [JoypadState::A; 2];
+const IDLE: [Keys; 2] = [Keys::empty(); 2];
+const GO: [Keys; 2] = [Keys::A; 2];
 
 pub(super) fn trade_program(sc: u8, first: u8, step: u8) -> Vec<u8> {
     let [low, high] = COUNT.to_le_bytes();
@@ -71,7 +71,7 @@ fn lines(gb: &mut GameBoy) -> [u8; 2] {
     })
 }
 
-fn trade(red: &mut GameBoy, silver: &mut GameBoy, cable: &mut LocalCable) -> usize {
+fn trade(red: &mut GameBoy, silver: &mut GameBoy, cable: &mut LocalCable<GameBoy>) -> usize {
     (1..=600)
         .find(|_| {
             cable.run_frame([red, silver], GO);
@@ -131,10 +131,7 @@ fn a_cable_plugged_in_after_both_games_ran_alone_still_trades() {
 fn buttons_reach_each_console_on_its_own() {
     let (mut red, mut silver) = (red(), silver());
     let mut cable = LocalCable::new();
-    cable.run_frame(
-        [&mut red, &mut silver],
-        [JoypadState::A, JoypadState::START | JoypadState::LEFT],
-    );
+    cable.run_frame([&mut red, &mut silver], [Keys::A, Keys::START | Keys::LEFT]);
     assert_eq!(lines(&mut red), [0x0E, 0x0F]);
     assert_eq!(lines(&mut silver), [0x07, 0x0D]);
 }

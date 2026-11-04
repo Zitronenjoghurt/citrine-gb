@@ -1,4 +1,4 @@
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::console::Keys;
 use citrine_gb::recording::{InputEvent, Recording};
 
 pub const T_CYCLES_PER_SECOND: u64 = 4_194_304;
@@ -14,7 +14,7 @@ pub enum ReplayError {
 pub struct ReplayPlayer {
     events: Vec<InputEvent>,
     next: usize,
-    held: JoypadState,
+    held: Keys,
 }
 
 pub fn parse(json: &[u8]) -> Result<Recording, ReplayError> {
@@ -38,17 +38,17 @@ impl ReplayPlayer {
         Self {
             events: recording.events,
             next: 0,
-            held: JoypadState::empty(),
+            held: Keys::empty(),
         }
     }
 
-    pub fn due(&mut self, t_cycle: u64) -> Vec<(JoypadState, bool)> {
+    pub fn due(&mut self, t_cycle: u64) -> Vec<(Keys, bool)> {
         let mut out = Vec::new();
         while let Some(event) = self.events.get(self.next) {
             if event.cycle > t_cycle {
                 break;
             }
-            let button = event.button.to_joypad_state();
+            let button = event.button.to_keys();
             if event.pressed {
                 self.held.insert(button);
             } else {
@@ -64,7 +64,7 @@ impl ReplayPlayer {
         self.next >= self.events.len()
     }
 
-    pub fn held(&self) -> JoypadState {
+    pub fn held(&self) -> Keys {
         self.held
     }
 
@@ -94,13 +94,10 @@ mod tests {
         assert_eq!(length_ms(&parsed), 1000);
         let mut player = ReplayPlayer::new(parsed);
         assert!(player.due(10).is_empty());
-        assert_eq!(
-            player.due(100),
-            vec![(JoypadState::START, true), (JoypadState::A, true)]
-        );
-        assert_eq!(player.held(), JoypadState::START | JoypadState::A);
+        assert_eq!(player.due(100), vec![(Keys::START, true), (Keys::A, true)]);
+        assert_eq!(player.held(), Keys::START | Keys::A);
         assert!(!player.finished());
-        assert_eq!(player.due(u64::MAX), vec![(JoypadState::A, false)]);
+        assert_eq!(player.due(u64::MAX), vec![(Keys::A, false)]);
         assert!(player.finished());
         assert_eq!(player.progress(), (3, 3));
     }

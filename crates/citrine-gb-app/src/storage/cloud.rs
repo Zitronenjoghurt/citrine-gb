@@ -1,4 +1,6 @@
-use super::{SaveStore, autosave_cloud, decode_meta, decompress};
+use super::{SaveStore, autosave_cloud, console_code, console_of_code, decode_meta, decompress};
+use citrine_gb::console::ConsoleKind;
+use citrine_gb::persistence::state::is_gba_state;
 use citrine_gb_net::SavePayload;
 use std::collections::BTreeSet;
 
@@ -10,6 +12,8 @@ const AUTOSAVE_SLOT: &str = "auto-";
 const BATTERY_ROLES: &[&str] = &["sav", "meta", "name"];
 const STATE_ROLES: &[&str] = &["snap", "meta", "thumb", "name"];
 const AUTOSAVE_ROLES: &[&str] = &["snap", "meta", "thumb"];
+const CONSOLE_ROLE: &str = "console";
+const GAME_CONSOLE: &str = "game.console";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LocalSave {
@@ -145,16 +149,59 @@ impl SaveStore {
         if !self.backend.exists(rom_key, &save.file(primary)) {
             return None;
         }
-        let files = save
-            .roles()
-            .iter()
-            .filter_map(|role| {
-                self.backend
-                    .read(rom_key, &save.file(role))
-                    .map(|data| (role.to_string(), data))
-            })
-            .collect();
-        Some(SavePayload { files })
+        let mut payload = SavePayload {
+            files: save
+                .roles()
+                .iter()
+                .filter_map(|role| {
+                    self.backend
+                        .read(rom_key, &save.file(role))
+                        .map(|data| (role.to_string(), data))
+                })
+                .collect(),
+        };
+        if self.holds_gba(rom_key, save, &payload) {
+            payload.files.push((
+                CONSOLE_ROLE.to_string(),
+                vec![console_code(ConsoleKind::Gba)],
+            ));
+        }
+        Some(payload)
+    }
+
+    fn holds_gba(&self, rom_key: &str, save: &LocalSave, payload: &SavePayload) -> bool {
+        let meta_tag = payload.file("meta").and_then(|meta| meta.get(8)).copied();
+        match save {
+            LocalSave::Snapshot(_) | LocalSave::Autosave(_) => {
+                meta_tag == Some(console_code(ConsoleKind::Gba))
+                    || payload.file("snap").is_some_and(is_gba_state)
+            }
+            LocalSave::Battery | LocalSave::OtherBattery(_) => match self.game_console(rom_key) {
+                Some(console) => console == ConsoleKind::Gba,
+                None => meta_tag.is_some(),
+            },
+        }
+    }
+
+    pub fn game_console(&self, rom_key: &str) -> Option<ConsoleKind> {
+        let code = *self.backend.read(rom_key, GAME_CONSOLE)?.first()?;
+        console_of_code(code)
+    }
+
+    pub fn set_game_console(&self, rom_key: &str, console: ConsoleKind) -> std::io::Result<()> {
+        if self.game_console(rom_key) == Some(console) {
+            return Ok(());
+        }
+        self.write(rom_key, GAME_CONSOLE, &[console_code(console)])
+    }
+
+    pub fn takes(&self, rom_key: &str, payload: &SavePayload) -> bool {
+        let gba = is_gba_payload(payload);
+        if gba && !cfg!(feature = "gba") {
+            return false;
+        }
+        self.game_console(rom_key)
+            .is_none_or(|console| (console == ConsoleKind::Gba) == gba)
     }
 
     pub fn write_payload(
@@ -166,6 +213,9 @@ impl SaveStore {
         let primary = save.roles()[0];
         if payload.file(primary).is_none() {
             return Err(std::io::Error::other("the save has no data"));
+        }
+        if is_gba_payload(payload) {
+            self.set_game_console(rom_key, ConsoleKind::Gba)?;
         }
         for role in save.roles().iter().rev() {
             match payload.file(role) {
@@ -331,6 +381,10 @@ impl SaveStore {
     }
 }
 
+pub fn is_gba_payload(payload: &SavePayload) -> bool {
+    payload.file(CONSOLE_ROLE) == Some(&[console_code(ConsoleKind::Gba)][..])
+}
+
 pub fn thumb_of(payload: &SavePayload) -> Option<Vec<u8>> {
     payload.file("thumb").and_then(decompress)
 }
@@ -345,7 +399,7 @@ pub fn saved_at_of(payload: &SavePayload) -> u64 {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use citrine_gb::gb::GbModel;
+    use citrine_gb::console::ConsoleKind;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -361,10 +415,10 @@ mod tests {
         let (store, root) = new_store("items");
         store.store_battery(KEY, &[1; 64]).unwrap();
         store
-            .store_snapshot(KEY, 2, &[2; 50], &[0; 160 * 144 * 4], GbModel::Cgb)
+            .store_snapshot(KEY, 2, &[2; 50], &[0; 160 * 144 * 4], ConsoleKind::Gbc)
             .unwrap();
         store
-            .store_autosave(KEY, &[3; 40], &[0; 160 * 144 * 4], GbModel::Dmg, 5)
+            .store_autosave(KEY, &[3; 40], &[0; 160 * 144 * 4], ConsoleKind::Gb, 5)
             .unwrap();
         let items = store.local_items(KEY, "dev1");
         let slots: Vec<&str> = items.iter().map(|i| i.slot.as_str()).collect();
@@ -420,7 +474,7 @@ mod tests {
         let (store, root) = new_store("autosave-order");
         let frame = vec![0; 160 * 144 * 4];
         store
-            .store_autosave(KEY, &[1; 8], &frame, GbModel::Dmg, 5)
+            .store_autosave(KEY, &[1; 8], &frame, ConsoleKind::Gb, 5)
             .unwrap();
         let mut older = store.read_payload(KEY, &LocalSave::Autosave(0)).unwrap();
         for (role, data) in &mut older.files {
@@ -437,6 +491,62 @@ mod tests {
         );
         store.prune_autosaves(KEY, 1).unwrap();
         assert_eq!(store.autosave_ids(KEY), [0]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_gba_save_carries_the_console_tag_to_the_other_store() {
+        let (store, root) = new_store("tag");
+        store.set_game_console(KEY, ConsoleKind::Gba).unwrap();
+        store.store_battery(KEY, &[4; 512]).unwrap();
+        let mut state = b"CGBA\x01".to_vec();
+        state.extend([5; 40]);
+        store
+            .store_snapshot(KEY, 0, &state, &[0; 240 * 160 * 4], ConsoleKind::Gba)
+            .unwrap();
+        let items = store.local_items(KEY, "dev1");
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| is_gba_payload(&item.payload)));
+
+        let (copy, copy_root) = new_store("tag-copy");
+        assert_eq!(copy.game_console(KEY), None);
+        assert_eq!(copy.takes(KEY, &items[0].payload), cfg!(feature = "gba"));
+        copy.write_payload(KEY, &items[1].save, &items[1].payload)
+            .unwrap();
+        assert_eq!(copy.game_console(KEY), Some(ConsoleKind::Gba));
+        copy.write_payload(KEY, &items[0].save, &items[0].payload)
+            .unwrap();
+        assert_eq!(copy.load_battery(KEY), Some(vec![4; 512]));
+        let again = copy.local_items(KEY, "dev2");
+        assert_eq!(again[0].payload.hash(), items[0].payload.hash());
+        assert_eq!(again[1].payload.hash(), items[1].payload.hash());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(copy_root);
+    }
+
+    #[test]
+    fn an_untagged_old_save_reads_as_game_boy() {
+        let (store, root) = new_store("untagged");
+        store.store_battery(KEY, &[1; 64]).unwrap();
+        let old = store.read_payload(KEY, &LocalSave::Battery).unwrap();
+        assert!(!is_gba_payload(&old));
+        assert!(store.takes(KEY, &old));
+        store.set_game_console(KEY, ConsoleKind::Gbc).unwrap();
+        assert!(store.takes(KEY, &old));
+        store.set_game_console(KEY, ConsoleKind::Gba).unwrap();
+        assert!(!store.takes(KEY, &old));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_gba_save_never_lands_on_a_game_boy_game() {
+        let (store, root) = new_store("foreign");
+        store.store_battery(KEY, &[1; 64]).unwrap();
+        let mut gba = store.read_payload(KEY, &LocalSave::Battery).unwrap();
+        gba.files.push((CONSOLE_ROLE.to_string(), vec![2]));
+        assert!(is_gba_payload(&gba));
+        store.set_game_console(KEY, ConsoleKind::Gb).unwrap();
+        assert!(!store.takes(KEY, &gba));
         let _ = std::fs::remove_dir_all(root);
     }
 

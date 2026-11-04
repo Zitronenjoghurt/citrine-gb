@@ -5,7 +5,11 @@ use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::icons;
 use crate::media::recording::{self, Availability, FinishedRecording, Outcome, StopReason};
 use crate::media::{Frame as MediaFrame, MediaId, MediaItem, MediaKind, NewMedia};
+use crate::progress::Progress;
 use egui::Context;
+
+const CODEC_LOAD: &str = "codec";
+const RECORDING_LOAD: &str = "recording";
 
 impl Citrine {
     pub(super) fn media_saved(&mut self, id: MediaId, touch: bool) {
@@ -84,9 +88,10 @@ impl Citrine {
             text = text.size(px);
         }
         let button = egui::Button::new(text).min_size(size.unwrap_or_default());
-        let loaded = self.emulator.gb.cartridge.has_rom_loaded;
+        let loaded = self.emulator.has_game();
         match recording::availability(
-            self.emulator.gb.apu.output_sample_rate,
+            self.recording_source(),
+            self.emulator.sample_rate(),
             self.ui.settings.recording_scale,
         ) {
             Availability::Ready | Availability::Checking | Availability::Download => ui
@@ -98,18 +103,23 @@ impl Citrine {
         }
     }
 
+    fn recording_source(&self) -> recording::Source {
+        recording::Source::new(self.emulator.video(), self.emulator.timing())
+    }
+
     pub(super) fn toggle_recording(&mut self) {
         if self.emulator.screen_recorder.is_recording() {
             self.emulator.screen_recorder.stop();
             return;
         }
-        if !self.emulator.gb.cartridge.has_rom_loaded {
+        if !self.emulator.has_game() {
             self.toasts.error("Load a ROM before recording");
             return;
         }
-        let rate = self.emulator.gb.apu.output_sample_rate;
+        let rate = self.emulator.sample_rate();
         let scale = self.ui.settings.recording_scale;
-        match recording::availability(rate, scale) {
+        let source = self.recording_source();
+        match recording::availability(source, rate, scale) {
             Availability::Ready => {}
             Availability::Checking => {
                 self.record_when_ready = true;
@@ -125,7 +135,11 @@ impl Citrine {
             }
         }
         let new = NewMedia::current(MediaKind::Recording, &self.emulator);
-        if let Err(err) = self.emulator.screen_recorder.start(new, rate, scale) {
+        if let Err(err) = self
+            .emulator
+            .screen_recorder
+            .start(new, source, rate, scale)
+        {
             self.toasts
                 .error(format!("Could not start recording: {err}"));
         }
@@ -148,7 +162,6 @@ impl Citrine {
         self.codec_prompt = false;
         if recording::download_codec(download) {
             self.record_when_ready = true;
-            self.toasts.info("Downloading the video codec");
         } else {
             self.toasts
                 .info("Recording needs the video codec, so nothing was recorded");
@@ -167,7 +180,8 @@ impl Citrine {
         if self.record_when_ready
             && !matches!(
                 recording::availability(
-                    self.emulator.gb.apu.output_sample_rate,
+                    self.recording_source(),
+                    self.emulator.sample_rate(),
                     self.ui.settings.recording_scale,
                 ),
                 Availability::Checking
@@ -194,6 +208,27 @@ impl Citrine {
             Some(StopReason::Asked | StopReason::Failed) | None => {}
         }
         self.store_recordings();
+    }
+
+    pub(super) fn show_loads(&mut self) {
+        let now = web_time::Instant::now();
+        match recording::codec_progress().filter(|_| self.record_when_ready) {
+            Some(progress) => {
+                self.toasts
+                    .load(CODEC_LOAD, "Downloading the video codec", progress, now);
+            }
+            None => self.toasts.load_done(CODEC_LOAD),
+        }
+        if self.emulator.screen_recorder.is_saving() {
+            self.toasts.load(
+                RECORDING_LOAD,
+                "Saving the recording",
+                Progress::unknown(),
+                now,
+            );
+        } else {
+            self.toasts.load_done(RECORDING_LOAD);
+        }
     }
 
     pub(super) fn store_recordings(&mut self) {

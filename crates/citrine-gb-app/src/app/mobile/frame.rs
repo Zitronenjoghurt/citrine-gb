@@ -65,9 +65,7 @@ pub fn rail(ui: &mut Ui, entries: &[Entry]) -> Option<Place> {
 }
 
 fn show(ui: &mut Ui, cell: Rect, entry: &Entry) -> bool {
-    let response = ui
-        .interact(cell, ui.id().with(("place", entry.place)), Sense::click())
-        .on_hover_text(entry.place.label());
+    let response = ui.interact(cell, ui.id().with(("place", entry.place)), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Button,

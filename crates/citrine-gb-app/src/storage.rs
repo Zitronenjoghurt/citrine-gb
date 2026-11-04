@@ -2,16 +2,31 @@ mod autosaves;
 mod backend;
 mod battery;
 pub mod cloud;
+mod crash;
+#[cfg(any(target_arch = "wasm32", test))]
+mod mirror;
 mod names;
 mod snapshots;
 
 pub(crate) use backend::Backend;
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::data_dir;
-use citrine_gb::gb::GbModel;
+#[cfg(target_arch = "wasm32")]
+pub use backend::open_saves;
+use citrine_gb::console::{ConsoleKind, VideoSpec};
+pub use crash::CrashSave;
 
-pub const THUMB_WIDTH: usize = 80;
-pub const THUMB_HEIGHT: usize = 72;
+pub fn thumb_size(console: Option<ConsoleKind>) -> [usize; 2] {
+    let video = console.unwrap_or(ConsoleKind::Gb).video();
+    [video.width / 2, video.height / 2]
+}
+
+pub fn thumb_size_of(pixels: &[u8]) -> Option<[usize; 2]> {
+    [ConsoleKind::Gb, ConsoleKind::Gba]
+        .map(|kind| thumb_size(Some(kind)))
+        .into_iter()
+        .find(|[width, height]| width * height * 4 == pixels.len())
+}
 
 const BATTERY: &str = "battery.sav";
 const BATTERY_META: &str = "battery.meta";
@@ -56,10 +71,14 @@ pub struct SnapshotInfo {
     pub saved_at: u64,
     pub thumbnail: Vec<u8>,
     pub name: Option<String>,
-    pub console: Option<GbModel>,
+    pub console: Option<ConsoleKind>,
 }
 
 impl SnapshotInfo {
+    pub fn thumb_size(&self) -> [usize; 2] {
+        thumb_size(self.console)
+    }
+
     pub fn display_name(&self) -> String {
         match &self.name {
             Some(name) => name.clone(),
@@ -68,29 +87,36 @@ impl SnapshotInfo {
     }
 }
 
-fn encode_meta(saved_at: u64, model: GbModel) -> Vec<u8> {
+fn console_code(console: ConsoleKind) -> u8 {
+    match console {
+        ConsoleKind::Gb => 0,
+        ConsoleKind::Gbc => 1,
+        ConsoleKind::Gba => 2,
+    }
+}
+
+fn console_of_code(code: u8) -> Option<ConsoleKind> {
+    match code {
+        0 => Some(ConsoleKind::Gb),
+        1 => Some(ConsoleKind::Gbc),
+        2 => Some(ConsoleKind::Gba),
+        _ => None,
+    }
+}
+
+fn encode_meta(saved_at: u64, console: ConsoleKind) -> Vec<u8> {
     let mut meta = saved_at.to_le_bytes().to_vec();
-    meta.push(model as u8);
+    meta.push(console_code(console));
     meta
 }
 
-fn decode_meta(meta: &[u8]) -> (Option<u64>, Option<GbModel>) {
+fn decode_meta(meta: &[u8]) -> (Option<u64>, Option<ConsoleKind>) {
     let saved_at = meta
         .get(..8)
         .and_then(|b| b.try_into().ok())
         .map(u64::from_le_bytes);
-    let console = match meta.get(8) {
-        Some(0) => Some(GbModel::Dmg),
-        Some(1) => Some(GbModel::Cgb),
-        _ => None,
-    };
+    let console = meta.get(8).copied().and_then(console_of_code);
     (saved_at, console)
-}
-
-fn state_console(state: &[u8]) -> Option<GbModel> {
-    citrine_gb::persistence::full_dump::FullDump::from_brotli(state)
-        .ok()
-        .map(|dump| dump.gb.model)
 }
 
 pub fn default_slot_name(slot: usize) -> String {
@@ -99,6 +125,10 @@ pub fn default_slot_name(slot: usize) -> String {
 
 const SETTINGS_NAMESPACE: &str = "settings";
 const SETTINGS: &str = "settings.json";
+#[cfg(feature = "gba")]
+const GBA_BIOS: &str = "gba-bios.bin";
+#[cfg(feature = "gba")]
+const GBA_BIOS_NAME: &str = "gba-bios-name.txt";
 
 pub struct SettingsStore {
     backend: Backend,
@@ -138,6 +168,32 @@ impl SettingsStore {
 
     pub fn location(&self) -> String {
         self.backend.location()
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn gba_bios(&self) -> Option<(Vec<u8>, String)> {
+        let image = self.backend.read(SETTINGS_NAMESPACE, GBA_BIOS)?;
+        let name = self
+            .backend
+            .read(SETTINGS_NAMESPACE, GBA_BIOS_NAME)
+            .and_then(|name| String::from_utf8(name).ok())
+            .unwrap_or_else(|| GBA_BIOS.to_owned());
+        Some((image, name))
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn store_gba_bios(&self, bios: Option<(&[u8], &str)>) -> std::io::Result<()> {
+        match bios {
+            Some((image, name)) => {
+                self.backend.write(SETTINGS_NAMESPACE, GBA_BIOS, image)?;
+                self.backend
+                    .write(SETTINGS_NAMESPACE, GBA_BIOS_NAME, name.as_bytes())
+            }
+            None => {
+                self.backend.delete(SETTINGS_NAMESPACE, GBA_BIOS_NAME)?;
+                self.backend.delete(SETTINGS_NAMESPACE, GBA_BIOS)
+            }
+        }
     }
 }
 
@@ -256,20 +312,21 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn downscale(frame: &[u8]) -> Vec<u8> {
-    const SRC_WIDTH: usize = THUMB_WIDTH * 2;
-    let mut out = vec![0u8; THUMB_WIDTH * THUMB_HEIGHT * 4];
-    if frame.len() < SRC_WIDTH * THUMB_HEIGHT * 2 * 4 {
+fn downscale(frame: &[u8], video: VideoSpec) -> Vec<u8> {
+    let [width, height] = [video.width / 2, video.height / 2];
+    let source_width = width * 2;
+    let mut out = vec![0u8; width * height * 4];
+    if frame.len() < source_width * height * 2 * 4 {
         return out;
     }
-    for y in 0..THUMB_HEIGHT {
-        for x in 0..THUMB_WIDTH {
+    for y in 0..height {
+        for x in 0..width {
             for channel in 0..4 {
                 let at = |dy: usize, dx: usize| -> u32 {
-                    frame[(((y * 2 + dy) * SRC_WIDTH) + x * 2 + dx) * 4 + channel] as u32
+                    frame[(((y * 2 + dy) * source_width) + x * 2 + dx) * 4 + channel] as u32
                 };
                 let sum = at(0, 0) + at(0, 1) + at(1, 0) + at(1, 1);
-                out[(y * THUMB_WIDTH + x) * 4 + channel] = (sum / 4) as u8;
+                out[(y * width + x) * 4 + channel] = (sum / 4) as u8;
             }
         }
     }
@@ -278,3 +335,21 @@ fn downscale(frame: &[u8]) -> Vec<u8> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
+
+#[cfg(target_arch = "wasm32")]
+pub fn keep_crash_save(crash: &CrashSave) {
+    backend::keep_crash_save(&crash.encode());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn recover_crash_save(raw: &str) {
+    let Some(crash) = CrashSave::decode(raw) else {
+        log::error!("the autosave kept in local storage is damaged, dropping it");
+        return;
+    };
+    match SaveStore::default().recover_crash_save(&crash) {
+        Ok(true) => log::info!("took the autosave kept in local storage, it was newer"),
+        Ok(false) => {}
+        Err(err) => log::error!("couldn't take the autosave kept in local storage: {err}"),
+    }
+}

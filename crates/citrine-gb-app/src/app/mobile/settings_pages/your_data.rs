@@ -1,7 +1,8 @@
 use crate::app::Citrine;
 use crate::app::mobile::kit::{self, Row};
+use crate::app::widgets::progress::ProgressBar;
 use crate::app::widgets::settings::your_data::{
-    DELETE, EXPORT, Exporting, IMPORT, Request, count_text, size_text,
+    DELETE, EXPORT, IMPORT, Request, count_text, load, loading, size_text,
 };
 use crate::icons;
 use egui::Ui;
@@ -34,8 +35,8 @@ impl Citrine {
             }
         });
         ui.add_space(12.0);
-        let busy = state.exporting == Exporting::Busy;
-        let export = if busy { "Exporting…" } else { EXPORT };
+        let busy = loading(state);
+        let export = EXPORT;
         let mut request = None;
         kit::list(ui, |list| {
             let row = list.custom(|ui| {
@@ -50,10 +51,16 @@ impl Citrine {
             if row.clicked() {
                 request = Some(Request::Export);
             }
-            if list
-                .row(Row::new(IMPORT).icon(icons::UPLOAD_SIMPLE).no_chevron())
-                .clicked()
-            {
+            let row = list.custom(|ui| {
+                ui.add_enabled_ui(!busy, |ui| {
+                    Row::new(IMPORT)
+                        .icon(icons::UPLOAD_SIMPLE)
+                        .no_chevron()
+                        .show(ui)
+                })
+                .inner
+            });
+            if row.clicked() {
                 request = Some(Request::Import);
             }
             if list
@@ -68,6 +75,12 @@ impl Citrine {
                 request = Some(Request::Delete);
             }
         });
+        if let Some((label, progress)) = load(state) {
+            ui.add_space(8.0);
+            kit::card(ui, |ui| {
+                kit::padded(ui, |ui| ui.add(ProgressBar::new(&label, progress)));
+            });
+        }
         if request.is_some() {
             state.request = request;
         }

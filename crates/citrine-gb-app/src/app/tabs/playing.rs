@@ -1,8 +1,10 @@
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::recent::RecentRoms;
 use crate::emulator::Emulator;
+use crate::icons;
 use crate::online::{Online, Seen, seen};
-use crate::play::{IncomingInvite, Play, PlaySession, Stage};
+use crate::play::{Ending, IncomingInvite, Play, PlaySession, Stage};
+use crate::progress::Progress;
 use citrine_gb_net::{GameHash, Mode, OnlineId, SessionId};
 use egui::Ui;
 use std::collections::HashMap;
@@ -13,19 +15,35 @@ mod bar;
 mod confirms;
 mod lines;
 mod picker;
+mod room;
+mod room_bar;
 mod screen;
 mod sound;
 
-pub use actions::{invite, join, join_with, shelf_from, watch};
+pub use actions::{
+    group_link, group_partners, invite, join, join_with, link_theirs, shelf_from, unlink_group,
+    watch,
+};
 pub use banners::{Answer, BannerAction, ask_banner, banner};
-pub use bar::{BarFacts, Switch, bar, bar_switches, latency, settle_bar};
-pub use confirms::{stop_confirm, switch_confirm};
+pub use bar::{BarFacts, Switch, bar, bar_switches, server_latency, settle_bar};
+#[cfg(test)]
+pub use confirms::switch_lines;
+pub use confirms::{join_confirm, relink_confirm, stop_confirm, switch_confirm};
 pub use lines::{
-    ending_line, friend_name, friend_tab_line, game_title, play_subtitle, quality, screen_note,
-    short_name,
+    ending_line, friend_tab_line, full_name, game_title, member_name, play_subtitle, quality,
+    screen_note, short_name,
 };
 pub use picker::{Pick, picker};
-pub use screen::{arriving, note_over, paint_friend_screen};
+#[cfg(test)]
+pub use room::member_menu;
+pub use room::{RoomFacts, adds_to_room, in_room, invite_closed, invite_note};
+pub use room_bar::{
+    MemberAction, MyMenu, RoomAction, header_ui, member_menu_ui, member_row, request_card,
+};
+pub use screen::{
+    WatchCaption, WatchTap, arriving, friend_console, note_over, paint_friend_screen,
+    watch_thumbnail, watched_friend, watched_name,
+};
 pub use sound::{FriendSound, friend_sound, friend_sound_bar};
 
 #[cfg(test)]
@@ -43,13 +61,51 @@ pub struct PlayingUi {
     pub picking: Option<PickFor>,
     pub switching: Option<OnlineId>,
     pub switch_to: Option<OnlineId>,
+    pub joining: Option<IncomingInvite>,
+    pub join_after: Option<IncomingInvite>,
     pub file_for: Option<PickFor>,
     pub swapped: bool,
     pub wants_copy: bool,
     pub copy_for: bool,
     pub pick_query: String,
+    pub relinking: Option<Relink>,
+    pub unlink_load: Option<usize>,
+    pub room_sheet: Option<RoomSheet>,
+    pub room_seen: usize,
+    pub room_draft: String,
     pick_shown: bool,
     fits: HashMap<(SessionId, Option<GameHash>), Fit>,
+}
+
+impl PlayingUi {
+    pub fn handed_back(&mut self, friend: OnlineId, name: &str) {
+        self.ended = ending_line(name, Ending::Dropped, true).map(|line| Ended {
+            friend,
+            line,
+            paused: true,
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Relink {
+    pub target: OnlineId,
+    pub take: bool,
+    pub theirs: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomSheet {
+    Member(OnlineId),
+    Chat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomGo {
+    Chat,
+    Add,
+    Message(OnlineId),
+    Profile(OnlineId),
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +173,8 @@ pub fn play_button(play: &Play, online: &Online, friend: OnlineId) -> Option<Pla
     }
     match play.session().filter(|s| s.is_live()) {
         Some(session) if session.friend() == friend => None,
+        Some(_) if in_room(play, friend) => None,
+        Some(_) if adds_to_room(play, online) => Some(PlayButton::Ready),
         Some(_) => Some(PlayButton::Switch),
         None => Some(PlayButton::Ready),
     }
@@ -167,22 +225,113 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
         crate::app::tabs::linked::show(viewer, ui);
         return;
     };
-    if session.stage() == Stage::Playing && watching(session) {
-        let sound = FriendSound::of(&viewer.ui.settings.online);
-        if let Some(sound) = friend_sound_bar(ui, sound) {
-            sound.store(&mut viewer.ui.settings.online);
-            viewer.ui.settings.dirty = true;
+    let group_watch = viewer
+        .play
+        .room()
+        .is_some_and(|r| r.watched_console().is_some());
+    if group_watch || (session.stage() == Stage::Playing && watching(session)) {
+        if !group_watch {
+            let sound = FriendSound::of(&viewer.ui.settings.online);
+            if let Some(sound) = friend_sound_bar(ui, sound) {
+                sound.store(&mut viewer.ui.settings.online);
+                viewer.ui.settings.dirty = true;
+            }
         }
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, egui::Sense::hover());
-        paint_friend_screen(&mut viewer.ui.playing, ui, session, area);
+        let console = friend_console(viewer.play, session);
+        paint_friend_screen(&mut viewer.ui.playing, ui, console, area);
         return;
     }
     let area = ui.available_rect_before_wrap();
     ui.allocate_rect(area, egui::Sense::hover());
-    let name = friend_name(viewer.online, session.friend());
+    let name = member_name(viewer.play, viewer.online, session.friend());
     let line = friend_tab_line(&name, session);
     note_over(ui, area, &line, None);
+}
+
+pub fn room_facts(play: &Play, online: &Online, playing: &PlayingUi) -> Option<RoomFacts> {
+    RoomFacts::of(play, online, playing.room_seen)
+}
+
+pub fn my_menu(play: &Play, online: &Online, sound: FriendSound) -> Option<MyMenu> {
+    let session = play.session()?;
+    Some(MyMenu::of(
+        session,
+        &lines::member_name(play, online, session.friend()),
+        sound,
+    ))
+}
+
+pub fn settle_room(
+    action: RoomAction,
+    play: &mut Play,
+    online: &mut Online,
+    emulator: &Emulator,
+    playing: &mut PlayingUi,
+) -> Option<RoomGo> {
+    if matches!(action, RoomAction::Member(..)) {
+        playing.room_sheet = None;
+    }
+    match action {
+        RoomAction::Open(who) => playing.room_sheet = Some(RoomSheet::Member(who)),
+        RoomAction::Member(who, MemberAction::Watch(on)) => {
+            let other = play.room().is_some_and(|r| r.in_other_group(who));
+            play.watch_group(who, on);
+            if !other && let Some(session) = play.session_mut() {
+                session.set_watch_friend(on);
+            }
+        }
+        RoomAction::Member(
+            _,
+            MemberAction::Link {
+                target,
+                moves_me,
+                theirs,
+            },
+        ) => {
+            if moves_me {
+                playing.relinking = Some(Relink {
+                    target,
+                    take: false,
+                    theirs,
+                });
+            } else if theirs {
+                link_theirs(play, emulator, target);
+            } else {
+                play.link(target);
+            }
+        }
+        RoomAction::Member(_, MemberAction::Unlink) => {
+            play.unlink();
+        }
+        RoomAction::Member(_, MemberAction::OpenCopy) => playing.wants_copy = true,
+        RoomAction::Member(who, MemberAction::Message) => return Some(RoomGo::Message(who)),
+        RoomAction::Member(who, MemberAction::Profile) => return Some(RoomGo::Profile(who)),
+        RoomAction::Member(who, MemberAction::AddFriend) => {
+            online.add_friend(who);
+        }
+        RoomAction::Bar(bar) => bar::settle_bar(bar, play, online, playing),
+        RoomAction::Add => return Some(RoomGo::Add),
+        RoomAction::Chat => return Some(RoomGo::Chat),
+        RoomAction::TakeLink(who) => {
+            let linked = room_facts(play, online, playing).is_some_and(|f| f.mine.is_some());
+            if linked {
+                playing.relinking = Some(Relink {
+                    target: who,
+                    take: true,
+                    theirs: false,
+                });
+            } else {
+                play.take_link(who);
+            }
+        }
+        RoomAction::DropAsks => play.drop_link_asks(),
+        RoomAction::Unlink(who) => {
+            play.unlink_member(who);
+        }
+    }
+    None
 }
 
 pub fn needs_copy(session: &PlaySession) -> bool {
@@ -199,11 +348,22 @@ pub fn pending_ask(play: &Play) -> Option<IncomingInvite> {
     play.invites().last().cloned()
 }
 
-pub fn receiving(session: &PlaySession) -> Option<(u32, u32)> {
-    match session.stage() {
-        Stage::Receiving { got, total } => Some((got, total)),
-        _ => None,
+pub fn transfer(session: &PlaySession, name: &str) -> Option<(String, Progress)> {
+    if let Stage::Receiving { got, total } = session.stage() {
+        let title = game_title(session);
+        let label = format!("{}  Getting {title} from {name}", icons::DOWNLOAD_SIMPLE);
+        return Some((label, Progress::bytes(u64::from(got), u64::from(total))));
     }
+    if session.sends_game() {
+        let title = session
+            .my_game()
+            .map(lines::card_name)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("your game");
+        let label = format!("{}  Sending {title} to {name}", icons::UPLOAD_SIMPLE);
+        return Some((label, Progress::unknown()));
+    }
+    None
 }
 
 #[cfg(test)]

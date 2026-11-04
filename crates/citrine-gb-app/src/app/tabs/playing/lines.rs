@@ -33,8 +33,15 @@ pub fn short_name(display_name: &str) -> &str {
         .unwrap_or(display_name)
 }
 
-pub fn friend_name(online: &Online, friend: OnlineId) -> String {
-    short_name(&online.display_name(friend)).to_owned()
+pub fn full_name(play: &Play, online: &Online, who: OnlineId) -> String {
+    match play.room().and_then(|r| r.member(who)) {
+        Some(member) => member.name.clone(),
+        None => online.display_name(who),
+    }
+}
+
+pub fn member_name(play: &Play, online: &Online, who: OnlineId) -> String {
+    short_name(&full_name(play, online, who)).to_owned()
 }
 
 pub fn ending_line(name: &str, ending: Ending, played: bool) -> Option<String> {
@@ -45,6 +52,7 @@ pub fn ending_line(name: &str, ending: Ending, played: bool) -> Option<String> {
         Ending::Dropped => Some(format!("Lost the connection to {name}.")),
         Ending::Failed if played => Some(format!("Playing with {name} stopped.")),
         Ending::Failed => Some(format!("Couldn't start playing with {name}.")),
+        Ending::Moved => Some("You joined from another device.".into()),
     }
 }
 
@@ -72,15 +80,6 @@ pub fn other_game_line(
     }
 }
 
-pub fn size_line(got: u32, total: u32) -> String {
-    pub(super) const MB: f64 = 1_000_000.0;
-    if total as f64 >= MB {
-        format!("{:.1} of {:.1} MB", got as f64 / MB, total as f64 / MB)
-    } else {
-        format!("{} of {} KB", got.div_ceil(1000), total.div_ceil(1000))
-    }
-}
-
 pub fn play_subtitle(play: &Play, friend: OnlineId) -> Option<String> {
     if let Some(session) = play
         .session()
@@ -94,6 +93,14 @@ pub fn play_subtitle(play: &Play, friend: OnlineId) -> Option<String> {
             _ => "Playing with you",
         };
         return Some(line.into());
+    }
+    if let Some(room) = play.room().filter(|r| r.is_live()) {
+        if room.inviting().contains(&friend) {
+            return Some("Invite sent".into());
+        }
+        if room.others().any(|w| w == friend) {
+            return Some("In the room".into());
+        }
     }
     play.invites()
         .iter()

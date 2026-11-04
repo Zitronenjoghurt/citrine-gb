@@ -18,6 +18,8 @@ pub struct CgbControl {
     pub div_reset_pending: bool,
     #[cfg_attr(feature = "serde", serde(default))]
     pub div_reset_lookahead: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ir_light: bool,
 }
 
 impl Default for CgbControl {
@@ -42,7 +44,12 @@ impl CgbControl {
             ff75: 0x00,
             div_reset_pending: false,
             div_reset_lookahead: false,
+            ir_light: false,
         }
+    }
+
+    pub fn ir_led(&self) -> bool {
+        self.cgb_mode && self.rp & 0x01 != 0
     }
 
     pub fn normal_speed_cycle(&mut self) -> bool {
@@ -91,7 +98,10 @@ impl CgbControl {
 
         match addr {
             0xFF4D if self.cgb_mode => ((self.double_speed as u8) << 7) | 0x7E | (self.key1 & 0x01),
-            0xFF56 if self.cgb_mode => (self.rp & 0xC1) | 0x2E,
+            0xFF56 if self.cgb_mode => {
+                let receiving = self.ir_light && self.rp & 0xC0 == 0xC0;
+                (self.rp & 0xC1) | 0x2C | if receiving { 0x00 } else { 0x02 }
+            }
             0xFF72 => self.ff72,
             0xFF73 => self.ff73,
             0xFF74 if self.cgb_mode => self.ff74,

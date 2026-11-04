@@ -1,10 +1,36 @@
 use super::lines::card_name;
+use super::room::{RoomFacts, adds_to_room, in_room, names};
 use super::{Fit, PickFor, PlayingUi, fit_of};
 use crate::app::ui_state::recent::RecentRoms;
 use crate::emulator::Emulator;
 use crate::online::Online;
-use crate::play::{GameFile, IncomingInvite, MyGame, Play, Shelf, model_of};
+use crate::play::{GameFile, IncomingInvite, MyGame, Play, PlaySession, Shelf, kind_of};
 use citrine_gb_net::OnlineId;
+
+pub fn group_partners(play: &Play, online: &Online) -> Option<String> {
+    group_link(play, online).map(|(partners, _)| partners)
+}
+
+pub fn group_link(play: &Play, online: &Online) -> Option<(String, Option<u16>)> {
+    if !play.session().is_some_and(PlaySession::in_group) {
+        return None;
+    }
+    let facts = RoomFacts::of(play, online, 0)?;
+    let partners = facts.partners();
+    let short: Vec<&str> = partners.iter().map(|p| p.short()).collect();
+    let slowest = partners.iter().filter_map(|p| p.ms).max();
+    Some((names(&short), slowest))
+}
+
+pub fn unlink_group(play: &mut Play, emulator: &mut Emulator) -> bool {
+    if !play.session().is_some_and(PlaySession::in_group) || !play.unlink() {
+        return false;
+    }
+    if let Some(back) = play.session_mut().and_then(PlaySession::take_returned) {
+        emulator.keep_returned(back);
+    }
+    true
+}
 
 pub fn shelf_from(recent: &RecentRoms) -> Box<dyn Shelf> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -20,6 +46,30 @@ pub fn shelf_from(recent: &RecentRoms) -> Box<dyn Shelf> {
     }
 }
 
+pub fn link_theirs(play: &mut Play, emulator: &Emulator, who: OnlineId) -> bool {
+    let Some(card) = play
+        .room()
+        .and_then(|r| r.pair(who))
+        .and_then(|p| p.friend_game())
+        .cloned()
+    else {
+        return false;
+    };
+    let game = match play.find(&card.hash) {
+        Some(rom) => MyGame::Own(GameFile {
+            save: emulator.battery_for(&rom),
+            rom,
+            title: card_name(&card).to_string(),
+            kind: kind_of(card.console),
+            running: false,
+        }),
+        None => MyGame::Borrow {
+            save: emulator.borrowed_save(&card.hash),
+        },
+    };
+    play.play_theirs(who, game)
+}
+
 fn prepare(emulator: &mut Emulator, playing: &mut PlayingUi) {
     if let Err(err) = emulator.end_link() {
         log::error!("could not save the second game before playing together: {err:?}");
@@ -33,7 +83,7 @@ fn prepare(emulator: &mut Emulator, playing: &mut PlayingUi) {
 }
 
 fn tune(play: &mut Play, emulator: &Emulator) {
-    let rate = emulator.gb.apu.output_sample_rate;
+    let rate = emulator.sample_rate();
     if let Some(session) = play.session_mut() {
         session.set_sample_rate(rate);
     }
@@ -47,6 +97,9 @@ pub fn invite(
     recent: &RecentRoms,
     friend: OnlineId,
 ) -> bool {
+    if adds_to_room(play, online) && !in_room(play, friend) {
+        return play.invite(online, friend, None);
+    }
     if play
         .session()
         .is_some_and(|s| s.is_live() && s.friend() != friend)
@@ -101,6 +154,10 @@ pub fn join(
     recent: &RecentRoms,
     invite: &IncomingInvite,
 ) -> bool {
+    if play.is_live() {
+        playing.joining = Some(invite.clone());
+        return true;
+    }
     let fit = fit_of(playing, play, online, emulator, recent, invite);
     let game = match (fit, &invite.game) {
         (Fit::Open | Fit::Cable, _) => match emulator.game_file() {
@@ -112,7 +169,7 @@ pub fn join(
                 save: emulator.battery_for(&rom),
                 rom,
                 title: card_name(card).to_string(),
-                model: model_of(card.console),
+                kind: kind_of(card.console),
                 running: false,
             }),
             None => return false,

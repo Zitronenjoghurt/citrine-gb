@@ -9,8 +9,12 @@ pub struct FileChannels {
     pub second_rom_rx: Receiver<PickedFile>,
     pub boot_rom_tx: Sender<PickedFile>,
     pub boot_rom_rx: Receiver<PickedFile>,
+    pub gba_bios_tx: Sender<PickedFile>,
+    pub gba_bios_rx: Receiver<PickedFile>,
     pub play_rom_tx: Sender<PickedFile>,
     pub play_rom_rx: Receiver<PickedFile>,
+    pub picture_tx: Sender<PickedFile>,
+    pub picture_rx: Receiver<PickedFile>,
     pub sav_tx: Sender<Vec<PickedFile>>,
     pub sav_rx: Receiver<Vec<PickedFile>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -29,7 +33,9 @@ impl Default for FileChannels {
         let (rom_tx, rom_rx) = channel();
         let (second_rom_tx, second_rom_rx) = channel();
         let (boot_rom_tx, boot_rom_rx) = channel();
+        let (gba_bios_tx, gba_bios_rx) = channel();
         let (play_rom_tx, play_rom_rx) = channel();
+        let (picture_tx, picture_rx) = channel();
         let (sav_tx, sav_rx) = channel();
         #[cfg(not(target_arch = "wasm32"))]
         let (folder_tx, folder_rx) = channel();
@@ -42,8 +48,12 @@ impl Default for FileChannels {
             second_rom_rx,
             boot_rom_tx,
             boot_rom_rx,
+            gba_bios_tx,
+            gba_bios_rx,
             play_rom_tx,
             play_rom_rx,
+            picture_tx,
+            picture_rx,
             sav_tx,
             sav_rx,
             #[cfg(not(target_arch = "wasm32"))]

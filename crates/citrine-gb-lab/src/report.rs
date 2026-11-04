@@ -1,4 +1,4 @@
-use crate::emulator::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::emulator::Frame;
 use crate::metric::Polarity;
 use crate::runner::ComparisonReport;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,14 @@ impl Reporter for ConsoleReporter {
             "\n{} (reference) vs {} (candidate)",
             report.reference_name, report.candidate_name
         );
+        if let Some(refusal) = &report.candidate_refusal {
+            println!("{} refused the game: {refusal}", report.candidate_name);
+            println!(
+                "frames: {} from {} alone",
+                report.reference_frame_count, report.reference_name
+            );
+            return Ok(());
+        }
         println!(
             "frames: {} reference, {} candidate, {} compared",
             report.reference_frame_count, report.candidate_frame_count, report.compared_frame_count
@@ -134,17 +142,35 @@ impl FrameDumper {
             self.skipped += 1;
             return Ok(());
         }
+        let size = (reference.width, reference.height);
         write_png(
             &self.dir.join(format!("frame_{index:05}_ref.png")),
+            size,
             &reference.rgba,
         )?;
         write_png(
             &self.dir.join(format!("frame_{index:05}_cand.png")),
+            size,
             &candidate.rgba,
         )?;
         write_png(
             &self.dir.join(format!("frame_{index:05}_diff.png")),
+            size,
             &diff_rgba(&reference.rgba, &candidate.rgba),
+        )?;
+        self.dumped += 1;
+        Ok(())
+    }
+
+    pub fn handle_alone(&mut self, index: usize, frame: &Frame) -> anyhow::Result<()> {
+        if self.dumped >= self.max_dumps.unwrap_or(usize::MAX) {
+            self.skipped += 1;
+            return Ok(());
+        }
+        write_png(
+            &self.dir.join(format!("frame_{index:05}_ref.png")),
+            (frame.width, frame.height),
+            &frame.rgba,
         )?;
         self.dumped += 1;
         Ok(())
@@ -183,13 +209,9 @@ fn diff_rgba(a: &[u8], b: &[u8]) -> Vec<u8> {
     out
 }
 
-fn write_png(path: &Path, rgba: &[u8]) -> anyhow::Result<()> {
+fn write_png(path: &Path, (width, height): (usize, usize), rgba: &[u8]) -> anyhow::Result<()> {
     let file = std::fs::File::create(path)?;
-    let mut encoder = png::Encoder::new(
-        std::io::BufWriter::new(file),
-        SCREEN_WIDTH as u32,
-        SCREEN_HEIGHT as u32,
-    );
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header()?;

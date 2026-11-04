@@ -137,6 +137,9 @@ relay open to anyone; each one has a variable to change it, listed with its defa
 | `CITRINE_SESSION_KB_PER_SECOND` | 256 | KB per second each player may send in a play session |
 | `CITRINE_SESSION_BURST_MB` | 12 | MB a player may send at once in a play session, enough for a game and a saved state |
 | `CITRINE_MAX_INVITES` | 5 | Play invites one host may have waiting for an answer. A new invite to the same friend replaces the old one |
+| `CITRINE_ROOM_MEMBERS` | 16 | People in one room, 2 to 64 |
+| `CITRINE_ROOM_PLAYERS` | 8 | Members of one room who may run a game at once, 2 to 64 |
+| `CITRINE_ROOM_GRACE_SECS` | 60 | Seconds a member whose connection dropped keeps their place in the room |
 | `CITRINE_PASSWORD_CHECKS` | 2 | Relay password checks that run at once. Each takes about 19 MB of memory |
 | `CITRINE_PASSWORD_QUEUE` | 16 | Password checks that may wait their turn. More get "too many tries" |
 | `CITRINE_SIGN_UPS_PER_IP` | 3 | New accounts per hour from one address. More get "too many tries" |
@@ -155,6 +158,11 @@ shared files in its `files` folder. The server only stores encrypted messages an
 hash of each account's key, never the relay ID the keys come from. Chat messages stay until the account is deleted,
 also after they arrive, so a device that signs in later gets the whole history. The history counts
 toward `CITRINE_STORAGE_TOTAL_MB`, not toward a player's own storage.
+
+Relays before 0.9.0 deleted a message once it arrived, so older chats live only on the devices that
+had them. Each device signed in before the upgrade sends its chats once, encrypted for its own
+account, the next time it connects. The server keeps one copy per account and gives it to that
+account's other devices only, a device signed in later included.
 
 An account can be online on several devices at once. Each one gets every chat, friend change and
 invite, and the user's Manage menu lists the devices with a Sign out for each.

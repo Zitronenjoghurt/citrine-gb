@@ -7,10 +7,11 @@ use crate::local_link::{Game, LocalLink, Source};
 use crate::pad_input::PadSource;
 use crate::partner_link::PartnerLink;
 use crate::play::{PlaySession, Returned};
+use citrine_gb::console::{Console, ConsoleKind, Keys};
 use citrine_gb::error::GbResult;
-use citrine_gb::gb::GbModel;
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::machine::Machine;
 use citrine_gb::rom::Rom;
+use citrine_gb_net::OnlineId;
 
 impl Emulator {
     pub fn update_linked(
@@ -32,10 +33,13 @@ impl Emulator {
 
         if let Some(session) = session.as_deref_mut() {
             if let Some(back) = session.take_returned() {
+                if back.paused {
+                    self.handed_back = Some(back.friend);
+                }
                 self.adopt(back);
             }
             if session.wants_state() {
-                session.give_state(citrine_gb::netplay::encode_state(&self.gb)?);
+                session.give_state(self.encoded_state()?, self.drop_history.take());
             }
             if session.runs_engine() {
                 if self.advance_rollback(web_time::Instant::now(), session) {
@@ -46,7 +50,7 @@ impl Emulator {
                 self.update_avg_timer.stop();
                 return Ok(());
             }
-            if session.holds_my_game() || session.watching_only() {
+            if session.holds_my_game() || session.watching_only() || session.shelves_mine() {
                 self.last_update = Some(web_time::Instant::now());
                 self.update_avg_timer.stop();
                 return Ok(());
@@ -59,8 +63,10 @@ impl Emulator {
 
         if !self.running {
             self.advance(web_time::Instant::now(), None);
+            self.continue_step(ctx);
             return Ok(());
         }
+        self.drop_history = None;
 
         if self.advance(web_time::Instant::now(), cable) {
             self.update_texture(ctx);
@@ -84,6 +90,12 @@ impl Emulator {
             None => 0.0,
         };
         self.last_update = Some(now);
+        if !self.running && session.in_group() && !session.watching_only() {
+            if let Some(feed) = &mut self.audio_feed {
+                feed.set_paused(true);
+            }
+            return false;
+        }
         let mut ran = false;
         let step = std::time::Duration::from_secs_f64(dt.min(MAX_PLAY_STEP));
         if let Some(rom) = linked_key(session)
@@ -101,20 +113,25 @@ impl Emulator {
                 together.played += step;
             }
         }
-        for _ in 0..self.clock.advance(dt) {
+        let timing = session
+            .console(true)
+            .or_else(|| session.console(false))
+            .map_or_else(|| self.machine.timing(), Console::timing);
+        for _ in 0..self.clock.advance(dt, timing) {
             self.frame_avg_timer.start();
             ran |= session.run_frame(self.held_buttons(), now);
             self.frame_avg_timer.stop();
             let owed = self.held.take_owed();
             self.apply(Change {
-                pressed: JoypadState::empty(),
+                pressed: Keys::empty(),
                 released: owed,
             });
         }
-        if let Some(gb) = session.console(true).or_else(|| session.console(false)) {
+        if let Some(console) = session.console(true).or_else(|| session.console(false)) {
+            self.linked_video = console.video();
             let frame = self.linked_frame.get_or_insert_with(Vec::new);
             frame.clear();
-            frame.extend_from_slice(gb.frame().as_slice());
+            frame.extend_from_slice(Console::frame(console));
         }
         session.drain_audio(&mut self.linked_audio, &mut self.friend_audio);
         self.mixer
@@ -125,6 +142,14 @@ impl Emulator {
         }
         self.linked_audio.clear();
         ran
+    }
+
+    fn encoded_state(&self) -> GbResult<Vec<u8>> {
+        match &self.machine {
+            Machine::Gb(gb) => citrine_gb::netplay::encode_state(gb.as_ref()),
+            #[cfg(feature = "gba")]
+            Machine::Gba(gba) => citrine_gb::netplay::encode_state(gba.as_ref()),
+        }
     }
 
     pub(super) fn store_linked_saves(&mut self, session: &mut PlaySession) -> GbResult<()> {
@@ -143,8 +168,10 @@ impl Emulator {
         let saves = session.finish_saves();
         self.store_saves(saves)?;
         let Some(back) = session.finish() else {
-            if self.gb.link_plugged() {
-                self.gb.unplug_link();
+            if let Some(gb) = self.machine.as_gb_mut()
+                && gb.link_plugged()
+            {
+                gb.unplug_link();
             }
             return Ok(false);
         };
@@ -153,18 +180,22 @@ impl Emulator {
         Ok(paused)
     }
 
+    pub fn take_handed_back(&mut self) -> Option<OnlineId> {
+        self.handed_back.take()
+    }
+
     pub(super) fn adopt(&mut self, back: Returned) {
         let key = Some(match &back.borrowed {
             Some(hash) => borrowed_key(hash),
-            None => back.console.cartridge.header.sha256_hex_string(),
+            None => back.console.rom_id().sha256_hex_string(),
         });
         self.screen_recorder.stop();
         let same_game = key == self.rom_key;
-        self.gb = back.console;
+        self.replace_machine(back.console);
+        self.drop_history = back.history;
         self.linked_frame = None;
         self.last_frame.clear();
-        self.last_frame
-            .extend_from_slice(self.gb.frame().as_slice());
+        self.last_frame.extend_from_slice(self.machine.frame());
         self.texture = None;
         self.rom_key = key;
         if !same_game {
@@ -186,32 +217,44 @@ impl Emulator {
     pub fn start_partner(&mut self, partner: PartnerLink) -> GbResult<()> {
         self.end_link()?;
         self.partner = Some(partner);
+        self.attach_printer();
         Ok(())
     }
 
-    pub fn start_link(&mut self, rom: &Rom, model: GbModel, title: String) -> GbResult<()> {
+    pub fn start_link(
+        &mut self,
+        rom: &Rom,
+        kind: ConsoleKind,
+        file_name: Option<&str>,
+    ) -> GbResult<()> {
         self.end_link()?;
-        let rate = self.gb.apu.output_sample_rate;
+        let rate = self.machine.sample_rate();
         self.link = Some(LocalLink::start(
             rom,
-            model,
-            title,
+            kind,
+            &self.firmware,
+            file_name,
             &self.store,
             rate,
             self.rom_key.as_deref(),
         )?);
         self.release_all();
+        self.attach_printer();
         Ok(())
     }
 
     pub fn end_link(&mut self) -> GbResult<()> {
-        if let Some(partner) = self.partner.take() {
-            partner.finish(&mut self.gb);
+        if let Some(gb) = self.machine.as_gb_mut()
+            && let Some(partner) = self.partner.take()
+        {
+            partner.finish(gb);
         }
-        let Some(link) = self.link.take() else {
-            return Ok(());
+        let result = match self.link.take() {
+            Some(link) => link.finish(&mut self.machine, &self.store, self.autosave_keep),
+            None => Ok(()),
         };
-        link.finish(&mut self.gb, &self.store, self.autosave_keep)
+        self.attach_printer();
+        result
     }
 
     pub fn set_link_control(&mut self, game: Game) {
@@ -227,7 +270,7 @@ impl Emulator {
         }
     }
 
-    pub(super) fn held_of(&mut self, pad: usize, source: InputSource) -> JoypadState {
+    pub(super) fn held_of(&mut self, pad: usize, source: InputSource) -> Keys {
         if let Some(link) = &mut self.link
             && link.game_for(Source::Pad(pad)) == Game::Second
         {
@@ -256,5 +299,5 @@ pub(super) fn linked_key(session: &PlaySession) -> Option<String> {
     }
     session
         .console(true)
-        .map(|gb| gb.cartridge.header.sha256_hex_string())
+        .map(|console| console.rom_id().sha256_hex_string())
 }

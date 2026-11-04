@@ -22,6 +22,7 @@ path = "src/bin/analyze.rs"
 
 [dependencies]
 citrine-gb = { workspace = true, features = ["debug", "persistence", "recording"] }
+mgba-sys = { workspace = true }
 sameboy-sys = { workspace = true }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

@@ -93,12 +93,7 @@ pub fn name_or<'a>(sha1: &[u8; 20], title: &'a str) -> &'a str {
     known_name(sha1).unwrap_or(title)
 }
 
-pub fn game_name(
-    sha1: &[u8; 20],
-    file_name: Option<&str>,
-    header_title: &str,
-    cgb: bool,
-) -> String {
+pub fn game_name(sha1: &[u8; 20], file_name: Option<&str>, header_title: &str) -> String {
     if let Some(name) = known_name(sha1) {
         return name.to_string();
     }
@@ -108,7 +103,7 @@ pub fn game_name(
     {
         return name;
     }
-    from_header(header_title, cgb)
+    from_header(header_title)
 }
 
 fn from_file_name(file_name: &str) -> String {
@@ -137,20 +132,8 @@ fn from_file_name(file_name: &str) -> String {
     }
 }
 
-fn from_header(title: &str, cgb: bool) -> String {
+fn from_header(title: &str) -> String {
     let title = title.trim();
-    let title = match title.char_indices().nth(11) {
-        Some((cut, _))
-            if cgb
-                && title.len() == 15
-                && title[cut..]
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) =>
-        {
-            &title[..cut]
-        }
-        _ => title,
-    };
     let title = title.replace('_', " ");
     let title = title.trim_end_matches(|c: char| !c.is_alphanumeric());
     title_case(&single_spaced(title))
@@ -226,21 +209,60 @@ mod tests {
     #[test]
     fn a_listed_game_gets_its_name_without_the_region() {
         assert_eq!(
-            game_name(&sha1(ALLEYWAY), Some("alley.gb"), "ALLEY WAY", false),
+            game_name(&sha1(ALLEYWAY), Some("alley.gb"), "ALLEY WAY"),
             "Alleyway"
         );
     }
 
     #[test]
+    fn a_listed_gba_game_gets_its_name_without_the_region_or_revision() {
+        let cases = [
+            (
+                "5de8536afe1f0078ee6fe1089f890e8c7aa0a6e8",
+                "Metroid - Zero Mission",
+            ),
+            (
+                "7c7107b87c3ccf6e3dbceb9cf80ceeffb25a1857",
+                "Pocket Monsters - Fire Red",
+            ),
+            ("c37e3bae84b53e6972ed7608541a62896fa5d6a3", "Fire Emblem"),
+            (
+                "2c7f8bc4ce37043a8f62713038591e861f812499",
+                "Pokémon Pinball - Ruby & Sapphire",
+            ),
+        ];
+        for (hash, name) in cases {
+            assert_eq!(known_name(&sha1(hash)), Some(name));
+            assert_eq!(game_name(&sha1(hash), Some("x.gba"), "IGNORED"), name);
+        }
+    }
+
+    #[test]
+    fn an_unknown_gba_rom_is_named_after_its_file_without_the_tags() {
+        let unknown = [0xAB; 20];
+        let cases = [
+            (
+                "Metroid - Zero Mission (USA, Europe) (Rev 1).gba",
+                "Metroid - Zero Mission",
+            ),
+            (
+                "Pocket Monsters - Fire Red (Japan, rev. 1).gba",
+                "Pocket Monsters - Fire Red",
+            ),
+            (
+                "Fire Emblem (Europe, English / French / German) [!].gba",
+                "Fire Emblem",
+            ),
+        ];
+        for (file, name) in cases {
+            assert_eq!(game_name(&unknown, Some(file), "IGNORED"), name);
+        }
+    }
+
+    #[test]
     fn a_shelf_game_gets_its_shelf_title() {
         for game in HOMEBREW_GAMES {
-            let data = game.data();
-            let rom = citrine_gb::rom::Rom::new(&data);
-            let header = rom.header().unwrap();
-            assert_eq!(
-                game_name(&header.sha1, Some("x.gb"), &header.title, false),
-                game.title
-            );
+            assert_eq!(game_name(&game.sha1, Some("x.gb"), "IGNORED"), game.title);
         }
     }
 
@@ -259,23 +281,20 @@ mod tests {
             ("Kirby's Dream Land 2.gb", "Kirby's Dream Land 2"),
         ];
         for (file, name) in cases {
-            assert_eq!(game_name(&unknown, Some(file), "IGNORED", false), name);
+            assert_eq!(game_name(&unknown, Some(file), "IGNORED"), name);
         }
     }
 
     #[test]
     fn without_a_usable_file_name_the_header_title_is_tidied() {
         let unknown = [0xAB; 20];
+        assert_eq!(game_name(&unknown, None, "POKEMON_SLV"), "Pokemon Slv");
         assert_eq!(
-            game_name(&unknown, None, "POKEMON_SLVAAXE", true),
-            "Pokemon Slv"
-        );
-        assert_eq!(
-            game_name(&unknown, Some("(Unknown).gb"), "SUPER MARIOLAND", false),
+            game_name(&unknown, Some("(Unknown).gb"), "SUPER MARIOLAND"),
             "Super Marioland"
         );
-        assert_eq!(game_name(&unknown, None, "ZELDA II__-", false), "Zelda II");
-        assert_eq!(game_name(&unknown, None, "DR.MARIO", false), "Dr.Mario");
-        assert_eq!(game_name(&unknown, None, "  ", false), "");
+        assert_eq!(game_name(&unknown, None, "ZELDA II__-"), "Zelda II");
+        assert_eq!(game_name(&unknown, None, "DR.MARIO"), "Dr.Mario");
+        assert_eq!(game_name(&unknown, None, "  "), "");
     }
 }

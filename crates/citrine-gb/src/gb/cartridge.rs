@@ -1,14 +1,17 @@
-use crate::disassembly::DisassemblySource;
+#[cfg(feature = "debug")]
+use crate::debug::code::{Address, BlockId};
+#[cfg(feature = "debug")]
+use crate::debug::disassembly::DisassemblySource;
 use crate::error::{GbError, GbResult};
 use crate::gb::cartridge::mbc::MbcInterface;
 use crate::rom::Rom;
 use crate::rom::header::RomHeader;
 use crate::{ReadMemory, WriteMemory};
-use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 mod mbc;
 
+pub use mbc::camera::{CAMERA_HEIGHT, CAMERA_PIXELS, CAMERA_WIDTH};
 pub use mbc::mbc3::{RTC_CYCLES_PER_SECOND, Rtc, RtcRegisters};
 
 pub const ROM_BANK_SIZE: usize = 0x4000; // 16KiB
@@ -89,6 +92,35 @@ impl Cartridge {
         &self.ram
     }
 
+    #[cfg(feature = "debug")]
+    pub(crate) fn rom_banks(&self) -> usize {
+        self.rom.len()
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn rom_bank(&self, bank: usize) -> Option<&[u8]> {
+        self.rom.get(bank).map(|bytes| &bytes[..])
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn ram_bank_mut(&mut self, bank: usize) -> Option<&mut [u8]> {
+        self.sram_dirty = true;
+        self.ram.get_mut(bank).map(|bytes| &mut bytes[..])
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn ram_address(&self, addr: u16) -> Option<Address> {
+        if self.mbc.on_read(addr).is_some() {
+            return None;
+        }
+        let bank = self.mbc.ram_bank()?;
+        Some(Address::at(
+            BlockId::CartRam,
+            bank as u16,
+            u32::from(addr - 0xA000),
+        ))
+    }
+
     #[cfg(feature = "persistence")]
     pub(crate) fn restore_storage(&mut self, like: &Self, ram: &[u8]) {
         self.rom = like.rom.clone();
@@ -144,7 +176,65 @@ impl Cartridge {
     }
 
     pub fn cycle(&mut self) {
-        self.mbc.cycle();
+        if self.mbc.cycle(&mut self.ram) {
+            self.sram_dirty = true;
+        }
+    }
+
+    fn rom_byte(&self, offset: usize) -> u8 {
+        let bank = offset / ROM_BANK_SIZE;
+        let bank = if bank < self.rom.len() {
+            bank
+        } else {
+            bank % self.rom.len()
+        };
+        self.rom[bank][offset % ROM_BANK_SIZE]
+    }
+
+    fn ram_index(&self, offset: usize) -> (usize, usize) {
+        let bank = offset / RAM_BANK_SIZE;
+        let bank = if bank < self.ram.len() {
+            bank
+        } else {
+            bank % self.ram.len()
+        };
+        (bank, offset % RAM_BANK_SIZE)
+    }
+
+    pub fn has_camera(&self) -> bool {
+        self.mbc.has_camera()
+    }
+
+    pub fn set_camera_frame(&mut self, frame: &[u8]) {
+        self.mbc.set_camera_frame(frame);
+    }
+
+    pub fn has_ir(&self) -> bool {
+        self.mbc.has_ir()
+    }
+
+    pub fn ir_led(&self) -> bool {
+        self.mbc.ir_led()
+    }
+
+    pub fn set_ir_light(&mut self, light: bool) {
+        self.mbc.set_ir_light(light);
+    }
+
+    pub fn has_tilt(&self) -> bool {
+        self.mbc.has_tilt()
+    }
+
+    pub fn set_tilt(&mut self, x: f32, y: f32) {
+        self.mbc.set_tilt(x, y);
+    }
+
+    pub fn has_rumble(&self) -> bool {
+        self.mbc.has_rumble()
+    }
+
+    pub fn take_rumble(&mut self) -> f32 {
+        self.mbc.take_rumble()
     }
 
     pub fn rtc(&self) -> Option<&Rtc> {
@@ -156,30 +246,113 @@ impl Cartridge {
     }
 
     #[cfg(feature = "persistence")]
-    pub fn poll_sram_dump(
+    pub fn poll_battery(
         &mut self,
         force: bool,
         now: u64,
-    ) -> Option<crate::persistence::sram_dump::SramDump> {
+    ) -> Option<crate::persistence::battery_save::BatterySave> {
         if !self.has_battery || (!self.sram_dirty && !force) {
             return None;
         };
 
-        let dump = if let Some(data) = self.mbc.get_internal_data() {
-            crate::persistence::sram_dump::SramDump::from_slice(data)
+        let save = if let Some(data) = self.mbc.get_internal_data(now) {
+            crate::persistence::battery_save::BatterySave {
+                ram: data,
+                clock: None,
+                #[cfg(feature = "gba")]
+                seiko: None,
+                #[cfg(feature = "gba")]
+                chip: None,
+            }
         } else if let Some(footer) = self.rtc_footer(now) {
-            let mut data = self.battery_ram();
-            data.extend_from_slice(&footer.encode());
-            crate::persistence::sram_dump::SramDump::from_slice(&data)
+            crate::persistence::battery_save::BatterySave {
+                ram: self.battery_ram(),
+                clock: Some(footer),
+                #[cfg(feature = "gba")]
+                seiko: None,
+                #[cfg(feature = "gba")]
+                chip: None,
+            }
+        } else if let Some(tail) = self.mbc.battery_tail(now) {
+            let mut ram = self.battery_ram();
+            ram.extend_from_slice(&tail);
+            crate::persistence::battery_save::BatterySave {
+                ram,
+                clock: None,
+                #[cfg(feature = "gba")]
+                seiko: None,
+                #[cfg(feature = "gba")]
+                chip: None,
+            }
         } else {
-            crate::persistence::sram_dump::SramDump::from_banks(self.ram.as_slice())
+            crate::persistence::battery_save::BatterySave {
+                ram: self.ram.concat(),
+                clock: None,
+                #[cfg(feature = "gba")]
+                seiko: None,
+                #[cfg(feature = "gba")]
+                chip: None,
+            }
         };
 
         if !force {
             self.sram_dirty = false;
         }
 
-        Some(dump)
+        Some(save)
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn poll_sram_dump(
+        &mut self,
+        force: bool,
+        now: u64,
+    ) -> Option<crate::persistence::sram_dump::SramDump> {
+        self.poll_battery(force, now)
+            .map(|save| crate::persistence::sram_dump::SramDump::from_slice(&save.to_file()))
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn read_battery(&self, data: &[u8]) -> crate::persistence::battery_save::BatterySave {
+        let ram_len = self.header.ram_banks * RAM_BANK_SIZE;
+        if self.mbc.rtc().is_some() && data.len() > ram_len {
+            let (ram, footer) = data.split_at(ram_len);
+            return crate::persistence::battery_save::BatterySave {
+                ram: ram.to_vec(),
+                clock: crate::persistence::rtc_footer::RtcFooter::decode(footer),
+                #[cfg(feature = "gba")]
+                seiko: None,
+                #[cfg(feature = "gba")]
+                chip: None,
+            };
+        }
+        crate::persistence::battery_save::BatterySave {
+            ram: data.to_vec(),
+            clock: None,
+            #[cfg(feature = "gba")]
+            seiko: None,
+            #[cfg(feature = "gba")]
+            chip: None,
+        }
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn put_battery(&mut self, save: crate::persistence::battery_save::BatterySave, now: u64) {
+        if self.has_battery && !self.mbc.put_internal_data(&save.ram, now) {
+            let ram_len = self.header.ram_banks * RAM_BANK_SIZE;
+            let (ram, tail) = if self.mbc.battery_tail(now).is_some() {
+                save.ram.split_at(ram_len.min(save.ram.len()))
+            } else {
+                (save.ram.as_slice(), &[][..])
+            };
+            for (bank, chunk) in self.ram.iter_mut().zip(ram.chunks(RAM_BANK_SIZE)) {
+                bank[..chunk.len()].copy_from_slice(chunk);
+            }
+            self.mbc.put_battery_tail(tail, now);
+        }
+        if let Some(clock) = save.clock {
+            self.put_rtc_footer(clock, now);
+        }
     }
 
     #[cfg(feature = "persistence")]
@@ -187,26 +360,7 @@ impl Cartridge {
         if !self.has_battery {
             return;
         };
-
-        let mut data = dump.as_slice();
-
-        let internal = self.mbc.put_internal_data(data);
-        if internal {
-            return;
-        };
-
-        let ram_len = self.header.ram_banks * RAM_BANK_SIZE;
-        if self.mbc.rtc().is_some() && data.len() > ram_len {
-            let (ram, footer) = data.split_at(ram_len);
-            if let Some(footer) = crate::persistence::rtc_footer::RtcFooter::decode(footer) {
-                self.put_rtc_footer(footer, now);
-            }
-            data = ram;
-        }
-
-        for (bank, chunk) in self.ram.iter_mut().zip(data.chunks(RAM_BANK_SIZE)) {
-            bank[..chunk.len()].copy_from_slice(chunk);
-        }
+        self.put_battery(self.read_battery(dump.as_slice()), now);
     }
 
     #[cfg(feature = "persistence")]
@@ -255,15 +409,14 @@ impl ReadMemory for Cartridge {
         };
 
         match addr {
-            0x0000..=0x3FFF => self.rom[self.mbc.rom_bank_low()][addr as usize],
-            0x4000..=0x7FFF => self.rom[self.mbc.rom_bank_high()][(addr - 0x4000) as usize],
-            0xA000..=0xBFFF => {
-                if let Some(bank) = self.mbc.ram_bank() {
-                    self.ram[bank][(addr - 0xA000) as usize]
-                } else {
-                    0xFF
+            0x0000..=0x7FFF => self.rom_byte(self.mbc.rom_offset(addr)),
+            0xA000..=0xBFFF => match self.mbc.ram_offset(addr) {
+                Some(offset) => {
+                    let (bank, index) = self.ram_index(offset);
+                    self.ram[bank][index]
                 }
-            }
+                None => 0xFF,
+            },
             _ => 0xFF,
         }
     }
@@ -277,71 +430,33 @@ impl WriteMemory for Cartridge {
             return;
         }
 
-        if let Some(bank) = self.mbc.ram_bank()
-            && (0xA000..=0xBFFF).contains(&addr)
+        if (0xA000..=0xBFFF).contains(&addr)
+            && let Some(offset) = self.mbc.ram_write_offset(addr)
         {
-            self.ram[bank][(addr - 0xA000) as usize] = value;
+            let (bank, index) = self.ram_index(offset);
+            self.ram[bank][index] = value;
             self.sram_dirty = true;
         }
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct RomLocation {
-    pub bank: u32,
-    pub offset: u16,
-}
-
-impl RomLocation {
-    pub fn offset(&self, offset: i16) -> RomLocation {
-        RomLocation {
-            bank: self.bank,
-            offset: (self.offset as i16 + offset) as u16,
-        }
-    }
-}
-
-impl Display for RomLocation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self.bank > 0xFF {
-            write!(f, "{:04X}:{:04X}", self.bank, self.offset)
-        } else {
-            write!(f, "{:02X}:{:04X}", self.bank, self.offset)
-        }
-    }
-}
-
+#[cfg(feature = "debug")]
 impl DisassemblySource for Cartridge {
     fn read_rom_address(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x3FFF => self.rom[self.mbc.rom_bank_low()][addr as usize],
-            0x4000..=0x7FFF => self.rom[self.mbc.rom_bank_high()][(addr - 0x4000) as usize],
+            0x0000..=0x7FFF => self.rom_byte(self.mbc.rom_offset(addr)),
             _ => 0xFF,
         }
     }
 
-    fn probe_rom_location(&self, addr: u16) -> RomLocation {
+    fn rom_address(&self, addr: u16) -> Address {
         match addr {
-            0x0000..=0x3FFF => RomLocation {
-                bank: self.mbc.rom_bank_low() as u32,
-                offset: addr,
-            },
-            0x4000..=0x7FFF => RomLocation {
-                bank: self.mbc.rom_bank_high() as u32,
-                offset: addr - 0x4000,
-            },
-            _ => RomLocation {
-                bank: 0,
-                offset: addr,
-            },
+            0x0000..=0x3FFF => Address::rom(self.mbc.rom_bank_low() as u16, u32::from(addr)),
+            _ => Address::rom(
+                self.mbc.rom_bank_high() as u16,
+                u32::from(addr.wrapping_sub(0x4000) & 0x3FFF),
+            ),
         }
-    }
-
-    fn read_rom_location(&self, loc: RomLocation) -> u8 {
-        self.rom
-            .get(loc.bank as usize)
-            .map(|bank| bank.get(loc.offset as usize).copied().unwrap_or(0xFF))
-            .unwrap_or(0xFF)
     }
 }
 

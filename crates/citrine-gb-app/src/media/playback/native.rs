@@ -449,7 +449,9 @@ mod tests {
 
         player.seek(2.0);
         let at = player.take_frame().unwrap().clone();
-        let index = (2.0 * crate::media::recording::fps()) as usize;
+        let index = (2.0
+            * crate::media::recording::Source::from(citrine_gb::console::ConsoleKind::Gb).fps())
+            as usize;
         let near = (index - 1..=index + 1).any(|i| close(&at.rgba, &recorded.frames[i]));
         assert!(near, "the frame at two seconds matches the game");
         assert!(player.take_frame().is_none(), "a frame is handed out once");

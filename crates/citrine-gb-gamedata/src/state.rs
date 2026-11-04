@@ -1,4 +1,6 @@
+use crate::battle::{Battle, Clock};
 use crate::game::Game;
+use crate::gen3::{Nature, Spread, Whereabouts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameState {
@@ -11,6 +13,39 @@ pub struct GameState {
     pub pc_items: Vec<ItemStack>,
     pub pokedex: Pokedex,
     pub copy: SaveCopy,
+    pub location: Option<Position>,
+    pub journey: Vec<Step>,
+    pub hall_of_fame: Option<u8>,
+    pub battle: Option<Battle>,
+    pub clock: Option<Clock>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    Gb(Location),
+    Gba(Whereabouts),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Location {
+    pub group: u8,
+    pub map: u8,
+    pub x: u8,
+    pub y: u8,
+    pub outside: Option<(u8, u8)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Milestone {
+    Pokedex,
+    Badge(usize),
+    EliteFour,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Step {
+    pub milestone: Milestone,
+    pub done: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +82,8 @@ pub struct PlayTime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemStack {
-    pub item: u8,
-    pub count: u8,
+    pub item: u16,
+    pub count: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -57,6 +92,7 @@ pub struct Bag {
     pub key_items: Vec<ItemStack>,
     pub balls: Vec<ItemStack>,
     pub tms_hms: Vec<ItemStack>,
+    pub berries: Vec<ItemStack>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -80,16 +116,15 @@ pub enum Pokemon {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mon {
-    pub species: u8,
+    pub species: u16,
     pub nickname: String,
     pub ot_name: String,
     pub ot_id: u16,
     pub level: u8,
     pub exp: u32,
     pub moves: Vec<MoveSlot>,
-    pub held_item: Option<u8>,
-    pub dvs: Dvs,
-    pub stat_exp: [u16; 5],
+    pub held_item: Option<u16>,
+    pub genes: Genes,
     pub hp: Option<u16>,
     pub stats: Option<Stats>,
     pub status: Option<u8>,
@@ -100,9 +135,26 @@ pub struct Mon {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveSlot {
-    pub id: u8,
+    pub id: u16,
     pub pp: u8,
     pub pp_ups: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Genes {
+    Gb { dvs: Dvs, stat_exp: [u16; 5] },
+    Gba(Gen3Genes),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gen3Genes {
+    pub personality: u32,
+    pub ot_secret_id: u16,
+    pub nature: Nature,
+    pub ivs: Spread,
+    pub evs: Spread,
+    pub ability_slot: u8,
+    pub ball: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +199,39 @@ pub enum Pokerus {
 
 impl Mon {
     pub fn pokerus_status(&self) -> Option<Pokerus> {
-        let byte = self.pokerus.filter(|&byte| byte != 0)?;
+        Pokerus::from_byte(self.pokerus?)
+    }
+
+    pub fn dvs(&self) -> Option<Dvs> {
+        match self.genes {
+            Genes::Gb { dvs, .. } => Some(dvs),
+            Genes::Gba(_) => None,
+        }
+    }
+
+    pub fn gen3(&self) -> Option<&Gen3Genes> {
+        match &self.genes {
+            Genes::Gb { .. } => None,
+            Genes::Gba(genes) => Some(genes),
+        }
+    }
+
+    pub fn shiny(&self) -> bool {
+        match &self.genes {
+            Genes::Gb { dvs, .. } => dvs.shiny(),
+            Genes::Gba(genes) => {
+                let p = genes.personality;
+                (self.ot_id ^ genes.ot_secret_id ^ (p >> 16) as u16 ^ p as u16) < 8
+            }
+        }
+    }
+}
+
+impl Pokerus {
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        if byte == 0 {
+            return None;
+        }
         let (strain, days) = (byte >> 4, byte & 0x0F);
         Some(if days > 0 {
             Pokerus::Infected { strain, days }
@@ -165,6 +249,23 @@ impl Dvs {
             speed: low >> 4,
             special: low & 0x0F,
         }
+    }
+
+    pub fn hidden_power(self) -> (u8, u8) {
+        let high = |v: u8| v >> 3 & 1;
+        let x = (high(self.attack) << 3)
+            | (high(self.defense) << 2)
+            | (high(self.speed) << 1)
+            | high(self.special);
+        let power = (x * 5 + (self.special & 3)) / 2 + 31;
+        let mut kind = ((self.attack & 3) << 2 | (self.defense & 3)) + 1;
+        if kind >= 6 {
+            kind += 1;
+        }
+        if kind >= 0x0A {
+            kind += 0x0A;
+        }
+        (kind, power)
     }
 
     pub fn hp(self) -> u8 {
@@ -190,8 +291,24 @@ impl Dvs {
     }
 }
 
+impl Position {
+    pub fn gb(&self) -> Option<&Location> {
+        match self {
+            Position::Gb(location) => Some(location),
+            Position::Gba(_) => None,
+        }
+    }
+}
+
 impl GameState {
     pub fn badge_count(&self) -> usize {
         self.trainer.badges.iter().filter(|b| **b).count()
+    }
+
+    pub fn next_goal(&self) -> Option<Milestone> {
+        self.journey
+            .iter()
+            .find(|step| !step.done)
+            .map(|step| step.milestone)
     }
 }

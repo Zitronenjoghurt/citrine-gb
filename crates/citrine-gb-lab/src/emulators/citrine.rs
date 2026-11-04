@@ -1,4 +1,5 @@
 use crate::emulator::{Button, FrameEmulator};
+use citrine_gb::console::{Console, ConsoleKind, VideoSpec};
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 use citrine_gb::gb::ram_init::RamInit;
 use citrine_gb::gb::{GameBoy, GbModel};
@@ -33,7 +34,14 @@ impl FrameEmulator for CitrineEmulator {
         "citrine"
     }
 
-    fn load(&mut self, rom: &[u8], boot_rom: Option<&[u8]>, model: GbModel) -> anyhow::Result<()> {
+    fn load(
+        &mut self,
+        rom: &[u8],
+        boot_rom: Option<&[u8]>,
+        console: ConsoleKind,
+    ) -> anyhow::Result<VideoSpec> {
+        let model = GbModel::try_from(console)
+            .map_err(|e| anyhow::anyhow!("citrine cannot run {console:?}: {e:?}"))?;
         self.gb = GameBoy::new_empty_with_ram_init(model, RamInit::random());
         if let Some(boot) = boot_rom {
             self.gb.load_boot_rom(boot);
@@ -44,11 +52,11 @@ impl FrameEmulator for CitrineEmulator {
             .map_err(|e| anyhow::anyhow!("citrine failed to load rom: {e:?}"))?;
         // Evenly-spaced greys, matching SameBoy's forced grey palette after normalization.
         self.gb.ppu.dmg_theme = DmgTheme::GreyScale;
-        Ok(())
+        Ok(self.gb.video())
     }
 
     fn set_button(&mut self, button: Button, pressed: bool) {
-        let state = button.to_joypad_state();
+        let state = button.to_keys().into();
         if pressed {
             self.gb.press_button(state);
         } else {

@@ -1,9 +1,14 @@
+mod wire;
+
 use crate::crypto::{Keys, OpenError, PublicKey, Sealed};
-use crate::proto::GameHash;
+use crate::id::OnlineId;
+use crate::proto::{GameHash, SessionId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const PLAY_VERSION: u16 = 3;
+pub const PLAY_VERSION: u16 = 5;
+pub const OLDEST_PLAY_VERSION: u16 = 5;
+pub const MAX_UNITS: usize = 4;
 pub const GAME_PART_BYTES: usize = 192 * 1024;
 pub const MAX_GAME_BYTES: u32 = 8 << 20;
 pub const MAX_TITLE_CHARS: usize = 64;
@@ -13,6 +18,11 @@ pub const MAX_STATE_BYTES: usize = 2 << 20;
 pub enum Console {
     Gb,
     Gbc,
+    Gba,
+}
+
+pub fn plays_with(version: u16) -> bool {
+    (OLDEST_PLAY_VERSION..=PLAY_VERSION).contains(&version)
 }
 
 impl Console {
@@ -20,6 +30,7 @@ impl Console {
         match index {
             0 => Some(Console::Gb),
             1 => Some(Console::Gbc),
+            2 => Some(Console::Gba),
             _ => None,
         }
     }
@@ -86,20 +97,21 @@ pub enum Mode {
     Apart,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Start {
     pub round: u32,
     pub mode: Mode,
     pub seed: u64,
     pub start_time: u64,
     pub delay: u8,
-    pub power_on: [u32; 2],
+    pub power_on: Vec<u32>,
     pub plugged: bool,
+    pub start_frame: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Pad {
-    pub buttons: u8,
+    pub buttons: u16,
     pub cable: Option<bool>,
 }
 
@@ -124,6 +136,16 @@ pub enum Origin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkGroup {
+    pub round: u32,
+    pub at_frame: u32,
+    pub members: Vec<OnlineId>,
+    pub plugged: bool,
+    pub console: Option<Console>,
+    pub watchers: Vec<OnlineId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayMsg {
     Join {
         version: u16,
@@ -143,23 +165,53 @@ pub enum PlayMsg {
     Start(Start),
     Pads {
         round: u32,
+        unit: Option<u8>,
         first: u32,
         pads: Vec<Pad>,
     },
     Check {
         round: u32,
         frame: u32,
-        hashes: [u64; 2],
+        hashes: Vec<u64>,
     },
     Resync {
         round: u32,
         frame: u32,
-        player: u8,
+        unit: u8,
         data: Vec<u8>,
     },
     Watch(bool),
     Cable(bool),
     Bytes(Vec<CableByte>),
+    LinkRequest(bool),
+    LinkGroup(LinkGroup),
+    MemberLeft {
+        round: u32,
+        unit: u8,
+        at_frame: u32,
+    },
+    Rejoin {
+        round: u32,
+        from: RejoinPoint,
+    },
+    Paused(bool),
+    WatchGroup(bool),
+    Away(bool),
+    WatchFrom {
+        round: u32,
+        frame: u32,
+        members: Vec<OnlineId>,
+        games: Vec<(u8, GameHash)>,
+        cable: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejoinPoint {
+    pub session: SessionId,
+    pub round: u32,
+    pub frame: u32,
+    pub oldest: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,11 +340,23 @@ mod tests {
                 seed: 1,
                 start_time: 1_790_000_000,
                 delay: 2,
-                power_on: [0, 60],
+                power_on: vec![0, 60],
                 plugged: true,
+                start_frame: 0,
+            }),
+            PlayMsg::Start(Start {
+                round: 4,
+                mode: Mode::Rollback,
+                seed: 1,
+                start_time: 1_790_000_000,
+                delay: 0,
+                power_on: vec![0, 0, 60, 120],
+                plugged: false,
+                start_frame: 36_000,
             }),
             PlayMsg::Pads {
                 round: 2,
+                unit: None,
                 first: 300,
                 pads: vec![
                     Pad {
@@ -308,13 +372,33 @@ mod tests {
             PlayMsg::Check {
                 round: 2,
                 frame: 60,
-                hashes: [1, u64::MAX],
+                hashes: vec![1, u64::MAX],
+            },
+            PlayMsg::Pads {
+                round: 2,
+                unit: Some(3),
+                first: 300,
+                pads: vec![Pad {
+                    buttons: 0x10,
+                    cable: Some(true),
+                }],
+            },
+            PlayMsg::Check {
+                round: 2,
+                frame: 60,
+                hashes: vec![1, 2, u64::MAX],
             },
             PlayMsg::Resync {
                 round: 2,
                 frame: 120,
-                player: 1,
+                unit: 1,
                 data: vec![5; 1000],
+            },
+            PlayMsg::Resync {
+                round: 2,
+                frame: 120,
+                unit: 3,
+                data: vec![6; 1000],
             },
             PlayMsg::Watch(true),
             PlayMsg::Cable(false),
@@ -327,11 +411,69 @@ mod tests {
                 },
                 CableByte::Reply { id: 1, byte: 0xFE },
             ]),
+            PlayMsg::LinkRequest(true),
+            PlayMsg::LinkRequest(false),
+            PlayMsg::LinkGroup(LinkGroup {
+                round: 2,
+                at_frame: 600,
+                members: vec![OnlineId::random(), OnlineId::random(), OnlineId::random()],
+                plugged: true,
+                console: Some(Console::Gba),
+                watchers: vec![OnlineId::random()],
+            }),
+            PlayMsg::MemberLeft {
+                round: 2,
+                unit: 2,
+                at_frame: 1_200,
+            },
+            rejoin(),
+            PlayMsg::Paused(true),
+            PlayMsg::WatchGroup(false),
+            PlayMsg::Away(true),
+            watch_from(),
         ];
         for msg in msgs {
             let sealed = msg.seal(&a, &b.public_key());
             assert_eq!(PlayMsg::open(&b, &a.public_key(), &sealed), Ok(msg));
         }
+    }
+
+    fn watch_from() -> PlayMsg {
+        PlayMsg::WatchFrom {
+            round: 1 << 31,
+            frame: 640,
+            members: vec![OnlineId::random(), OnlineId::random(), OnlineId::random()],
+            games: vec![(0, [3; 20]), (2, [4; 20])],
+            cable: vec![1, 2, 3],
+        }
+    }
+
+    fn rejoin() -> PlayMsg {
+        PlayMsg::Rejoin {
+            round: 1,
+            from: RejoinPoint {
+                session: 77,
+                round: 3,
+                frame: 905,
+                oldest: 880,
+            },
+        }
+    }
+
+    #[test]
+    fn a_rejoin_point_keeps_the_older_messages_where_they_were() {
+        let tag = |msg: &PlayMsg| postcard::to_allocvec(msg).unwrap()[0];
+        let left = PlayMsg::MemberLeft {
+            round: 0,
+            unit: 0,
+            at_frame: 0,
+        };
+        assert_eq!(tag(&left), 17);
+        assert_eq!(tag(&rejoin()), 18);
+        assert_eq!(tag(&PlayMsg::Paused(true)), 19);
+        assert_eq!(tag(&PlayMsg::WatchGroup(true)), 20);
+        assert_eq!(tag(&PlayMsg::Away(true)), 21);
+        assert_eq!(tag(&watch_from()), 22);
     }
 
     #[test]
@@ -381,6 +523,7 @@ mod tests {
         Gb,
         Gbc,
         Gba,
+        Nds,
     }
 
     #[test]
@@ -402,7 +545,8 @@ mod tests {
         };
         assert_eq!(open(FutureConsole::Gb), Ok(Some(Console::Gb)));
         assert_eq!(open(FutureConsole::Gbc), Ok(Some(Console::Gbc)));
-        let err = open(FutureConsole::Gba).unwrap_err();
+        assert_eq!(open(FutureConsole::Gba), Ok(Some(Console::Gba)));
+        let err = open(FutureConsole::Nds).unwrap_err();
         assert_eq!(err, OfferError::UnknownConsole);
         assert_eq!(
             err.to_string(),
@@ -437,7 +581,7 @@ mod tests {
     #[test]
     fn every_known_console_opens_from_an_offer() {
         let (a, b) = pair();
-        for console in [Console::Gb, Console::Gbc] {
+        for console in [Console::Gb, Console::Gbc, Console::Gba] {
             let offer = Offer {
                 version: PLAY_VERSION,
                 ask: Ask::Play,
@@ -471,6 +615,7 @@ mod tests {
         let (a, b) = pair();
         let sealed = PlayMsg::Pads {
             round: 1_000,
+            unit: None,
             first: 1_000_000,
             pads: vec![Pad::default()],
         }
@@ -480,5 +625,13 @@ mod tests {
             sealed,
         };
         assert!(msg.encode().unwrap().len() <= 72);
+    }
+
+    #[test]
+    fn this_build_plays_only_with_play_version_five() {
+        assert!(!plays_with(3));
+        assert!(!plays_with(4));
+        assert!(plays_with(5));
+        assert!(!plays_with(6));
     }
 }

@@ -7,6 +7,12 @@ pub enum AppEvent {
     LoadRomData {
         data: Vec<u8>,
     },
+    PlayShelfGame {
+        game: &'static crate::homebrew::HomebrewGame,
+    },
+    PrefetchShelfGame {
+        game: &'static crate::homebrew::HomebrewGame,
+    },
     OpenTab {
         tab: Tab,
     },
@@ -42,6 +48,12 @@ pub enum AppEvent {
         rom_key: String,
         slot: usize,
     },
+    PickCameraPicture,
+    CentreTilt,
+    #[cfg(feature = "gba")]
+    PickGbaBios,
+    #[cfg(feature = "gba")]
+    UseBuiltInBios,
 }
 
 #[derive(Default)]
@@ -60,6 +72,24 @@ impl AppEventQueue {
 
     pub fn load_rom_data(&mut self, data: Vec<u8>) {
         self.queue.push(AppEvent::LoadRomData { data });
+    }
+
+    pub fn play_shelf_game(&mut self, game: &'static crate::homebrew::HomebrewGame) {
+        self.queue.push(AppEvent::PlayShelfGame { game });
+    }
+
+    pub fn prefetch_shelf_game(&mut self, game: &'static crate::homebrew::HomebrewGame) {
+        self.queue.push(AppEvent::PrefetchShelfGame { game });
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn pick_gba_bios(&mut self) {
+        self.queue.push(AppEvent::PickGbaBios);
+    }
+
+    #[cfg(feature = "gba")]
+    pub fn use_built_in_bios(&mut self) {
+        self.queue.push(AppEvent::UseBuiltInBios);
     }
 
     pub fn play_on(&mut self, model: GbModel) {
@@ -84,6 +114,14 @@ impl AppEventQueue {
 
     pub fn open_settings(&mut self, tab: SettingsTab) {
         self.queue.push(AppEvent::OpenSettings { tab });
+    }
+
+    pub fn pick_camera_picture(&mut self) {
+        self.queue.push(AppEvent::PickCameraPicture);
+    }
+
+    pub fn centre_tilt(&mut self) {
+        self.queue.push(AppEvent::CentreTilt);
     }
 
     pub fn open_tab(&mut self, tab: Tab) {

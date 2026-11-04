@@ -1,4 +1,4 @@
-use super::lines::{card_name, friend_name};
+use super::lines::{card_name, member_name};
 use super::{PickFor, PlayingUi};
 use crate::app::ui_state::recent::RecentRoms;
 use crate::app::widgets::action::main_button;
@@ -28,11 +28,11 @@ pub fn picker(
     let target = playing.picking.clone()?;
     let (friend, title, theirs_card) = match &target {
         PickFor::Invite(friend) => {
-            let name = friend_name(online, *friend);
+            let name = member_name(play, online, *friend);
             (*friend, format!("Play with {name}"), None)
         }
         PickFor::Join(invite) => {
-            let name = friend_name(online, invite.from);
+            let name = member_name(play, online, invite.from);
             (invite.from, format!("Join {name}"), invite.game.clone())
         }
         PickFor::Change => {
@@ -47,7 +47,7 @@ pub fn picker(
             )
         }
     };
-    let name = friend_name(online, friend);
+    let name = member_name(play, online, friend);
     let theirs = theirs_card
         .as_ref()
         .map(|c| c.hash)
@@ -80,7 +80,9 @@ pub fn picker(
             playing.pick_shown = true;
         }
         scroll.show(ui, |ui| {
-            let homebrew = crate::homebrew::HOMEBREW_GAMES.iter();
+            let homebrew = crate::homebrew::HOMEBREW_GAMES
+                .iter()
+                .filter(|g| g.console == crate::homebrew::ShelfConsole::GameBoy);
             let playing_it = format!("{name} is playing it");
             if let Some(game) = homebrew.clone().find(|g| Some(g.sha1) == theirs) {
                 if fits(game.title, game.author) && pick_row(ui, game.title, &playing_it, true) {

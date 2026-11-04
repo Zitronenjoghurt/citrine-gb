@@ -1,6 +1,6 @@
 use super::Controls;
 use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
-use crate::app::ui_state::keybinds::{GbButton, KeyBindings};
+use crate::app::ui_state::keybinds::{BindingTarget, GbButton, KeyBindings};
 use strum::IntoEnumIterator;
 
 pub fn build(controls: &Controls) -> String {
@@ -114,31 +114,30 @@ fn joined(names: Vec<String>) -> String {
 
 fn keyboard_table(bindings: &KeyBindings) -> String {
     table(
-        ("Game Boy", "Keyboard"),
-        GbButton::iter().map(|button| {
-            let keys = bindings
-                .keys_for(button)
-                .into_iter()
-                .map(|key| key.name().to_owned())
-                .collect();
-            (button.to_string(), joined(keys))
+        ("Button", "Keyboard"),
+        BindingTarget::buttons().filter_map(|target| {
+            let (keys, _) = bindings.bound_inputs(target);
+            let keys = keys.into_iter().map(|key| key.name().to_owned()).collect();
+            Some((target.button_name()?, joined(keys)))
         }),
     )
 }
 
 fn controller_table(bindings: &KeyBindings) -> String {
     table(
-        ("Game Boy", "Controller"),
-        GbButton::iter().map(|button| {
-            let mut pads: Vec<String> = bindings
-                .pads_for(button)
+        ("Button", "Controller"),
+        BindingTarget::buttons().filter_map(|target| {
+            let (_, pads) = bindings.bound_inputs(target);
+            let mut pads: Vec<String> = pads
                 .into_iter()
                 .map(|pad| pad.short_name().to_owned())
                 .collect();
-            if bindings.stick_as_dpad && GbButton::DPAD.contains(&button) {
+            if bindings.stick_as_dpad
+                && matches!(target, BindingTarget::Button(button) if GbButton::DPAD.contains(&button))
+            {
                 pads.push("Left stick".to_owned());
             }
-            (button.to_string(), joined(pads))
+            Some((target.button_name()?, joined(pads)))
         }),
     )
 }

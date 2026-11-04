@@ -1,24 +1,27 @@
 use super::Emulator;
 use crate::app::ui_state::keybinds::{
-    BindingCapture, BindingKind, Captured, GbButton, KeyBindings, PadButton,
+    BindingCapture, BindingKind, Captured, GbButton, KeyBindings, PadButton, Shoulder,
 };
 use crate::controller_debug::PadLog;
 use crate::held::{Change, InputSource};
 use crate::local_link::{Game, Source};
-use crate::pad_input::{Ignored, PadAction, PadEvent, PadInput, PadKey, PadSource};
-use citrine_gb::gb::joypad::JoypadState;
+use crate::pad_input::{Ignored, PadAction, PadAxis, PadEvent, PadInput, PadKey, PadSource};
+use citrine_gb::console::{Console, Keys};
+use citrine_gb::debug::Debug;
 use strum::IntoEnumIterator;
 
+const STICK_TILT_DEADZONE: f32 = 0.15;
+
 impl Emulator {
-    pub fn press(&mut self, source: InputSource, button: JoypadState) -> bool {
+    pub fn press(&mut self, source: InputSource, button: Keys) -> bool {
         self.set_source(source, button, button)
     }
 
-    pub fn release(&mut self, source: InputSource, button: JoypadState) -> bool {
-        self.set_source(source, button, JoypadState::empty())
+    pub fn release(&mut self, source: InputSource, button: Keys) -> bool {
+        self.set_source(source, button, Keys::empty())
     }
 
-    pub fn set_held(&mut self, source: InputSource, button: JoypadState, pressed: bool) -> bool {
+    pub fn set_held(&mut self, source: InputSource, button: Keys, pressed: bool) -> bool {
         if pressed {
             self.press(source, button)
         } else {
@@ -26,11 +29,11 @@ impl Emulator {
         }
     }
 
-    pub fn held_buttons(&self) -> JoypadState {
+    pub fn held_buttons(&self) -> Keys {
         self.held.held()
     }
 
-    pub fn is_held(&self, button: JoypadState) -> bool {
+    pub fn is_held(&self, button: Keys) -> bool {
         self.held.held().contains(button)
     }
 
@@ -39,8 +42,8 @@ impl Emulator {
     }
 
     pub fn release_keyboard(&mut self) {
-        let all = JoypadState::all();
-        let none = JoypadState::empty();
+        let all = Keys::all();
+        let none = Keys::empty();
         self.set_game_source(Game::First, InputSource::Keyboard, all, none);
         if self.link.is_some() {
             self.set_game_source(Game::Second, InputSource::Keyboard, all, none);
@@ -52,12 +55,7 @@ impl Emulator {
         self.apply(change);
     }
 
-    pub(super) fn set_source(
-        &mut self,
-        source: InputSource,
-        mask: JoypadState,
-        down: JoypadState,
-    ) -> bool {
+    pub(super) fn set_source(&mut self, source: InputSource, mask: Keys, down: Keys) -> bool {
         let routed = match source {
             InputSource::PadButtons(pad) | InputSource::PadAxis(pad, _) => Source::Pad(pad),
             InputSource::Touch => Source::Touch,
@@ -74,8 +72,8 @@ impl Emulator {
         &mut self,
         game: Game,
         source: InputSource,
-        mask: JoypadState,
-        down: JoypadState,
+        mask: Keys,
+        down: Keys,
     ) -> bool {
         if !(down & mask).is_empty() {
             self.pressed_by = Some(source);
@@ -94,14 +92,14 @@ impl Emulator {
     }
 
     pub(super) fn apply(&mut self, change: Change) {
-        let total_cycles = self.gb.debugger.total_cycles;
-        for button in GbButton::iter() {
-            let joypad = button.joypad();
+        let total_cycles = Debug::cycles(&self.machine);
+        let buttons = GbButton::iter().map(GbButton::key);
+        for joypad in buttons.chain(Shoulder::iter().map(Shoulder::key)) {
             if change.pressed.contains(joypad) {
-                self.gb.press_button(joypad);
+                self.machine.set_keys(self.machine.keys() | joypad);
                 self.recorder.record(total_cycles, joypad, true);
             } else if change.released.contains(joypad) {
-                self.gb.release_button(joypad);
+                self.machine.set_keys(self.machine.keys() - joypad);
                 self.recorder.record(total_cycles, joypad, false);
             }
         }
@@ -110,17 +108,10 @@ impl Emulator {
     pub(super) fn sync_joypad(&mut self) {
         let owed = self.held.take_owed();
         self.apply(Change {
-            pressed: JoypadState::empty(),
+            pressed: Keys::empty(),
             released: owed,
         });
-        for button in GbButton::iter() {
-            let joypad = button.joypad();
-            if self.is_held(joypad) {
-                self.gb.press_button(joypad);
-            } else {
-                self.gb.release_button(joypad);
-            }
-        }
+        self.machine.set_keys(self.held_buttons());
     }
 
     pub(super) fn apply_pad(
@@ -130,14 +121,16 @@ impl Emulator {
         capture: &mut BindingCapture,
     ) -> bool {
         match action {
-            PadAction::Press(button) => self.press(source, button.joypad()),
-            PadAction::Release(button) => self.release(source, button.joypad()),
+            PadAction::Press(button) => self.press(source, button.key()),
+            PadAction::Release(button) => self.release(source, button.key()),
+            PadAction::Shoulder(shoulder, true) => self.press(source, shoulder.key()),
+            PadAction::Shoulder(shoulder, false) => self.release(source, shoulder.key()),
             PadAction::Steer { on, off } => {
                 let mask = off
                     .iter()
                     .chain(on.iter())
-                    .fold(JoypadState::empty(), |all, b| all | b.joypad());
-                let down = on.map_or(JoypadState::empty(), GbButton::joypad);
+                    .fold(Keys::empty(), |all, b| all | b.key());
+                let down = on.map_or(Keys::empty(), GbButton::key);
                 self.set_source(source, mask, down)
             }
             PadAction::Capture(pad) => {
@@ -174,12 +167,21 @@ impl Emulator {
         mut log: Option<&mut PadLog>,
     ) {
         while let Some(PadEvent { pad, input, code }) = pads.next_event() {
+            match input {
+                PadInput::Moved(PadAxis::RightStickX, value) => {
+                    self.gimmicks.stick(Some(stick_tilt(value)), None);
+                }
+                PadInput::Moved(PadAxis::RightStickY, value) => {
+                    self.gimmicks.stick(None, Some(-stick_tilt(value)));
+                }
+                _ => {}
+            }
             let source = match input {
                 PadInput::Moved(axis, _) => InputSource::PadAxis(pad, axis),
                 _ => InputSource::PadButtons(pad),
             };
             let zone = self.held_of(pad, source);
-            let steering = GbButton::iter().find(|b| zone.contains(b.joypad()));
+            let steering = GbButton::iter().find(|b| zone.contains(b.key()));
             let action = crate::pad_input::route(input, bindings, capture, steering);
             if let (PadInput::Pressed(PadKey::Known(button)), PadAction::Ignore(Ignored::Unbound)) =
                 (input, action)
@@ -239,20 +241,25 @@ impl Emulator {
                 continue;
             }
             let routed = match &self.link {
-                Some(link) => link.key(key, bindings),
-                None => bindings
-                    .button_for_key(key)
-                    .map(|button| (Game::First, button)),
+                Some(link) => link
+                    .key(key, bindings)
+                    .map(|(game, button)| (game, button.key())),
+                None => bindings.input_for_key(key).map(|keys| (Game::First, keys)),
             };
-            if let Some((game, button)) = routed {
-                let joypad = button.joypad();
-                let down = if pressed {
-                    joypad
-                } else {
-                    JoypadState::empty()
-                };
+            if let Some((game, joypad)) = routed {
+                let down = if pressed { joypad } else { Keys::empty() };
                 self.set_game_source(game, InputSource::Keyboard, joypad, down);
+            } else if self.cart().motion() {
+                self.gimmicks.tilt_key(key, pressed);
             }
         }
+    }
+}
+
+fn stick_tilt(value: f32) -> f32 {
+    if value.abs() < STICK_TILT_DEADZONE {
+        0.0
+    } else {
+        value
     }
 }

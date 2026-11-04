@@ -159,7 +159,9 @@ pub(super) fn pump(viewer: &mut TabViewer, ctx: &Context, source: Source) {
         .as_ref()
         .and_then(|s| s.fetching)
         .and_then(|file| match viewer.online.fetched(file) {
-            Some(Fetch::Loading { done, total }) => Some((file, Some(percent(*done, *total)))),
+            Some(Fetch::Loading { done, total }) => {
+                Some((file, Some(crate::progress::Progress::bytes(*done, *total))))
+            }
             Some(_) => Some((file, None)),
             None => None,
         });
@@ -167,7 +169,7 @@ pub(super) fn pump(viewer: &mut TabViewer, ctx: &Context, source: Source) {
         && let Some(shown) = viewer.ui.viewer.shown.as_mut()
     {
         match loading {
-            Some(done) => shown.status = Status::Loading(Some(done)),
+            Some(progress) => shown.status = Status::Loading(Some(progress)),
             None => {
                 shown.fetching = None;
                 match viewer.online.take_fetched(file) {
@@ -211,7 +213,7 @@ pub(super) fn pump(viewer: &mut TabViewer, ctx: &Context, source: Source) {
     };
     let shown = viewer.ui.viewer.shown.as_mut().expect("checked above");
     match kind {
-        MediaKind::Screenshot => {
+        MediaKind::Screenshot | MediaKind::Print => {
             let png = match &share {
                 Some(share) => chat_media::unpack_screenshot(&pending, share.width, share.height),
                 None => Some(pending.clone()),
@@ -272,8 +274,4 @@ pub(super) fn tick(ctx: &Context, shown: &mut Shown) {
     if player.is_playing() || !player.is_ready() {
         ctx.request_repaint();
     }
-}
-
-pub(super) fn percent(done: u64, total: u64) -> u64 {
-    (done * 100).checked_div(total).unwrap_or(0).min(100)
 }

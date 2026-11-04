@@ -31,6 +31,7 @@ fn every_event_has_a_key_a_source_and_sane_facts() {
         let (species, moves) = match event.generation {
             Generation::One => (151, 165),
             Generation::Two => (251, 251),
+            Generation::Three => (0, 0),
         };
         assert!((1..=species).contains(&event.dex), "{}", event.key);
         assert!(
@@ -66,6 +67,7 @@ fn every_trainer_name_has_glyphs_in_its_games() {
                 let versions: &[Version] = match event.generation {
                     Generation::One => &[Version::Red, Version::Silver],
                     Generation::Two => &[Version::Silver],
+                    Generation::Three => &[],
                 };
                 for &version in versions {
                     let game = game(version, language);

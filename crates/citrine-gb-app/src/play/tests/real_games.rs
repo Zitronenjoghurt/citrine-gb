@@ -15,7 +15,7 @@ fn copy(file: &GameFile) -> GameFile {
     GameFile {
         rom: file.rom.clone(),
         title: file.title.clone(),
-        model: file.model,
+        kind: file.kind,
         save: file.save.clone(),
         running: file.running,
     }
@@ -133,12 +133,12 @@ fn two_friends_chat_play_silver_watch_and_link_gold_with_silver() {
     });
     assert!(pair.host.play.close().unwrap().finish().is_none());
     let back = pair.guest.play.close().unwrap().finish().unwrap();
-    assert_eq!(back.console.cartridge.rom_bytes(), silver.rom);
+    assert_eq!(back.console.rom_bytes(), silver.rom);
     pair.guest.own = None;
 
     let session = pair.invite(copy(&gold));
     for (side, file) in [(&mut pair.host, &gold), (&mut pair.guest, &silver)] {
-        let mut gb = GameBoy::new_empty(file.model);
+        let mut gb = GameBoy::new_empty(GbModel::try_from(file.kind).unwrap());
         gb.load_rom(&Rom::new(&file.rom)).unwrap();
         side.cable_gb = Some(gb);
     }

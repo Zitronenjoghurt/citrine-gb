@@ -1,5 +1,5 @@
-use super::toasts::{Toast, Toasts};
-use super::{Citrine, FRIENDS_DOCK_SHARE};
+use super::toasts::Toast;
+use super::{Citrine, DOCK_PANE_MIN, FRIENDS_DOCK_SHARE, FRIENDS_DOCK_WIDTH, FRIENDS_STACK_SHARE};
 use super::{focus, link, tabs, viewer, widgets};
 use crate::app::tabs::Tab;
 use crate::app::ui_state::hotkeys::HotkeyAction;
@@ -7,9 +7,14 @@ use crate::app::ui_state::keybinds::PadButton;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::app::ui_state::settings::console_name;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::app::ui_state::settings::kind_short;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::app::ui_state::settings::other_console;
+use crate::app::widgets::dev_menu::dev_menu;
+use crate::app::widgets::shortcut::shortcut_button;
 use crate::icons;
 use crate::utils::file_loader::FileLoader;
+use crate::utils::save_files::ROM_FILTER;
 #[cfg(not(target_arch = "wasm32"))]
 use citrine_gb::rom::header::RomCgbMode;
 use egui::{CentralPanel, Color32, Context, TopBottomPanel};
@@ -22,6 +27,7 @@ impl Citrine {
     }
 
     pub(super) fn render(&mut self, ctx: &Context) {
+        self.emulator.reserve = 0.0;
         if self.is_mobile(ctx) {
             self.render_mobile(ctx);
             return;
@@ -39,9 +45,11 @@ impl Citrine {
     pub(super) fn render_normal_mode(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_panel").show(ctx, |ui| self.top_panel(ui));
         self.toast_strip(ctx);
+        self.emulator.reserve = self.toasts.held_height(ctx);
 
-        self.ui.tab_fit = tabs::fit_titles(ctx, &self.dock);
+        self.ui.tab_fit = tabs::fit_titles(ctx, &self.dock, tabs::game_title(&self.emulator));
         CentralPanel::default().show(ctx, |ui| {
+            self.toasts.place_dock(ui.max_rect());
             let mut viewer = tabs::TabViewer {
                 audio: &mut self.audio,
                 commonmark: &mut self.commonmark,
@@ -53,12 +61,15 @@ impl Citrine {
                 media: &mut self.media,
                 online: &mut self.online,
                 play: &mut self.play,
+                senses: &self.senses,
                 stats: &self.stats,
                 ui: &mut self.ui,
             };
 
+            let mut style = egui_dock::Style::from_egui(ctx.style().as_ref());
+            style.separator.extra = DOCK_PANE_MIN;
             egui_dock::DockArea::new(&mut self.dock)
-                .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
+                .style(style)
                 .show_leaf_collapse_buttons(false)
                 .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
@@ -77,6 +88,7 @@ impl Citrine {
             media: &mut self.media,
             online: &mut self.online,
             play: &mut self.play,
+            senses: &self.senses,
             stats: &self.stats,
             ui: &mut self.ui,
         };
@@ -86,6 +98,9 @@ impl Citrine {
     pub(super) fn show_toasts(&mut self, ctx: &Context) {
         if let Some(area) = self.ui.toast_area.take() {
             self.toasts.place(area);
+        }
+        if let Some(picture) = self.ui.toast_picture.take() {
+            self.toasts.place_picture(picture);
         }
         for event in self.toasts.show(ctx) {
             self.events.push(event);
@@ -97,7 +112,7 @@ impl Citrine {
             return;
         }
         TopBottomPanel::bottom("toast_strip")
-            .exact_height(Toasts::strip_height(ctx))
+            .exact_height(self.toasts.strip_height(ctx))
             .show_separator_line(false)
             .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
             .show(ctx, |ui| self.toasts.place_strip(ui.max_rect()));
@@ -115,7 +130,7 @@ impl Citrine {
                 if ui.button("Load ROM").clicked() {
                     FileLoader::new()
                         .title("Load ROM")
-                        .add_filter("Game Boy ROMs", &["gb", "gbc"])
+                        .add_filter(ROM_FILTER.0, ROM_FILTER.1)
                         .dispatch(self.files.rom_tx.clone());
                 }
                 if ui.button("Load boot ROM").clicked() {
@@ -123,6 +138,10 @@ impl Citrine {
                         .title("Load boot ROM")
                         .add_filter("Game Boy boot ROM", &["bin"])
                         .dispatch(self.files.boot_rom_tx.clone());
+                }
+                #[cfg(feature = "gba")]
+                if ui.button("Load GBA BIOS").clicked() {
+                    self.pick_gba_bios();
                 }
 
                 #[cfg(not(target_arch = "wasm32"))]
@@ -142,9 +161,12 @@ impl Citrine {
                                     let model = other_console(
                                         self.ui.settings.console_for(key, RomCgbMode::CgbAndGb),
                                     );
-                                    let button = egui::Button::new(name).right_text(
-                                        egui::containers::menu::SubMenuButton::RIGHT_ARROW,
-                                    );
+                                    let arrow = egui::containers::menu::SubMenuButton::RIGHT_ARROW;
+                                    let right = match entry.console {
+                                        Some(kind) => format!("{}  {arrow}", kind_short(kind)),
+                                        None => arrow.to_owned(),
+                                    };
+                                    let button = egui::Button::new(name).right_text(right);
                                     egui::containers::menu::SubMenuButton::from_button(button)
                                         .ui(ui, |ui| {
                                             if ui
@@ -161,7 +183,9 @@ impl Citrine {
                                         .clicked()
                                 }
                                 None => ui
-                                    .button(name)
+                                    .add(egui::Button::new(name).right_text(
+                                        entry.console.map(kind_short).unwrap_or_default(),
+                                    ))
                                     .on_hover_text(entry.path.display().to_string())
                                     .clicked(),
                             };
@@ -276,45 +300,17 @@ impl Citrine {
             .on_hover_text("About");
 
             let focus = HotkeyAction::ToggleFocusMode;
-            let focus_hint = match self.ui.settings.hotkeys.key_name(focus) {
-                Some(key) => format!("{} ({key})", focus.label()),
-                None => focus.label().to_owned(),
-            };
-            if ui
-                .button(icons::FRAME_CORNERS)
-                .on_hover_text(focus_hint)
-                .clicked()
-            {
+            if shortcut_button(ui, &self.ui.settings.hotkeys, focus, false, true).clicked() {
                 self.toggle_focus_mode();
             }
 
             if self.ui.settings.dev_mode {
-                ui.menu_button(icons::CIRCUITRY, |ui| {
-                    for tab in [Tab::Disassembly, Tab::Apu, Tab::Registers] {
-                        if ui.button(tab.label()).clicked() {
-                            self.open_tab(tab);
-                        }
+                let menu = ui.menu_button(icons::CODE, |ui| {
+                    if let Some(tab) = dev_menu(ui) {
+                        self.open_tab(tab);
                     }
-                })
-                .response
-                .on_hover_text("Hardware views");
-
-                ui.menu_button(icons::BRACKETS_CURLY, |ui| {
-                    for tab in [
-                        Tab::TimeControl,
-                        Tab::Performance,
-                        Tab::DebugActions,
-                        Tab::AudioDebug,
-                        Tab::ControllerDebug,
-                        Tab::E2ETest,
-                    ] {
-                        if ui.button(tab.label()).clicked() {
-                            self.open_tab(tab);
-                        }
-                    }
-                })
-                .response
-                .on_hover_text("Debug tools");
+                });
+                menu.response.on_hover_text("Dev tools");
             }
 
             ui.separator();
@@ -333,78 +329,32 @@ impl Citrine {
     }
 
     pub(super) fn transport_buttons(&mut self, ui: &mut egui::Ui) {
-        let loaded = self.emulator.gb.cartridge.has_rom_loaded;
-        let running = self.emulator.running;
-
-        let play_icon = if running { icons::PAUSE } else { icons::PLAY };
-        let play_hint = if running { "Pause" } else { "Resume" };
-        if self
-            .shortcut_button(ui, play_icon, play_hint, HotkeyAction::TogglePause, loaded)
-            .clicked()
-        {
-            self.run_hotkey(HotkeyAction::TogglePause);
+        let loaded = self.emulator.has_game();
+        let running = self.emulator.is_running();
+        let muted = self.ui.settings.muted;
+        let hotkeys = &self.ui.settings.hotkeys;
+        let mut pressed = None;
+        for (action, on, enabled) in [
+            (HotkeyAction::TogglePause, running, loaded),
+            (HotkeyAction::SoftReset, false, loaded),
+            (HotkeyAction::Screenshot, false, loaded),
+        ] {
+            if shortcut_button(ui, hotkeys, action, on, enabled).clicked() {
+                pressed = Some(action);
+            }
         }
-
-        if self
-            .shortcut_button(
-                ui,
-                icons::ARROW_COUNTER_CLOCKWISE,
-                "Reset the game",
-                HotkeyAction::SoftReset,
-                loaded,
-            )
-            .clicked()
-        {
-            self.run_hotkey(HotkeyAction::SoftReset);
-        }
-
-        if self
-            .shortcut_button(
-                ui,
-                icons::CAMERA,
-                "Screenshot",
-                HotkeyAction::Screenshot,
-                loaded,
-            )
-            .clicked()
-        {
-            self.run_hotkey(HotkeyAction::Screenshot);
+        if let Some(action) = pressed {
+            self.run_hotkey(action);
         }
 
         if self.recording_button(ui, None).clicked() {
             self.run_hotkey(HotkeyAction::ToggleRecording);
         }
 
-        let muted = self.ui.settings.muted;
-        let mute_icon = if muted {
-            icons::SPEAKER_SLASH
-        } else {
-            icons::SPEAKER_HIGH
-        };
-        let mute_hint = if muted { "Unmute" } else { "Mute" };
-        if self
-            .shortcut_button(ui, mute_icon, mute_hint, HotkeyAction::ToggleMute, true)
-            .clicked()
-        {
-            self.run_hotkey(HotkeyAction::ToggleMute);
+        let mute = HotkeyAction::ToggleMute;
+        if shortcut_button(ui, &self.ui.settings.hotkeys, mute, muted, true).clicked() {
+            self.run_hotkey(mute);
         }
-    }
-
-    pub(super) fn shortcut_button(
-        &self,
-        ui: &mut egui::Ui,
-        icon: &str,
-        hint: &str,
-        action: HotkeyAction,
-        enabled: bool,
-    ) -> egui::Response {
-        let keys = self.ui.settings.hotkeys.keys_for(action);
-        let hint = match keys.first() {
-            Some(hotkey) => format!("{hint} ({hotkey})"),
-            None => hint.to_string(),
-        };
-        ui.add_enabled(enabled, egui::Button::new(icon))
-            .on_hover_text(hint)
     }
 
     pub(super) fn toggle_focus_mode(&mut self) {
@@ -459,6 +409,9 @@ impl Citrine {
                 let screen = self
                     .emulator
                     .ui_placed(ui, area, |size| place.rect(area, size));
+                if self.emulator.has_game() {
+                    self.ui.toast_picture = Some(screen);
+                }
                 let response = ui
                     .interact(
                         screen,
@@ -480,10 +433,7 @@ impl Citrine {
     }
 
     pub(super) fn tools_node(&self) -> Option<(SurfaceIndex, NodeIndex)> {
-        Tab::iter()
-            .filter(|t| *t != Tab::GameBoy && *t != Tab::Friends)
-            .find_map(|t| self.dock.find_tab(&t))
-            .map(|(surface_idx, node_idx, _)| (surface_idx, node_idx))
+        tools_node(&self.dock)
     }
 
     pub(super) fn media_would_cover_game(&self) -> bool {
@@ -508,6 +458,7 @@ impl Citrine {
                     self.dock
                         .main_surface_mut()
                         .split_right(gb_node, 0.5, vec![Tab::Playing]);
+                    stack_friends_column(&mut self.dock);
                 }
                 _ => self.open_tab(Tab::Playing),
             },
@@ -521,13 +472,23 @@ impl Citrine {
             return;
         }
 
+        if tab == Tab::Friends && stack_friends(&mut self.dock) {
+            return;
+        }
+
         if tab == Tab::Friends
-            && let Some((surface, gb_node, _)) = self.dock.find_tab(&Tab::GameBoy)
+            && let Some((surface, _, _)) = self.dock.find_tab(&Tab::GameBoy)
             && surface == SurfaceIndex::main()
         {
-            self.dock
-                .main_surface_mut()
-                .split_left(gb_node, FRIENDS_DOCK_SHARE, vec![tab]);
+            let main = self.dock.main_surface_mut();
+            let share = main
+                .root_node()
+                .and_then(|node| node.rect())
+                .filter(|rect| rect.width() > 1.0)
+                .map_or(FRIENDS_DOCK_SHARE, |rect| {
+                    (FRIENDS_DOCK_WIDTH / rect.width()).clamp(0.12, FRIENDS_DOCK_SHARE)
+                });
+            main.split_left(NodeIndex::root(), share, vec![tab]);
             return;
         }
 
@@ -544,5 +505,103 @@ impl Citrine {
         } else {
             self.dock.main_surface_mut().push_to_focused_leaf(tab);
         }
+    }
+}
+
+fn tools_node(dock: &DockState<Tab>) -> Option<(SurfaceIndex, NodeIndex)> {
+    Tab::iter()
+        .filter(|t| !matches!(t, Tab::GameBoy | Tab::Friends | Tab::Playing))
+        .find_map(|t| dock.find_tab(&t))
+        .map(|(surface_idx, node_idx, _)| (surface_idx, node_idx))
+}
+
+fn stack_friends(dock: &mut DockState<Tab>) -> bool {
+    let on_main = |tab: &Tab| {
+        dock.find_tab(tab)
+            .is_some_and(|(surface, _, _)| surface == SurfaceIndex::main())
+    };
+    if !on_main(&Tab::GameBoy) || !on_main(&Tab::Playing) {
+        return false;
+    }
+    let Some((surface, node)) = tools_node(dock) else {
+        return false;
+    };
+    if surface != SurfaceIndex::main() {
+        return false;
+    }
+    dock.main_surface_mut()
+        .split_above(node, FRIENDS_STACK_SHARE, vec![Tab::Friends]);
+    true
+}
+
+fn stack_friends_column(dock: &mut DockState<Tab>) {
+    let Some(location) = dock.find_tab(&Tab::Friends) else {
+        return;
+    };
+    let (surface, node, _) = location;
+    let alone = dock.main_surface()[node].tabs_count() == 1;
+    let tools = tools_node(dock).is_some_and(|(surface, _)| surface == SurfaceIndex::main());
+    if surface != SurfaceIndex::main() || node != NodeIndex::root().left() || !alone || !tools {
+        return;
+    }
+    dock.remove_tab(location);
+    stack_friends(dock);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn room_dock() -> DockState<Tab> {
+        let mut dock = DockState::new(vec![Tab::GameBoy]);
+        let [game, _] = dock.main_surface_mut().split_right(
+            NodeIndex::root(),
+            0.6,
+            vec![Tab::Info, Tab::RoomChat],
+        );
+        dock.main_surface_mut()
+            .split_right(game, 0.5, vec![Tab::Playing]);
+        dock
+    }
+
+    fn beside(dock: &DockState<Tab>, a: Tab, b: Tab) -> bool {
+        let node = |tab| dock.find_tab(&tab).map(|(_, node, _)| node).unwrap();
+        let (a, b) = (node(a), node(b));
+        a.parent() == b.parent() && a.is_left() && b.is_right()
+    }
+
+    #[test]
+    fn friends_stack_over_the_tools_while_a_friend_view_is_open() {
+        let mut dock = room_dock();
+        assert!(stack_friends(&mut dock));
+        assert!(beside(&dock, Tab::Friends, Tab::Info));
+        assert!(beside(&dock, Tab::GameBoy, Tab::Playing));
+    }
+
+    #[test]
+    fn friends_keep_their_own_column_without_a_friend_view() {
+        let mut dock = DockState::new(vec![Tab::GameBoy]);
+        dock.main_surface_mut()
+            .split_right(NodeIndex::root(), 0.6, vec![Tab::Info]);
+        assert!(!stack_friends(&mut dock));
+    }
+
+    #[test]
+    fn a_friends_column_moves_over_the_tools_when_a_friend_view_opens() {
+        let mut dock = DockState::new(vec![Tab::GameBoy]);
+        dock.main_surface_mut()
+            .split_right(NodeIndex::root(), 0.6, vec![Tab::Info]);
+        dock.main_surface_mut()
+            .split_left(NodeIndex::root(), 0.2, vec![Tab::Friends]);
+        let game = dock
+            .find_tab(&Tab::GameBoy)
+            .map(|(_, node, _)| node)
+            .unwrap();
+        dock.main_surface_mut()
+            .split_right(game, 0.5, vec![Tab::Playing]);
+        stack_friends_column(&mut dock);
+        assert!(beside(&dock, Tab::Friends, Tab::Info));
+        assert!(beside(&dock, Tab::GameBoy, Tab::Playing));
+        assert_eq!(dock.iter_all_tabs().count(), 4);
     }
 }

@@ -3,10 +3,13 @@ use super::tabs::Tab;
 use super::ui_state::UiState;
 use super::ui_state::settings::SettingsTab;
 use super::widgets::confirm::{self, Answer, Ask};
-use super::widgets::settings::your_data::{Exporting, PendingImport, Request};
+use super::widgets::settings::your_data::{
+    self as your_data_ui, Exporting, PendingImport, Request,
+};
+use crate::progress::Counter;
 use crate::utils::file_loader::FileLoader;
 use crate::utils::file_saver::{FileSaver, SaveOutcome};
-use crate::your_data::{self, Change, Files, Kind, Parts, Tally};
+use crate::your_data::{self, Change, Files, Kind, Packer, Parts, Tally};
 use egui::Context;
 use egui_dock::DockState;
 
@@ -23,6 +26,12 @@ impl Citrine {
             stats: &mut self.stats,
             #[cfg(not(target_arch = "wasm32"))]
             recent: &mut self.ui.recent,
+            #[cfg(feature = "gba")]
+            gba_bios: your_data::gba_bios::GbaBios {
+                store: &self.settings_store,
+                bios: &mut self.emulator.firmware.gba_bios,
+                name: &mut self.emulator.gba_bios_name,
+            },
         }
     }
 
@@ -56,7 +65,10 @@ impl Citrine {
     }
 
     pub(super) fn handle_your_data(&mut self, ctx: &Context) {
-        match self.ui.your_data.request.take() {
+        let request = self.ui.your_data.request.take();
+        let loading = your_data_ui::loading(&self.ui.your_data);
+        match request {
+            Some(Request::Export | Request::Import) if loading => {}
             Some(Request::Export) => self.start_data_export(),
             Some(Request::Import) => {
                 FileLoader::new()
@@ -74,28 +86,82 @@ impl Citrine {
         }
         self.poll_data_export();
         while let Ok(file) = self.ui.your_data.picked_rx.try_recv() {
-            self.read_data_file(file.name, &file.data);
+            self.unpack_data_file(file.name, file.data);
+        }
+        while let Ok((name, files)) = self.ui.your_data.unpacked_rx.try_recv() {
+            self.ui.your_data.importing = None;
+            match files {
+                Ok(files) => self.read_data_file(name, files),
+                Err(err) => {
+                    self.toasts.error(err.text());
+                }
+            }
         }
         self.import_dialog(ctx);
         self.delete_dialog(ctx);
     }
 
     fn start_data_export(&mut self) {
+        if your_data_ui::loading(&self.ui.your_data) {
+            return;
+        }
         if let Err(err) = self.emulator.flush_save() {
             log::error!("failed to flush save before the export: {err:?}");
         }
-        let mut files = self.data_parts().export();
-        let tx = self.ui.your_data.files_tx.clone();
+        let files = self.data_parts().export();
+        let counter = Counter::default();
+        counter.set_total(your_data::export_bytes(&files, self.media.items()));
+        self.ui.your_data.progress = counter.clone();
         self.ui.your_data.exporting = Exporting::Busy;
+        let tx = self.ui.your_data.packed_tx.clone();
+        let mut files = Some(files);
+        let mut packer = Some(Packer::new(counter));
         self.media.read_files(move |media| {
-            your_data::add_media_files(&mut files, media);
-            let _ = tx.send(files);
+            let Some(packing) = packer.as_mut() else {
+                return;
+            };
+            if let Some(files) = files.take() {
+                packing.add_all(&files);
+            }
+            match media {
+                Some((id, bytes)) => packing.add_media(&id, &bytes),
+                None => {
+                    if let Some(packing) = packer.take() {
+                        let _ = tx.send(packing.finish());
+                    }
+                }
+            }
+        });
+    }
+
+    fn unpack_data_file(&mut self, name: String, bytes: Vec<u8>) {
+        let counter = Counter::default();
+        counter.set_total(bytes.len() as u64);
+        self.ui.your_data.progress = counter.clone();
+        self.ui.your_data.importing = Some(name.clone());
+        let tx = self.ui.your_data.unpacked_tx.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(move || {
+            let files = your_data::unpack_counted(bytes, &counter);
+            let _ = tx.send((name, files));
+        });
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let files = async {
+                let mut unpacker = your_data::Unpacker::new(bytes, counter)?;
+                while unpacker.step_for(your_data::STEP_BUDGET)? {
+                    crate::utils::next_tick().await;
+                }
+                Ok(unpacker.finish())
+            }
+            .await;
+            let _ = tx.send((name, files));
         });
     }
 
     fn poll_data_export(&mut self) {
-        while let Ok(files) = self.ui.your_data.files_rx.try_recv() {
-            match your_data::pack(&files) {
+        while let Ok(packed) = self.ui.your_data.packed_rx.try_recv() {
+            match packed {
                 Ok(bytes) => {
                     FileSaver::new(&your_data::file_name(crate::storage::now_unix()))
                         .add_filter(FILTER, &[your_data::FILE_EXTENSION])
@@ -122,14 +188,7 @@ impl Citrine {
         }
     }
 
-    fn read_data_file(&mut self, name: String, bytes: &[u8]) {
-        let files = match your_data::unpack(bytes) {
-            Ok(files) => files,
-            Err(err) => {
-                self.toasts.error(err.text());
-                return;
-            }
-        };
+    fn read_data_file(&mut self, name: String, files: Files) {
         if let Err(err) = self.emulator.flush_save() {
             log::error!("failed to flush save before the import: {err:?}");
         }
@@ -157,6 +216,7 @@ impl Citrine {
                 action: "Import",
                 action_enabled: true,
                 extra: None,
+                load: None,
             },
         );
         match answer {
@@ -199,10 +259,10 @@ impl Citrine {
         let notes = delete_notes(&self.ui.your_data.rows);
         let exporting = self.ui.your_data.exporting;
         let extra = match exporting {
-            Exporting::Idle => "Export first",
-            Exporting::Busy => "Exporting…",
+            Exporting::Idle | Exporting::Busy => "Export first",
             Exporting::Done => "Exported",
         };
+        let load = your_data_ui::load(&self.ui.your_data);
         let answer = confirm::ask(
             ctx,
             "your_data_delete",
@@ -212,6 +272,9 @@ impl Citrine {
                 action: "Delete everything",
                 action_enabled: exporting != Exporting::Busy,
                 extra: Some((extra, exporting == Exporting::Idle)),
+                load: load
+                    .as_ref()
+                    .map(|(label, progress)| (label.as_str(), *progress)),
             },
         );
         match answer {

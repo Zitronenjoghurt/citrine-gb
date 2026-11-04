@@ -19,12 +19,20 @@ pub fn icon_button(icon: impl Into<String>, side: f32) -> Button<'static> {
 }
 
 pub fn main_button(ui: &Ui, text: impl Into<WidgetText>) -> Button<'static> {
-    let fill = ui.visuals().selection.bg_fill;
+    let fill = crate::app::ui_state::ui_theme::brand(ui.visuals());
     Button::new(
         text.into()
             .color(crate::app::ui_state::ui_theme::ink_on(fill)),
     )
     .fill(fill)
+    .stroke(Stroke::NONE)
+}
+
+pub fn danger_button(ui: &Ui, text: impl Into<WidgetText>) -> Button<'static> {
+    let fill = crate::app::ui_state::ui_theme::danger(ui.visuals());
+    Button::new(text.into().color(crate::app::ui_state::ui_theme::ON_DANGER))
+        .fill(fill)
+        .stroke(Stroke::NONE)
 }
 
 pub fn quiet_button(ui: &Ui, text: impl Into<WidgetText>) -> Button<'static> {

@@ -1,4 +1,4 @@
-.PHONY: version test test-mooneye ledger ledger-check build-tests lab lab-deps check fmt lint dev native up down build logs publish results significance release bundle-mac icons
+.PHONY: version test test-mooneye ledger ledger-check ledger-bios ledger-bios-check ledger-intro ledger-intro-check arm7tdmi build-tests lab lab-deps check fmt lint dev native up down build logs publish results significance release bundle-mac icons
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 
 version:
@@ -15,7 +15,7 @@ lab: lab-deps
 	cargo test --release -p citrine-gb-lab
 
 lab-deps:
-	git submodule update --init crates/sameboy-sys/SameBoy
+	git submodule update --init crates/sameboy-sys/SameBoy crates/mgba-sys/mGBA
 
 build-tests:
 	git submodule update --init tests/mooneye
@@ -25,10 +25,25 @@ test-mooneye: build-tests
 	cargo test --release --test mooneye
 
 ledger:
-	cargo test --release --test ledger -- --write
+	cargo test --release -p citrine-gb --features gba --test ledger -- --write
 
 ledger-check:
-	cargo test --release --test ledger
+	cargo test --release -p citrine-gb --features gba --test ledger
+
+ledger-bios:
+	cargo test --release -p citrine-gb --features gba --test ledger -- --bios "$(GBA_BIOS)" --write
+
+ledger-bios-check:
+	cargo test --release -p citrine-gb --features gba --test ledger -- --bios "$(GBA_BIOS)"
+
+ledger-intro:
+	cargo test --release -p citrine-gb --features gba --test ledger -- --intro --write
+
+ledger-intro-check:
+	cargo test --release -p citrine-gb --features gba --test ledger -- --intro
+
+arm7tdmi:
+	cargo test --release -p citrine-gb --features gba,debug --test arm7tdmi -- --fetch
 
 test:
 	cargo test --release -- --nocapture

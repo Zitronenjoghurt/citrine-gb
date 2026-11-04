@@ -4,9 +4,9 @@ use super::queue::QueueWriter;
 use super::resampler::Resampler;
 #[cfg(target_arch = "wasm32")]
 use super::web::PortWriter as QueueWriter;
+use citrine_gb::console::Timing;
 use std::sync::Arc;
 
-const FRAME_TIME: f64 = 1.0 / 59.7275;
 const MAX_FRAMES_PER_UPDATE: usize = 4;
 const MAX_BEHIND_SECS: f64 = 0.25;
 
@@ -21,13 +21,14 @@ pub struct FrameClock {
 }
 
 impl FrameClock {
-    pub fn advance(&mut self, dt: f64) -> usize {
+    pub fn advance(&mut self, dt: f64, timing: Timing) -> usize {
+        let frame_secs = timing.frame_secs();
         self.behind += dt.max(0.0);
         if self.behind > MAX_BEHIND_SECS {
-            self.behind = FRAME_TIME;
+            self.behind = frame_secs;
         }
-        let due = ((self.behind / FRAME_TIME) as usize).min(MAX_FRAMES_PER_UPDATE);
-        self.behind -= due as f64 * FRAME_TIME;
+        let due = ((self.behind / frame_secs) as usize).min(MAX_FRAMES_PER_UPDATE);
+        self.behind -= due as f64 * frame_secs;
         due
     }
 }
@@ -140,21 +141,37 @@ impl AudioFeed {
 mod tests {
     use super::*;
     use crate::audio::queue::{QueueConfig, audio_queue, latency_frames};
+    use citrine_gb::console::ConsoleKind;
+
+    const GB: Timing = Timing {
+        clock_hz: 4_194_304,
+        cycles_per_frame: 70_224,
+    };
+    const FRAME_TIME: f64 = 70_224.0 / 4_194_304.0;
+
+    #[test]
+    fn frame_clock_paces_by_the_console_timing() {
+        assert_eq!(ConsoleKind::Gb.timing(), GB);
+        assert!((1.0 / FRAME_TIME - 59.7275).abs() < 1e-6);
+        let gba = ConsoleKind::Gba.timing();
+        let mut clock = FrameClock::default();
+        assert_eq!(clock.advance(gba.frame_secs() * 1.5, gba), 1);
+    }
 
     #[test]
     fn frame_clock_runs_what_is_due() {
         let mut clock = FrameClock::default();
-        assert_eq!(clock.advance(FRAME_TIME * 0.5), 0);
-        assert_eq!(clock.advance(FRAME_TIME * 0.6), 1);
-        assert_eq!(clock.advance(FRAME_TIME * 2.0), 2);
+        assert_eq!(clock.advance(FRAME_TIME * 0.5, GB), 0);
+        assert_eq!(clock.advance(FRAME_TIME * 0.6, GB), 1);
+        assert_eq!(clock.advance(FRAME_TIME * 2.0, GB), 2);
     }
 
     #[test]
     fn frame_clock_catches_up_over_several_updates() {
         let mut clock = FrameClock::default();
         let behind = FRAME_TIME * 7.2;
-        let first = clock.advance(behind);
-        let second = clock.advance(0.0);
+        let first = clock.advance(behind, GB);
+        let second = clock.advance(0.0, GB);
         assert_eq!(first, MAX_FRAMES_PER_UPDATE);
         assert_eq!(first + second, 7);
     }
@@ -162,8 +179,8 @@ mod tests {
     #[test]
     fn frame_clock_drops_a_long_stall() {
         let mut clock = FrameClock::default();
-        assert_eq!(clock.advance(2.0), 1);
-        assert_eq!(clock.advance(0.0), 0);
+        assert_eq!(clock.advance(2.0, GB), 1);
+        assert_eq!(clock.advance(0.0, GB), 0);
     }
 
     #[test]
@@ -231,7 +248,7 @@ mod tests {
                 reader.read(&mut out, 2);
                 next_callback += period;
             }
-            let frames = clock.advance(dt);
+            let frames = clock.advance(dt, GB);
             let produced = (frames as f64 * FRAME_TIME * rate as f64) as usize;
             let samples: Vec<f32> = (0..produced)
                 .flat_map(|_| {

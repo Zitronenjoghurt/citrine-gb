@@ -1,3 +1,4 @@
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::rom::Rom;
 use citrine_gb_app::online::cloud::{AccountCopy, Choice, LocalSave, SaveStore, SyncState};
@@ -220,12 +221,12 @@ fn a_save_made_on_one_device_arrives_on_the_other() {
     let (mut a, settings) = first_account(&relay);
     a.store.store_battery(ROM, &battery_bytes(1)).unwrap();
     a.store
-        .store_snapshot(ROM, 0, &noise(30_000, 1), &frame(), GbModel::Cgb)
+        .store_snapshot(ROM, 0, &noise(30_000, 1), &frame(), ConsoleKind::Gbc)
         .unwrap();
     a.store.set_snapshot_name(ROM, 0, "Boss door").unwrap();
     let auto = a
         .store
-        .store_autosave(ROM, &noise(30_000, 2), &frame(), GbModel::Cgb, 5)
+        .store_autosave(ROM, &noise(30_000, 2), &frame(), ConsoleKind::Gbc, 5)
         .unwrap();
     a.online.cloud_game(Some((ROM.into(), TITLE.into())));
     a.synced(&[
@@ -355,7 +356,7 @@ fn a_full_cloud_keeps_the_local_save_and_says_so() {
                 slot,
                 &noise(400_000, slot as u64),
                 &frame(),
-                GbModel::Dmg,
+                ConsoleKind::Gb,
             )
             .unwrap();
     }
@@ -386,7 +387,7 @@ fn deleting_here_only_keeps_the_cloud_copy() {
     let relay = Relay::start(50);
     let (mut a, settings) = first_account(&relay);
     a.store
-        .store_snapshot(ROM, 1, &noise(20_000, 9), &frame(), GbModel::Dmg)
+        .store_snapshot(ROM, 1, &noise(20_000, 9), &frame(), ConsoleKind::Gb)
         .unwrap();
     a.online.cloud_game(Some((ROM.into(), TITLE.into())));
     a.synced(&[LocalSave::Snapshot(1)]);
@@ -428,11 +429,11 @@ fn saves_shrink_before_they_are_sealed() {
     let frame = gb.frame().as_slice().to_vec();
     a.store.store_battery(ROM, &sram).unwrap();
     a.store
-        .store_snapshot(ROM, 0, &state, &frame, GbModel::Cgb)
+        .store_snapshot(ROM, 0, &state, &frame, ConsoleKind::Gbc)
         .unwrap();
     let auto = a
         .store
-        .store_autosave(ROM, &state, &frame, GbModel::Cgb, 5)
+        .store_autosave(ROM, &state, &frame, ConsoleKind::Gbc, 5)
         .unwrap();
     a.online.cloud_game(Some((ROM.into(), TITLE.into())));
     let saves = [
@@ -464,10 +465,10 @@ fn a_new_device_with_its_own_save_asks_which_to_keep() {
     let (mut a, settings) = first_account(&relay);
     a.store.store_battery(ROM, &battery_bytes(1)).unwrap();
     a.store
-        .store_snapshot(ROM, 0, &noise(250_000, 1), &frame(), GbModel::Cgb)
+        .store_snapshot(ROM, 0, &noise(250_000, 1), &frame(), ConsoleKind::Gbc)
         .unwrap();
     a.store
-        .store_snapshot(ROM, 1, &noise(250_000, 2), &frame(), GbModel::Cgb)
+        .store_snapshot(ROM, 1, &noise(250_000, 2), &frame(), ConsoleKind::Gbc)
         .unwrap();
     a.online.cloud_game(Some((ROM.into(), TITLE.into())));
     a.synced(&[
@@ -478,7 +479,7 @@ fn a_new_device_with_its_own_save_asks_which_to_keep() {
     a.go_offline();
     a.store.store_battery(ROM, &battery_bytes(2)).unwrap();
     a.store
-        .store_snapshot(ROM, 2, &noise(700_000, 3), &frame(), GbModel::Cgb)
+        .store_snapshot(ROM, 2, &noise(700_000, 3), &frame(), ConsoleKind::Gbc)
         .unwrap();
 
     let mut b = Device::new(&settings);
@@ -561,12 +562,7 @@ fn the_cloud_list_names_a_game_as_this_device_does() {
     let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/homebrew/libbet.gb")).unwrap();
     let header = Rom::new(&data).header().unwrap();
     let cartridge = header.title.trim().to_string();
-    let name = citrine_gb_app::game_name::game_name(
-        &header.sha1,
-        None,
-        &header.title,
-        header.cgb_mode.is_cgb(),
-    );
+    let name = citrine_gb_app::game_name::game_name(&header.sha1, None, header.short_title());
     assert_eq!(name, "Libbet and the Magic Floor");
 
     let relay = Relay::start(50);
@@ -615,4 +611,137 @@ fn a_save_from_before_cloud_saves_names_its_game_in_the_cloud() {
     c.until("the cloud list", |d| !d.online.cloud_games().is_empty());
     assert_eq!(c.online.cloud_games()[0].title, name);
     assert_eq!(c.online.cloud_games()[0].saves, 1);
+}
+
+#[test]
+fn a_save_for_another_console_stays_in_the_cloud() {
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    a.store.set_game_console(ROM, ConsoleKind::Gba).unwrap();
+    a.store.store_battery(ROM, &battery_bytes(3)).unwrap();
+    a.online.cloud_game(Some((ROM.into(), TITLE.into())));
+    a.synced(&[LocalSave::Battery]);
+    a.go_offline();
+
+    let mut b = Device::new(&settings);
+    b.store.set_game_console(ROM, ConsoleKind::Gb).unwrap();
+    b.sign_in(&settings);
+    b.online.cloud_game(Some((ROM.into(), TITLE.into())));
+    b.online.cloud_hold(ROM);
+    b.until("the cloud check", |d| d.online.cloud_settled(ROM));
+    assert_eq!(b.battery(), None);
+    assert!(!b.online.cloud_take_reload());
+    assert_eq!(b.online.cloud_games()[0].saves, 1);
+}
+
+#[cfg(feature = "gba")]
+fn gba_rom(n: usize) -> String {
+    format!("{:064x}", 0xba00 + n)
+}
+
+#[cfg(feature = "gba")]
+fn synced_on(device: &mut Device, rom: &str, save: &LocalSave) {
+    device.online.cloud_game(Some((rom.into(), TITLE.into())));
+    device.online.cloud_hold(rom);
+    device.until("the GBA save to sync", |d| {
+        d.online.cloud_state(rom, save) == Some(SyncState::Synced)
+    });
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn gba_battery_saves_of_every_size_arrive_on_the_other_device() {
+    use citrine_gb::gba::machine::Gba;
+    use citrine_gb::gba::save::SaveType;
+    use citrine_gb::persistence::battery_save::BatterySave;
+    let chips = [
+        (SaveType::Eeprom512, 512),
+        (SaveType::Eeprom8K, 8 << 10),
+        (SaveType::Sram32K, 32 << 10),
+        (SaveType::Flash64K, 64 << 10),
+        (SaveType::Flash128K, 128 << 10),
+    ];
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    for (n, (chip, size)) in chips.into_iter().enumerate() {
+        let mut save = BatterySave::raw(noise(size, n as u64));
+        save.chip = Some(chip);
+        a.store.store_battery_save(&gba_rom(n), &save).unwrap();
+        synced_on(&mut a, &gba_rom(n), &LocalSave::Battery);
+    }
+    a.go_offline();
+
+    let mut b = Device::new(&settings);
+    b.sign_in(&settings);
+    let gba = Gba::new(&[0; 0x200]);
+    for (n, (chip, size)) in chips.into_iter().enumerate() {
+        let rom = gba_rom(n);
+        synced_on(&mut b, &rom, &LocalSave::Battery);
+        assert_eq!(b.store.load_battery(&rom).unwrap(), noise(size, n as u64));
+        assert_eq!(
+            b.store.load_battery_save(&rom, &gba).unwrap().chip,
+            Some(chip)
+        );
+        assert_eq!(b.store.game_console(&rom), Some(ConsoleKind::Gba));
+    }
+}
+
+#[cfg(feature = "gba")]
+#[test]
+fn a_gba_snapshot_with_full_memory_arrives_on_the_other_device() {
+    use citrine_gb::console::Console;
+    use citrine_gb::gba::machine::Gba;
+    let mut rom = vec![0; 0x400];
+    rom[0x200..0x209].copy_from_slice(b"FLASH1M_V");
+    let mut gba = Gba::new(&rom);
+    gba.put_battery(
+        citrine_gb::persistence::battery_save::BatterySave::raw(noise(128 << 10, 9)),
+        0,
+    );
+    for (base, len, seed) in [
+        (0x0200_0000u32, 256 << 10, 1),
+        (0x0300_0000, 32 << 10, 2),
+        (0x0500_0000, 1 << 10, 3),
+        (0x0600_0000, 96 << 10, 4),
+        (0x0700_0000, 1 << 10, 5),
+    ] {
+        for (i, word) in noise(len, seed).chunks(4).enumerate() {
+            let value = u32::from_le_bytes(word.try_into().unwrap());
+            gba.bus_mut().write32(base + 4 * i as u32, value);
+        }
+    }
+    let state = gba.save_state(0).unwrap();
+    let frame = vec![90; 240 * 160 * 4];
+    let rom_key = gba_rom(9);
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    a.store
+        .store_snapshot(&rom_key, 0, &state, &frame, ConsoleKind::Gba)
+        .unwrap();
+    let auto = a
+        .store
+        .store_autosave(&rom_key, &state, &frame, ConsoleKind::Gba, 5)
+        .unwrap();
+    synced_on(&mut a, &rom_key, &LocalSave::Snapshot(0));
+    synced_on(&mut a, &rom_key, &LocalSave::Autosave(auto));
+    a.go_offline();
+    let largest = relay.stored_files().iter().map(Vec::len).max().unwrap();
+    assert!(largest < citrine_gb_net::MAX_SAVE_BYTES);
+
+    let mut b = Device::new(&settings);
+    b.sign_in(&settings);
+    b.online.cloud_game(Some((rom_key.clone(), TITLE.into())));
+    b.until("both GBA saves on the second device", |d| {
+        d.store.load_snapshot(&rom_key, 0).is_some() && !d.store.autosave_ids(&rom_key).is_empty()
+    });
+    let id = b.store.autosave_ids(&rom_key)[0];
+    synced_on(&mut b, &rom_key, &LocalSave::Snapshot(0));
+    synced_on(&mut b, &rom_key, &LocalSave::Autosave(id));
+    let arrived = b.store.load_snapshot(&rom_key, 0).unwrap();
+    assert_eq!(arrived, state);
+    assert_eq!(b.store.load_autosave(&rom_key, id).unwrap(), state);
+    assert!(Gba::new(&rom).restore(&arrived).is_ok());
+    let info = b.store.snapshot_info(&rom_key, 0).unwrap();
+    assert_eq!(info.console, Some(ConsoleKind::Gba));
+    assert_eq!(info.thumb_size(), [120, 80]);
 }

@@ -7,6 +7,7 @@ use egui::{
 pub const SIDE: f32 = 14.0;
 pub const ROW_HEIGHT: f32 = 50.0;
 pub const RADIUS: u8 = 14;
+pub const VALUE_EDGE: f32 = 16.0;
 const ICON_COLUMN: f32 = 50.0;
 const ICON_TILE: f32 = 36.0;
 
@@ -207,6 +208,7 @@ pub struct Row<'a> {
     icon: Option<&'a str>,
     label: &'a str,
     detail: Option<&'a str>,
+    info: Option<&'a str>,
     value: Option<String>,
     chevron: bool,
     trailing: &'a str,
@@ -221,6 +223,7 @@ impl<'a> Row<'a> {
             icon: None,
             label,
             detail: None,
+            info: None,
             value: None,
             chevron: true,
             trailing: icons::CARET_RIGHT,
@@ -237,6 +240,11 @@ impl<'a> Row<'a> {
 
     pub fn detail(mut self, detail: &'a str) -> Self {
         self.detail = Some(detail).filter(|d| !d.is_empty());
+        self
+    }
+
+    pub fn info(mut self, info: &'a str) -> Self {
+        self.info = Some(info);
         self
     }
 
@@ -339,18 +347,16 @@ impl<'a> Row<'a> {
             );
             right -= 22.0;
         }
+        if !self.chevron && self.checked.is_none() {
+            right = rect.right() - VALUE_EDGE;
+        }
         if let Some(value) = &self.value {
             let color = if self.accent {
                 crate::app::ui_state::ui_theme::brand_mark(visuals)
             } else {
                 secondary
             };
-            let galley = ui.painter().layout(
-                value.clone(),
-                FontId::proportional(15.0),
-                color,
-                (right - left) * 0.55,
-            );
+            let galley = one_line(ui, value, 15.0, color, (right - left) * 0.55);
             let width = galley.size().x.min((right - left) * 0.55);
             let pos = egui::pos2(right - width, rect.center().y - galley.size().y / 2.0);
             ui.painter()
@@ -365,8 +371,14 @@ impl<'a> Row<'a> {
             egui::pos2(left, rect.top()),
             egui::pos2(right, rect.bottom()),
         );
-        let label = one_line(ui, self.label, 16.0, strong, text_rect.width());
-        match self.detail {
+        let info_width = if self.info.is_some() {
+            crate::app::widgets::info_mark::width(ui) + 6.0
+        } else {
+            0.0
+        };
+        let label = one_line(ui, self.label, 16.0, strong, text_rect.width() - info_width);
+        let label_size = label.size();
+        let top = match self.detail {
             Some(detail) => {
                 let detail = one_line(ui, detail, 13.0, secondary, text_rect.width());
                 let top = rect.center().y - (label.size().y + detail.size().y + 2.0) / 2.0;
@@ -374,11 +386,26 @@ impl<'a> Row<'a> {
                 ui.painter().galley(egui::pos2(left, top), label, strong);
                 ui.painter()
                     .galley(egui::pos2(left, detail_top), detail, secondary);
+                top
             }
             None => {
                 let top = rect.center().y - label.size().y / 2.0;
                 ui.painter().galley(egui::pos2(left, top), label, strong);
+                top
             }
+        };
+        if let Some(info) = self.info {
+            let line = top + label_size.y / 2.0;
+            let mark = Rect::from_min_max(
+                egui::pos2(left + label_size.x + 6.0, line - height / 2.0),
+                egui::pos2(left + label_size.x + info_width, line + height / 2.0),
+            );
+            let mut cell = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(mark)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            crate::app::widgets::info_mark::info_mark(&mut cell, info);
         }
         response.widget_info(|| match self.checked {
             Some(checked) => egui::WidgetInfo::selected(
@@ -444,18 +471,25 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     });
     if ui.is_rect_visible(cell) {
         let t = ui.ctx().animate_bool_responsive(response.id, *on);
-        let visuals = ui.visuals();
-        let off = visuals.widgets.inactive.bg_fill;
-        let fill = off.lerp_to_gamma(visuals.selection.bg_fill, t);
-        let radius = rect.height() / 2.0;
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(radius as u8), fill);
-        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
-        let knob = Color32::WHITE;
-        ui.painter()
-            .circle_filled(egui::pos2(x, rect.center().y), radius - 3.0, knob);
+        paint_switch(ui, rect, t);
     }
     response
+}
+
+pub fn paint_switch(ui: &Ui, rect: Rect, t: f32) {
+    let visuals = ui.visuals();
+    let off = visuals.widgets.inactive.bg_fill;
+    let fill = off.lerp_to_gamma(visuals.selection.bg_fill, t);
+    let radius = rect.height() / 2.0;
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(radius as u8), fill);
+    let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+    let knob = Color32::WHITE;
+    ui.painter().circle_filled(
+        egui::pos2(x, rect.center().y),
+        radius - (radius * 0.23).round(),
+        knob,
+    );
 }
 
 pub struct SwitchRow<'a> {
@@ -605,21 +639,6 @@ pub fn list<R>(ui: &mut Ui, body: impl FnOnce(&mut List<'_>) -> R) -> R {
     card(ui, |ui| body(&mut List { ui, count: 0 }))
 }
 
-pub fn meter(ui: &mut Ui, fraction: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
-    let visuals = ui.visuals();
-    let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(3), icon_tile_fill(visuals));
-    if fraction > 0.0 {
-        let width = (rect.width() * fraction).max(rect.height());
-        painter.rect_filled(
-            Rect::from_min_size(rect.min, vec2(width, rect.height())),
-            CornerRadius::same(3),
-            crate::app::ui_state::ui_theme::brand(visuals),
-        );
-    }
-}
-
 fn pill_colors(ui: &Ui, primary: bool) -> (Color32, Color32) {
     let visuals = ui.visuals();
     if primary && ui.is_enabled() {
@@ -649,8 +668,10 @@ pub fn wide_button(ui: &mut Ui, text: &str, primary: bool) -> Response {
 
 pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
     let colors = if ui.is_enabled() {
-        let fill = ui.visuals().error_fg_color;
-        (fill, crate::app::ui_state::ui_theme::ink_on(fill))
+        (
+            crate::app::ui_state::ui_theme::danger(ui.visuals()),
+            crate::app::ui_state::ui_theme::ON_DANGER,
+        )
     } else {
         pill_colors(ui, false)
     };
@@ -675,7 +696,7 @@ pub fn field(ui: &mut Ui, edit: egui::TextEdit<'_>) -> Response {
     ui.scope(|ui| {
         let visuals = ui.visuals_mut();
         if visuals.dark_mode {
-            visuals.selection.stroke.color = crate::app::ui_state::ui_theme::BRAND_DARK;
+            visuals.selection.stroke.color = crate::app::ui_state::ui_theme::focus_ring(visuals);
         }
         let widgets = &mut visuals.widgets;
         for state in [

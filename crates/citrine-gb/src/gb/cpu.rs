@@ -150,6 +150,9 @@ impl Cpu {
 
         self.interrupt_handler(bus);
 
+        #[cfg(feature = "debug")]
+        bus.on_instruction(self);
+
         match self.decode(bus) {
             Instruction::NOP => {}
             Instruction::LD_rr_nn(r16) => self.ld_rr_nn(bus, r16),
@@ -273,6 +276,18 @@ impl Cpu {
         self.e = 0x08;
         self.h = hi(hl);
         self.l = lo(hl);
+    }
+
+    #[cfg(feature = "debug")]
+    pub fn trace_registers(&self) -> [u16; 5] {
+        let pair = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]);
+        [
+            pair(self.a, u8::from(self.f)),
+            pair(self.b, self.c),
+            pair(self.d, self.e),
+            pair(self.h, self.l),
+            self.sp,
+        ]
     }
 
     pub fn fetch(&mut self, bus: &mut impl Bus) {

@@ -8,6 +8,9 @@ use std::{env, fs};
 #[path = "src/game_name/tags.rs"]
 mod tags;
 
+#[path = "src/homebrew/storage.rs"]
+mod storage;
+
 #[derive(serde::Deserialize, Default)]
 struct GameMeta {
     title: String,
@@ -18,6 +21,8 @@ struct GameMeta {
     links: Vec<Link>,
     #[serde(default)]
     tags: Vec<String>,
+    sha1: Option<String>,
+    size: Option<usize>,
 }
 
 #[derive(serde::Deserialize)]
@@ -63,10 +68,13 @@ fn main() {
     let mut index: HashMap<String, GameMeta> =
         toml::from_str(&fs::read_to_string(index_path).unwrap()).unwrap();
 
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let mut games = Vec::new();
     for entry in fs::read_dir(homebrew_dir).unwrap() {
         let path = entry.unwrap().path();
-        let ext = path.extension().unwrap().to_str().unwrap();
+        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
 
         if ext != "gb" && ext != "gbc" {
             continue;
@@ -75,31 +83,85 @@ fn main() {
         let stem = path.file_stem().unwrap().to_str().unwrap().to_string();
         let meta = index.remove(&stem).unwrap();
 
-        games.push((path, stem, meta));
+        games.push((path, stem, meta, false));
+    }
+    if env::var_os("CARGO_FEATURE_GBA").is_some() {
+        for entry in fs::read_dir(homebrew_dir.join("gba")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let Some(stem) = name.strip_suffix(".gba.br") else {
+                continue;
+            };
+            let stem = stem.to_string();
+            assert!(
+                homebrew_dir
+                    .join("gba")
+                    .join(format!("{stem}.LICENSE.txt"))
+                    .exists(),
+                "{stem} has no licence file"
+            );
+            let meta = index.remove(&stem).unwrap();
+            games.push((path, stem, meta, true));
+        }
     }
 
-    games.sort_by_cached_key(|game| (sort_key(&game.2.title), game.2.title.clone()));
+    games.sort_by_cached_key(|game| (game.3, sort_key(&game.2.title), game.2.title.clone()));
 
-    for (path, stem, meta) in games {
-        let raw_data = fs::read(&path).unwrap();
+    for (path, stem, meta, gba) in games {
+        let stored = fs::read(&path).unwrap();
+        let raw_data = if gba {
+            let mut raw = Vec::new();
+            std::io::Read::read_to_end(
+                &mut brotli::Decompressor::new(stored.as_slice(), 4096),
+                &mut raw,
+            )
+            .unwrap();
+            raw
+        } else {
+            stored.clone()
+        };
         let sha1: [u8; 20] = sha1::Sha1::digest(&raw_data).into();
+        let sha1_hex: String = sha1.iter().map(|b| format!("{b:02x}")).collect();
+        if gba {
+            assert_eq!(meta.sha1.as_deref(), Some(sha1_hex.as_str()), "{stem} sha1");
+            assert_eq!(meta.size, Some(raw_data.len()), "{stem} size");
+            assert_eq!(raw_data[0xB2], 0x96, "{stem} is not a GBA game");
+        }
         let rom_key: String = sha2::Sha256::digest(&raw_data)
             .iter()
             .map(|b| format!("{b:02X}"))
             .collect();
         let cgb_mode = match raw_data[0x143] {
+            _ if gba => quote! { citrine_gb::rom::header::RomCgbMode::None },
             0xC0 => quote! { citrine_gb::rom::header::RomCgbMode::CgbOnly },
             flag if flag & 0x80 != 0 => quote! { citrine_gb::rom::header::RomCgbMode::CgbAndGb },
             _ => quote! { citrine_gb::rom::header::RomCgbMode::None },
         };
-        let mut compressed_data = Vec::new();
-        {
-            let mut writer = brotli::CompressorWriter::new(&mut compressed_data, 4096, 11, 22);
-            writer.write_all(&raw_data).unwrap();
-        }
-        let compressed_filename = format!("{}.br", stem);
-        let compressed_path = Path::new(&out_dir).join(&compressed_filename);
-        fs::write(&compressed_path, compressed_data).unwrap();
+        let console = if gba {
+            quote! { ShelfConsole::GameBoyAdvance }
+        } else {
+            quote! { ShelfConsole::GameBoy }
+        };
+        let size = raw_data.len();
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        let rom = if storage::fetched(file_name, &target_arch) {
+            let fetch_path = format!("homebrew/gba/{file_name}");
+            let bytes = stored.len() as u64;
+            quote! { ShelfRom::Fetch { path: #fetch_path, bytes: #bytes } }
+        } else if gba {
+            let source = format!("/homebrew/gba/{file_name}");
+            quote! { ShelfRom::Embedded(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), #source))) }
+        } else {
+            let mut compressed_data = Vec::new();
+            {
+                let mut writer = brotli::CompressorWriter::new(&mut compressed_data, 4096, 11, 22);
+                writer.write_all(&raw_data).unwrap();
+            }
+            let compressed_filename = format!("{}.br", stem);
+            let compressed_path = Path::new(&out_dir).join(&compressed_filename);
+            fs::write(&compressed_path, compressed_data).unwrap();
+            quote! { ShelfRom::Embedded(include_bytes!(concat!(env!("OUT_DIR"), "/", #compressed_filename))) }
+        };
 
         let title = meta.title;
         let author = meta.author;
@@ -123,9 +185,11 @@ fn main() {
                 sha1: [ #(#sha1),* ],
                 rom_key: #rom_key,
                 cgb_mode: #cgb_mode,
+                console: #console,
+                size: #size,
                 links: &[ #(#link_tokens),* ],
                 tags: &[ #(#tag_tokens),* ],
-                data: include_bytes!(concat!(env!("OUT_DIR"), "/", #compressed_filename)),
+                rom: #rom,
             }
         });
     }
@@ -144,6 +208,18 @@ fn main() {
             pub kind: LinkKind,
         }
 
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        pub enum ShelfConsole {
+            GameBoy,
+            GameBoyAdvance,
+        }
+
+        #[derive(Clone, Copy)]
+        pub enum ShelfRom {
+            Embedded(&'static [u8]),
+            Fetch { path: &'static str, bytes: u64 },
+        }
+
         #[derive(Clone, Copy)]
         pub struct HomebrewGame {
             pub id: &'static str,
@@ -154,9 +230,11 @@ fn main() {
             pub sha1: [u8; 20],
             pub rom_key: &'static str,
             pub cgb_mode: citrine_gb::rom::header::RomCgbMode,
+            pub console: ShelfConsole,
+            pub size: usize,
             pub links: &'static [HomebrewLink],
             pub tags: &'static [&'static str],
-            data: &'static [u8],
+            pub rom: ShelfRom,
         }
 
         impl HomebrewGame {
@@ -164,11 +242,14 @@ fn main() {
                 self.tags.join(", ")
             }
 
-            pub fn data(&self) -> Vec<u8> {
+            pub fn embedded(&self) -> Option<Vec<u8>> {
+                let ShelfRom::Embedded(data) = self.rom else {
+                    return None;
+                };
                 let mut decompressed = Vec::new();
-                let mut decompressor = brotli::Decompressor::new(self.data, 4096);
+                let mut decompressor = brotli::Decompressor::new(data, 4096);
                 std::io::Read::read_to_end(&mut decompressor, &mut decompressed).expect("Failed to decompress ROM data");
-                decompressed
+                Some(decompressed)
             }
         }
 
@@ -186,7 +267,7 @@ fn main() {
 fn game_names(out_dir: &Path) {
     println!("cargo:rerun-if-changed=names");
     let mut entries: Vec<([u8; 8], String)> = Vec::new();
-    for list in ["names/gameboy.xml", "names/gbcolor.xml"] {
+    for list in ["names/gameboy.xml", "names/gbcolor.xml", "names/gba.xml"] {
         let xml = without_comments(&fs::read_to_string(list).unwrap());
         for software in xml.split("<software ").skip(1) {
             let description = software

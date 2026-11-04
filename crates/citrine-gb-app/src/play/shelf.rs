@@ -12,7 +12,7 @@ impl Shelf for Homebrew {
         HOMEBREW_GAMES
             .iter()
             .find(|game| game.sha1 == *hash)
-            .map(|game| game.data())
+            .and_then(|game| game.embedded())
     }
 }
 
@@ -31,7 +31,7 @@ impl Shelf for Files {
                     return None;
                 }
                 let data = std::fs::read(path).ok()?;
-                (citrine_gb::rom::Rom::new(&data).header().ok()?.sha1 == *hash).then_some(data)
+                (super::sha1_of(&data) == Some(*hash)).then_some(data)
             })
         })
     }

@@ -1,4 +1,9 @@
+#[cfg(feature = "persistence")]
+use crate::gb::GameBoy;
 use crate::gb::ic::{ICInterface, Interrupt};
+use crate::gb::printer::{PrintedImage, Printer};
+#[cfg(feature = "persistence")]
+use crate::netplay::LinkPort;
 use std::collections::VecDeque;
 
 pub const DEFAULT_LINK_TIMEOUT_FRAMES: u32 = 300;
@@ -210,6 +215,8 @@ pub struct Serial {
     sent: Option<u8>,
     #[cfg_attr(feature = "serde", serde(default))]
     link: Link,
+    #[cfg_attr(feature = "serde", serde(default))]
+    printer: Option<Printer>,
 }
 
 impl Default for Serial {
@@ -222,6 +229,7 @@ impl Default for Serial {
             awaiting: false,
             sent: None,
             link: Link::default(),
+            printer: None,
         }
     }
 }
@@ -233,8 +241,10 @@ impl Serial {
 
     pub fn reset_keeping_link(&mut self) {
         let link = self.link.carry_over();
+        let printer = self.printer.as_ref().map(|_| Printer::default());
         *self = Self {
             link,
+            printer,
             ..Self::default()
         };
     }
@@ -263,7 +273,17 @@ impl Serial {
         }
         if self.sc & 0x81 == 0x81 {
             self.sent = Some(self.sb);
-            if self.link.plugged {
+            if !self.link.plugged
+                && let Some(printer) = &mut self.printer
+            {
+                self.link.master = Some(MasterTransfer {
+                    id: 0,
+                    reply: Some(printer.exchange(self.sb)),
+                    pulled_at: None,
+                    seq: 0,
+                    since: 0,
+                });
+            } else if self.link.plugged {
                 let id = self.link.next_id;
                 let (seq, since) = (self.link.seq, self.link.since);
                 self.link.next_id = id.wrapping_add(1);
@@ -287,6 +307,21 @@ impl Serial {
                 });
             }
         }
+    }
+
+    pub fn attach_printer(&mut self, attached: bool) {
+        self.printer = attached.then(Printer::default);
+    }
+
+    pub fn printer_attached(&self) -> bool {
+        self.printer.is_some()
+    }
+
+    pub fn take_prints(&mut self) -> Vec<PrintedImage> {
+        self.printer
+            .as_mut()
+            .map(Printer::take_prints)
+            .unwrap_or_default()
     }
 
     pub fn forget_link(&mut self) {
@@ -549,5 +584,66 @@ impl Serial {
             self.awaiting = true;
             self.resume(ic);
         }
+    }
+}
+
+#[cfg(feature = "persistence")]
+impl LinkPort for GameBoy {
+    type Message = LinkMessage;
+
+    fn plug_link(&mut self) {
+        GameBoy::plug_link(self);
+    }
+
+    fn unplug_link(&mut self) {
+        GameBoy::unplug_link(self);
+    }
+
+    fn link_plugged(&self) -> bool {
+        GameBoy::link_plugged(self)
+    }
+
+    fn link_waiting(&self) -> bool {
+        GameBoy::link_waiting(self)
+    }
+
+    fn take_link_messages(&mut self) -> Vec<LinkMessage> {
+        GameBoy::take_link_messages(self)
+    }
+
+    fn receive_link_message(&mut self, message: LinkMessage) {
+        GameBoy::receive_link_message(self, message);
+    }
+
+    fn is_transfer(message: &LinkMessage) -> bool {
+        matches!(message, LinkMessage::Transfer { .. })
+    }
+
+    fn begin_linked_frame(&mut self) -> u64 {
+        self.ppu.frame_ready = false;
+        0
+    }
+
+    fn step_linked(&mut self) -> u64 {
+        let before = self.cycle_counter;
+        self.step();
+        let spent = self.cycle_counter.wrapping_sub(before) as u64;
+        if self.cgb.double_speed {
+            spent
+        } else {
+            spent * 2
+        }
+    }
+
+    fn linked_frame_done(&self) -> bool {
+        self.ppu.frame_ready
+            || (!self.ppu.lcdc.lcd_enabled && self.cycle_counter >= self.frame_cycles())
+    }
+
+    fn end_linked_frame(&mut self) {
+        if self.cycle_counter >= self.frame_cycles() {
+            self.cycle_counter -= self.frame_cycles();
+        }
+        self.apu.flush_audio();
     }
 }

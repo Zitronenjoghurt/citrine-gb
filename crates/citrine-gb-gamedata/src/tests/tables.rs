@@ -280,11 +280,13 @@ fn gen2_pictures_follow_the_bank_fix_and_the_unown_letter() {
     for dex in [1u8, 2, 3, 150, 251] {
         let n = [5, 6, 7][usize::from(dex) % 3];
         let front = tables
-            .sprite(&rom, dex, None, Side::Front)
+            .sprite(&rom, u16::from(dex), None, Side::Front)
             .unwrap_or_else(|e| panic!("{dex}: {e}"));
         assert_eq!((front.width, front.height), (n, n));
         assert!(uniform(&front, dex), "{dex}");
-        let back = tables.sprite(&rom, dex, None, Side::Back).expect("back");
+        let back = tables
+            .sprite(&rom, u16::from(dex), None, Side::Back)
+            .expect("back");
         assert_eq!((back.width, back.height), (6, 6));
         assert!(uniform(&back, !dex), "{dex}");
     }

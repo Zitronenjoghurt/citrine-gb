@@ -10,6 +10,7 @@ const DEX: u16 = 251;
 const EGG: u8 = 0xFD;
 const CHECK_START: u8 = 0x63;
 const CHECK_END: u8 = 0x7F;
+const BEAT_ELITE_FOUR: usize = 68;
 const KANTO_SPAWNS: std::ops::RangeInclusive<usize> = 2..=12;
 
 pub(crate) fn read_save(game: Game, sram: &[u8]) -> Result<GameState, ReadError> {
@@ -127,8 +128,8 @@ fn read(game: Game, layout: &Gen2Layout, sram: &[u8], copy: SaveCopy) -> Option<
         .enumerate()
         .filter(|(_, count)| **count != 0)
         .map(|(index, &count)| ItemStack {
-            item: tm_hm_item(index),
-            count,
+            item: u16::from(tm_hm_item(index)),
+            count: u16::from(count),
         })
         .collect();
     let gender = layout.gender.map(|at| {
@@ -170,6 +171,7 @@ fn read(game: Game, layout: &Gen2Layout, sram: &[u8], copy: SaveCopy) -> Option<
             key_items: list::key_items(&sram[layout.key_items..], 25)?,
             balls: list::items(&sram[layout.balls..], 12)?,
             tms_hms,
+            berries: Vec::new(),
         },
         pc_items: list::items(&sram[layout.pc_items..], 50)?,
         pokedex: Pokedex {
@@ -177,7 +179,45 @@ fn read(game: Game, layout: &Gen2Layout, sram: &[u8], copy: SaveCopy) -> Option<
             caught: list::flags(&sram[layout.pokedex_caught..][..32], DEX),
         },
         copy,
+        location: layout.location.map(|at| {
+            Position::Gb(Location {
+                group: sram[at],
+                map: sram[at + 1],
+                x: sram[at + 3],
+                y: sram[at + 2],
+                outside: layout.outside.map(|at| (sram[at], sram[at + 1])),
+            })
+        }),
+        journey: journey(layout, sram, johto, kanto, badge_count),
+        hall_of_fame: None,
+        battle: None,
+        clock: None,
     })
+}
+
+fn journey(layout: &Gen2Layout, sram: &[u8], johto: u8, kanto: u8, badges: usize) -> Vec<Step> {
+    let (Some(events), Some(status)) = (layout.events, layout.status_flags) else {
+        return Vec::new();
+    };
+    let badge = |bit: usize| Step {
+        milestone: Milestone::Badge(bit),
+        done: if bit < 8 {
+            johto >> bit & 1 == 1
+        } else {
+            kanto >> (bit - 8) & 1 == 1
+        },
+    };
+    let mut steps = vec![Step {
+        milestone: Milestone::Pokedex,
+        done: sram[status] & 1 == 1,
+    }];
+    steps.extend((0..8).map(badge));
+    steps.push(Step {
+        milestone: Milestone::EliteFour,
+        done: list::flag(&sram[events..], BEAT_ELITE_FOUR),
+    });
+    steps.extend((8..badges).map(badge));
+    steps
 }
 
 fn tm_hm_item(index: usize) -> u8 {
@@ -204,7 +244,7 @@ fn pokemon(game: Game, shape: Shape, bytes: &[u8]) -> Option<Vec<Pokemon>> {
                 let party = m.len() == PARTY_MON;
                 let word = |at: usize| u16::from_be_bytes([m[at], m[at + 1]]);
                 Pokemon::Hatched(Box::new(Mon {
-                    species: m[0],
+                    species: u16::from(m[0]),
                     nickname: text::decode(game, entry.nickname),
                     ot_name: text::decode(game, entry.ot_name),
                     ot_id: word(6),
@@ -213,14 +253,16 @@ fn pokemon(game: Game, shape: Shape, bytes: &[u8]) -> Option<Vec<Pokemon>> {
                     moves: (0..4)
                         .filter(|&i| m[2 + i] != 0)
                         .map(|i| MoveSlot {
-                            id: m[2 + i],
+                            id: u16::from(m[2 + i]),
                             pp: m[23 + i] & 0x3F,
                             pp_ups: m[23 + i] >> 6,
                         })
                         .collect(),
-                    held_item: Some(m[1]).filter(|&item| item != 0),
-                    dvs: Dvs::from_bytes(m[21], m[22]),
-                    stat_exp: [word(11), word(13), word(15), word(17), word(19)],
+                    held_item: Some(u16::from(m[1])).filter(|&item| item != 0),
+                    genes: Genes::Gb {
+                        dvs: Dvs::from_bytes(m[21], m[22]),
+                        stat_exp: [word(11), word(13), word(15), word(17), word(19)],
+                    },
                     hp: party.then(|| word(34)),
                     stats: party.then(|| Stats {
                         max_hp: word(36),

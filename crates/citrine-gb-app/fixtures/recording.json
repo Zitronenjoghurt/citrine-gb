@@ -1,0 +1,137 @@
+{
+  "rom_sha256": "5D3871CAE77DB2287807E8914FD21F76203E73AA3FEC20955489D45CB4571D8F",
+  "model": "Dmg",
+  "events": [
+    {
+      "cycle": 2058532,
+      "button": "Start",
+      "pressed": true
+    },
+    {
+      "cycle": 2479876,
+      "button": "Start",
+      "pressed": false
+    },
+    {
+      "cycle": 4165252,
+      "button": "Right",
+      "pressed": true
+    },
+    {
+      "cycle": 7044436,
+      "button": "A",
+      "pressed": true
+    },
+    {
+      "cycle": 7044436,
+      "button": "Right",
+      "pressed": false
+    },
+    {
+      "cycle": 7746676,
+      "button": "A",
+      "pressed": false
+    },
+    {
+      "cycle": 10485412,
+      "button": "B",
+      "pressed": true
+    },
+    {
+      "cycle": 10485412,
+      "button": "Left",
+      "pressed": true
+    },
+    {
+      "cycle": 14066836,
+      "button": "B",
+      "pressed": false
+    },
+    {
+      "cycle": 14066836,
+      "button": "Left",
+      "pressed": false
+    },
+    {
+      "cycle": 18912292,
+      "button": "Start",
+      "pressed": true
+    },
+    {
+      "cycle": 19333636,
+      "button": "Start",
+      "pressed": false
+    },
+    {
+      "cycle": 20996980,
+      "button": "Right",
+      "pressed": true
+    },
+    {
+      "cycle": 23906388,
+      "button": "A",
+      "pressed": true
+    },
+    {
+      "cycle": 23906388,
+      "button": "Right",
+      "pressed": false
+    },
+    {
+      "cycle": 24608628,
+      "button": "A",
+      "pressed": false
+    },
+    {
+      "cycle": 27347364,
+      "button": "B",
+      "pressed": true
+    },
+    {
+      "cycle": 27347364,
+      "button": "Left",
+      "pressed": true
+    },
+    {
+      "cycle": 30928788,
+      "button": "B",
+      "pressed": false
+    },
+    {
+      "cycle": 30928788,
+      "button": "Left",
+      "pressed": false
+    },
+    {
+      "cycle": 35774244,
+      "button": "Start",
+      "pressed": true
+    },
+    {
+      "cycle": 36195588,
+      "button": "Start",
+      "pressed": false
+    },
+    {
+      "cycle": 37880964,
+      "button": "Right",
+      "pressed": true
+    },
+    {
+      "cycle": 40760148,
+      "button": "A",
+      "pressed": true
+    },
+    {
+      "cycle": 40760148,
+      "button": "Right",
+      "pressed": false
+    },
+    {
+      "cycle": 41462388,
+      "button": "A",
+      "pressed": false
+    }
+  ],
+  "end_cycle": 41462388
+}

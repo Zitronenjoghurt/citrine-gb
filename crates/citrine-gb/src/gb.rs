@@ -1,3 +1,6 @@
+use crate::console::Keys;
+#[cfg(feature = "debug")]
+use crate::debug::step::Stop;
 use crate::error::GbResult;
 use crate::rom::Rom;
 use crate::{ReadMemory, WriteMemory};
@@ -41,19 +44,23 @@ macro_rules! cpu_bus {
 }
 
 pub mod apu;
-mod boot_rom;
+pub(crate) mod boot_rom;
 pub mod bus;
 pub mod cartridge;
 pub mod cgb;
+mod console;
 pub mod cpu;
 mod dma;
 pub mod hdma;
 pub mod ic;
 pub mod joypad;
-mod memory;
+pub(crate) mod memory;
 mod oam_bug;
 pub mod ppu;
+pub mod printer;
 pub mod ram_init;
+#[cfg(feature = "persistence")]
+mod rollback;
 pub mod serial;
 pub mod timer;
 
@@ -161,6 +168,7 @@ impl GameBoy {
 
     pub fn load_rom(&mut self, rom: &Rom) -> GbResult<()> {
         let sample_rate = self.apu.output_sample_rate;
+        let muted_channels = self.apu.muted_channels;
         let mut serial = std::mem::take(&mut self.serial);
         let boot_rom = if !self.boot_rom.rom.is_empty() {
             Some(self.boot_rom.rom.clone())
@@ -186,6 +194,7 @@ impl GameBoy {
             self.ppu.load_boot_vram(&logo, dmg_tilemap);
         }
         self.apu.set_sample_rate(sample_rate);
+        self.apu.muted_channels = muted_channels;
         Ok(())
     }
 
@@ -221,8 +230,10 @@ impl GameBoy {
 
     pub fn load_boot_rom(&mut self, rom: &[u8]) {
         let sample_rate = self.apu.output_sample_rate;
+        let muted_channels = self.apu.muted_channels;
         *self = Self::new_with_ram_init(self.model, Some(rom.to_vec()), 0x00, self.ram_init);
         self.apu.set_sample_rate(sample_rate);
+        self.apu.muted_channels = muted_channels;
     }
 
     pub fn step(&mut self) {
@@ -232,6 +243,11 @@ impl GameBoy {
             return;
         }
         self.cpu.step(&mut cpu_bus!(self));
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn write_io(&mut self, addr: u16, value: u8) {
+        cpu_bus!(self).write_naive(addr, value);
     }
 
     #[cfg(test)]
@@ -274,13 +290,14 @@ impl GameBoy {
         }
     }
 
-    pub fn step_cycles(&mut self, cycles: u32) -> bool {
+    #[cfg(feature = "debug")]
+    pub fn run_for(&mut self, cycles: u32) -> Stop {
         let start = self.cycle_counter;
-        let mut stopped = false;
+        let mut stop = Stop::Finished;
         while self.cycle_counter.wrapping_sub(start) < cycles {
             self.step();
-            if self.at_breakpoint() {
-                stopped = true;
+            if let Some(hit) = self.breakpoint_hit() {
+                stop = hit;
                 break;
             }
         }
@@ -289,23 +306,33 @@ impl GameBoy {
             self.cycle_counter -= frame_cycles;
         }
         self.apu.flush_audio();
-        stopped
+        stop
     }
 
     #[cfg(feature = "debug")]
-    pub(crate) fn at_breakpoint(&self) -> bool {
-        use crate::disassembly::DisassemblySource;
-        !self.debugger.breakpoints.is_empty()
-            && self.debugger.breakpoints.contains(
-                &self
-                    .cartridge
-                    .probe_rom_location(self.cpu.pc.wrapping_sub(1)),
-            )
+    #[inline]
+    pub(crate) fn at_breakpoint(&mut self) -> bool {
+        self.debugger.breakpoints.armed() && self.breakpoint_hit().is_some()
     }
 
-    #[cfg(not(feature = "debug"))]
-    pub(crate) fn at_breakpoint(&self) -> bool {
-        false
+    #[cfg(feature = "debug")]
+    pub(crate) fn breakpoint_hit(&mut self) -> Option<Stop> {
+        if !self.debugger.breakpoints.armed() {
+            return None;
+        }
+        if let Some(stop) = self.debugger.breakpoints.take_pending() {
+            return Some(stop);
+        }
+        let at = self
+            .pc_address()
+            .filter(|at| self.debugger.breakpoints.contains(at))?;
+        let stop = Stop::Breakpoint(at);
+        self.debugger.breakpoints.record(stop);
+        Some(stop)
+    }
+
+    pub fn audio_channels(&self) -> &'static [&'static str] {
+        &apu::CHANNEL_NAMES
     }
 
     pub fn wram_bank(&self, bank: usize) -> Option<&[u8; 0x1000]> {
@@ -334,11 +361,13 @@ impl GameBoy {
         self.timer.div = post_boot_div(self.model, self.boot_rom.mounted);
         self.ppu.soft_reset();
         let sample_rate = self.apu.output_sample_rate;
+        let muted_channels = self.apu.muted_channels;
         self.apu = apu::Apu::new(self.model);
         if !self.boot_rom.mounted {
             self.apu.apply_post_boot();
         }
         self.apu.set_sample_rate(sample_rate);
+        self.apu.muted_channels = muted_channels;
         self.serial.reset_keeping_link();
         self.cycle_counter = 0;
         if self.boot_rom.mounted {
@@ -383,12 +412,69 @@ impl GameBoy {
         self.serial.receive(message, &mut self.ic);
     }
 
+    pub fn has_ir(&self) -> bool {
+        self.cgb.cgb_mode || self.cartridge.has_ir()
+    }
+
+    pub fn ir_led(&self) -> bool {
+        self.cgb.ir_led() || self.cartridge.ir_led()
+    }
+
+    pub fn set_ir_light(&mut self, light: bool) {
+        self.cgb.ir_light = light;
+        self.cartridge.set_ir_light(light);
+    }
+
+    pub fn attach_printer(&mut self, attached: bool) {
+        self.serial.attach_printer(attached);
+    }
+
+    pub fn printer_attached(&self) -> bool {
+        self.serial.printer_attached()
+    }
+
+    pub fn take_prints(&mut self) -> Vec<printer::PrintedImage> {
+        self.serial.take_prints()
+    }
+
+    pub fn has_camera(&self) -> bool {
+        self.cartridge.has_camera()
+    }
+
+    pub fn set_camera_frame(&mut self, frame: &[u8]) {
+        self.cartridge.set_camera_frame(frame);
+    }
+
+    pub fn has_tilt(&self) -> bool {
+        self.cartridge.has_tilt()
+    }
+
+    pub fn set_tilt(&mut self, x: f32, y: f32) {
+        self.cartridge.set_tilt(x, y);
+    }
+
+    pub fn has_rumble(&self) -> bool {
+        self.cartridge.has_rumble()
+    }
+
+    pub fn take_rumble(&mut self) -> f32 {
+        self.cartridge.take_rumble()
+    }
+
     pub fn press_button(&mut self, button: joypad::JoypadState) {
         self.joypad.press(button);
     }
 
     pub fn release_button(&mut self, button: joypad::JoypadState) {
         self.joypad.release(button);
+    }
+
+    pub fn set_keys(&mut self, keys: Keys) {
+        self.joypad.set(keys.into());
+    }
+
+    pub fn keys(&self) -> Keys {
+        self.joypad.held().into()
     }
 
     #[cfg(feature = "persistence")]

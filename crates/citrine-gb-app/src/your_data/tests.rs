@@ -18,6 +18,12 @@ struct Home {
     settings: Settings,
     stats: Stats,
     recent: RecentRoms,
+    #[cfg(feature = "gba")]
+    bios: (
+        crate::storage::SettingsStore,
+        Option<citrine_gb::gba::bios::Bios>,
+        String,
+    ),
 }
 
 impl Home {
@@ -34,6 +40,12 @@ impl Home {
             settings: Settings::default(),
             stats: Stats::open(crate::stats::StatsStore::in_dir(root.join("stats"))),
             recent: RecentRoms::default(),
+            #[cfg(feature = "gba")]
+            bios: (
+                crate::storage::SettingsStore::at(root.join("settings")),
+                None,
+                String::new(),
+            ),
             root,
         }
     }
@@ -46,6 +58,12 @@ impl Home {
             settings: &mut self.settings,
             stats: &mut self.stats,
             recent: &mut self.recent,
+            #[cfg(feature = "gba")]
+            gba_bios: gba_bios::GbaBios {
+                store: &self.bios.0,
+                bios: &mut self.bios.1,
+                name: &mut self.bios.2,
+            },
         }
     }
 
@@ -75,6 +93,13 @@ impl Home {
         self.recent
             .record(Path::new("/roms/silver.gbc"), "Pokémon Silver", None);
         sign_in(&mut self.settings);
+        #[cfg(feature = "gba")]
+        {
+            self.bios.1 = Some(
+                citrine_gb::gba::bios::Bios::user(citrine_gb::gba::bios::CULT_OF_GBA).unwrap(),
+            );
+            self.bios.2 = "gba_bios.bin".to_owned();
+        }
     }
 }
 
@@ -180,8 +205,13 @@ fn counts(home: &mut Home) -> Vec<(&'static str, usize)> {
 fn export(home: &mut Home) -> Files {
     let mut parts = home.parts();
     let mut files = parts.export();
-    home.media
-        .read_files(|media| add_media_files(&mut files, media));
+    let (tx, rx) = std::sync::mpsc::channel();
+    home.media.read_files(move |media| {
+        let _ = tx.send(media);
+    });
+    while let Ok(Some((id, bytes))) = rx.recv() {
+        files.insert(format!("{MEDIA}{}", id.as_str()), bytes);
+    }
     files
 }
 
@@ -205,6 +235,8 @@ fn export_then_delete_then_import_gives_the_same_data_back() {
             ("Settings", 2),
             ("Recent games", 1),
             ("Game names", 1),
+            #[cfg(feature = "gba")]
+            ("GBA BIOS", 1),
         ]
     );
 
@@ -360,4 +392,52 @@ fn paths_from_the_file_cannot_leave_their_folder() {
     assert!(home.media.items().is_empty());
     assert!(!home.root.join("escape.sav").exists());
     assert!(home.online.chat_files().is_empty());
+}
+
+#[test]
+fn an_export_and_its_import_count_every_byte_up_to_their_totals() {
+    let mut home = Home::new("counted");
+    home.fill();
+    let files = home.parts().export();
+    let counter = Counter::default();
+    counter.set_total(export_bytes(&files, home.media.items()));
+    let mut packer = Packer::new(counter.clone());
+    packer.add_all(&files);
+    assert!(!counter.bytes().is_done());
+    let (tx, rx) = std::sync::mpsc::channel();
+    home.media.read_files(move |media| {
+        let _ = tx.send(media);
+    });
+    while let Ok(Some((id, bytes))) = rx.recv() {
+        packer.add_media(&id, &bytes);
+    }
+    let progress = counter.bytes();
+    assert!(progress.is_done(), "{progress:?}");
+    assert_eq!(Some(progress.done), progress.total);
+
+    let zip = packer.finish().unwrap();
+    let reading = Counter::default();
+    let back = unpack_counted(zip, &reading).unwrap();
+    assert_eq!(back.len(), files.len() + 2);
+    let read = reading.bytes();
+    assert!(read.is_done(), "{read:?}");
+}
+
+#[test]
+fn an_import_reads_many_files_per_tick_within_its_budget() {
+    let mut files = Files::new();
+    for i in 0..200 {
+        files.insert(format!("saves/game {i}.sav"), vec![i as u8; 64]);
+    }
+    let zip = pack(&files).unwrap();
+    let counter = Counter::default();
+    let mut slow = Unpacker::new(zip.clone(), counter.clone()).unwrap();
+    assert!(slow.step_for(std::time::Duration::ZERO).unwrap());
+    assert!(!counter.bytes().is_done());
+
+    let whole = Counter::default();
+    let mut fast = Unpacker::new(zip, whole.clone()).unwrap();
+    assert!(!fast.step_for(std::time::Duration::from_secs(60)).unwrap());
+    assert!(whole.bytes().is_done());
+    assert_eq!(fast.finish().len(), files.len());
 }

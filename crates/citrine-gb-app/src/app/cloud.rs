@@ -1,6 +1,9 @@
 use super::widgets;
-use super::{CLOUD_HOLD_LIMIT, CLOUD_HOLD_TOAST, Citrine, CloudHold};
+use super::{CLOUD_HOLD_LIMIT, Citrine, CloudHold};
+use crate::progress::Progress;
 use egui::Context;
+
+const CLOUD_SAVE_LOAD: &str = "cloud save";
 
 impl Citrine {
     pub(super) fn watch_cloud_game(&mut self) {
@@ -27,7 +30,6 @@ impl Citrine {
         self.cloud_hold = Some(CloudHold {
             since: web_time::Instant::now(),
             was_running,
-            told: false,
         });
         self.emulator.running = false;
     }
@@ -59,12 +61,15 @@ impl Citrine {
                 .is_none_or(|rom| self.online.cloud_settled(rom));
             let waited = now.duration_since(hold.since);
             if !settled && waited < CLOUD_HOLD_LIMIT {
-                if waited >= CLOUD_HOLD_TOAST && !hold.told {
-                    hold.told = true;
-                    self.toasts.info("Getting your save from the cloud");
-                }
+                self.toasts.load(
+                    CLOUD_SAVE_LOAD,
+                    "Getting your save from the cloud",
+                    Progress::unknown(),
+                    now,
+                );
                 return;
             }
+            self.toasts.load_done(CLOUD_SAVE_LOAD);
             let was_running = hold.was_running;
             self.cloud_hold = None;
             self.online.cloud_release();

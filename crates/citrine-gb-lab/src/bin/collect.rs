@@ -6,7 +6,7 @@
 use anyhow::Context;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::rom::Rom;
-use citrine_gb::rom::header::RomHeader;
+use citrine_gb::rom::id::RomId;
 use citrine_lab::metric::FrameMetric;
 use citrine_lab::metrics;
 use citrine_lab::recording::Recording;
@@ -389,10 +389,7 @@ fn discover_roms(root: &Path, only: Option<&str>) -> anyhow::Result<Vec<RomConfi
             continue;
         }
         let rom = std::fs::read(&path).with_context(|| format!("failed to read {name}"))?;
-        let sha: String = RomHeader::calculate_sha256(&rom)
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect();
+        let sha = RomId::new(&rom).sha256_hex_string();
         let model = if path.extension().is_some_and(|e| e == "gbc") {
             GbModel::Cgb
         } else {
@@ -475,6 +472,7 @@ fn run_diff(
             &config.rom,
             Some(boot_rom),
             &recording,
+            recording.model.into(),
             &metrics,
             frames,
             true,

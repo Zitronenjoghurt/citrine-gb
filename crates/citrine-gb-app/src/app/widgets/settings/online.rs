@@ -4,13 +4,15 @@ use crate::app::widgets;
 use crate::app::widgets::avatar;
 use crate::app::widgets::confirm;
 use crate::app::widgets::field::row_field;
+use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::info_mark::info_mark;
 use crate::app::widgets::settings::form::Form;
 use crate::icons;
 use crate::online::cloud::SyncState;
+use crate::online::settings::InputDelay;
 use crate::online::{Online, Phase, Problem, Seen};
 use citrine_gb_net::{DISPLAY_NAME_MAX_CHARS, FileId, display_name};
-use egui::{RichText, Ui};
+use egui::{RichText, Ui, Widget};
 use join::{account_step, address_step, name_step};
 pub use phone_join::{JoinSheet, join_dialogs, join_sheet, open_sheet, signed_out_rows};
 use std::time::Duration;
@@ -232,7 +234,7 @@ pub fn connection_line(ui: &mut Ui, online: &mut Online, now: Instant) {
     if online.is_connected() {
         online.watch_round_trip(now);
         if let Some(ms) = online.round_trip_ms() {
-            crate::app::tabs::playing::latency(ui, ms);
+            crate::app::tabs::playing::server_latency(ui, ms);
         }
         return;
     }
@@ -419,6 +421,8 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
     show_playing(ui, s);
     typing(ui, s);
     cloud(ui, s, online);
+    ui.add_space(6.0);
+    input_delay(ui, s);
     ui.add_space(ui.spacing().interact_size.y.max(20.0));
     two_factor::two_factor(
         ui,
@@ -614,6 +618,18 @@ fn display_name_row(f: &mut Form, online: &mut Online, form: &mut JoinForm, fact
     }
 }
 
+fn input_delay(ui: &mut Ui, s: &mut Settings) {
+    Form::show(ui, "online_play", |f| {
+        f.row_with_hint("Input delay", DELAY_HINT, |ui| {
+            s.dirty |=
+                GenericSelect::from_enum(&mut s.online.input_delay, "enum_select_input_delay")
+                    .default_value(InputDelay::Auto)
+                    .ui(ui)
+                    .changed();
+        });
+    });
+}
+
 fn show_playing(ui: &mut Ui, s: &mut Settings) {
     s.dirty |= ui
         .checkbox(&mut s.online.show_playing, SHOW_PLAYING)
@@ -652,7 +668,7 @@ fn cloud(ui: &mut Ui, s: &mut Settings, online: &mut Online) {
     ui.horizontal(|ui| {
         ui.add_space(indent);
         let mut on = s.online.cloud_saves && s.online.sync_settings;
-        let check = egui::Checkbox::new(&mut on, "Sync settings");
+        let check = crate::app::widgets::check::Check::new(&mut on, "Sync settings");
         if ui.add_enabled(s.online.cloud_saves, check).changed() {
             s.online.sync_settings = on;
             s.dirty = true;
@@ -664,6 +680,7 @@ fn cloud(ui: &mut Ui, s: &mut Settings, online: &mut Online) {
     }
 }
 
+pub const DELAY_HINT: &str = "Your presses count this many frames later, so online play rewinds less, and Auto picks the number from the ping.";
 pub const CLOUD_HINT: &str = "Keeps your saves on the relay so your other devices can load them. They're encrypted, so only your devices can read them.";
 pub const SYNC_HINT: &str = "Your theme, palettes, key bindings and screen effects copy to your other devices on this relay ID, encrypted like your saves. The latest change wins. Volume, controllers, touch controls and the UI size stay on each device. Needs Cloud saves.";
 

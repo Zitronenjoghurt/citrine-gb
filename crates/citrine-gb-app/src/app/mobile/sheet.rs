@@ -37,20 +37,19 @@ pub fn show<R>(
     title: &str,
     body: impl FnOnce(&mut Ui) -> R,
 ) -> SheetResponse<R> {
-    let screen = ctx.content_rect();
+    let column = area(ctx).unwrap_or(ctx.content_rect());
     let mut measure = ctx.data(|d| d.get_temp::<Measure>(id)).unwrap_or_default();
-    let most = screen.height() * TALLEST;
+    let most = column.height() * TALLEST;
     let height = if measure.height > 0.0 {
         measure.height.min(most)
     } else {
         most
     };
-    let column = area(ctx).unwrap_or(screen);
     let width = column.width().min(MAX_WIDTH);
     let rect = Rect::from_min_size(
         pos2(
             column.center().x - width / 2.0,
-            screen.bottom() - height + measure.drag,
+            column.bottom() - height + measure.drag,
         ),
         vec2(width, most),
     );
@@ -66,8 +65,13 @@ pub fn show<R>(
                 .fixed_pos(rect.min),
         )
         .frame(Frame::NONE)
-        .backdrop_color(kit::scrim(&ctx.style().visuals))
+        .backdrop_color(egui::Color32::TRANSPARENT)
         .show(ctx, |ui| {
+            ui.ctx().layer_painter(ui.layer_id()).rect_filled(
+                column,
+                CornerRadius::ZERO,
+                kit::scrim(ui.visuals()),
+            );
             let fill = kit::card_fill(ui.visuals());
             let shown = ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
                 Frame::new()
@@ -289,6 +293,38 @@ pub fn percent(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sheet_ends_on_the_top_of_its_area() {
+        let ctx = Context::default();
+        let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(412.0, 800.0));
+        let mut bottom = 0.0_f32;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(412.0, 860.0))),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                set_area(ctx, Some(area));
+                show(ctx, Id::new("test_sheet"), "Room chat", |ui| {
+                    ui.set_height(1000.0);
+                });
+            });
+            bottom = output
+                .shapes
+                .iter()
+                .map(|clipped| {
+                    clipped
+                        .shape
+                        .visual_bounding_rect()
+                        .intersect(clipped.clip_rect)
+                })
+                .filter(|rect| rect.is_positive())
+                .map(|rect| rect.bottom())
+                .fold(0.0, f32::max);
+        }
+        assert!(bottom <= area.bottom() + 0.5, "the sheet reaches {bottom}");
+    }
 
     fn frame(ctx: &Context, events: Vec<egui::Event>) -> (bool, bool) {
         let input = egui::RawInput {

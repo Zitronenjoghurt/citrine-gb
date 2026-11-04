@@ -1,4 +1,4 @@
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::console::Keys;
 use std::fmt::Display;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -18,20 +18,73 @@ pub enum GbButton {
 }
 
 impl GbButton {
-    pub fn joypad(self) -> JoypadState {
+    pub fn key(self) -> Keys {
         match self {
-            Self::Up => JoypadState::UP,
-            Self::Down => JoypadState::DOWN,
-            Self::Left => JoypadState::LEFT,
-            Self::Right => JoypadState::RIGHT,
-            Self::A => JoypadState::A,
-            Self::B => JoypadState::B,
-            Self::Start => JoypadState::START,
-            Self::Select => JoypadState::SELECT,
+            Self::Up => Keys::UP,
+            Self::Down => Keys::DOWN,
+            Self::Left => Keys::LEFT,
+            Self::Right => Keys::RIGHT,
+            Self::A => Keys::A,
+            Self::B => Keys::B,
+            Self::Start => Keys::START,
+            Self::Select => Keys::SELECT,
         }
     }
 
     pub const DPAD: [Self; 4] = [Self::Up, Self::Down, Self::Left, Self::Right];
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, serde::Serialize, serde::Deserialize,
+)]
+pub enum Shoulder {
+    L,
+    R,
+}
+
+impl Shoulder {
+    pub fn key(self) -> Keys {
+        match self {
+            Self::L => Keys::L,
+            Self::R => Keys::R,
+        }
+    }
+}
+
+impl Display for Shoulder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::L => "L",
+            Self::R => "R",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Shoulders {
+    keyboard: Vec<(egui::Key, Shoulder)>,
+    gamepad: Vec<(PadButton, Shoulder)>,
+    #[serde(default)]
+    triggers: bool,
+}
+
+impl Default for Shoulders {
+    fn default() -> Self {
+        Self {
+            keyboard: vec![
+                (egui::Key::Num1, Shoulder::L),
+                (egui::Key::Num3, Shoulder::R),
+            ],
+            gamepad: vec![
+                (PadButton::LeftTrigger, Shoulder::L),
+                (PadButton::LeftTrigger2, Shoulder::L),
+                (PadButton::RightTrigger, Shoulder::R),
+                (PadButton::RightTrigger2, Shoulder::R),
+            ],
+            triggers: true,
+        }
+    }
 }
 
 impl Display for GbButton {
@@ -132,8 +185,26 @@ pub enum BindingKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BindingTarget {
     Button(GbButton),
+    Shoulder(Shoulder),
     Shortcut(crate::app::ui_state::hotkeys::HotkeyAction),
     LinkKey(crate::local_link::Half, GbButton),
+}
+
+impl BindingTarget {
+    pub fn buttons() -> impl Iterator<Item = Self> {
+        let buttons = GbButton::iter().map(Self::Button);
+        #[cfg(feature = "gba")]
+        let buttons = buttons.chain(Shoulder::iter().map(Self::Shoulder));
+        buttons
+    }
+
+    pub fn button_name(self) -> Option<String> {
+        match self {
+            Self::Button(button) => Some(button.to_string()),
+            Self::Shoulder(shoulder) => Some(shoulder.to_string()),
+            Self::Shortcut(_) | Self::LinkKey(..) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -141,6 +212,7 @@ pub enum BindingTarget {
 pub struct KeyBindings {
     keyboard: Vec<(egui::Key, GbButton)>,
     gamepad: Vec<(PadButton, GbButton)>,
+    shoulders: Shoulders,
     pub stick_as_dpad: bool,
     pub stick_deadzone: u8,
 }
@@ -181,6 +253,7 @@ impl Default for KeyBindings {
                 (PadButton::Start, GbButton::Start),
                 (PadButton::Select, GbButton::Select),
             ],
+            shoulders: Shoulders::default(),
             stick_as_dpad: true,
             stick_deadzone: Self::DEFAULT_DEADZONE,
         }
@@ -230,22 +303,112 @@ impl KeyBindings {
             .collect()
     }
 
+    pub fn input_for_key(&self, key: egui::Key) -> Option<Keys> {
+        self.button_for_key(key)
+            .map(GbButton::key)
+            .or_else(|| self.shoulder_for_key(key).map(Shoulder::key))
+    }
+
+    pub fn shoulder_for_key(&self, key: egui::Key) -> Option<Shoulder> {
+        if self.button_for_key(key).is_some() {
+            return None;
+        }
+        self.shoulders
+            .keyboard
+            .iter()
+            .find(|(bound, _)| *bound == key)
+            .map(|(_, shoulder)| *shoulder)
+    }
+
+    pub fn shoulder_for_pad(&self, pad: PadButton) -> Option<Shoulder> {
+        if self.button_for_pad(pad).is_some() {
+            return None;
+        }
+        self.shoulders
+            .gamepad
+            .iter()
+            .find(|(bound, _)| *bound == pad)
+            .map(|(_, shoulder)| *shoulder)
+    }
+
+    pub fn adopt_triggers(&mut self) -> bool {
+        if self.shoulders.triggers {
+            return false;
+        }
+        self.shoulders.triggers = true;
+        for (pad, shoulder) in [
+            (PadButton::LeftTrigger2, Shoulder::L),
+            (PadButton::RightTrigger2, Shoulder::R),
+        ] {
+            let taken = self.button_for_pad(pad).is_some()
+                || self
+                    .shoulders
+                    .gamepad
+                    .iter()
+                    .any(|(bound, _)| *bound == pad);
+            if !taken {
+                self.shoulders.gamepad.push((pad, shoulder));
+            }
+        }
+        true
+    }
+
+    pub fn bound_inputs(&self, target: BindingTarget) -> (Vec<egui::Key>, Vec<PadButton>) {
+        match target {
+            BindingTarget::Button(button) => (self.keys_for(button), self.pads_for(button)),
+            BindingTarget::Shoulder(shoulder) => {
+                (self.shoulder_keys(shoulder), self.shoulder_pads(shoulder))
+            }
+            BindingTarget::Shortcut(_) | BindingTarget::LinkKey(..) => (Vec::new(), Vec::new()),
+        }
+    }
+
+    pub fn shoulder_keys(&self, shoulder: Shoulder) -> Vec<egui::Key> {
+        self.shoulders
+            .keyboard
+            .iter()
+            .filter(|(key, bound)| *bound == shoulder && self.button_for_key(*key).is_none())
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    pub fn shoulder_pads(&self, shoulder: Shoulder) -> Vec<PadButton> {
+        self.shoulders
+            .gamepad
+            .iter()
+            .filter(|(pad, bound)| *bound == shoulder && self.button_for_pad(*pad).is_none())
+            .map(|(pad, _)| *pad)
+            .collect()
+    }
+
     pub fn bind_key(&mut self, key: egui::Key, button: GbButton) {
-        self.keyboard.retain(|(bound, _)| *bound != key);
+        self.unbind_key(key);
         self.keyboard.push((key, button));
     }
 
     pub fn bind_pad(&mut self, pad: PadButton, button: GbButton) {
-        self.gamepad.retain(|(bound, _)| *bound != pad);
+        self.unbind_pad(pad);
         self.gamepad.push((pad, button));
+    }
+
+    pub fn bind_shoulder_key(&mut self, key: egui::Key, shoulder: Shoulder) {
+        self.unbind_key(key);
+        self.shoulders.keyboard.push((key, shoulder));
+    }
+
+    pub fn bind_shoulder_pad(&mut self, pad: PadButton, shoulder: Shoulder) {
+        self.unbind_pad(pad);
+        self.shoulders.gamepad.push((pad, shoulder));
     }
 
     pub fn unbind_key(&mut self, key: egui::Key) {
         self.keyboard.retain(|(bound, _)| *bound != key);
+        self.shoulders.keyboard.retain(|(bound, _)| *bound != key);
     }
 
     pub fn unbind_pad(&mut self, pad: PadButton) {
         self.gamepad.retain(|(bound, _)| *bound != pad);
+        self.shoulders.gamepad.retain(|(bound, _)| *bound != pad);
     }
 
     pub fn unbound(&self) -> Vec<GbButton> {
@@ -339,7 +502,28 @@ pub fn key_label(key: egui::Key) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use citrine_gb::gb::joypad::JoypadState;
     use egui::Key;
+
+    #[test]
+    fn every_button_keeps_its_bit() {
+        let bits: Vec<(GbButton, u16, JoypadState)> = GbButton::iter()
+            .map(|button| (button, button.key().bits(), button.key().into()))
+            .collect();
+        assert_eq!(
+            bits,
+            [
+                (GbButton::Up, 0x40, JoypadState::UP),
+                (GbButton::Down, 0x80, JoypadState::DOWN),
+                (GbButton::Left, 0x20, JoypadState::LEFT),
+                (GbButton::Right, 0x10, JoypadState::RIGHT),
+                (GbButton::A, 0x01, JoypadState::A),
+                (GbButton::B, 0x02, JoypadState::B),
+                (GbButton::Start, 0x08, JoypadState::START),
+                (GbButton::Select, 0x04, JoypadState::SELECT),
+            ]
+        );
+    }
 
     #[test]
     fn the_defaults_cover_every_button() {
@@ -456,5 +640,139 @@ mod tests {
             Some(GbButton::Up)
         );
         assert!(!bindings.stick_as_dpad);
+    }
+
+    #[test]
+    fn l_and_r_have_their_own_defaults() {
+        let bindings = KeyBindings::default();
+        assert_eq!(bindings.shoulder_keys(Shoulder::L), [Key::Num1]);
+        assert_eq!(bindings.shoulder_keys(Shoulder::R), [Key::Num3]);
+        assert_eq!(
+            bindings.shoulder_pads(Shoulder::L),
+            [PadButton::LeftTrigger, PadButton::LeftTrigger2]
+        );
+        assert_eq!(
+            bindings.shoulder_pads(Shoulder::R),
+            [PadButton::RightTrigger, PadButton::RightTrigger2]
+        );
+        assert_eq!(bindings.input_for_key(Key::Num1), Some(Keys::L));
+        assert_eq!(bindings.input_for_key(Key::Num3), Some(Keys::R));
+        assert_eq!(bindings.input_for_key(Key::Q), Some(Keys::A));
+    }
+
+    #[test]
+    fn saved_shoulders_take_the_triggers_once_unless_they_are_used() {
+        let saved = r#"{"gamepad":[["RightTrigger2","A"]],"shoulders":{"keyboard":[],"gamepad":[["LeftTrigger","L"],["RightTrigger","R"]]}}"#;
+        let mut bindings: KeyBindings = serde_json::from_str(saved).expect("loads");
+        assert!(bindings.adopt_triggers());
+        assert_eq!(
+            bindings.shoulder_pads(Shoulder::L),
+            [PadButton::LeftTrigger, PadButton::LeftTrigger2]
+        );
+        assert_eq!(
+            bindings.shoulder_pads(Shoulder::R),
+            [PadButton::RightTrigger]
+        );
+        assert_eq!(
+            bindings.button_for_pad(PadButton::RightTrigger2),
+            Some(GbButton::A)
+        );
+
+        bindings.unbind_pad(PadButton::LeftTrigger2);
+        assert!(!bindings.adopt_triggers());
+        assert_eq!(
+            bindings.shoulder_pads(Shoulder::L),
+            [PadButton::LeftTrigger]
+        );
+        assert!(!KeyBindings::default().adopt_triggers());
+    }
+
+    #[test]
+    fn the_shoulder_keys_collide_with_no_shortcut() {
+        let hotkeys = crate::app::ui_state::hotkeys::Hotkeys::default();
+        for key in [Key::Num1, Key::Num3] {
+            for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+                assert_eq!(hotkeys.action_for(key, modifiers), None, "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_moves_between_a_button_and_a_shoulder() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind_shoulder_key(Key::Q, Shoulder::L);
+        assert_eq!(bindings.button_for_key(Key::Q), None);
+        assert_eq!(bindings.input_for_key(Key::Q), Some(Keys::L));
+
+        bindings.bind_key(Key::Num1, GbButton::B);
+        assert_eq!(bindings.shoulder_keys(Shoulder::L), [Key::Q]);
+        assert_eq!(bindings.input_for_key(Key::Num1), Some(Keys::B));
+
+        bindings.bind_shoulder_pad(PadButton::East, Shoulder::R);
+        assert_eq!(bindings.button_for_pad(PadButton::East), None);
+        assert_eq!(
+            bindings.shoulder_for_pad(PadButton::East),
+            Some(Shoulder::R)
+        );
+
+        bindings.unbind_pad(PadButton::East);
+        assert_eq!(bindings.shoulder_for_pad(PadButton::East), None);
+    }
+
+    #[test]
+    fn old_settings_keep_their_binds_and_get_l_and_r() {
+        let saved = r#"{"keyboard":[["Num1","Select"],["W","Up"]],"gamepad":[["LeftTrigger","Start"]],"stick_as_dpad":true}"#;
+        let bindings: KeyBindings = serde_json::from_str(saved).expect("loads");
+        assert_eq!(bindings.input_for_key(Key::Num1), Some(Keys::SELECT));
+        assert!(bindings.shoulder_keys(Shoulder::L).is_empty());
+        assert_eq!(bindings.shoulder_keys(Shoulder::R), [Key::Num3]);
+        assert_eq!(
+            bindings.button_for_pad(PadButton::LeftTrigger),
+            Some(GbButton::Start)
+        );
+        assert_eq!(bindings.shoulder_for_pad(PadButton::LeftTrigger), None);
+        assert_eq!(
+            bindings.shoulder_for_pad(PadButton::RightTrigger),
+            Some(Shoulder::R)
+        );
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(default)]
+    struct BindingsBeforeShoulders {
+        keyboard: Vec<(egui::Key, GbButton)>,
+        gamepad: Vec<(PadButton, GbButton)>,
+        stick_as_dpad: bool,
+    }
+
+    impl Default for BindingsBeforeShoulders {
+        fn default() -> Self {
+            Self {
+                keyboard: Vec::new(),
+                gamepad: Vec::new(),
+                stick_as_dpad: true,
+            }
+        }
+    }
+
+    #[test]
+    fn a_build_without_shoulders_loads_binds_saved_with_l_and_r() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind_shoulder_key(Key::K, Shoulder::L);
+        bindings.bind_shoulder_pad(PadButton::LeftTrigger2, Shoulder::R);
+        bindings.bind_key(Key::J, GbButton::A);
+        let saved = serde_json::to_string(&bindings).expect("saves");
+        assert!(saved.contains("shoulders"));
+
+        let old: BindingsBeforeShoulders = serde_json::from_str(&saved).expect("loads");
+        assert!(old.keyboard.contains(&(Key::J, GbButton::A)));
+        assert!(old.keyboard.iter().all(|(key, _)| *key != Key::K));
+        assert!(
+            old.gamepad
+                .iter()
+                .all(|(pad, _)| *pad != PadButton::LeftTrigger2)
+        );
+        assert_eq!(old.gamepad.len(), KeyBindings::default().gamepad.len());
+        assert!(old.stick_as_dpad);
     }
 }

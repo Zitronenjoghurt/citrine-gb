@@ -1,11 +1,13 @@
 use super::engine::Rollback;
 use super::{
-    CableLink, Ending, Engine, GUEST_POWER_ON, GameFile, KEPT_PINGS, KEPT_ROMS, PlaySession,
-    Returned, Role, Round, SETUP_PINGS, SETUP_WAIT, SLOW_DELAY, SLOW_ROUND_TRIP_MS, Shelf, Stage,
-    model_of, packed, random_seed, sha1_of, unix_now,
+    CableLink, DropHistory, Ending, Engine, GUEST_POWER_ON, GameFile, KEPT_PINGS, KEPT_ROMS,
+    PlaySession, Returned, Role, Round, SETUP_PINGS, SETUP_WAIT, Shelf, Stage, kind_of, links,
+    packed, random_seed, sha1_of, unix_now,
 };
-use citrine_gb::netplay::NEVER;
-use citrine_gb_net::{GameCard, GameHash, Mode, Origin, PLAY_VERSION, PlayMsg, Start};
+use citrine_gb::netplay::{NEVER, Sync};
+use citrine_gb_net::{
+    Console, GameCard, GameHash, Mode, OLDEST_PLAY_VERSION, Origin, PlayMsg, Start,
+};
 use web_time::Instant;
 
 impl PlaySession {
@@ -23,6 +25,7 @@ impl PlaySession {
             return;
         }
         self.stage = Stage::Preparing;
+        self.began = true;
         self.started_at = now;
         self.heard_at = now;
         self.outbox.push(PlayMsg::Watch(self.let_watch));
@@ -32,24 +35,38 @@ impl PlaySession {
     }
 
     pub(super) fn retire_round(&mut self) {
+        if self.round.rollback().is_some_and(Rollback::is_group)
+            && let Some(Engine::Rollback(r)) = self.round.engine.take()
+        {
+            self.stashed = Some(r);
+            return;
+        }
         let save = self.round.rollback_mut().and_then(Rollback::final_save);
         self.keep_saves(save);
         let Some(engine) = self.round.engine.take() else {
             return;
         };
         let dropped = self.stage == Stage::Ended(Ending::Dropped);
+        let history = match (&engine, self.id, &self.round.my_card) {
+            (Engine::Rollback(r), Some(id), Some(card)) if dropped => {
+                DropHistory::of(r, id, self.round.number, self.friend, card.hash)
+            }
+            _ => None,
+        };
         if let Engine::Rollback(r) = engine
-            && let Some(mut gb) = r.into_console(dropped)
+            && !self.lent
+            && let Some(console) = r.into_console(dropped)
         {
-            gb.unplug_link();
             let borrowed = self
                 .borrowing
                 .then(|| self.round.my_card.as_ref().map(|c| c.hash))
                 .flatten();
             self.returned = Some(Returned {
-                console: gb,
+                console,
                 borrowed,
                 paused: dropped,
+                friend: self.friend,
+                history,
             });
         }
     }
@@ -73,16 +90,36 @@ impl PlaySession {
         self.join_round();
     }
 
+    pub(super) fn restart(&mut self, now: Instant) {
+        let mine = self.round.mine.take();
+        let card = self.round.my_card.clone();
+        self.restart_with(now, mine, card);
+    }
+
+    pub(super) fn restart_with(
+        &mut self,
+        now: Instant,
+        mine: Option<GameFile>,
+        card: Option<GameCard>,
+    ) {
+        self.started_at = now;
+        self.heard_at = now;
+        self.next_round(self.round.number + 1, mine, card);
+    }
+
     fn join_round(&mut self) {
         if self.round.joined {
             return;
         }
         self.round.joined = true;
         self.outbox.push(PlayMsg::Join {
-            version: PLAY_VERSION,
+            version: OLDEST_PLAY_VERSION,
             round: self.round.number,
             game: self.round.my_card.clone(),
         });
+        if self.apart {
+            return;
+        }
         let resume = self.round.my_card.is_some()
             && (self.round.resume || self.round.mine.as_ref().is_some_and(|m| m.running));
         self.round.my_origin = match &self.round.mine {
@@ -144,6 +181,21 @@ impl PlaySession {
         let Some(theirs) = self.round.theirs.clone() else {
             return;
         };
+        if self.apart {
+            let start = Start {
+                round: self.round.number,
+                mode: Mode::Apart,
+                seed: random_seed(),
+                start_time: unix_now(),
+                delay: 0,
+                power_on: vec![NEVER, NEVER],
+                plugged: false,
+                start_frame: 0,
+            };
+            self.outbox.push(PlayMsg::Start(start.clone()));
+            self.launch(start, now);
+            return;
+        }
         let mine = self.round.my_card.is_some();
         if mine && !self.round.set_up {
             return;
@@ -172,7 +224,12 @@ impl PlaySession {
                 return;
             }
         }
-        let mode = if !mine && theirs.is_none() {
+        let gba = |card: &GameCard| card.console == Console::Gba;
+        let mixed = theirs
+            .as_ref()
+            .zip(self.round.my_card.as_ref())
+            .is_some_and(|(t, m)| gba(t) != gba(m));
+        let mode = if (!mine && theirs.is_none()) || mixed {
             Mode::Apart
         } else if i_hold && they_hold {
             Mode::Rollback
@@ -181,9 +238,6 @@ impl PlaySession {
         } else {
             Mode::Apart
         };
-        let slow = self
-            .round_trip_ms()
-            .is_some_and(|ms| ms > SLOW_ROUND_TRIP_MS);
         let power = |origin: Option<&Origin>, later: u32| match origin {
             None => NEVER,
             Some(Origin::Boot(_)) => later,
@@ -194,8 +248,16 @@ impl PlaySession {
             mode,
             seed: random_seed(),
             start_time: unix_now(),
-            delay: if slow && both { SLOW_DELAY } else { 0 },
-            power_on: [
+            delay: if both {
+                links::delay_for(
+                    self.input_delay,
+                    self.round_trip_ms(),
+                    self.round_sync().budget(),
+                ) as u8
+            } else {
+                0
+            },
+            power_on: vec![
                 power(self.round.my_origin.as_ref().filter(|_| mine), 0),
                 power(
                     self.round
@@ -206,13 +268,14 @@ impl PlaySession {
                 ),
             ],
             plugged: self.my_cable && self.friend_cable,
+            start_frame: 0,
         };
-        self.outbox.push(PlayMsg::Start(start));
+        self.outbox.push(PlayMsg::Start(start.clone()));
         self.launch(start, now);
     }
 
     pub(super) fn launch(&mut self, start: Start, now: Instant) {
-        self.round.start = Some(start);
+        self.round.start = Some(start.clone());
         let engine = match start.mode {
             Mode::Cable => Some(Engine::Cable(CableLink {
                 plugged: self.my_cable && self.friend_cable,
@@ -233,7 +296,19 @@ impl PlaySession {
         }
     }
 
-    fn my_rom(&self) -> Option<Vec<u8>> {
+    fn round_sync(&self) -> Sync {
+        let mut cards = self
+            .round
+            .my_card
+            .iter()
+            .chain(self.round.theirs.iter().flatten());
+        match cards.any(|card| card.console == Console::Gba) {
+            true => links::sync_for(Some(Console::Gba), 2),
+            false => self.sync,
+        }
+    }
+
+    pub(super) fn my_rom(&self) -> Option<Vec<u8>> {
         if let Some(mine) = &self.round.mine {
             return Some(mine.rom.clone());
         }
@@ -246,9 +321,10 @@ impl PlaySession {
     }
 
     pub(super) fn rollback(&mut self, start: Start, now: Instant) -> Option<Rollback> {
+        self.meet_at_common_frame();
         let mine = match (&self.round.my_card, &self.round.my_origin) {
             (Some(card), Some(origin)) => {
-                Some((self.my_rom()?, model_of(card.console), origin.clone()))
+                Some((self.my_rom()?, kind_of(card.console), origin.clone()))
             }
             (Some(_), None) => return None,
             (None, _) => None,
@@ -256,7 +332,7 @@ impl PlaySession {
         let theirs = match (&self.round.theirs, &self.round.their_origin) {
             (Some(Some(card)), Some(origin)) => Some((
                 self.round.their_rom.clone()?,
-                model_of(card.console),
+                kind_of(card.console),
                 origin.clone(),
             )),
             (Some(Some(_)), None) => return None,
@@ -270,7 +346,15 @@ impl PlaySession {
         if local == citrine_gb::netplay::Player::Two {
             games.swap(0, 1);
         }
-        let mut r = Rollback::new(local, start, games, self.sample_rate, now).ok()?;
+        let mut r = Rollback::new(
+            local,
+            start,
+            games,
+            self.sample_rate,
+            self.round_sync(),
+            now,
+        )
+        .ok()?;
         r.watch(self.friend_lets_watch && self.watch_friend);
         r.show(self.let_watch);
         Some(r)

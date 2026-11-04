@@ -50,8 +50,8 @@ pub(crate) fn items(bytes: &[u8], capacity: usize) -> Option<Vec<crate::ItemStac
         bytes[1..1 + 2 * count]
             .chunks(2)
             .map(|pair| crate::ItemStack {
-                item: pair[0],
-                count: pair[1],
+                item: u16::from(pair[0]),
+                count: u16::from(pair[1]),
             })
             .collect(),
     )
@@ -65,7 +65,10 @@ pub(crate) fn key_items(bytes: &[u8], capacity: usize) -> Option<Vec<crate::Item
     Some(
         bytes[1..1 + count]
             .iter()
-            .map(|&item| crate::ItemStack { item, count: 1 })
+            .map(|&item| crate::ItemStack {
+                item: u16::from(item),
+                count: 1,
+            })
             .collect(),
     )
 }
@@ -87,4 +90,10 @@ pub(crate) fn bcd(bytes: &[u8]) -> u32 {
 
 pub(crate) fn be(bytes: &[u8]) -> u32 {
     bytes.iter().fold(0, |total, &b| total << 8 | u32::from(b))
+}
+
+pub(crate) fn flag(bytes: &[u8], index: usize) -> bool {
+    bytes
+        .get(index / 8)
+        .is_some_and(|byte| byte >> (index % 8) & 1 == 1)
 }

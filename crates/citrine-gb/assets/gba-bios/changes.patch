@@ -1,0 +1,1136 @@
+diff --git a/bios_calls/decompression/bitunpack.s b/bios_calls/decompression/bitunpack.s
+index 47ca0ef..3e659bc 100644
+--- a/bios_calls/decompression/bitunpack.s
++++ b/bios_calls/decompression/bitunpack.s
+@@ -44,6 +44,9 @@ swi_BitUnpack:
+     
+     @ check for invalid decompression parameters
+     check_invalid_decomp r3, r4, r0, .bit_unpack_return
++    .rept 24
++        nop
++    .endr
+     
+     .bit_unpack_check_skip:
+     
+@@ -65,6 +68,9 @@ swi_BitUnpack:
+     
+         ldrb r11, [r0], #1  @ data
+         mov r8, #0          @ src_bit_count
++        .rept 4
++            nop
++        .endr
+         
+         @ while (src_bit_count < 8)
+         .bit_unpack_bit_loop:
+@@ -74,7 +80,15 @@ swi_BitUnpack:
+             ands r10, r12, r11, lsr r8   @ masked_data = (data >> src_bit_count) & data_mask
+                                          @ omits use of shifted data mask
+             cmpeq r6, #0                 @ if (masked_data != 0 || zero_flag)
+-            addne r10, r2                @     masked_data += data_offset
++            beq .bit_unpack_unit_zero
++            add r10, r2                  @     masked_data += data_offset
++            .rept 3
++                nop
++            .endr
++            .bit_unpack_unit_zero:
++            .rept 4
++                nop
++            .endr
+             
+             orr r7, r10, lsl r9          @ data_buffer |= masked_data << dest_bit_count
+             add r9, r5                   @ dest_bit_count += dest_width
+diff --git a/bios_calls/decompression/huffman.s b/bios_calls/decompression/huffman.s
+index a849d75..b501f63 100644
+--- a/bios_calls/decompression/huffman.s
++++ b/bios_calls/decompression/huffman.s
+@@ -74,6 +74,9 @@ swi_HuffUnCompReadNormal:
+     movnes r2, r0, lsr #25   @ == 0 if and only if src_addr < 0x02000000
+     beq .huff_uncomp_return
+      
++    .rept 32
++        nop
++    .endr
+     and r2, r3, #0xf         @ data_size
+     lsr r3, #8               @ decomp_len
+     
+@@ -94,8 +97,14 @@ swi_HuffUnCompReadNormal:
+             subs r8, #1
+             blt .huff_uncomp_word_loop
+             
++            cmp r3, #0                  @ the official BIOS checks the length on every bit
++            ble .huff_uncomp_return
+             ldrb r10, [r7]              @ node
+-            and r11, r10, #0x3f
++            ldrb r11, [r7]              @ the official BIOS reads the node twice
++            .rept 7
++                nop
++            .endr
++            and r11, r11, #0x3f
+             add r11, #1                 @ next_node_offset
+             
+             bic r7, #1
+@@ -107,6 +116,9 @@ swi_HuffUnCompReadNormal:
+             beq .huff_uncomp_node_loop  @ we did not change src_len here, so we don't need to check it
+             
+             @ next node is data
++            .rept 5
++                nop
++            .endr
+             ldrb r7, [r7]               @ we have to reset r7 (node_ptr) to tree_ptr after this anyway
+             
+             orr r5, r7, lsl r6          @ buffer |= next_node << unit_counter
+diff --git a/bios_calls/decompression/lz77.s b/bios_calls/decompression/lz77.s
+index ea39f4b..9876733 100644
+--- a/bios_calls/decompression/lz77.s
++++ b/bios_calls/decompression/lz77.s
+@@ -1,143 +1,111 @@
+-@ TODO: check if source address is valid (>= 0x02000000)
+-
++@ LZ77UnCompReadNormalWrite8bit / 16bit
++@ As in the official BIOS, a window is always copied whole and the length is checked
++@ after each literal or window, so the output can run up to 17 bytes past the length.
++@ The waits pad the cycles per block, literal, window and window byte to the official
++@ BIOS's (WRAM: 12, 22, 31 + 13 per byte; VRAM: 12, 23/24, 34 + 22/23 per byte).
++
++.macro lz77_wait cycles
++    .rept \cycles
++        nop
++    .endr
++.endm
++
++.arm
+ swi_LZ77UnCompWrite8bit:
+     stmfd sp!, {r3 - r6}
+-
+-    @ Read header word:
+-    @ bit0-3:  reserved
+-    @ bit4-7:  compressed type (1 for LZ77)
+-    @ bit8-31: size of compressed data
+     ldr r2, [r0], #4
+     lsrs r2, r2, #8
+-    @ ignore zero-length decompression requests
+     beq .lz77_8bit_done
+-
+-.lz77_8bit_loop:
+-    @ read encoder byte, shift to MSB for easier access.
++    lz77_wait 18
++.lz77_8bit_block:
+     ldrb r3, [r0], #1
+-    orr r3, #0x01000000
+-.lz77_8bit_encoder_loop:
++    mov r6, #8
++    lz77_wait 5
++.lz77_8bit_item:
+     tst r3, #0x80
+-    bne .lz77_8bit_copy_window
+-.lz77_8bit_copy_byte:
+-    @ copy byte from current source to current destination
++    bne .lz77_8bit_window
+     ldrb r4, [r0], #1
+     strb r4, [r1], #1
+-
+-    @ check if decompressed length has been reached.
+-    subs r2, #1
+-    beq .lz77_8bit_done
+-
+-    @ read next encoder or process next block
+-    lsls r3, #1
+-    bcc .lz77_8bit_encoder_loop
+-    b .lz77_8bit_loop
+-.lz77_8bit_copy_window:
+-    @ read window tuple {displacement, size}
++    sub r2, #1
++    lz77_wait 3
++.lz77_8bit_next:
++    cmp r2, #0
++    ble .lz77_8bit_done
++    lsl r3, #1
++    subs r6, #1
++    bne .lz77_8bit_item
++    b .lz77_8bit_block
++.lz77_8bit_window:
++    @ window tuple {displacement, size}
+     ldrb r4, [r0], #1
+     ldrb r5, [r0], #1
+-
+-    @ r5 = window displacement
+     orr r5, r5, r4, lsl #8
+     bic r5, #0xF000
+     add r5, #1
+-
+-    @ r4 = window size
+     lsr r4, #4
+     add r4, #3
++    sub r2, r4
++    lz77_wait 3
+ .lz77_8bit_copy_window_loop:
+-    @ copy byte from window to current destination
+-    ldrb r6, [r1, -r5]
+-    strb r6, [r1], #1
+-
+-    @ check if decompressed length has been reached
+-    subs r2, #1
+-    beq .lz77_8bit_done
+-
+-    @ check if window has been fully copied
++    ldrb r12, [r1, -r5]
++    strb r12, [r1], #1
+     subs r4, #1
+     bne .lz77_8bit_copy_window_loop
+-
+-    @ read next encoder or process next block
+-    lsls r3, #1
+-    bcc .lz77_8bit_encoder_loop
+-    b .lz77_8bit_loop
+-
++    b .lz77_8bit_next
+ .lz77_8bit_done:
+     ldmfd sp!, {r3 - r6}
+     bx lr
+ 
+ swi_LZ77UnCompWrite16bit:
+     stmfd sp!, {r3 - r7}
+-
+-    @ Read header word:
+-    @ bit0-3:  reserved
+-    @ bit4-7:  compressed type (1 for LZ77)
+-    @ bit8-31: size of compressed data
+     ldr r2, [r0], #4
+     lsrs r2, r2, #8
+-    @ ignore zero-length decompression requests
+     beq .lz77_16bit_done
+-
+-.lz77_16bit_loop:
+-    @ read encoder byte, shift to MSB for easier access.
++    lz77_wait 26
++.lz77_16bit_block:
+     ldrb r3, [r0], #1
+-    orr r3, #0x01000000
+-.lz77_16bit_encoder_loop:
++    mov r6, #8
++    lz77_wait 5
++.lz77_16bit_item:
+     tst r3, #0x80
+-    bne .lz77_16bit_copy_window
+-.lz77_16bit_copy_byte:
+-    @ copy byte from current source to current destination
++    bne .lz77_16bit_window
+     ldrb r4, [r0], #1
+     tst r1, #1
+     moveq r7, r4
+     orrne r7, r4, lsl #8
+-    strneh r7, [r1]
++    strneh r7, [r1, #-1]
+     add r1, #1
+-
+-    @ check if decompressed length has been reached.
+-    subs r2, #1
+-    beq .lz77_16bit_done
+-
+-    @ read next encoder or process next block
+-    lsls r3, #1
+-    bcc .lz77_16bit_encoder_loop
+-    b .lz77_16bit_loop
+-.lz77_16bit_copy_window:
+-    @ read window tuple {displacement, size}
++    sub r2, #1
++    lz77_wait 3
++.lz77_16bit_next:
++    cmp r2, #0
++    ble .lz77_16bit_done
++    lsl r3, #1
++    subs r6, #1
++    bne .lz77_16bit_item
++    b .lz77_16bit_block
++.lz77_16bit_window:
+     ldrb r4, [r0], #1
+     ldrb r5, [r0], #1
+-
+-    @ r5 = window displacement
+     orr r5, r5, r4, lsl #8
+     bic r5, #0xF000
+     add r5, #1
+-
+-    @ r4 = window size
+     lsr r4, #4
+     add r4, #3
++    sub r2, r4
++    lz77_wait 6
+ .lz77_16bit_copy_window_loop:
+-    @ copy byte from window to current destination
+-    ldrb r6, [r1, -r5]
++    @ a displacement of 1 reads the byte still in the buffer from VRAM
++    ldrb r12, [r1, -r5]
+     tst r1, #1
+-    moveq r7, r6
+-    orrne r7, r6, lsl #8
+-    strneh r7, [r1]
++    moveq r7, r12
++    orrne r7, r12, lsl #8
++    strneh r7, [r1, #-1]
+     add r1, #1
+-
+-    @ check if decompressed length has been reached
+-    subs r2, #1
+-    beq .lz77_16bit_done
+-
+-    @ check if window has been fully copied
++    lz77_wait 10
+     subs r4, #1
+     bne .lz77_16bit_copy_window_loop
+-
+-    @ read next encoder or process next block
+-    lsls r3, #1
+-    bcc .lz77_16bit_encoder_loop
+-    b .lz77_16bit_loop
+-
++    b .lz77_16bit_next
+ .lz77_16bit_done:
+     ldmfd sp!, {r3 - r7}
+     bx lr
+diff --git a/bios_calls/decompression/running_length.s b/bios_calls/decompression/running_length.s
+index c6dd191..4ea2554 100644
+--- a/bios_calls/decompression/running_length.s
++++ b/bios_calls/decompression/running_length.s
+@@ -1,157 +1,144 @@
+-@ RLUnCompReadNormalWrite8bit(src_addr: r0, dest_addr: r1):
++@ RLUnCompReadNormalWrite8bit / 16bit, in Thumb as in the official BIOS; the cycle counts
++@ per run and per byte follow the official BIOS's
+ @ {
+-@     // return if zero length / BIOS read
+-@     uint decomp_len             // r7 (@[src_addr])
+-@     src_addr += 4               // skip header
+-@     
++@     decomp_len = [src_addr] >> 8, src_addr += 4
+ @     while (decomp_len > 0)
+ @     {
+-@         byte flags = [src_addr++]
+-@         expand_length = flags & 0x7f  // r2 (N - 1 or N - 3 depending on compression flag)
+-@         if ((flags & 0x80) == 0)   // check uncomp/comp flag
+-@         {
+-@             // uncompressed
+-@             expand_length++
+-@             decomp_len -= expand_length
+-@             
+-@             while (decomp_len > 0)
+-@             {
+-@                 byte data = [src_addr++]
+-@                 [dest_addr++] = data
+-@                 
+-@                 decomp_len--
+-@             }
+-@         }
+-@         else
+-@         {
+-@             // compressed
+-@             expand_length += 3
+-@             decomp_len -= expand_length
+-@             
+-@             byte data = [src_addr++]
+-@             
+-@             while (decomp_len > 0) 
+-@             {
+-@                 [dest_addr++] = data
+-@                 expand_length--
+-@             }
+-@         }
++@         flags = [src_addr++]
++@         if (flags & 0x80): expand (flags & 0x7f) + 3 copies of [src_addr++]
++@         else: copy (flags & 0x7f) + 1 bytes from src_addr
++@         decomp_len -= that length
+ @     }
+ @ }
+ 
++.align 2
++.thumb
+ swi_RLUnCompReadNormalWrite8bit:
+-    stmfd sp!, { r2-r4 }
+-    
+-    ldr r2, [r0], #4
+-    lsr r2, #8                  @ decomp_len
+-    
+-    @ check for invalid decompression parameters
+-    check_invalid_decomp r2, r3, r0, .rl_uncomp_read_normal_write_8bit_return
+-    
+-    .rl_uncomp_read_normal_write_8bit_check_skip:       @ used in boot_screen
+-    
+-    .rl_uncomp_read_normal_write_8bit_loop:
+-        ldrb r3, [r0], #1
+-        lsls r3, #0x19          @ carry flag = uncomp/comp flag
+-        lsr r3, #0x19
+-        
+-        bcc .rl_uncomp_read_normal_write_8bit_uncompressed
+-        
+-        .rl_uncomp_read_normal_write_8bit_compressed:
+-            ldrb r4, [r0], #1   @ data
+-            add r3, #3          @ expand_length += 3
+-            sub r2, r3          @ decomp_len -= expand_length
+-            
+-            .rl_uncomp_read_normal_write_8bit_compressed_loop:
+-                strb r4, [r1], #1
+-                subs r3, #1
+-                bgt .rl_uncomp_read_normal_write_8bit_compressed_loop
+-            
+-            b .rl_uncomp_read_normal_write_8bit_loop_end
+-            
+-        .rl_uncomp_read_normal_write_8bit_uncompressed:
+-            add r3, #1          @ expand_length += 1
+-            sub r2, r3          @ decomp_len -= expand_length
+-            
+-            .rl_uncomp_read_normal_write_8bit_uncompressed_loop:
+-                ldrb r4, [r0], #1
+-                strb r4, [r1], #1
+-                subs r3, #1
+-                bgt .rl_uncomp_read_normal_write_8bit_uncompressed_loop
+-                
+-        .rl_uncomp_read_normal_write_8bit_loop_end:
+-            cmp r2, #0
+-            bgt .rl_uncomp_read_normal_write_8bit_loop
+-    
+-    .rl_uncomp_read_normal_write_8bit_return:
+-        ldmfd sp!, { r2-r4 }
++    push { r4 }
++    ldr r2, [r0]
++    add r0, #4
++    lsr r2, r2, #8
++    beq .rl8_return
++    lsr r3, r0, #25
++    beq .rl8_return
++    .rept 32
++        nop
++    .endr
++    .rl_uncomp_read_normal_write_8bit_check_skip:   @ used in boot_screen, with r4 pushed
++    .rl8_loop:
++        ldrb r3, [r0]
++        add r0, #1
++        lsl r4, r3, #24
++        bmi .rl8_compressed
++        lsl r3, r3, #25
++        lsr r3, r3, #25
++        add r3, #1
++        sub r2, r2, r3
++        nop
++        .rl8_raw_loop:
++            ldrb r4, [r0]
++            add r0, #1
++            strb r4, [r1]
++            add r1, #1
++            sub r3, #1
++            bgt .rl8_raw_loop
++        cmp r2, #0
++        bgt .rl8_loop
++    .rl8_return:
++        pop { r4 }
+         bx lr
+- 
+- 
+- swi_RLUnCompReadNormalWrite16bit:
+-    @ basically the same thing as above, except we buffer the bytes and write them 2 at a time
+-    @ in the original BIOS, any leftover byte (if the uncompressed length is not divisible by 2) is NOT written
+-    
+-    stmfd sp!, { r2-r6 }
+-    
+-    ldr r2, [r0], #4
+-    lsr r2, #8                  @ decomp_len
+-    
+-    @ check for invalid decompression parameters
+-    check_invalid_decomp r2, r3, r0, .rl_uncomp_read_normal_write_16bit_return
+-    
+-    mov r5, #0                  @ keep track of upper/lower byte
+-    mov r6, #0                  @ write buffer
+-    
+-    .rl_uncomp_read_normal_write_16bit_loop:
+-        ldrb r3, [r0], #1
+-        lsls r3, #0x19          @ carry flag = uncomp/comp flag
+-        lsr r3, #0x19
+-        
+-        bcc .rl_uncomp_read_normal_write_16bit_uncompressed
+-        
+-        .rl_uncomp_read_normal_write_16bit_compressed:
+-            ldrb r4, [r0], #1   @ data
+-            add r3, #3          @ expand_length += 3
+-            sub r2, r3          @ decomp_len -= expand_length
+-            
+-            .rl_uncomp_read_normal_write_16bit_compressed_loop:
+-                subs r3, #1
+-                blt .rl_uncomp_read_normal_write_16bit_loop_end
+-                
+-                orr r6, r4, lsl r5
+-                eors r5, #8
+-                @ store only if it's an even byte we are checking
+-                bne .rl_uncomp_read_normal_write_16bit_compressed_loop
+-                
+-                strh r6, [r1], #2
+-                mov r6, #0              @ clear buffer
+-                b .rl_uncomp_read_normal_write_16bit_compressed_loop
+-            
+-        .rl_uncomp_read_normal_write_16bit_uncompressed:
+-            add r3, #1          @ expand_length += 1
+-            sub r2, r3          @ decomp_len -= expand_length
+-            
+-            .rl_uncomp_read_normal_write_16bit_uncompressed_loop:
+-                subs r3, #1
+-                blt .rl_uncomp_read_normal_write_16bit_loop_end
+-                
+-                ldrb r4, [r0], #1
+-                orr r6, r4, lsl r5
+-                eors r5, #8
+-                @ store only if it's an even byte we are checking
+-                bne .rl_uncomp_read_normal_write_16bit_uncompressed_loop
+-                
+-                strh r6, [r1], #2     @ last byte is not stored for misaligned decomp_len
+-                mov r6, #0            @ clear buffer
+-                
+-                b .rl_uncomp_read_normal_write_16bit_uncompressed_loop
+-                
+-        .rl_uncomp_read_normal_write_16bit_loop_end:
+-            cmp r2, #0
+-            bgt .rl_uncomp_read_normal_write_16bit_loop
+-    
+-    .rl_uncomp_read_normal_write_16bit_return:
+-        ldmfd sp!, { r2-r6 }
++    .rl8_compressed:
++        lsl r3, r3, #25
++        lsr r3, r3, #25
++        add r3, #3
++        sub r2, r2, r3
++        ldrb r4, [r0]
++        add r0, #1
++        nop
++        .rl8_comp_loop:
++            strb r4, [r1]
++            add r1, #1
++            sub r3, #1
++            bgt .rl8_comp_loop
++        cmp r2, #0
++        bgt .rl8_loop
++        b .rl8_return
++
++swi_RLUnCompReadNormalWrite16bit:
++    push { r4-r7 }
++    ldr r2, [r0]
++    add r0, #4
++    lsr r2, r2, #8
++    beq .rl16_return
++    lsr r3, r0, #25
++    beq .rl16_return
++    .rept 27
++        nop
++    .endr
++    mov r5, #0                  @ shift of the next byte in the halfword
++    mov r6, #0                  @ halfword buffer
++    mov r7, #8
++    .rl16_loop:
++        ldrb r3, [r0]
++        add r0, #1
++        lsl r4, r3, #24
++        bmi .rl16_compressed
++        lsl r3, r3, #25
++        lsr r3, r3, #25
++        add r3, #1
++        sub r2, r2, r3
++        .rept 9
++            nop
++        .endr
++        .rl16_raw_loop:
++            ldrb r4, [r0]
++            add r0, #1
++            lsl r4, r5
++            orr r6, r4
++            eor r5, r7
++            cmp r5, #0
++            bne .rl16_raw_next
++            strh r6, [r1]           @ last byte is not stored for an odd decomp_len
++            add r1, #2
++            mov r6, #0
++            .rl16_raw_next:
++            sub r3, #1
++            bgt .rl16_raw_loop
++        cmp r2, #0
++        bgt .rl16_loop
++    .rl16_return:
++        pop { r4-r7 }
+         bx lr
+- 
+\ No newline at end of file
++    .rl16_compressed:
++        lsl r3, r3, #25
++        lsr r3, r3, #25
++        add r3, #3
++        sub r2, r2, r3
++        ldrb r4, [r0]
++        add r0, #1
++        mov r12, r0
++        .rept 9
++            nop
++        .endr
++        .rl16_comp_loop:
++            nop
++            nop
++            mov r0, r4
++            lsl r0, r5
++            orr r6, r0
++            eor r5, r7
++            cmp r5, #0
++            bne .rl16_comp_next
++            strh r6, [r1]
++            add r1, #2
++            mov r6, #0
++            .rl16_comp_next:
++            sub r3, #1
++            bgt .rl16_comp_loop
++        mov r0, r12
++        cmp r2, #0
++        bgt .rl16_loop
++        b .rl16_return
++
++.align 2
++.arm
+diff --git a/bios_calls/math/division.s b/bios_calls/math/division.s
+index d8eb105..956ecad 100644
+--- a/bios_calls/math/division.s
++++ b/bios_calls/math/division.s
+@@ -18,6 +18,7 @@ swi_Div:
+     movs r4, r1
+     rsbmis r1, r1, #0        @ r1 was negative
+     beq .div_by_zero         @ prevent freezes on division by 0
++    mov r12, r0
+     eors r4, r0, asr #32     @ bit 31 of r4 are now sign(r1) ^ sign(r0)
+     rsbcs r0, r0, #0         @ r0 was negative
+ 
+@@ -45,7 +46,7 @@ swi_Div:
+     @ at this point, r0 contains Number % Denom (unsigned)
+     @                r3 contains Number / Denom (unsigned)
+     
+-    eors r1, r0, r4, asr #32
++    eors r1, r0, r12, asr #32
+     adc r1, r1, #0              @ Number % Denom (signed)
+     eors r0, r3, r4, asr #32
+     adc r0, r0, #0              @ Number / Denom (signed)
+diff --git a/bios_calls/math/sqrt.s b/bios_calls/math/sqrt.s
+index 236feb4..fec5c40 100644
+--- a/bios_calls/math/sqrt.s
++++ b/bios_calls/math/sqrt.s
+@@ -1,4 +1,6 @@
+ swi_Sqrt:
++    cmp r0, #0
++    bxeq lr
+     @ idea: binary search with a power of 2 as initial guess
+     
+     stmfd sp!, { r1, r2, r3, r4 }
+diff --git a/bios_calls/power.s b/bios_calls/power.s
+index ef863d5..04a84a7 100644
+--- a/bios_calls/power.s
++++ b/bios_calls/power.s
+@@ -24,10 +24,15 @@ swi_IntrWait:
+     mov r2, #0
+     mov r3, #1
+     mov r12, #MMIO_BASE
+-    cmp r0, #0
+-    blne .intr_wait_check_processed_irqs
+-
+     adr lr, .intr_wait_loop_end
++    cmp r0, #0
++    @ r0 = 0: an IRQ flagged before the call ends the wait at once
++    beq .intr_wait_check_processed_irqs
++    @ r0 = 1: discard old flags, then wait for a new IRQ
++    stmfd sp!, {lr}
++    bl .intr_wait_check_processed_irqs
++    ldmfd sp!, {lr}
++    b .intr_wait_halt_until_irq
+ .intr_wait_halt_until_irq:
+     @ HALTCNT = 0 (enter halt mode)
+     strb r2, [r12, #(REG_HALTCNT - MMIO_BASE)]
+diff --git a/bios_calls/register_ram_reset.s b/bios_calls/register_ram_reset.s
+index b8697d8..42db684 100644
+--- a/bios_calls/register_ram_reset.s
++++ b/bios_calls/register_ram_reset.s
+@@ -44,6 +44,10 @@ swi_RegisterRamReset:
+     tst r3, #0x20
+     bne .register_ram_SIO
+     .register_ram_SIO_return:
++    @ forced blank, as the official BIOS leaves DISPCNT for any flags
++    mov r1, #0x04000000
++    mov r2, #0x80
++    strh r2, [r1]
+ 
+     and r3, #0x1f
+     mov r4, #0          @ used for offset into LUTs
+@@ -54,9 +58,11 @@ swi_RegisterRamReset:
+     .register_ram_reset_loop:
+         add r4, #2
+         lsrs r3, #1
+-        
+-        beq .register_ram_reset_return  @ no more flags left
+-        bcc .register_ram_reset_loop
++        bcs .register_ram_reset_clear
++        bne .register_ram_reset_loop
++        b .register_ram_reset_return    @ no more flags left
++
++    .register_ram_reset_clear:
+         
+         @ we keep adding 2 to r4 because we cant shift it in ldrh, but we can in ldr
+         ldr r1, [r11, r4, lsl #1]       @ load dest address
+@@ -73,13 +79,11 @@ swi_RegisterRamReset:
+         
+         bl swi_CpuFastSet
+ 
+-        @ set special registers (RCNT, JOYCNT)
++        @ set special registers (RCNT)
+         mov r1, #0x04000000
+         add r1, #0x100
+         mov r2, #0x8000
+         strh r2, [r1, #0x34]  @ RCNT
+-        mov r2, #7
+-        strh r2, [r1, #0x40]  @ JOYCNT
+ 
+         b .register_ram_SIO_return
+ 
+@@ -103,7 +107,8 @@ swi_RegisterRamReset:
+         mov r2, #0x70
+         strh r2, [r1, #0x70]
+         strh r1, [r1, #0x84]  @ clear SOUNDCNT_X
+-
++        mov r2, #0x0e
++        strh r2, [r1, #0x82]  @ SOUNDCNT_H as the official BIOS leaves it
+         b .register_ram_sound_IO_return
+     .register_ram_other_IO:
+         @ preserve r0
+diff --git a/bios_calls/sound_bias.s b/bios_calls/sound_bias.s
+new file mode 100644
+index 0000000..ec71eab
+--- /dev/null
++++ b/bios_calls/sound_bias.s
+@@ -0,0 +1,56 @@
++swi_SoundBias:
++    @ moves the SOUNDBIAS level in steps of 2 towards 0 (r0 = 0) or 0x200, keeping the
++    @ resolution bits; the waits around each step follow the official BIOS's step times
++    @ (61 cycles down, 62 up), and r1 and r3 are left as it leaves them
++    mov r3, #0x04000000
++    add r3, #0x88
++    movs r1, r0
++    movne r1, #0x200
++    ldrh r2, [r3]
++    bic r2, #1
++    bic r12, r2, #0xfc00
++    bne .sound_bias_up
++    .sound_bias_down:
++        cmp r12, #0
++        beq .sound_bias_down_done
++        sub r2, #2
++        sub r12, #2
++        mov r0, #2
++        .sound_bias_down_wait:
++            subs r0, #1
++            bne .sound_bias_down_wait
++        strh r2, [r3]
++        mov r0, #11
++        .sound_bias_down_delay:
++            subs r0, #1
++            bne .sound_bias_down_delay
++        nop
++        nop
++        b .sound_bias_down
++    .sound_bias_up:
++        cmp r12, #0x200
++        bge .sound_bias_done
++        add r2, #2
++        add r12, #2
++        mov r0, #2
++        .sound_bias_up_wait:
++            subs r0, #1
++            bne .sound_bias_up_wait
++        strh r2, [r3]
++        mov r0, #11
++        .sound_bias_up_delay:
++            subs r0, #1
++            bne .sound_bias_up_delay
++        nop
++        nop
++        nop
++        b .sound_bias_up
++    .sound_bias_down_done:
++        .rept 3
++            nop
++        .endr
++    .sound_bias_done:
++        .rept 5
++            nop
++        .endr
++        bx lr
+diff --git a/boot_screen/boot_screen.s b/boot_screen/boot_screen.s
+index 75f6b56..f957df6 100644
+--- a/boot_screen/boot_screen.s
++++ b/boot_screen/boot_screen.s
+@@ -1,7 +1,14 @@
+ .equ NAME_TILES_START, VRAM_START + (14 << 6) + (7 << 1)       @ Tx = 7, Ty = 14
+ .equ ONE_LINE_TID_OFFSET, 30 << 1
+ .equ GLOW_SPRITE_BASE, OAM_START + 0x400 - 32
+-.equ SPEED, 4
++.equ SPEED, 1
++.equ BOOT_WAKES_BEFORE_SOUND, 3
++.equ BOOT_WAIT_SOUND, 69908
++.equ BOOT_WAIT_TIMER_STOP, 1534
++.equ BOOT_WAIT_RESET, 4
++.equ BOOT_PAD_SOUND, 2
++.equ BOOT_PAD_TIMER_STOP, 2
++.equ BOOT_PAD_RESET, 1
+ 
+ .align 4
+ .pool
+@@ -66,39 +73,55 @@ boot_screen_text_data:
+ .arm
+ BootScreen:
+     stmfd sp!, { lr }
++    mov r0, #MMIO_BASE
++    mov r1, #1
++    strb r1, [r0, #0x300]
++    add r2, r0, #(REG_IE - MMIO_BASE)
++    strh r1, [r2]
++    mov r1, #0x08
++    strh r1, [r0, #(REG_DISPSTAT - MMIO_BASE)]
+     
+     @ decompress glyphs into WRAM
+     ldr r0, =#glyphs
+     mov r1, #eWRAM_START
+     
+     @                       -------- Cheese to skip RLDecompress BIOS read check --------
+-    stmfd sp!, { r2-r4 }
++    stmfd sp!, { r4 }
+     ldr r2, [r0], #4
+     lsr r2, #8                  @ decomp_len
+-    bl .rl_uncomp_read_normal_write_8bit_check_skip
++    adr lr, .boot_screen_glyphs_done
++    ldr r12, =#.rl_uncomp_read_normal_write_8bit_check_skip + 1
++    bx r12
++    .boot_screen_glyphs_done:
+     @                       ------------------------- /Cheese ---------------------------
+     
+     @ -------------------------------------- load base palette entries--------------------------------------------
+     mov r0, #PAL_START
+     @ blue: BGR (254, 5, 21) /8 ~~ (32, 1, 3)
+-    ldrh r1, =((31 << 10) | (1 << 5) | 3)
++    ldr r1, =((31 << 10) | (1 << 5) | 3)
+     strh r1, [r0]           @ backdrop
+-    ldrh r1, =#0x7fff
++    ldr r1, =#0x7fff
+     strh r1, [r0, #2]       @ PAL entry 1 (white BG on "Fleroviux")
+     strh r1, [r0, #6]       @ PAL entry 3 (white BG on "DenSinH")
+     @ pink: BGR (218, 12, 208) /8 ~~ (27, 2, 26)
+-    ldrh r1, =#((27 << 10) | (2 << 5) | 26)
++    ldr r1, =#((27 << 10) | (2 << 5) | 26)
+     strh r1, [r0, #4]       @ PAL entry 2 ("Fleroviux")
+     strh r1, [r0, #8]       @ PAL entry 4 ("DenSinH")
+     
+     @ ------------------------------------------- init LCD registers ---------------------------------------------
+-    mov r0, #MMIO_BASE                                @ DISPCNT
+-    ldrh r1, =#0x9140                                 @ 1D OBJ mapping; Enable BG0; Enable OBJ; OBJ Window display
+-    strh r1, [r0]                                     @ store to DISPCNT
+-    mov r1, #0x08                                     @ V-Blank IRQ enable, for swi_Halt
+-    strh r1, [r0, #(REG_DISPSTAT - MMIO_BASE)]        @ store to DISPSTAT
+-    ldrh r1, =#0x3001                                 @ display BG0 outside WinOBJ, display OBJ within WinOBJ
++    mov r0, #MMIO_BASE
++    ldr r1, =#0x3021
+     strh r1, [r0, #(REG_WINOUT - MMIO_BASE)]
++    ldr r1, =#0x00103fbf
++    str r1, [r0, #0x50]
++    mov r1, #16
++    strh r1, [r0, #0x54]
++    mov r1, #0x8f
++    strh r1, [r0, #(REG_SOUNDCNT_X - MMIO_BASE)]
++    ldr r1, =#0xa90e
++    strh r1, [r0, #(REG_SOUNDCNT_H - MMIO_BASE)]
++    mov r1, #0x42
++    strb r1, [r0, #(REG_SOUNDBIAS + 1 - MMIO_BASE)]
+     
+     mov r1, #0x07                                     @ Prio 3; CharBaseBlock 1; 4bpp
+     strh r1, [r0, #(REG_BG0CNT - MMIO_BASE)]          @ store to BG0CNT
+@@ -250,35 +273,100 @@ BootScreen_draw:
+ .pool
+ 
+ BootScreen_animate:
+-    @ I have to use registers that are not altered by swi_Halt for this:
+-    mov r8, #SCREEN_WIDTH       @ keep track of x-coordinate
+-    ldr r10, =#REG_IE
++    ldr r10, =#REG_IE + 2
+     mov r11, #1
+-    strh r11, [r10], #2         @ enable VBlank IRQs in IE (IME is still off); r11 now holds REG_IF
++    strh r11, [r10]
++    mov r9, #BOOT_WAKES_BEFORE_SOUND
++    .boot_screen_wait_for_sound:
++        bl swi_Halt
++        mov r11, #1
++        strh r11, [r10]
++        subs r9, #1
++        bne .boot_screen_wait_for_sound
+ 
++    ldr r0, =#BOOT_WAIT_SOUND
++    bl boot_wait
++    .rept BOOT_PAD_SOUND
++    nop
++    .endr
++    mov r1, #ROM_ENTRYPOINT
++    ldrb r0, [r1, #0xb4]
++    tst r0, #0x80
++    muleq r2, r0, r0
++    ldr r0, =#MMIO_BASE + 0x100
++    ldr r1, =#0xfb1a
++    strh r1, [r0]
++    mov r1, #0x80
++    strh r1, [r0, #2]
++
++    mov r9, #6
++    mov r8, #MMIO_BASE
+     .boot_screen_animation_loop:
+-        bl swi_Halt             @ wait until VBlank (IE still has VBlank IRQ enabled, IME is off)
++        bl swi_Halt
+         mov r11, #1
+-        strh r11, [r10]         @ acknowledge VBlank IRQ
+-        
+-        ldr r3, =#GLOW_SPRITE_BASE + 2   @ load address of first glow sprite + 2 (OBJ_ATTR1)
++        strh r11, [r10]
++
++        cmp r9, #6
++        ldreq r1, =#0x9140
++        streqh r1, [r8]
++
++        cmp r9, #7
++        blt .boot_screen_glow_done
++        cmp r9, #22
++        rsble r1, r9, #22
++        strleh r1, [r8, #0x54]
++        cmp r9, #246
++        bgt .boot_screen_glow_done
++        ldr r3, =#GLOW_SPRITE_BASE + 2
+         mov r4, #4
+-        
+         .boot_screen_animation_glow_loop:
+-            @ load all glow sprites, increment their x coordinate, and store them again
+-            
+             ldrh r1, [r3]
+             add r1, #SPEED
+-            strh r1, [r3], #8   @ go to next sprite
++            strh r1, [r3], #8
+             subs r4, #1
+             bgt .boot_screen_animation_glow_loop
+-            
+-        subs r8, #SPEED
+-        bgt .boot_screen_animation_loop
+-    
++        .boot_screen_glow_done:
++
++        cmp r9, #217
++        ldreq r1, =#0x00103fbf
++        streq r1, [r8, #0x50]
++        moveq r1, #0
++        streq r1, [r8, #0x54]
++        bls .boot_screen_fade_done
++        cmp r9, #248
++        bgt .boot_screen_fade_done
++        tst r9, #1
++        subeq r1, r9, #216
++        lsreq r1, #1
++        streq r1, [r8, #0x54]
++        .boot_screen_fade_done:
++
++        add r9, #1
++        cmp r9, #268
++        ble .boot_screen_animation_loop
++
++    ldr r0, =#BOOT_WAIT_TIMER_STOP
++    bl boot_wait
++    .rept BOOT_PAD_TIMER_STOP
++    nop
++    .endr
++    ldr r0, =#MMIO_BASE + 0x100
++    mov r1, #0
++    strh r1, [r0, #2]
++    ldr r0, =#BOOT_WAIT_RESET
++    bl boot_wait
++    .rept BOOT_PAD_RESET
++    nop
++    .endr
++
+     ldmfd sp!, { lr }
+     bx lr
+ 
++boot_wait:
++    subs r0, #1
++    bne boot_wait
++    bx lr
++
+ .pool
+ 
+ draw_GB_letter:
+diff --git a/entrypoint.s b/entrypoint.s
+index c050769..f224b84 100644
+--- a/entrypoint.s
++++ b/entrypoint.s
+@@ -65,14 +65,8 @@ swi_HardReset:
+     add r1, r0, #(REG_IME - MMIO_BASE)
+     strh r0, [r1]
+     
+-    msr cpsr_cf, #MODE_SYS
+-    mov r0, #0
+-    mov r1, #0
+-    mov r2, #0
+-    mov r3, #0
+-        
+-    mov lr, #ROM_ENTRYPOINT
+-    bx lr
++    mov r12, #0
++    b .hard_reset_exit
+ 
+ .hard_reset_IO_values:
+     @ address, value
+@@ -86,43 +80,23 @@ swi_HardReset:
+     .hword 0x0134, 0x8000
+ .hard_reset_IO_values_end:
+ 
+-swi_SoftReset:
+-    @ read return address from 0x03007FFA (0x04000000 - 6 with mirroring)
+-    mov r0, #0x04000000
+-    ldrb r2, [r0, #-6]
+-    tst r2, #1
+-    moveq lr, #ROM_ENTRYPOINT
+-    movne lr, #RAM_ENTRYPOINT
+-
+-reset_modes:
+-    @ Setup supervisor, IRQ and system mode stacks/link registers/.
+-    msr cpsr_cf, #MODE_SVC
+-    ldr sp, =#SVC_STACK
+-    mov lr, #0
+-    msr spsr_cf, lr 
+-    msr cpsr_c, #MODE_IRQ
+-    ldr sp, =#IRQ_STACK
+-    mov lr, #0
+-    msr spsr_cf, lr
++@ the jump into the ROM sits where the official BIOS has it, so that
++@ BIOS reads after boot return the opcode games and tests expect
++.org 0xC4
++.hard_reset_exit:
+     msr cpsr_cf, #MODE_SYS
+-    ldr sp, =#SYS_STACK
+-    
+-    @ clear 0x200 bytes of RAM from 0x03007d00 to 0x03007fff
+-    @ r0 still contains 0x04000000 from HardReset or SoftReset!
+-    ldr r1, =#-0x200
++    mov r0, #0
++    mov r1, #0
+     mov r2, #0
+-    
+-    .soft_reset_RAM_clear:
+-        str r2, [r0, r1]
+-        adds r1, #4
+-        bne .soft_reset_RAM_clear
+-    
+-    @ load all registers from 0 cleared RAM
+-    ldmfa r0, { r0-r12 }
+-    
+-    @ Jump into the ROM or RAM
++    mov r3, #0
++    mov lr, #ROM_ENTRYPOINT
+     bx lr
+ 
++.org 0xE4
++    msr cpsr_fc, r0
++
++@ the IRQ and SWI handlers sit at the official BIOS's addresses
++.org 0x128
+ exception_irq:
+     stmfd sp!, {r0-r3, r12, lr}
+     mov r0, #0x04000000
+@@ -177,9 +151,50 @@ exception_swi:
+ exception_undefined:
+     b $
+ 
++@ never runs: the opcode official BIOS reads return after an SWI
++    mov r2, #4
++
+ @ prefetch abort, data abort, reserved, fast IRQ
+ exception_unused:
+     b $
++
++swi_SoftReset:
++    @ read return address from 0x03007FFA (0x04000000 - 6 with mirroring)
++    mov r0, #0x04000000
++    ldrb r2, [r0, #-6]
++    tst r2, #1
++    moveq lr, #ROM_ENTRYPOINT
++    movne lr, #RAM_ENTRYPOINT
++
++reset_modes:
++    @ Setup supervisor, IRQ and system mode stacks/link registers/.
++    msr cpsr_cf, #MODE_SVC
++    ldr sp, =#SVC_STACK
++    mov lr, #0
++    msr spsr_cf, lr 
++    msr cpsr_c, #MODE_IRQ
++    ldr sp, =#IRQ_STACK
++    mov lr, #0
++    msr spsr_cf, lr
++    msr cpsr_cf, #MODE_SYS
++    ldr sp, =#SYS_STACK
++    
++    @ clear 0x200 bytes of RAM from 0x03007d00 to 0x03007fff
++    @ r0 still contains 0x04000000 from HardReset or SoftReset!
++    ldr r1, =#-0x200
++    mov r2, #0
++    
++    .soft_reset_RAM_clear:
++        str r2, [r0, r1]
++        adds r1, #4
++        bne .soft_reset_RAM_clear
++    
++    @ load all registers from 0 cleared RAM
++    ldmfa r0, { r0-r12 }
++    
++    @ Jump into the ROM or RAM
++    bx lr
++
+     
+ @ the real BIOS yolo's out-of-bound SWIs, so we might as well do it too
+ swi_table:
+@@ -203,12 +218,12 @@ swi_table:
+     .word swi_LZ77UnCompWrite8bit
+     .word swi_LZ77UnCompWrite16bit
+     .word swi_HuffUnCompReadNormal
+-    .word swi_RLUnCompReadNormalWrite8bit
+-    .word swi_RLUnCompReadNormalWrite16bit
++    .word swi_RLUnCompReadNormalWrite8bit + 1
++    .word swi_RLUnCompReadNormalWrite16bit + 1
+     .word swi_Diff8bitUnfilterWrite8bit
+     .word swi_Diff8bitUnfilterWrite16bit
+     .word swi_Diff16bitUnfilter
+-    .word swi_DoNothing @ SoundBias
++    .word swi_SoundBias
+     .word swi_SoundDriverInit
+     .word swi_DoNothing @ SoundDriverMode
+     .word swi_DoNothing @ SoundDriverMain
+@@ -236,8 +251,18 @@ swi_GetBiosChecksum:
+     @ GBATek says this should be the value resulting in r0 for a proper ROM's checksum
+     @ In the end, this BIOS is directed more towards emulators, and it wouldn't matter much 
+     @ if "not properly checksummed" ROMs can't run with it
++    @ sums its own 4096 words at the official BIOS's pace, then returns the official sum
++    mov r3, #0
++    .bios_checksum_loop:
++        ldr r1, [r3], #4
++        add r0, r1
++        nop
++        nop
++        cmp r3, #0x4000
++        bne .bios_checksum_loop
+     ldr r0, =#0xBAAE187F
+     bx lr
++.pool
+ 
+ .include "bios_calls/cpu_set.s"
+ .include "bios_calls/decompression.s"
+@@ -245,6 +270,7 @@ swi_GetBiosChecksum:
+ .include "bios_calls/power.s"
+ .include "bios_calls/register_ram_reset.s"
+ .include "bios_calls/audio.s"
++.include "bios_calls/sound_bias.s"
+ 
+ .include "boot_screen/boot_screen.s"
+ 

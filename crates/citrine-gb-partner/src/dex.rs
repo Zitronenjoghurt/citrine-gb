@@ -17,14 +17,15 @@ impl Dex {
         let count = match tables.game.generation() {
             Generation::One => 151,
             Generation::Two => 251,
+            Generation::Three => 0,
         };
         let entries = (1..=count)
             .map(|dex| {
-                let index = tables.species_for_dex(dex)?;
+                let species = tables.species_for_dex(dex)?;
                 Some(Entry {
-                    index,
-                    name: tables.species_name(index)?.to_string(),
-                    base: *tables.base_stats(index)?,
+                    index: u8::try_from(species).ok()?,
+                    name: tables.species_name(species)?.to_string(),
+                    base: *tables.base_stats(species)?,
                 })
             })
             .collect();

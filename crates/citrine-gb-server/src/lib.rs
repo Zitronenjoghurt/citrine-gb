@@ -206,6 +206,10 @@ impl Running {
         Ok(self.app.db.create_invite("", now()).await?.code)
     }
 
+    pub async fn stored_messages(&self) -> sqlx::Result<u64> {
+        Ok(self.app.db.stored_messages().await?.0)
+    }
+
     pub async fn back_up(&self, now: u64) {
         back_up(&self.app.db, &self.app.config.data_dir.join("backups"), now).await;
     }

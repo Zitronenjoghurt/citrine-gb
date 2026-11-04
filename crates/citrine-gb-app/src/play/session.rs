@@ -1,11 +1,11 @@
 use super::engine::Rollback;
 use super::messages::to_byte;
 use super::{
-    Engine, LinkedSave, MyGame, PlaySession, Returned, Role, Round, STALL_SHOWN, SaveKey, Stage,
-    sha1_of,
+    DropHistory, Engine, LinkedSave, MyGame, PlaySession, Returned, Role, Round, STALL_SHOWN,
+    SaveKey, Stage, sha1_of,
 };
+use citrine_gb::console::{Console, Keys};
 use citrine_gb::gb::GameBoy;
-use citrine_gb::gb::joypad::JoypadState;
 use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb_net::{CableByte, GameCard, Mode, OnlineId, Origin, PlayMsg, SessionId};
 use std::collections::VecDeque;
@@ -17,10 +17,17 @@ impl PlaySession {
         Self {
             id: None,
             friend,
+            key: None,
+            apart: false,
+            began: false,
+            links_in: Vec::new(),
+            sync: super::links::sync_for(None, 2),
+            input_delay: None,
             role,
             stage,
             borrowing: false,
             borrowed_save: None,
+            lent: false,
             round: Round::new(1, None, None),
             roms: Vec::new(),
             wants_state: false,
@@ -41,11 +48,22 @@ impl PlaySession {
             outbox: Vec::new(),
             game_outbox: Vec::new(),
             sample_rate: 44_100,
+            grouped: false,
+            stashed: None,
         }
     }
 
     pub fn id(&self) -> Option<SessionId> {
         self.id
+    }
+
+    pub fn is_apart(&self) -> bool {
+        self.apart
+    }
+
+    pub(super) fn key(&self, online: &crate::online::Online) -> Option<citrine_gb_net::PublicKey> {
+        self.key
+            .or_else(|| online.friend(self.friend).map(|f| f.public_key))
     }
 
     pub fn friend(&self) -> OnlineId {
@@ -58,6 +76,12 @@ impl PlaySession {
 
     pub fn stage(&self) -> Stage {
         self.stage
+    }
+
+    pub fn sends_game(&self) -> bool {
+        matches!(self.stage, Stage::Preparing | Stage::Receiving { .. })
+            && self.sharing
+            && self.round.they_hold_mine == Some(false)
     }
 
     pub fn is_live(&self) -> bool {
@@ -89,11 +113,11 @@ impl PlaySession {
     }
 
     pub fn mode(&self) -> Option<Mode> {
-        self.round.start.map(|s| s.mode)
+        self.round.start.as_ref().map(|s| s.mode)
     }
 
     pub fn delay(&self) -> Option<u8> {
-        self.round.start.map(|s| s.delay)
+        self.round.start.as_ref().map(|s| s.delay)
     }
 
     pub fn round_trip_ms(&self) -> Option<u32> {
@@ -131,7 +155,7 @@ impl PlaySession {
             Some(Engine::Rollback(r)) => r.cable_plugged(),
             Some(Engine::Cable(c)) => c.plugged,
             Some(Engine::Apart) => false,
-            None => self.round.start.is_some_and(|s| s.plugged),
+            None => self.round.start.as_ref().is_some_and(|s| s.plugged),
         }
     }
 
@@ -141,11 +165,17 @@ impl PlaySession {
             .is_some_and(|r| r.stalled_for(now) >= STALL_SHOWN)
     }
 
+    pub fn in_group(&self) -> bool {
+        self.round
+            .rollback()
+            .is_some_and(super::engine::Rollback::is_group)
+    }
+
     pub fn runs_engine(&self) -> bool {
         self.round.rollback().is_some()
     }
 
-    pub fn console(&self, local: bool) -> Option<&GameBoy> {
+    pub fn console(&self, local: bool) -> Option<&dyn Console> {
         self.round.rollback().and_then(|r| r.console(local))
     }
 
@@ -153,11 +183,19 @@ impl PlaySession {
         self.wants_state
     }
 
-    pub fn give_state(&mut self, state: Vec<u8>) {
+    pub fn give_state(&mut self, state: Vec<u8>, history: Option<DropHistory>) {
         if !self.wants_state {
             return;
         }
         self.wants_state = false;
+        let game = self.round.my_card.as_ref().map(|c| c.hash);
+        if let Some(history) = history.filter(|h| h.fits(self.friend, game)) {
+            self.outbox.push(PlayMsg::Rejoin {
+                round: self.round.number,
+                from: history.point(),
+            });
+            self.round.rejoin = Some(history);
+        }
         self.round.my_origin = Some(Origin::Resume(state));
         self.send_setup();
     }
@@ -169,6 +207,10 @@ impl PlaySession {
     pub fn holds_my_game(&self) -> bool {
         let resuming = self.wants_state || matches!(self.round.my_origin, Some(Origin::Resume(_)));
         resuming && self.is_live() && self.round.start.is_none() && self.stage != Stage::Inviting
+    }
+
+    pub fn shelves_mine(&self) -> bool {
+        self.lent && self.is_live()
     }
 
     pub fn shares_games(&self) -> bool {
@@ -195,6 +237,10 @@ impl PlaySession {
         self.round.rollback().map_or(0, Rollback::resyncs)
     }
 
+    pub fn sync(&self) -> Option<citrine_gb::netplay::Sync> {
+        self.round.rollback().map(Rollback::sync)
+    }
+
     pub fn set_sample_rate(&mut self, rate: u32) {
         self.sample_rate = rate;
     }
@@ -212,13 +258,13 @@ impl PlaySession {
     }
 
     #[cfg(test)]
-    pub(crate) fn confirmed_frame(&self) -> u32 {
-        self.round.rollback().map_or(0, Rollback::confirmed_frame)
+    pub(crate) fn game_boy(&self, local: bool) -> Option<&citrine_gb::gb::GameBoy> {
+        self.round.rollback().and_then(|r| r.game_boy(local))
     }
 
     #[cfg(test)]
     pub(crate) fn start(&self) -> Option<citrine_gb_net::Start> {
-        self.round.start
+        self.round.start.clone()
     }
 
     pub fn set_let_watch(&mut self, on: bool) {
@@ -281,6 +327,18 @@ impl PlaySession {
         true
     }
 
+    pub(super) fn show_card(&mut self, card: Option<GameCard>) -> bool {
+        if !self.is_live()
+            || self.stage == Stage::Inviting
+            || self.id.is_none()
+            || self.round.my_card == card
+        {
+            return false;
+        }
+        self.next_round(self.round.number + 1, None, card);
+        true
+    }
+
     pub fn hand_rom(&mut self, rom: &[u8]) -> bool {
         if !self.is_live() || self.id.is_none() {
             return false;
@@ -307,7 +365,7 @@ impl PlaySession {
             return Some(SaveKey::Borrowed(card.hash));
         }
         self.console(true)
-            .map(|gb| SaveKey::Rom(gb.cartridge.header.sha256_hex_string()))
+            .map(|console| SaveKey::Rom(console.rom_id().sha256_hex_string()))
     }
 
     pub(super) fn keep_saves(&mut self, dumps: impl IntoIterator<Item = SramDump>) {
@@ -326,7 +384,7 @@ impl PlaySession {
         }
     }
 
-    pub fn run_frame(&mut self, buttons: JoypadState, now: Instant) -> bool {
+    pub fn run_frame(&mut self, buttons: Keys, now: Instant) -> bool {
         if self.stage != Stage::Playing {
             return false;
         }

@@ -333,7 +333,10 @@ pub fn storage_list(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: 
                 });
                 if quota > 0 {
                     ui.add_space(6.0);
-                    kit::meter(ui, (used as f32 / quota as f32).clamp(0.0, 1.0));
+                    crate::app::widgets::progress::bar(
+                        ui,
+                        Some((used as f32 / quota as f32).clamp(0.0, 1.0)),
+                    );
                     ui.add_space(4.0);
                 }
             })

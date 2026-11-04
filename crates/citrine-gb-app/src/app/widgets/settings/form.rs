@@ -76,9 +76,15 @@ impl Form<'_> {
         self.striped = true;
     }
 
-    pub fn text_only(&mut self) {
+    pub fn text_only(&mut self, widest_value_word: f32) {
         self.text_only = true;
-        self.label_width = self.label_room;
+        let value_room =
+            self.ui.available_width() - self.label_room - self.ui.spacing().item_spacing.x;
+        self.label_width = if value_room < widest_value_word {
+            0.0
+        } else {
+            self.label_room
+        };
     }
 
     pub fn header(&mut self, label: &str, value: &str) {
@@ -153,6 +159,13 @@ impl Form<'_> {
                 UiBuilder::new().max_rect(rect.with_min_x(rect.left() + indent)),
                 add,
             )
+            .inner
+    }
+
+    pub fn full<R>(&mut self, add: impl FnOnce(&mut Ui) -> R) -> R {
+        let rect = self.ui.available_rect_before_wrap();
+        self.ui
+            .scope_builder(UiBuilder::new().max_rect(rect), add)
             .inner
     }
 

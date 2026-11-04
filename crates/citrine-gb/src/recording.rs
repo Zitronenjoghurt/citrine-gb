@@ -5,12 +5,10 @@
 //!
 //! Cycles are **T-cycles** (~4.19 MHz on DMG), i.e. `GameBoy::debugger.total_cycles * 4`.
 
+use crate::console::Keys;
 use crate::gb::GbModel;
-use crate::gb::joypad::JoypadState;
 use serde::{Deserialize, Serialize};
 
-/// A single Game Boy button. A neutral enum (rather than the [`JoypadState`] bitflags) so a
-/// recorded event always refers to exactly one button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Button {
     A,
@@ -35,24 +33,20 @@ impl Button {
         Button::Down,
     ];
 
-    /// Convert a single-button [`JoypadState`] to a [`Button`]. Returns `None` if `state` does not
-    /// contain exactly one button.
-    pub fn from_joypad_state(state: JoypadState) -> Option<Self> {
-        Button::ALL
-            .into_iter()
-            .find(|b| b.to_joypad_state().bits() == state.bits())
+    pub fn from_keys(keys: Keys) -> Option<Self> {
+        Button::ALL.into_iter().find(|b| b.to_keys() == keys)
     }
 
-    pub fn to_joypad_state(self) -> JoypadState {
+    pub fn to_keys(self) -> Keys {
         match self {
-            Button::A => JoypadState::A,
-            Button::B => JoypadState::B,
-            Button::Select => JoypadState::SELECT,
-            Button::Start => JoypadState::START,
-            Button::Right => JoypadState::RIGHT,
-            Button::Left => JoypadState::LEFT,
-            Button::Up => JoypadState::UP,
-            Button::Down => JoypadState::DOWN,
+            Button::A => Keys::A,
+            Button::B => Keys::B,
+            Button::Select => Keys::SELECT,
+            Button::Start => Keys::START,
+            Button::Right => Keys::RIGHT,
+            Button::Left => Keys::LEFT,
+            Button::Up => Keys::UP,
+            Button::Down => Keys::DOWN,
         }
     }
 }

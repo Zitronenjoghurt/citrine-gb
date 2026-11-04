@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO message_deliveries (device_id, message_id)\n                   SELECT id, ?3 FROM devices WHERE account_id = ?1 AND id != ?2 AND left_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "1724819bd1d290ce667b5dd27becf02601856d087dedf22ff54e4edcfc3e65e7"
+}

@@ -1,6 +1,6 @@
 use super::parts::{beside, box_name, card_with_margin};
 use super::sprites::pokemon_sprite;
-use super::{BOX_SIZE, GRID_CELL, Pages, TILE};
+use super::{GRID_CELL, Pages, TILE};
 use crate::game_info::View;
 use crate::icons;
 use citrine_gb_gamedata::{GameState, Pokemon};
@@ -44,7 +44,8 @@ impl Pages<'_> {
                 view.box_pick = 0;
             }
             let held = state.boxes[index].pokemon.len();
-            ui.label(RichText::new(format!("{held} / {BOX_SIZE} Pokémon")).weak());
+            let size = self.game.tables.generation().box_size();
+            ui.label(RichText::new(format!("{held} / {size} Pokémon")).weak());
         });
         ui.add_space(6.0);
         let index = view.pc_box.unwrap_or(index);

@@ -10,10 +10,12 @@ exclude = [".DS_Store"]
 
 [features]
 default = []
+gba = []
 serde = ["dep:serde", "bitflags/serde"]
-debug = ["crc32fast", "png", "serde", "serde_json", "sha1", "sha2"]
+debug = ["png", "rom-id", "serde", "serde_json"]
 persistence = ["serde", "rmp-serde"]
 recording = ["serde", "serde_json"]
+rom-id = ["dep:crc32fast", "dep:sha1", "dep:sha2"]
 strum = ["dep:strum", "strum_macros"]
 
 [dependencies]
@@ -50,3 +52,9 @@ test = false
 name = "ledger"
 harness = false
 test = false
+
+[[test]]
+name = "arm7tdmi"
+harness = false
+test = false
+required-features = ["gba", "debug"]

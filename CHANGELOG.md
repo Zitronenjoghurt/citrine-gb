@@ -1,3 +1,61 @@
+# 0.11.0 - 2026-11-04
+
+## Added
+
+- Game Boy Advance games on desktop, web and Android
+- Game Boy Advance battery saves, save states, autosaves and cloud saves, with mGBA .sav import and export
+- Game Boy Advance online play and link cable, online or between two games side by side
+- Rooms of up to 16 people with room chat
+- Link groups of three or four on Game Boy Advance
+- Game Boy and Game Boy Advance players link by one playing the other's game
+- Six Game Boy Advance homebrew games: CASCADE7, GBArcade, Hyperspace Roll, Nonogram Advance, Pentris and The Hat Chooses the Wizard
+- Built-in open source GBA BIOS, or a BIOS file of your own
+- Pokémon game info for Ruby, Sapphire, Emerald, FireRed and LeafGreen
+- Pokémon Map tab with the region map and the wild Pokémon where you stand
+- Pokémon Battle tab in Red to Crystal, and a Journey tab with gym leaders and the Elite Four
+- MBC6, MBC7, MMM01, TAMA5, HuC1, HuC3, Pocket Camera and Wisdom Tree cartridges, including Kirby Tilt 'n' Tumble and Robopon Sun
+- Cartridge settings for Clock, Rumble, Tilt, Sunlight, Camera and Printer
+- Rumble on controllers and Android phones
+- Tilt with keys, a controller's right stick or a phone's motion sensor
+- Sunlight from a phone's light sensor or a slider
+- Pocket Camera through a webcam, a phone's front camera or a picture you choose, with a live preview to pick the view
+- Game Boy Printer, with prints in Media
+- Infrared between two games on one screen
+- Online input delay setting
+- Debugger trace of the last 30,000 instructions, with text export
+- Memory tool with hex view, edits and watchpoints
+- Video tool with tiles, background maps, sprites and palettes
+
+## Changed
+
+- Every game with friends is a room, and a friend who drops has a minute to come back
+- Playing together needs 0.11.0 on both sides
+- Brand yellow on desktop toggles, sliders, focus rings and main buttons
+- Darker red on Delete, Reset and other destructive buttons
+- Higher contrast for faint text in every theme
+- Toasts and download bars stay off the game picture on desktop and the web
+- Progress bars for game transfers, chat files, data export and import, recordings and cloud saves
+- Data export and import run in the background
+- Web saves in the browser's database, with room for many more save states
+- One Debugger tab for Disassembly and Time control, with step over, step out, line and frame steps
+- One Dev tools menu in the toolbar
+- Disassembly marks RAM code and lines the CPU ran
+- Registers tab as one table with named bits
+- Phone sheets open above the bottom bar
+
+## Fixed
+
+- New devices get chats from before the relay kept history
+- Retrying an unsent chat message no longer sends it twice
+- Chat edits and deletes made after a dropped send reach your friend
+- Game Boy Color passes the last two Mealybug Tearoom tile select tests
+- Muted sound channels stay muted after loading a snapshot or autosave
+- Time control's reset stops at breakpoints and keeps frame and sound in step
+- Hiding the web page and then closing the game no longer saves the autosave twice
+- Autosaves made in the same minute show their seconds
+- Saves page no longer cuts off the top autosave
+- Phone bar no longer shows tooltips
+
 # 0.10.0 - 2026-11-03
 
 ## Added

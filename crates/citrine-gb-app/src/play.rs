@@ -1,23 +1,31 @@
 use crate::online::Online;
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::serial::LinkMessage;
-use citrine_gb::gb::{GameBoy, GbModel};
+use citrine_gb::machine::Machine;
 use citrine_gb::persistence::sram_dump::SramDump;
-use citrine_gb::rom::Rom;
+use citrine_gb::rom::id::RomId;
 use citrine_gb_net::{
     Ask, ClientMsg, Console, EndReason, GameCard, GameHash, GamePart, MAX_STATE_BYTES,
-    MAX_TITLE_CHARS, Offer, OnlineId, Origin, PLAY_VERSION, PlayMsg, ServerMsg, SessionId, Start,
+    MAX_TITLE_CHARS, OLDEST_PLAY_VERSION, Offer, OnlineId, Origin, PlayMsg, PublicKey, ServerMsg,
+    SessionId, Start, plays_with,
 };
 use std::collections::VecDeque;
 use std::time::Duration;
 use web_time::Instant;
 
 mod engine;
+mod links;
 mod messages;
+mod rejoin;
+mod room;
 mod rounds;
 mod session;
 pub mod shelf;
 
 use engine::Rollback;
+pub use links::{LinkGroup, Links};
+pub use rejoin::DropHistory;
+pub use room::{Room, RoomLine, RoomMember};
 pub use shelf::Shelf;
 
 pub const SLOW_ROUND_TRIP_MS: u32 = 120;
@@ -28,6 +36,7 @@ const SETUP_PINGS: usize = 3;
 const SETUP_WAIT: Duration = Duration::from_secs(3);
 const PARTS_PER_UPDATE: usize = 4;
 const STALL_SHOWN: Duration = Duration::from_millis(750);
+pub const UNLINK_AFTER: Duration = Duration::from_secs(10);
 #[cfg(not(test))]
 const SILENCE_LIMIT: Duration = Duration::from_secs(20);
 #[cfg(test)]
@@ -35,22 +44,22 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(3);
 const KEPT_PINGS: usize = 8;
 const KEPT_ROMS: usize = 4;
 
+#[derive(Clone)]
 pub struct GameFile {
     pub rom: Vec<u8>,
     pub title: String,
-    pub model: GbModel,
+    pub kind: ConsoleKind,
     pub save: Option<Vec<u8>>,
     pub running: bool,
 }
 
 impl GameFile {
     pub fn card(&self) -> Option<GameCard> {
-        let header = Rom::new(&self.rom).header().ok()?;
         Some(GameCard {
-            hash: header.sha1,
+            hash: sha1_of(&self.rom)?,
             size: u32::try_from(self.rom.len()).ok()?,
             title: self.title.chars().take(MAX_TITLE_CHARS).collect(),
-            console: console_of(self.model),
+            console: console_of(self.kind),
         })
     }
 }
@@ -67,9 +76,11 @@ pub struct LinkedSave {
 }
 
 pub struct Returned {
-    pub console: GameBoy,
+    pub console: Machine,
     pub borrowed: Option<GameHash>,
     pub paused: bool,
+    pub friend: OnlineId,
+    pub history: Option<DropHistory>,
 }
 
 pub enum MyGame {
@@ -92,6 +103,7 @@ pub enum Ending {
     FriendLeft,
     Dropped,
     Failed,
+    Moved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +157,8 @@ struct Round {
     sending: Option<usize>,
     start: Option<Start>,
     engine: Option<Engine>,
+    rejoin: Option<DropHistory>,
+    their_rejoin: Option<citrine_gb_net::RejoinPoint>,
 }
 
 impl Round {
@@ -166,6 +180,8 @@ impl Round {
             sending: None,
             start: None,
             engine: None,
+            rejoin: None,
+            their_rejoin: None,
         }
     }
 
@@ -187,10 +203,17 @@ impl Round {
 pub struct PlaySession {
     id: Option<SessionId>,
     friend: OnlineId,
+    key: Option<PublicKey>,
+    apart: bool,
+    began: bool,
+    links_in: Vec<PlayMsg>,
+    sync: citrine_gb::netplay::Sync,
+    input_delay: Option<u32>,
     role: Role,
     stage: Stage,
     borrowing: bool,
     borrowed_save: Option<Vec<u8>>,
+    lent: bool,
     round: Round,
     roms: Vec<(GameHash, Vec<u8>)>,
     wants_state: bool,
@@ -211,13 +234,16 @@ pub struct PlaySession {
     outbox: Vec<PlayMsg>,
     game_outbox: Vec<GamePart>,
     sample_rate: u32,
+    grouped: bool,
+    stashed: Option<Box<Rollback>>,
 }
 
 pub struct Play {
     invites: Vec<IncomingInvite>,
-    session: Option<PlaySession>,
+    room: Option<Room>,
     shelf: Box<dyn Shelf>,
     seen_invites: bool,
+    input_delay: Option<u32>,
 }
 
 impl Default for Play {
@@ -230,14 +256,20 @@ impl Play {
     pub fn new(shelf: Box<dyn Shelf>) -> Self {
         Self {
             invites: Vec::new(),
-            session: None,
+            room: None,
             shelf,
             seen_invites: true,
+            input_delay: None,
         }
     }
 
     pub fn invites(&self) -> &[IncomingInvite] {
         &self.invites
+    }
+
+    #[cfg(test)]
+    pub fn push_invite(&mut self, invite: IncomingInvite) {
+        self.invites.push(invite);
     }
 
     pub fn has_unseen_invite(&self) -> bool {
@@ -249,15 +281,87 @@ impl Play {
     }
 
     pub fn session(&self) -> Option<&PlaySession> {
-        self.session.as_ref()
+        self.room.as_ref().and_then(Room::view)
     }
 
     pub fn session_mut(&mut self) -> Option<&mut PlaySession> {
-        self.session.as_mut()
+        self.room.as_mut().and_then(Room::view_mut)
+    }
+
+    pub fn room(&self) -> Option<&Room> {
+        self.room.as_ref()
     }
 
     pub fn is_live(&self) -> bool {
-        self.session.as_ref().is_some_and(PlaySession::is_live)
+        self.room.as_ref().is_some_and(Room::is_live)
+    }
+
+    pub fn bring(&mut self, game: MyGame) -> bool {
+        self.room.as_mut().is_some_and(|room| room.bring(game))
+    }
+
+    pub fn set_status(&mut self, paused: bool, away: bool) {
+        if let Some(room) = self.room.as_mut().filter(|r| r.is_live()) {
+            room.set_status(paused, away);
+        }
+    }
+
+    pub fn unlink_member(&mut self, who: OnlineId) -> bool {
+        self.room
+            .as_mut()
+            .is_some_and(|room| room.unlink_member(who))
+    }
+
+    pub fn link(&mut self, who: OnlineId) -> bool {
+        self.room.as_mut().is_some_and(|room| room.link(who))
+    }
+
+    pub fn watch_group(&mut self, who: OnlineId, on: bool) -> bool {
+        self.room
+            .as_mut()
+            .is_some_and(|room| room.watch_group(who, on))
+    }
+
+    pub fn tick_watch(&mut self, now: Instant) {
+        if let Some(room) = self.room.as_mut().filter(|r| r.is_live()) {
+            room.tick_watch(now);
+        }
+    }
+
+    pub fn set_let_watch(&mut self, on: bool) {
+        if let Some(room) = self.room.as_mut() {
+            room.set_let_watch(on);
+        }
+    }
+
+    pub fn play_theirs(&mut self, who: OnlineId, game: MyGame) -> bool {
+        self.room
+            .as_mut()
+            .is_some_and(|room| room.play_theirs(who, game))
+    }
+
+    pub fn shelved(&self) -> Option<&GameCard> {
+        self.room.as_ref().and_then(Room::shelved)
+    }
+
+    pub fn unlink(&mut self) -> bool {
+        self.room.as_mut().is_some_and(Room::unlink)
+    }
+
+    pub fn take_link(&mut self, who: OnlineId) -> bool {
+        self.room.as_mut().is_some_and(|room| room.take_link(who))
+    }
+
+    pub fn drop_link_asks(&mut self) {
+        if let Some(room) = self.room.as_mut() {
+            room.drop_asks();
+        }
+    }
+
+    pub fn say(&mut self, online: &mut Online, text: String) -> bool {
+        self.room
+            .as_mut()
+            .is_some_and(|room| room.say(online, text))
     }
 
     pub fn holds(&self, hash: &GameHash) -> bool {
@@ -274,6 +378,10 @@ impl Play {
         self.shelf = shelf;
     }
 
+    pub fn set_input_delay(&mut self, frames: Option<u32>) {
+        self.input_delay = frames;
+    }
+
     pub fn invite(
         &mut self,
         online: &mut Online,
@@ -281,7 +389,7 @@ impl Play {
         game: Option<GameFile>,
     ) -> bool {
         if self.is_live() {
-            return false;
+            return self.invite_to_room(online, friend);
         }
         let card = match &game {
             Some(game) => match game.card() {
@@ -297,7 +405,7 @@ impl Play {
             return false;
         };
         let offer = Offer {
-            version: PLAY_VERSION,
+            version: OLDEST_PLAY_VERSION,
             ask: Ask::Play,
             game: card.clone(),
         };
@@ -308,7 +416,46 @@ impl Play {
         let sharing = online.info().is_some_and(|i| i.game_sharing);
         let mut play = PlaySession::new(friend, Role::Host, Stage::Inviting, sharing);
         play.round = Round::new(1, game, card);
-        self.session = Some(play);
+        self.room = Some(Room::new(play));
+        true
+    }
+
+    fn invite_to_room(&mut self, online: &mut Online, friend: OnlineId) -> bool {
+        let Some(room) = self.room.as_mut() else {
+            return false;
+        };
+        let Some(id) = room.id() else {
+            return false;
+        };
+        if online.protocol() < citrine_gb_net::PROTOCOL_VERSION
+            || room.rejoining()
+            || room.others().any(|w| w == friend)
+        {
+            return false;
+        }
+        let Some(view) = room.view().filter(|v| v.began) else {
+            return false;
+        };
+        let Some(public_key) = online.friend(friend).map(|f| f.public_key) else {
+            return false;
+        };
+        let Some(keys) = online.keys() else {
+            return false;
+        };
+        let offer = Offer {
+            version: OLDEST_PLAY_VERSION,
+            ask: Ask::Play,
+            game: view.my_game().cloned(),
+        };
+        let sealed = offer.seal(keys, &public_key);
+        if !online.send(ClientMsg::RoomInvite {
+            room: id,
+            to: friend,
+            sealed,
+        }) {
+            return false;
+        }
+        room.invited(friend);
         true
     }
 
@@ -345,7 +492,7 @@ impl Play {
         play.borrowing = borrowing;
         play.borrowed_save = save;
         play.round = Round::new(1, file, card);
-        self.session = Some(play);
+        self.room = Some(Room::new(play));
         true
     }
 
@@ -358,22 +505,14 @@ impl Play {
     }
 
     pub fn leave(&mut self, online: &mut Online) {
-        let Some(play) = &mut self.session else {
-            return;
-        };
-        if let Some(id) = play.id
-            && play.is_live()
-        {
-            online.send(ClientMsg::Leave(id));
-        }
-        if play.is_live() {
-            play.end(Ending::Left);
+        if let Some(room) = &mut self.room {
+            room.leave(online);
         }
     }
 
     pub fn close(&mut self) -> Option<PlaySession> {
-        match &self.session {
-            Some(play) if !play.is_live() => self.session.take(),
+        match &self.room {
+            Some(room) if !room.is_live() => self.room.take().and_then(Room::into_view),
             _ => None,
         }
     }
@@ -381,12 +520,21 @@ impl Play {
     pub fn update(&mut self, online: &mut Online, now: Instant) {
         if !online.is_connected() {
             self.invites.clear();
-            if let Some(play) = &mut self.session
-                && play.is_live()
+            if let Some(room) = &mut self.room
+                && room.is_live()
             {
-                play.end(Ending::Dropped);
+                if room.can_rejoin() && online.comes_back() {
+                    room.lose(now);
+                } else {
+                    room.end(Ending::Dropped);
+                }
             }
             return;
+        }
+        if let Some(room) = &mut self.room
+            && room.is_live()
+        {
+            room.rejoin(online);
         }
         let msgs: Vec<ServerMsg> = online
             .inbox()
@@ -398,16 +546,82 @@ impl Play {
             self.receive(online, msg, now);
         }
         let sharing = online.info().is_some_and(|i| i.game_sharing);
-        if let Some(play) = &mut self.session {
-            play.sharing = sharing;
-            play.step(&*self.shelf, now);
+        if let Some(room) = &mut self.room {
+            let me = online.account().map(|a| a.online_id);
+            room.set_input_delay(self.input_delay);
+            room.step(&*self.shelf, sharing, me, now);
+            room.tell(online);
         }
         self.flush(online);
     }
 
     pub fn flush(&mut self, online: &mut Online) {
-        if let Some(play) = &mut self.session {
-            play.flush(online);
+        if let Some(room) = &mut self.room {
+            room.flush(online);
+        }
+    }
+
+    fn live_room(&mut self, id: SessionId) -> Option<&mut Room> {
+        self.room
+            .as_mut()
+            .filter(|r| r.id() == Some(id) && r.is_live())
+    }
+
+    fn hear(
+        &mut self,
+        online: &Online,
+        id: SessionId,
+        from: Option<OnlineId>,
+        sealed: &citrine_gb_net::Sealed,
+        now: Instant,
+    ) {
+        let shelf = &*self.shelf;
+        let Some(room) = self
+            .room
+            .as_mut()
+            .filter(|r| r.id() == Some(id) && r.is_live())
+        else {
+            return;
+        };
+        let Some((index, key)) = room.route(from, online) else {
+            return;
+        };
+        let Some(keys) = online.keys() else {
+            return;
+        };
+        if let Ok(msg) = PlayMsg::open(keys, &key, sealed) {
+            let play = room.pair_at(index);
+            play.heard_at = now;
+            let friend = play.friend;
+            if let Some(msg) = room.hear_watch(friend, msg)
+                && let Some(msg) = room.hear_group(friend, msg)
+            {
+                room.pair_at(index).receive(msg, shelf, now);
+            }
+        }
+    }
+
+    fn hear_part(
+        &mut self,
+        online: &Online,
+        id: SessionId,
+        from: Option<OnlineId>,
+        sealed: &citrine_gb_net::Sealed,
+        now: Instant,
+    ) {
+        let Some(room) = self.live_room(id) else {
+            return;
+        };
+        let Some((index, key)) = room.route(from, online) else {
+            return;
+        };
+        let Some(keys) = online.keys() else {
+            return;
+        };
+        if let Ok(part) = GamePart::open(keys, &key, sealed) {
+            let play = room.pair_at(index);
+            play.heard_at = now;
+            play.receive_part(part);
         }
     }
 
@@ -428,7 +642,7 @@ impl Play {
                             .ok()
                     });
                 match offer {
-                    Some(offer) if offer.version == PLAY_VERSION => {
+                    Some(offer) if plays_with(offer.version) => {
                         self.invites.retain(|i| i.from != from);
                         self.invites.push(IncomingInvite {
                             session,
@@ -446,19 +660,31 @@ impl Play {
                 }
             }
             ServerMsg::Invited { session, to } => {
-                if let Some(play) = &mut self.session
-                    && play.friend == to
-                    && play.id.is_none()
-                    && play.stage == Stage::Inviting
-                {
-                    play.id = Some(session);
-                } else {
+                let Some(room) = &mut self.room else {
                     online.send(ClientMsg::Leave(session));
+                    return;
+                };
+                if room.id() == Some(session) {
+                    room.invited(to);
+                    return;
+                }
+                match room.first_mut() {
+                    Some(play)
+                        if play.friend == to
+                            && play.id.is_none()
+                            && play.stage == Stage::Inviting =>
+                    {
+                        room.set_id(session);
+                    }
+                    _ => {
+                        online.send(ClientMsg::Leave(session));
+                    }
                 }
             }
             ServerMsg::SessionStarted { session, with } => {
-                if let Some(play) = &mut self.session
-                    && play.id == Some(session)
+                if let Some(room) = &mut self.room
+                    && room.id() == Some(session)
+                    && let Some(play) = room.first_mut()
                     && play.friend == with
                 {
                     play.begin(now);
@@ -466,47 +692,77 @@ impl Play {
             }
             ServerMsg::SessionEnded { session, reason } => {
                 self.invites.retain(|i| i.session != session);
-                if let Some(play) = &mut self.session
-                    && play.id == Some(session)
-                    && play.is_live()
+                if let Some(room) = &mut self.room
+                    && room.id() == Some(session)
+                    && room.is_live()
                 {
-                    play.end(match reason {
+                    room.end(match reason {
                         EndReason::Declined => Ending::Declined,
                         EndReason::Left => Ending::FriendLeft,
                         EndReason::Disconnected => Ending::Dropped,
                     });
                 }
             }
-            ServerMsg::Play { session, sealed } => {
-                let Some(play) = self.session.as_mut().filter(|p| p.id == Some(session)) else {
+            ServerMsg::RoomJoined { room: id, members } => {
+                let Some(me) = online.account().map(|a| a.online_id) else {
                     return;
                 };
-                let Some(key) = online.friend(play.friend).map(|f| f.public_key) else {
-                    return;
-                };
-                let Some(keys) = online.keys() else {
-                    return;
-                };
-                if let Ok(msg) = PlayMsg::open(keys, &key, &sealed) {
-                    play.heard_at = now;
-                    play.receive(msg, &*self.shelf, now);
+                let sharing = online.info().is_some_and(|i| i.game_sharing);
+                if let Some(room) = self.live_room(id) {
+                    room.joined(me, members, sharing, now);
                 }
             }
+            ServerMsg::MemberUpdate { room: id, member } => {
+                let sharing = online.info().is_some_and(|i| i.game_sharing);
+                if let Some(me) = online.account().map(|a| a.online_id)
+                    && member.who != me
+                    && let Some(room) = self.live_room(id)
+                {
+                    room.update_member(member, sharing, now);
+                }
+            }
+            ServerMsg::MemberGone {
+                room: id,
+                who,
+                reason,
+            } => {
+                let me = online.account().map(|a| a.online_id);
+                if let Some(room) = self.live_room(id) {
+                    match me == Some(who) {
+                        true => room.end(Ending::Moved),
+                        false => room.member_gone(who, reason, online),
+                    }
+                }
+            }
+            ServerMsg::RoomChat {
+                room: id,
+                from,
+                at,
+                sealed,
+            } => {
+                if let Some(room) = self.live_room(id) {
+                    room.hear_chat(from, at, &sealed, online);
+                }
+            }
+            ServerMsg::Error(code) => {
+                if let Some(room) = self.room.as_mut().filter(|r| r.is_live()) {
+                    room.error(code);
+                }
+            }
+            ServerMsg::Play { session, sealed } => self.hear(online, session, None, &sealed, now),
+            ServerMsg::RoomPlay {
+                room: id,
+                from,
+                sealed,
+            } => self.hear(online, id, Some(from), &sealed, now),
             ServerMsg::Game { session, sealed } => {
-                let Some(play) = self.session.as_mut().filter(|p| p.id == Some(session)) else {
-                    return;
-                };
-                let Some(key) = online.friend(play.friend).map(|f| f.public_key) else {
-                    return;
-                };
-                let Some(keys) = online.keys() else {
-                    return;
-                };
-                if let Ok(part) = GamePart::open(keys, &key, &sealed) {
-                    play.heard_at = now;
-                    play.receive_part(part);
-                }
+                self.hear_part(online, session, None, &sealed, now)
             }
+            ServerMsg::RoomGame {
+                room: id,
+                from,
+                sealed,
+            } => self.hear_part(online, id, Some(from), &sealed, now),
             _ => {}
         }
     }
@@ -521,20 +777,29 @@ fn is_session_msg(msg: &ServerMsg) -> bool {
             | ServerMsg::SessionEnded { .. }
             | ServerMsg::Play { .. }
             | ServerMsg::Game { .. }
+            | ServerMsg::RoomJoined { .. }
+            | ServerMsg::MemberUpdate { .. }
+            | ServerMsg::MemberGone { .. }
+            | ServerMsg::RoomPlay { .. }
+            | ServerMsg::RoomGame { .. }
+            | ServerMsg::RoomChat { .. }
+            | ServerMsg::Error(_)
     )
 }
 
-pub fn console_of(model: GbModel) -> Console {
-    match model {
-        GbModel::Dmg => Console::Gb,
-        GbModel::Cgb => Console::Gbc,
+pub fn console_of(kind: ConsoleKind) -> Console {
+    match kind {
+        ConsoleKind::Gb => Console::Gb,
+        ConsoleKind::Gbc => Console::Gbc,
+        ConsoleKind::Gba => Console::Gba,
     }
 }
 
-pub fn model_of(console: Console) -> GbModel {
+pub fn kind_of(console: Console) -> ConsoleKind {
     match console {
-        Console::Gb => GbModel::Dmg,
-        Console::Gbc => GbModel::Cgb,
+        Console::Gb => ConsoleKind::Gb,
+        Console::Gbc => ConsoleKind::Gbc,
+        Console::Gba => ConsoleKind::Gba,
     }
 }
 
@@ -550,8 +815,8 @@ fn random_seed() -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-fn sha1_of(rom: &[u8]) -> Option<GameHash> {
-    Rom::new(rom).header().ok().map(|h| h.sha1)
+pub fn sha1_of(rom: &[u8]) -> Option<GameHash> {
+    (!rom.is_empty()).then(|| RomId::new(rom).sha1)
 }
 
 fn packed(origin: Origin) -> Origin {

@@ -282,7 +282,7 @@ fn silver_receives_celebi_from_the_event_partner() {
     println!("took {:?}", started.elapsed());
 }
 
-fn received(state: &GameState, species: u8) -> Option<Mon> {
+fn received(state: &GameState, species: u16) -> Option<Mon> {
     state
         .party
         .iter()

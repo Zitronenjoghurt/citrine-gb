@@ -1,19 +1,19 @@
 use super::Emulator;
 use crate::autosave::{PlayClock, StateCopy};
 use crate::storage::now_unix;
+use citrine_gb::console::Console;
 use citrine_gb::error::GbResult;
-use citrine_gb::persistence::full_dump::FullDumpRef;
-use citrine_gb::rom::Rom;
+use citrine_gb::gb::GbModel;
 
 impl Emulator {
     pub fn save_snapshot(&mut self, slot: usize) -> GbResult<()> {
         let Some(key) = self.rom_key.clone() else {
             return Ok(());
         };
-        let state = self.gb.dump_full(now_unix())?;
-        let frame = self.gb.frame().as_slice().to_vec();
+        let state = self.machine.save_state(now_unix())?;
+        let frame = self.machine.frame().to_vec();
         self.store
-            .store_snapshot(&key, slot, &state, &frame, self.gb.model)?;
+            .store_snapshot(&key, slot, &state, &frame, self.machine.kind())?;
         self.started_at = Some(web_time::Instant::now());
         self.stat_events.snapshots += 1;
         Ok(())
@@ -44,14 +44,13 @@ impl Emulator {
     }
 
     pub(super) fn restore(&mut self, state: &[u8]) -> GbResult<()> {
-        let rom = Rom::new(&self.gb.cartridge.rom_bytes());
-        let restored = citrine_gb::gb::GameBoy::from_dump(state, &rom, now_unix())?;
-        let sample_rate = self.gb.apu.output_sample_rate;
-        if restored.model != self.gb.model {
-            self.console_switched = Some(restored.model);
+        let restored = self.machine.restore(state, now_unix(), &self.firmware)?;
+        let sample_rate = self.machine.sample_rate();
+        if restored.kind() != self.machine.kind() {
+            self.console_switched = GbModel::try_from(restored.kind()).ok();
         }
-        self.gb = restored;
-        self.gb.apu.set_sample_rate(sample_rate);
+        self.replace_machine(restored);
+        self.machine.set_sample_rate(sample_rate);
         self.sync_joypad();
         self.running = true;
         self.started_at = Some(web_time::Instant::now());
@@ -73,11 +72,15 @@ impl Emulator {
         };
         self.play.attempted();
         self.flush_save()?;
-        let state = self.gb.dump_full(now_unix())?;
-        let frame = self.gb.frame().as_slice().to_vec();
-        let id =
-            self.store
-                .store_autosave(&key, &state, &frame, self.gb.model, self.autosave_keep)?;
+        let state = self.machine.save_state(now_unix())?;
+        let frame = self.machine.frame().to_vec();
+        let id = self.store.store_autosave(
+            &key,
+            &state,
+            &frame,
+            self.machine.kind(),
+            self.autosave_keep,
+        )?;
         self.play.saved();
         self.last_good.mark_saved();
         self.started_at = Some(web_time::Instant::now());
@@ -103,9 +106,9 @@ impl Emulator {
         let Some(key) = self.rom_key.clone() else {
             return;
         };
-        let sram = self.gb.poll_sram_dump(true, now_unix());
-        let battery = sram.as_ref().map(|dump| dump.as_slice().to_vec());
-        let state = match (FullDumpRef { gb: &self.gb, sram }).to_rmp() {
+        let now = now_unix();
+        let battery = self.machine.battery(true, now);
+        let state = match self.machine.state_body(now) {
             Ok(state) => state,
             Err(err) => {
                 log::error!("could not copy the state for autosave: {err:?}");
@@ -116,11 +119,11 @@ impl Emulator {
             store: self.store.clone(),
             rom_key: key,
             state,
-            frame: self.gb.frame().as_slice().to_vec(),
-            model: self.gb.model,
+            frame: self.machine.frame().to_vec(),
             battery,
             keep: self.autosave_keep,
             unsaved: self.play.has_unsaved_play(),
+            written: false,
         });
     }
 

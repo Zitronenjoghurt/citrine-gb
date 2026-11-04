@@ -1,5 +1,6 @@
-use crate::storage::SaveStore;
-use citrine_gb::gb::GbModel;
+use crate::storage::{CrashSave, SaveStore, now_unix};
+use citrine_gb::persistence::battery_save::BatterySave;
+use citrine_gb::persistence::state::StateBody;
 use std::fmt::Display;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
@@ -7,6 +8,7 @@ use strum_macros::EnumIter;
 
 pub const DEFAULT_KEEP: usize = 10;
 pub const MAX_KEEP: usize = 50;
+const LAST_GOOD_QUALITY: u32 = 6;
 const COPY_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(
@@ -94,17 +96,23 @@ impl PlayClock {
     pub fn has_unsaved_play(&self) -> bool {
         self.unsaved
     }
+
+    pub fn copy_written(&mut self) {
+        if self.since_copy == Duration::ZERO {
+            self.saved();
+        }
+    }
 }
 
 pub struct StateCopy {
     pub store: SaveStore,
     pub rom_key: String,
-    pub state: Vec<u8>,
+    pub state: StateBody,
     pub frame: Vec<u8>,
-    pub model: GbModel,
-    pub battery: Option<Vec<u8>>,
+    pub battery: Option<BatterySave>,
     pub keep: usize,
     pub unsaved: bool,
+    pub written: bool,
 }
 
 #[derive(Clone, Default)]
@@ -125,6 +133,16 @@ impl LastGood {
         *self.hold() = None;
     }
 
+    pub fn take_written(&self) -> bool {
+        match self.hold().as_mut() {
+            Some(copy) if copy.written => {
+                copy.written = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn mark_saved(&self) {
         if let Some(copy) = self.hold().as_mut() {
             copy.unsaved = false;
@@ -140,17 +158,29 @@ impl LastGood {
         let Some(copy) = guard.as_mut().filter(|copy| copy.unsaved) else {
             return Ok(None);
         };
-        let battery = match &copy.battery {
-            Some(data) => copy.store.store_battery(&copy.rom_key, data),
-            None => Ok(()),
+        let state = match copy.state.pack(LAST_GOOD_QUALITY) {
+            Ok(state) => state,
+            Err(err) => {
+                if let Some(save) = &copy.battery {
+                    let _ = copy.store.store_battery_save(&copy.rom_key, save);
+                }
+                return Err(err.to_string());
+            }
         };
-        let state = crate::storage::compress(&copy.state);
-        let id = copy
-            .store
-            .store_autosave(&copy.rom_key, &state, &copy.frame, copy.model, copy.keep)
-            .map_err(|err| err.to_string())?;
-        battery.map_err(|err| err.to_string())?;
+        let crash = CrashSave::new(
+            copy.rom_key.clone(),
+            now_unix(),
+            copy.state.kind,
+            state,
+            &copy.frame,
+            copy.battery.as_ref(),
+        );
+        let stored = copy.store.store_crash_save(&crash, copy.keep);
+        #[cfg(target_arch = "wasm32")]
+        crate::storage::keep_crash_save(&crash);
+        let id = stored.map_err(|err| err.to_string())?;
         copy.unsaved = false;
+        copy.written = true;
         Ok(Some(id))
     }
 }
@@ -201,6 +231,7 @@ pub fn save_when_hidden(last_good: LastGood) {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use citrine_gb::console::ConsoleKind;
 
     const KEY: &str = "GAME";
 
@@ -217,12 +248,15 @@ mod tests {
         StateCopy {
             store: store.clone(),
             rom_key: KEY.into(),
-            state: b"state".to_vec(),
+            state: StateBody {
+                kind: ConsoleKind::Gb,
+                data: b"state".to_vec(),
+            },
             frame: vec![0; 160 * 144 * 4],
-            model: GbModel::Dmg,
-            battery: Some(b"sram".to_vec()),
+            battery: Some(BatterySave::raw(b"sram".to_vec())),
             keep: 3,
             unsaved,
+            written: false,
         }
     }
 

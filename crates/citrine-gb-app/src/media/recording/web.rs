@@ -1,10 +1,9 @@
 use super::mp4::{AudioCodec, AudioFormat, Mp4Layout, VideoFormat};
 use super::{
-    AUDIO_BITRATE, Availability, CHANNELS, FRAME_TICKS, SOURCE_HEIGHT, SOURCE_WIDTH, StopReason,
-    VIDEO_TIMESCALE, fps, upscale_rgba, video_bitrate,
+    AUDIO_BITRATE, Availability, CHANNELS, Source, StopReason, upscale_rgba, video_bitrate,
 };
 
-type SupportKey = (u32, usize);
+type SupportKey = (Source, u32, usize);
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -89,8 +88,8 @@ fn string_field(value: &JsValue, name: &str) -> String {
         .unwrap_or_default()
 }
 
-pub fn availability(sample_rate: u32, scale: usize) -> Availability {
-    let wanted = (sample_rate, scale);
+pub fn availability(source: Source, sample_rate: u32, scale: usize) -> Availability {
+    let wanted = (source, sample_rate, scale);
     let current = SUPPORT.with(|s| s.borrow().clone());
     match current {
         Support::Ready { key, .. } if key == wanted => Availability::Ready,
@@ -99,9 +98,9 @@ pub fn availability(sample_rate: u32, scale: usize) -> Availability {
         _ => {
             SUPPORT.with(|s| *s.borrow_mut() = Support::Checking(wanted));
             let promise = probe_recording(
-                (SOURCE_WIDTH * scale) as u32,
-                (SOURCE_HEIGHT * scale) as u32,
-                fps(),
+                (source.width * scale) as u32,
+                (source.height * scale) as u32,
+                source.fps(),
                 sample_rate,
                 video_bitrate(WEB_VIDEO_BITRATE, scale),
                 AUDIO_BITRATE,
@@ -183,6 +182,7 @@ pub struct Worker {
     state: Rc<RefCell<State>>,
     callbacks: Callbacks,
     upscaled: Vec<u8>,
+    source: Source,
     scale: usize,
     frames: u64,
     audio_frames: u64,
@@ -210,11 +210,13 @@ fn aac_config(sample_rate: u32) -> Vec<u8> {
 }
 
 impl Worker {
-    pub fn start(sample_rate: u32, scale: usize) -> anyhow::Result<Self> {
-        let (width, height) = (SOURCE_WIDTH * scale, SOURCE_HEIGHT * scale);
+    pub fn start(source: Source, sample_rate: u32, scale: usize) -> anyhow::Result<Self> {
+        let (width, height) = (source.width * scale, source.height * scale);
         let (video_codec, audio_codec) = match SUPPORT.with(|s| s.borrow().clone()) {
-            Support::Ready { key, video, audio } if key == (sample_rate, scale) => (video, audio),
-            _ => match availability(sample_rate, scale) {
+            Support::Ready { key, video, audio } if key == (source, sample_rate, scale) => {
+                (video, audio)
+            }
+            _ => match availability(source, sample_rate, scale) {
                 Availability::Missing(reason) => anyhow::bail!("{reason}"),
                 _ => anyhow::bail!("This browser is still checking whether it can record"),
             },
@@ -239,11 +241,13 @@ impl Worker {
                     state.layout.set_video(VideoFormat {
                         width: width as u16,
                         height: height as u16,
-                        timescale: VIDEO_TIMESCALE,
+                        timescale: source.timescale,
                         avc_config: config,
                     });
                 }
-                state.layout.add_video(size as usize, FRAME_TICKS, key);
+                state
+                    .layout
+                    .add_video(size as usize, source.frame_ticks, key);
             },
         );
         let audio_state = state.clone();
@@ -275,7 +279,7 @@ impl Worker {
             &audio_codec,
             width as u32,
             height as u32,
-            fps(),
+            source.fps(),
             sample_rate,
             video_bitrate(WEB_VIDEO_BITRATE, scale),
             AUDIO_BITRATE,
@@ -288,6 +292,7 @@ impl Worker {
             state,
             callbacks: (on_video, on_audio, on_error),
             upscaled: vec![0; width * height * 4],
+            source,
             scale,
             frames: 0,
             audio_frames: 0,
@@ -298,13 +303,13 @@ impl Worker {
     pub fn frame(&mut self, rgba: &[u8], repeat: u32) {
         upscale_rgba(
             rgba,
-            SOURCE_WIDTH,
-            SOURCE_HEIGHT,
+            self.source.width,
+            self.source.height,
             self.scale,
             &mut self.upscaled,
         );
-        let step = 1_000_000.0 / fps();
-        let keyframe_every = (fps().round() as u64) * 2;
+        let step = 1_000_000.0 / self.source.fps();
+        let keyframe_every = (self.source.fps().round() as u64) * 2;
         for _ in 0..repeat {
             let timestamp = self.frames as f64 * step;
             self.recorder.frame(

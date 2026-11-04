@@ -1,6 +1,6 @@
 use super::bubble::{bubble_fill, long_pressed, receipt_text, stamp_mark};
 use super::composer::{draft_field, enter_sends, icon_button};
-use super::share::{percent, share_facts};
+use super::share::share_facts;
 use super::*;
 use crate::app::ui_state::palette::PaletteLibrary;
 use crate::game_name::GameNames;
@@ -157,13 +157,6 @@ fn message_text_reads_clearly_on_both_bubbles_in_both_themes() {
             );
         }
     }
-}
-
-#[test]
-fn progress_never_passes_a_hundred() {
-    assert_eq!(percent(0, 0), 0);
-    assert_eq!(percent(50, 200), 25);
-    assert_eq!(percent(300, 200), 100);
 }
 
 #[test]

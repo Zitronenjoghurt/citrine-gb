@@ -101,6 +101,26 @@ impl Db {
         Ok(KnownDevice::Known(found.id))
     }
 
+    pub async fn old_chats_wanted(&self, device: i64) -> Result<bool> {
+        let wanted = sqlx::query_scalar!(
+            r#"SELECT old_chats_wanted AS "wanted!: bool" FROM devices WHERE id = ?1"#,
+            device,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(wanted.unwrap_or(false))
+    }
+
+    pub async fn old_chats_kept(&self, device: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE devices SET old_chats_wanted = 0 WHERE id = ?1",
+            device
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn devices_of(&self, account: i64) -> Result<Vec<DeviceRow>> {
         let rows = sqlx::query!(
             r#"SELECT id AS "id!", name, created_at, last_seen FROM devices
@@ -262,11 +282,11 @@ mod tests {
             .unwrap();
         let theirs = db.add_device(friend, &[9; 32], "Mac", 10).await.unwrap();
         let first = db
-            .insert_message(friend, me, Some(theirs), 11, &sealed(1))
+            .insert_message(friend, me, Some(theirs), 11, None, &sealed(1))
             .await
             .unwrap();
         let second = db
-            .insert_message(me, friend, Some(phone), 12, &sealed(2))
+            .insert_message(me, friend, Some(phone), 12, None, &sealed(2))
             .await
             .unwrap();
         db.ack_messages(phone, &[first]).await.unwrap();
@@ -300,11 +320,11 @@ mod tests {
             .unwrap();
         let theirs = db.add_device(friend, &[9; 32], "Mac", 10).await.unwrap();
         let to_me = db
-            .insert_message(friend, me, Some(theirs), 11, &sealed(1))
+            .insert_message(friend, me, Some(theirs), 11, None, &sealed(1))
             .await
             .unwrap();
         let from_me = db
-            .insert_message(me, friend, Some(phone), 12, &sealed(2))
+            .insert_message(me, friend, Some(phone), 12, None, &sealed(2))
             .await
             .unwrap();
         assert!(db.leave_device(me, phone, 13).await.unwrap());
@@ -338,7 +358,7 @@ mod tests {
             .await
             .unwrap();
         let old = db
-            .insert_message(friend, me, None, 11, &sealed(1))
+            .insert_message(friend, me, None, 11, None, &sealed(1))
             .await
             .unwrap();
         db.ack_messages(phone, &[old]).await.unwrap();
@@ -349,9 +369,43 @@ mod tests {
         assert!(db.leave_device(me, phone, 13).await.unwrap());
         assert!(db.leave_device(me, pc, 14).await.unwrap());
         assert_eq!(db.waiting_between(friend, me).await.unwrap(), (0, 0));
-        db.insert_message(friend, me, None, 15, &sealed(2))
+        db.insert_message(friend, me, None, 15, None, &sealed(2))
             .await
             .unwrap();
         assert_eq!(db.waiting_between(friend, me).await.unwrap(), (1, 3));
+    }
+    #[tokio::test]
+    async fn only_devices_from_before_the_upgrade_are_asked_for_old_chats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate::Migrator::with_migrations(
+            crate::db::MIGRATOR
+                .iter()
+                .filter(|m| m.version < 9)
+                .cloned()
+                .collect(),
+        )
+        .run(&pool)
+        .await
+        .unwrap();
+        let old = Db { pool };
+        let me = account(&old, 1, "me").await.id;
+        let phone = old
+            .add_device(me, &[7; 32], "Android phone", 10)
+            .await
+            .unwrap();
+        old.pool.close().await;
+
+        let db = Db::open(&path).await.unwrap();
+        assert!(db.old_chats_wanted(phone).await.unwrap());
+        let pc = db.add_device(me, &[8; 32], "Linux PC", 20).await.unwrap();
+        assert!(!db.old_chats_wanted(pc).await.unwrap());
+        db.old_chats_kept(phone).await.unwrap();
+        assert!(!db.old_chats_wanted(phone).await.unwrap());
     }
 }

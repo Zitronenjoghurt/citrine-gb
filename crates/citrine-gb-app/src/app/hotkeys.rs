@@ -1,6 +1,7 @@
 use super::{Citrine, QUICK_LOAD_HOLD};
 use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::app::widgets::snapshots::{SnapshotNews, snapshot_message};
+use citrine_gb::debug::step::Step;
 use egui::Context;
 
 impl Citrine {
@@ -161,6 +162,10 @@ impl Citrine {
             }
             HotkeyAction::QuickLoad => {
                 let slot = self.ui.settings.quick_slot;
+                if super::tabs::playing::group_partners(&self.play, &self.online).is_some() {
+                    self.ui.playing.unlink_load = Some(slot);
+                    return;
+                }
                 match self.emulator.load_snapshot(slot) {
                     Ok(true) => self.toasts.success(snapshot_message(
                         SnapshotNews::Loaded,
@@ -176,12 +181,7 @@ impl Citrine {
             }
             HotkeyAction::Screenshot => self.take_screenshot(),
             HotkeyAction::ToggleRecording => self.toggle_recording(),
-            HotkeyAction::TogglePause => {
-                self.emulator.running = !self.emulator.running;
-                if !self.emulator.running {
-                    self.emulator.release_all();
-                }
-            }
+            HotkeyAction::TogglePause => self.emulator.toggle_running(),
             HotkeyAction::SoftReset => self.ask_reset(),
             HotkeyAction::ToggleMute => {
                 self.ui.settings.muted = !self.ui.settings.muted;
@@ -203,6 +203,17 @@ impl Citrine {
                 self.ui.friends.chat.focus();
                 self.events.open_tab(crate::app::tabs::Tab::Friends);
             }
+            HotkeyAction::StepInstruction => self.debug_step(Step::Instruction),
+            HotkeyAction::StepOver => self.debug_step(Step::Over),
+            HotkeyAction::StepOut => self.debug_step(Step::Out),
+            HotkeyAction::StepLine => self.debug_step(Step::Line),
+            HotkeyAction::StepFrame => self.debug_step(Step::Frame),
+        }
+    }
+
+    fn debug_step(&mut self, step: Step) {
+        if self.ui.settings.dev_mode && self.emulator.has_game() {
+            self.emulator.step(step);
         }
     }
 

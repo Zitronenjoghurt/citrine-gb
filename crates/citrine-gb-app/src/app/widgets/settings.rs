@@ -1,4 +1,4 @@
-pub mod bar;
+pub mod cartridge;
 pub mod content;
 pub mod controls;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]

@@ -2,11 +2,16 @@ use crate::ReadError;
 use crate::base::{self, BaseStats};
 use crate::game::{GLOBAL_CHECKSUM, Game, Generation};
 use crate::layout::Layout;
+use crate::matchups::{self, Effect, TypeChart};
+use crate::moves::{self, MoveData};
 use crate::names;
 use crate::pic::{Sprite, SpriteError};
+use crate::places::{Places, Region, Spot};
+use crate::region_map::{Marker, RegionMap, RegionMaps};
 use crate::sprite::{Palette, Side, SpriteTables};
-use crate::state::{Caught, Gender, Mon, Stats};
+use crate::state::{Caught, Dvs, Gender, Genes, Location, Mon, MoveSlot, Stats, TimeOfDay};
 use crate::text::{self, TERMINATOR};
+use crate::wild::{WildList, WildTables};
 
 pub(crate) const BANK_SIZE: usize = 0x4000;
 const MAX_NAME_BYTES: usize = 16;
@@ -26,8 +31,12 @@ pub struct RomTables {
     pub sprites: SpriteTables,
     base_stats: Vec<BaseStats>,
     type_names: Vec<String>,
-    landmarks: Vec<String>,
+    places: Places,
+    maps: RegionMaps,
     machines: Vec<u8>,
+    moves: Vec<MoveData>,
+    chart: TypeChart,
+    wild: WildTables,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,15 +61,12 @@ struct NameSources {
 
 impl RomTables {
     pub fn load(game: Game, rom: &[u8]) -> Result<Self, ReadError> {
-        let sources = match game.generation() {
-            Generation::One => gen1_sources(game, rom),
-            Generation::Two => gen2_sources(game, rom),
-        }
-        .ok_or(ReadError::RomTables)?;
-        let (species_count, move_count, item_count) = match game.generation() {
-            Generation::One => (GEN1_SPECIES, 165, 83),
-            Generation::Two => (GEN2_SPECIES, 251, 249),
+        let (sources, species_count, move_count, item_count) = match game.generation() {
+            Generation::One => (gen1_sources(game, rom), GEN1_SPECIES, 165, 83),
+            Generation::Two => (gen2_sources(game, rom), GEN2_SPECIES, 251, 249),
+            Generation::Three => return Err(ReadError::RomTables),
         };
+        let sources = sources.ok_or(ReadError::RomTables)?;
         let species_names =
             fixed_names(game, rom, sources.species, species_count).ok_or(ReadError::RomTables)?;
         if game.is_japanese()
@@ -75,7 +81,7 @@ impl RomTables {
             name_list(game, rom, sources.items, item_count).ok_or(ReadError::RomTables)?;
         let dex_order = match game.generation() {
             Generation::One => find_dex_order(rom).ok_or(ReadError::RomTables)?,
-            Generation::Two => Vec::new(),
+            Generation::Two | Generation::Three => Vec::new(),
         };
         let live = live_blocks(rom, Layout::of(game).live_starts);
         let base_stats = base::load(game, rom);
@@ -90,12 +96,16 @@ impl RomTables {
             sprites,
             base_stats,
             type_names: names::type_names(game, rom),
-            landmarks: names::landmark_names(game, rom),
+            places: Places::load(game, rom),
+            maps: RegionMaps::load(game, rom),
             machines: find_machines(game, rom),
+            moves: moves::load(game, rom),
+            chart: matchups::load(game, rom),
+            wild: WildTables::load(game, rom),
         })
     }
 
-    pub fn base_stats(&self, species: u8) -> Option<&BaseStats> {
+    pub fn base_stats(&self, species: u16) -> Option<&BaseStats> {
         let dex = self.dex_number(species)?;
         self.base_stats.get(usize::from(dex) - 1)
     }
@@ -104,7 +114,7 @@ impl RomTables {
         self.type_names.get(usize::from(id)).map(String::as_str)
     }
 
-    pub fn species_types(&self, species: u8) -> Vec<&str> {
+    pub fn species_types(&self, species: u16) -> Vec<&str> {
         let Some(base) = self.base_stats(species) else {
             return Vec::new();
         };
@@ -121,7 +131,7 @@ impl RomTables {
     pub fn sprite(
         &self,
         rom: &[u8],
-        species: u8,
+        species: u16,
         unown_letter: Option<char>,
         side: Side,
     ) -> Result<Sprite, SpriteError> {
@@ -136,26 +146,29 @@ impl RomTables {
         self.sprites.sprite(rom, dex, unown, side)
     }
 
-    pub fn palette(&self, species: u8, shiny: bool) -> Option<Palette> {
+    pub fn palette(&self, species: u16, shiny: bool) -> Option<Palette> {
         self.sprites.palette(self.dex_number(species)?, shiny)
     }
 
     pub fn mon_sprite(&self, rom: &[u8], mon: &Mon, side: Side) -> Result<Sprite, SpriteError> {
-        self.sprite(rom, mon.species, Some(mon.dvs.unown_letter()), side)
+        self.sprite(rom, mon.species, mon.dvs().map(Dvs::unown_letter), side)
     }
 
     pub fn mon_palette(&self, mon: &Mon) -> Option<Palette> {
-        let shiny = self.game.generation() == Generation::Two && mon.dvs.shiny();
+        let shiny = self.game.generation() == Generation::Two && mon.shiny();
         self.palette(mon.species, shiny)
     }
 
     pub fn mon_stats(&self, mon: &Mon) -> Option<Stats> {
+        let Genes::Gb { dvs, stat_exp } = mon.genes else {
+            return None;
+        };
         let base = self.base_stats(mon.species)?;
-        Some(base.stats(mon.level, mon.dvs, mon.stat_exp))
+        Some(base.stats(mon.level, dvs, stat_exp))
     }
 
     pub fn mon_gender(&self, mon: &Mon) -> Option<Gender> {
-        self.base_stats(mon.species)?.gender(mon.dvs)
+        self.base_stats(mon.species)?.gender(mon.dvs()?)
     }
 
     pub fn exp_to_next_level(&self, mon: &Mon) -> Option<u32> {
@@ -168,18 +181,49 @@ impl RomTables {
             0x7E => Some(Place::Gift),
             0x7F => Some(Place::Event),
             location => self
+                .places
                 .landmarks
                 .get(usize::from(location))
-                .map(|name| Place::Landmark(name)),
+                .map(|landmark| Place::Landmark(&landmark.name)),
         }
     }
 
-    pub fn species_name(&self, species: u8) -> Option<&str> {
+    pub fn move_data(&self, id: u16) -> Option<MoveData> {
+        self.moves.get(usize::from(id).checked_sub(1)?).copied()
+    }
+
+    pub fn max_pp(&self, slot: MoveSlot) -> Option<u8> {
+        Some(self.move_data(slot.id)?.max_pp(slot.pp_ups))
+    }
+
+    pub fn effect(&self, move_id: u16, defenders: [u8; 2]) -> Option<Effect> {
+        let data = self.move_data(move_id)?;
+        (!self.chart.is_empty() && data.power > 0)
+            .then(|| self.chart.effect(data.type_id, &defenders))
+    }
+
+    pub fn spot(&self, location: &Location) -> Option<Spot<'_>> {
+        self.places.spot(location)
+    }
+
+    pub fn region_map(&self, region: Region) -> Option<&RegionMap> {
+        self.maps.get(region)
+    }
+
+    pub fn marker(&self, location: &Location) -> Option<Marker<'_>> {
+        self.maps.marker(self.game, self.spot(location)?)
+    }
+
+    pub fn wild(&self, location: &Location, time: Option<TimeOfDay>) -> Vec<WildList> {
+        self.wild.here(location, time)
+    }
+
+    pub fn species_name(&self, species: u16) -> Option<&str> {
         let index = usize::from(species).checked_sub(1)?;
         self.species_names.get(index).map(String::as_str)
     }
 
-    pub fn dex_number(&self, species: u8) -> Option<u16> {
+    pub fn dex_number(&self, species: u16) -> Option<u16> {
         match self.game.generation() {
             Generation::One => {
                 let index = usize::from(species).checked_sub(1)?;
@@ -187,30 +231,30 @@ impl RomTables {
                 (dex != 0).then_some(u16::from(dex))
             }
             Generation::Two => (1..=GEN2_SPECIES as u16)
-                .contains(&u16::from(species))
-                .then_some(u16::from(species)),
+                .contains(&species)
+                .then_some(species),
+            Generation::Three => None,
         }
     }
 
-    pub fn species_for_dex(&self, dex: u16) -> Option<u8> {
+    pub fn species_for_dex(&self, dex: u16) -> Option<u16> {
         match self.game.generation() {
             Generation::One => self
                 .dex_order
                 .iter()
                 .position(|&d| d != 0 && u16::from(d) == dex)
-                .map(|index| index as u8 + 1),
-            Generation::Two => (1..=GEN2_SPECIES as u16)
-                .contains(&dex)
-                .then_some(dex as u8),
+                .map(|index| index as u16 + 1),
+            Generation::Two => (1..=GEN2_SPECIES as u16).contains(&dex).then_some(dex),
+            Generation::Three => None,
         }
     }
 
-    pub fn move_name(&self, id: u8) -> Option<&str> {
+    pub fn move_name(&self, id: u16) -> Option<&str> {
         let index = usize::from(id).checked_sub(1)?;
         self.move_names.get(index).map(String::as_str)
     }
 
-    pub fn item_name(&self, id: u8) -> Option<String> {
+    pub fn item_name(&self, id: u16) -> Option<String> {
         if self.game.generation() == Generation::One {
             match id {
                 0xC4..=0xC8 => return Some(format!("HM{:02}", id - 0xC3)),
@@ -222,7 +266,8 @@ impl RomTables {
         self.item_names.get(index).cloned()
     }
 
-    pub fn machine_move(&self, item: u8) -> Option<&str> {
+    pub fn machine_move(&self, item: u16) -> Option<&str> {
+        let item = u8::try_from(item).ok()?;
         let index = match (self.game.generation(), item) {
             (Generation::One, 0xC4..=0xC8) => item - 0xC4 + 50,
             (Generation::One, 0xC9..=0xFA) => item - 0xC9,
@@ -231,13 +276,14 @@ impl RomTables {
             (Generation::Two, 0xDD..=0xF9) => item - 0xC1,
             _ => return None,
         };
-        self.move_name(*self.machines.get(usize::from(index))?)
+        self.move_name(u16::from(*self.machines.get(usize::from(index))?))
     }
 
-    pub fn is_hm(&self, item: u8) -> bool {
+    pub fn is_hm(&self, item: u16) -> bool {
         match self.game.generation() {
             Generation::One => (0xC4..=0xC8).contains(&item),
             Generation::Two => (0xF3..=0xF9).contains(&item),
+            Generation::Three => false,
         }
     }
 
@@ -252,6 +298,7 @@ impl RomTables {
         match self.game.generation() {
             Generation::One => GEN1_DEX,
             Generation::Two => GEN2_SPECIES as u16,
+            Generation::Three => 0,
         }
     }
 }
@@ -388,6 +435,7 @@ fn find_machines(game: Game, rom: &[u8]) -> Vec<u8> {
     let (start, count): (&[u8], usize) = match game.generation() {
         Generation::One => (&[5, 13, 14, 18, 25, 92], 55),
         Generation::Two => (&[223, 29, 174, 205, 46, 92], 57),
+        Generation::Three => return Vec::new(),
     };
     rom.windows(start.len())
         .position(|window| window == start)

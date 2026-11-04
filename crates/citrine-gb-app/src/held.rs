@@ -1,5 +1,5 @@
 use crate::pad_input::PadAxis;
-use citrine_gb::gb::joypad::JoypadState;
+use citrine_gb::console::Keys;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputSource {
@@ -20,31 +20,31 @@ impl InputSource {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Change {
-    pub pressed: JoypadState,
-    pub released: JoypadState,
+    pub pressed: Keys,
+    pub released: Keys,
 }
 
 #[derive(Debug, Default)]
 pub struct HeldButtons {
-    sources: Vec<(InputSource, JoypadState)>,
-    held: JoypadState,
-    fresh: JoypadState,
-    owed: JoypadState,
+    sources: Vec<(InputSource, Keys)>,
+    held: Keys,
+    fresh: Keys,
+    owed: Keys,
 }
 
 impl HeldButtons {
-    pub fn held(&self) -> JoypadState {
+    pub fn held(&self) -> Keys {
         self.held
     }
 
-    pub fn of(&self, source: InputSource) -> JoypadState {
+    pub fn of(&self, source: InputSource) -> Keys {
         self.sources
             .iter()
             .find(|(held_by, _)| *held_by == source)
-            .map_or(JoypadState::empty(), |&(_, buttons)| buttons)
+            .map_or(Keys::empty(), |&(_, buttons)| buttons)
     }
 
-    pub fn set(&mut self, source: InputSource, mask: JoypadState, down: JoypadState) -> Change {
+    pub fn set(&mut self, source: InputSource, mask: Keys, down: Keys) -> Change {
         let next = (self.of(source) - mask) | (down & mask);
         self.sources.retain(|(held_by, _)| *held_by != source);
         if !next.is_empty() {
@@ -66,8 +66,8 @@ impl HeldButtons {
         change
     }
 
-    pub fn take_owed(&mut self) -> JoypadState {
-        self.fresh = JoypadState::empty();
+    pub fn take_owed(&mut self) -> Keys {
+        self.fresh = Keys::empty();
         std::mem::take(&mut self.owed)
     }
 
@@ -75,7 +75,7 @@ impl HeldButtons {
         let want = self
             .sources
             .iter()
-            .fold(JoypadState::empty(), |all, &(_, buttons)| all | buttons);
+            .fold(Keys::empty(), |all, &(_, buttons)| all | buttons);
         let before = self.held | self.owed;
         let let_go = self.held - want;
         self.fresh |= want - self.held;
@@ -93,8 +93,8 @@ impl HeldButtons {
 mod tests {
     use super::*;
 
-    const LEFT: JoypadState = JoypadState::LEFT;
-    const RIGHT: JoypadState = JoypadState::RIGHT;
+    const LEFT: Keys = Keys::LEFT;
+    const RIGHT: Keys = Keys::RIGHT;
     const STICK: InputSource = InputSource::PadAxis(0, PadAxis::LeftStickX);
     const BUTTONS: InputSource = InputSource::PadButtons(0);
 
@@ -108,10 +108,10 @@ mod tests {
         held.set(BUTTONS, LEFT, LEFT);
         held.set(InputSource::Keyboard, LEFT, LEFT);
         played(&mut held);
-        let change = held.set(BUTTONS, LEFT, JoypadState::empty());
+        let change = held.set(BUTTONS, LEFT, Keys::empty());
         assert!(change.released.is_empty());
         assert!(held.held().contains(LEFT));
-        let change = held.set(InputSource::Keyboard, LEFT, JoypadState::empty());
+        let change = held.set(InputSource::Keyboard, LEFT, Keys::empty());
         assert_eq!(change.released.bits(), LEFT.bits());
     }
 
@@ -121,7 +121,7 @@ mod tests {
         held.set(BUTTONS, LEFT, LEFT);
         held.set(STICK, LEFT | RIGHT, RIGHT);
         played(&mut held);
-        let change = held.set(STICK, LEFT | RIGHT, JoypadState::empty());
+        let change = held.set(STICK, LEFT | RIGHT, Keys::empty());
         assert_eq!(change.released.bits(), RIGHT.bits());
         assert_eq!(held.held().bits(), LEFT.bits());
     }
@@ -131,7 +131,7 @@ mod tests {
         let mut held = HeldButtons::default();
         let pressed = held.set(BUTTONS, LEFT, LEFT);
         assert_eq!(pressed.pressed.bits(), LEFT.bits());
-        let change = held.set(BUTTONS, LEFT, JoypadState::empty());
+        let change = held.set(BUTTONS, LEFT, Keys::empty());
         assert!(change.released.is_empty(), "the game has not seen it yet");
         assert!(held.held().is_empty());
         assert_eq!(held.take_owed().bits(), LEFT.bits());
@@ -142,7 +142,7 @@ mod tests {
     fn a_press_again_before_the_frame_keeps_it_down() {
         let mut held = HeldButtons::default();
         held.set(BUTTONS, LEFT, LEFT);
-        held.set(BUTTONS, LEFT, JoypadState::empty());
+        held.set(BUTTONS, LEFT, Keys::empty());
         let change = held.set(BUTTONS, LEFT, LEFT);
         assert!(change.pressed.is_empty(), "it never went up on the game");
         assert!(held.take_owed().is_empty());
@@ -152,20 +152,20 @@ mod tests {
     #[test]
     fn an_unplugged_pad_lets_go_of_everything_it_held() {
         let mut held = HeldButtons::default();
-        held.set(BUTTONS, JoypadState::A, JoypadState::A);
+        held.set(BUTTONS, Keys::A, Keys::A);
         held.set(STICK, LEFT | RIGHT, LEFT);
-        held.set(InputSource::PadButtons(1), JoypadState::B, JoypadState::B);
+        held.set(InputSource::PadButtons(1), Keys::B, Keys::B);
         played(&mut held);
         let change = held.forget_pad(0);
-        assert_eq!(change.released.bits(), (JoypadState::A | LEFT).bits());
-        assert_eq!(held.held().bits(), JoypadState::B.bits());
+        assert_eq!(change.released.bits(), (Keys::A | LEFT).bits());
+        assert_eq!(held.held().bits(), Keys::B.bits());
     }
 
     #[test]
     fn clearing_lets_go_at_once() {
         let mut held = HeldButtons::default();
         held.set(BUTTONS, LEFT, LEFT);
-        held.set(BUTTONS, LEFT, JoypadState::empty());
+        held.set(BUTTONS, LEFT, Keys::empty());
         held.set(InputSource::Touch, RIGHT, RIGHT);
         let change = held.clear();
         assert_eq!(change.released.bits(), (LEFT | RIGHT).bits());

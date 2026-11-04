@@ -1,7 +1,7 @@
+use crate::app::widgets::debugger::TimeControlState;
 use crate::app::widgets::info::InfoState;
 use crate::app::widgets::registers::RegistersState;
 use crate::app::widgets::snapshots::SnapshotsState;
-use crate::app::widgets::time_control::TimeControlState;
 use crate::utils::avg_timer::AvgTimer;
 use recent::RecentRoms;
 use settings::Settings;
@@ -50,6 +50,8 @@ pub struct UiState {
     #[serde(skip, default)]
     pub toast_area: Option<egui::Rect>,
     #[serde(skip, default)]
+    pub toast_picture: Option<egui::Rect>,
+    #[serde(skip, default)]
     pub tab_fit: crate::app::tabs::TabFit,
     #[serde(skip, default)]
     pub join: crate::app::widgets::settings::online::JoinForm,
@@ -63,6 +65,10 @@ pub struct UiState {
     pub your_data: crate::app::widgets::settings::your_data::YourDataUi,
     #[serde(skip, default)]
     pub viewer: crate::app::viewer::ViewerState,
+    #[serde(skip, default)]
+    pub memory: crate::app::widgets::memory::MemoryViewState,
+    #[serde(skip, default)]
+    pub video: crate::app::widgets::video::VideoViewState,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]

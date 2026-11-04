@@ -1,31 +1,35 @@
 use crate::game_info::Game;
-use citrine_gb_gamedata::{Generation, Mon, Pokemon, Side};
+use citrine_gb_gamedata::{Dvs, Generation, Mon, Pokemon, Side};
 use egui::TextureHandle;
 use std::collections::HashMap;
 
-pub(super) fn sprite_key(generation: Generation, mon: &Mon) -> (u8, bool, char) {
-    let shiny = generation == Generation::Two && mon.dvs.shiny();
-    (mon.species, shiny, mon.dvs.unown_letter())
+pub(super) fn sprite_key(generation: Generation, mon: &Mon) -> (u16, bool, char) {
+    let shiny = generation != Generation::One && mon.shiny();
+    (mon.species, shiny, unown_letter(mon))
 }
 
-pub(super) fn pokemon_sprite(pokemon: &Pokemon) -> Option<(u8, bool, char)> {
+pub(super) fn pokemon_sprite(pokemon: &Pokemon) -> Option<(u16, bool, char)> {
     match pokemon {
-        Pokemon::Hatched(mon) => Some((mon.species, mon.dvs.shiny(), mon.dvs.unown_letter())),
+        Pokemon::Hatched(mon) => Some((mon.species, mon.shiny(), unown_letter(mon))),
         Pokemon::Egg => None,
     }
 }
 
-pub(super) type SpriteCache = HashMap<(String, u8, bool, char), Option<TextureHandle>>;
+fn unown_letter(mon: &Mon) -> char {
+    mon.dvs().map_or('A', Dvs::unown_letter)
+}
+
+pub(super) type SpriteCache = HashMap<(String, u16, bool, char), Option<TextureHandle>>;
 
 pub(super) fn sprite_texture(
     ctx: &egui::Context,
     key: &str,
     game: &Game,
-    species: u8,
+    species: u16,
     shiny: bool,
     letter: char,
 ) -> Option<TextureHandle> {
-    let shiny = shiny && game.tables.game.generation() == Generation::Two;
+    let shiny = shiny && game.tables.generation() != Generation::One;
     let id = egui::Id::new("game_info_sprites");
     let cache_key = (key.to_owned(), species, shiny, letter);
     if let Some(found) = ctx.data_mut(|d| {
@@ -51,11 +55,18 @@ pub(super) fn sprite_texture(
 
 pub fn sprite_image(
     game: &Game,
-    species: u8,
+    species: u16,
     shiny: bool,
     letter: char,
 ) -> Option<egui::ColorImage> {
-    let tables = &game.tables;
+    let Some(tables) = game.tables.gb() else {
+        let picture = game.tables.front_picture(&game.rom, species, shiny)?;
+        let side = citrine_gb_gamedata::gen3::PICTURE_SIDE;
+        return Some(egui::ColorImage::from_rgba_unmultiplied(
+            [side, side],
+            &picture.rgba(),
+        ));
+    };
     let sprite = tables
         .sprite(&game.rom, species, Some(letter), Side::Front)
         .ok()?;

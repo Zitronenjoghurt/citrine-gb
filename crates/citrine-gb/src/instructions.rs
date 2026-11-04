@@ -1,5 +1,4 @@
-use crate::disassembly::FlowControl;
-use crate::disassembly::FlowControl::ConditionalReturn;
+use FlowControl::ConditionalReturn;
 use std::fmt::Display;
 
 #[allow(non_camel_case_types)]
@@ -1212,4 +1211,16 @@ impl Display for Operand {
             }
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FlowControl<T = u16> {
+    Continue,
+    Jump(T),
+    ConditionalJump(T),
+    UnknownJump,
+    Call(T),
+    Return,
+    ConditionalReturn,
+    Invalid,
 }

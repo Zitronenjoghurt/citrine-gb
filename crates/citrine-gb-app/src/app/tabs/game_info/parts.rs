@@ -1,5 +1,4 @@
 use super::DETAILS_MIN;
-use crate::app::widgets::text::faint;
 use citrine_gb_gamedata::GameState;
 use egui::{Align, Color32, Layout, RichText, Sense, Stroke, Ui, vec2};
 
@@ -37,7 +36,7 @@ pub(super) fn card_with_margin(ui: &Ui, selected: bool, x: i8, y: i8) -> egui::F
 pub(super) fn fact(ui: &mut Ui, label: &str, value: &str) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
-        ui.add(egui::Label::new(faint(label)).extend());
+        ui.add(egui::Label::new(RichText::new(label).weak()).extend());
         ui.add(egui::Label::new(value).extend());
     });
 }
@@ -55,7 +54,7 @@ pub(super) fn text_width(ui: &Ui, text: RichText) -> f32 {
 }
 
 pub(super) fn fact_width(ui: &Ui, label: &str, value: &str) -> f32 {
-    text_width(ui, RichText::new(label).small()).max(text_width(ui, RichText::new(value)))
+    text_width(ui, RichText::new(label)).max(text_width(ui, RichText::new(value)))
 }
 
 pub(super) fn right_cell(ui: &mut Ui, width: f32, text: RichText) {

@@ -22,21 +22,64 @@ use native::{Output, Pending, Worker};
 use web::{Output, Pending, Worker};
 
 use crate::media::NewMedia;
+use citrine_gb::console::{Console, ConsoleKind, Timing, VideoSpec};
 use std::time::Duration;
 use thumbnail::Thumbnails;
 
-pub const SOURCE_WIDTH: usize = 160;
-pub const SOURCE_HEIGHT: usize = 144;
 pub const DEFAULT_SCALE: usize = 4;
 pub const MAX_SCALE: usize = 8;
-pub const VIDEO_TIMESCALE: u32 = 1_048_576;
-pub const FRAME_TICKS: u32 = 17_556;
+const CYCLES_PER_TICK: u32 = 4;
 #[cfg_attr(not(feature = "audio-codec"), allow(dead_code))]
 pub const AUDIO_BITRATE: u32 = 256_000;
 pub const CHANNELS: usize = 2;
 
-pub fn fps() -> f64 {
-    VIDEO_TIMESCALE as f64 / FRAME_TICKS as f64
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Source {
+    pub width: usize,
+    pub height: usize,
+    pub timescale: u32,
+    pub frame_ticks: u32,
+}
+
+impl Source {
+    pub fn new(video: VideoSpec, timing: Timing) -> Self {
+        Self {
+            width: video.width,
+            height: video.height,
+            timescale: timing.clock_hz / CYCLES_PER_TICK,
+            frame_ticks: timing.cycles_per_frame / CYCLES_PER_TICK,
+        }
+    }
+
+    pub fn of(console: &impl Console) -> Self {
+        Self::new(console.video(), console.timing())
+    }
+
+    pub fn fps(self) -> f64 {
+        self.timescale as f64 / self.frame_ticks as f64
+    }
+
+    pub fn frames_to_duration(self, frames: u64) -> Duration {
+        let nanos =
+            frames as u128 * self.frame_ticks as u128 * 1_000_000_000 / self.timescale as u128;
+        Duration::from_nanos(nanos as u64)
+    }
+
+    fn second_of(self, frame: u64) -> u64 {
+        frame * self.frame_ticks as u64 / self.timescale as u64
+    }
+
+    fn frames_for_audio(self, audio_frames: u64, sample_rate: u32) -> u64 {
+        let ticks = audio_frames as u128 * self.timescale as u128;
+        let per_frame = self.frame_ticks as u128 * sample_rate.max(1) as u128;
+        ((ticks + per_frame / 2) / per_frame) as u64
+    }
+}
+
+impl From<ConsoleKind> for Source {
+    fn from(kind: ConsoleKind) -> Self {
+        Self::new(kind.video(), kind.timing())
+    }
 }
 
 pub fn even_scale(scale: usize) -> usize {
@@ -71,12 +114,12 @@ pub enum Availability {
 pub const CODEC_NOTICE: &str = "OpenH264 Video Codec provided by Cisco Systems, Inc.";
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "openh264-source"))]
-pub fn availability(_sample_rate: u32, _scale: usize) -> Availability {
+pub fn availability(_source: Source, _sample_rate: u32, _scale: usize) -> Availability {
     Availability::Ready
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
-pub fn availability(_sample_rate: u32, _scale: usize) -> Availability {
+pub fn availability(_source: Source, _sample_rate: u32, _scale: usize) -> Availability {
     match codec::shared().status() {
         codec::Status::Ready => Availability::Ready,
         codec::Status::Downloading => Availability::Checking,
@@ -95,6 +138,16 @@ pub fn download_codec(download: bool) -> bool {
 #[cfg(any(target_arch = "wasm32", feature = "openh264-source"))]
 pub fn download_codec(_download: bool) -> bool {
     false
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
+pub fn codec_progress() -> Option<crate::progress::Progress> {
+    codec::shared().progress()
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "openh264-source"))]
+pub fn codec_progress() -> Option<crate::progress::Progress> {
+    None
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
@@ -121,8 +174,8 @@ pub(crate) fn video_api() -> anyhow::Result<openh264::OpenH264API> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn availability(sample_rate: u32, scale: usize) -> Availability {
-    web::availability(sample_rate, even_scale(scale))
+pub fn availability(source: Source, sample_rate: u32, scale: usize) -> Availability {
+    web::availability(source, sample_rate, even_scale(scale))
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -156,6 +209,7 @@ pub struct FinishedRecording {
 struct Session {
     worker: Worker,
     info: RecordingInfo,
+    source: Source,
     scale: usize,
     sample_rate: u32,
     audio_frames: u64,
@@ -189,6 +243,7 @@ fn discard(_output: Output) {}
 struct Finishing {
     pending: Pending,
     info: RecordingInfo,
+    source: Source,
     scale: usize,
     frames: u64,
     thumbnail: Vec<u8>,
@@ -211,9 +266,9 @@ impl ScreenRecorder {
     }
 
     pub fn elapsed(&self) -> Duration {
-        self.session
-            .as_ref()
-            .map_or(Duration::ZERO, |s| frames_to_duration(s.video_frames))
+        self.session.as_ref().map_or(Duration::ZERO, |s| {
+            s.source.frames_to_duration(s.video_frames)
+        })
     }
 
     pub fn elapsed_label(&self) -> String {
@@ -223,15 +278,21 @@ impl ScreenRecorder {
     pub fn start(
         &mut self,
         info: RecordingInfo,
+        source: Source,
         sample_rate: u32,
         scale: usize,
     ) -> anyhow::Result<()> {
         let scale = even_scale(scale);
         #[cfg(not(target_arch = "wasm32"))]
-        let worker = Worker::start(crate::media::recording_temp_path()?, sample_rate, scale)?;
+        let worker = Worker::start(
+            crate::media::recording_temp_path()?,
+            source,
+            sample_rate,
+            scale,
+        )?;
         #[cfg(target_arch = "wasm32")]
-        let worker = Worker::start(sample_rate, scale)?;
-        self.begin(worker, info, sample_rate, scale);
+        let worker = Worker::start(source, sample_rate, scale)?;
+        self.begin(worker, info, source, sample_rate, scale);
         Ok(())
     }
 
@@ -240,12 +301,13 @@ impl ScreenRecorder {
         &mut self,
         path: std::path::PathBuf,
         info: RecordingInfo,
+        source: Source,
         sample_rate: u32,
         scale: usize,
     ) -> anyhow::Result<()> {
         let scale = even_scale(scale);
-        let worker = Worker::start(path, sample_rate, scale)?;
-        self.begin(worker, info, sample_rate, scale);
+        let worker = Worker::start(path, source, sample_rate, scale)?;
+        self.begin(worker, info, source, sample_rate, scale);
         Ok(())
     }
 
@@ -255,24 +317,33 @@ impl ScreenRecorder {
         api: openh264::OpenH264API,
         path: std::path::PathBuf,
         info: RecordingInfo,
+        source: Source,
         sample_rate: u32,
     ) -> anyhow::Result<()> {
-        let worker = Worker::start_with(api, path, sample_rate, DEFAULT_SCALE)?;
-        self.begin(worker, info, sample_rate, DEFAULT_SCALE);
+        let worker = Worker::start_with(api, path, source, sample_rate, DEFAULT_SCALE)?;
+        self.begin(worker, info, source, sample_rate, DEFAULT_SCALE);
         Ok(())
     }
 
-    fn begin(&mut self, worker: Worker, info: RecordingInfo, sample_rate: u32, scale: usize) {
+    fn begin(
+        &mut self,
+        worker: Worker,
+        info: RecordingInfo,
+        source: Source,
+        sample_rate: u32,
+        scale: usize,
+    ) {
         self.finish(StopReason::Asked);
         self.stopped = None;
         self.session = Some(Session {
             worker,
             info,
+            source,
             scale,
             sample_rate,
             audio_frames: 0,
             video_frames: 0,
-            thumbnails: Thumbnails::default(),
+            thumbnails: Thumbnails::new(source),
         });
     }
 
@@ -288,7 +359,9 @@ impl ScreenRecorder {
             session.audio_frames += (audio.len() / CHANNELS) as u64;
             session.worker.audio(audio);
         }
-        let target = frames_for_audio(session.audio_frames, session.sample_rate);
+        let target = session
+            .source
+            .frames_for_audio(session.audio_frames, session.sample_rate);
         let repeat = target.saturating_sub(session.video_frames);
         if repeat > 0 {
             session.worker.frame(rgba, repeat as u32);
@@ -299,7 +372,9 @@ impl ScreenRecorder {
         }
         if let Some(reason) = session.worker.failed_or_full() {
             self.finish(reason);
-        } else if MAX_LENGTH.is_some_and(|max| frames_to_duration(session.video_frames) >= max) {
+        } else if MAX_LENGTH
+            .is_some_and(|max| session.source.frames_to_duration(session.video_frames) >= max)
+        {
             self.finish(StopReason::TooLong);
         }
     }
@@ -317,6 +392,7 @@ impl ScreenRecorder {
         self.finishing.push(Finishing {
             pending: session.worker.finish(),
             info: session.info,
+            source: session.source,
             scale: session.scale,
             frames: session.video_frames,
             thumbnail,
@@ -344,9 +420,9 @@ impl ScreenRecorder {
         Some(Outcome::Saved(Box::new(FinishedRecording {
             output,
             info: done.info,
-            width: SOURCE_WIDTH * done.scale,
-            height: SOURCE_HEIGHT * done.scale,
-            length: frames_to_duration(done.frames),
+            width: done.source.width * done.scale,
+            height: done.source.height * done.scale,
+            length: done.source.frames_to_duration(done.frames),
             frames: done.frames,
             thumbnail: done.thumbnail,
         })))
@@ -361,31 +437,21 @@ impl ScreenRecorder {
     }
 }
 
-fn frames_for_audio(audio_frames: u64, sample_rate: u32) -> u64 {
-    let ticks = audio_frames as u128 * VIDEO_TIMESCALE as u128;
-    let per_frame = FRAME_TICKS as u128 * sample_rate.max(1) as u128;
-    ((ticks + per_frame / 2) / per_frame) as u64
-}
-
-pub fn frames_to_duration(frames: u64) -> Duration {
-    let nanos = frames as u128 * FRAME_TICKS as u128 * 1_000_000_000 / VIDEO_TIMESCALE as u128;
-    Duration::from_nanos(nanos as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn one_frame_of_sound_asks_for_one_frame_of_video() {
+        let source = Source::from(ConsoleKind::Gb);
         let rate = 48_000;
-        let per_frame = rate as f64 / fps();
+        let per_frame = rate as f64 / source.fps();
         let mut audio = 0u64;
         let mut video = 0u64;
         for n in 1..=10_000u64 {
             let next = (n as f64 * per_frame).floor() as u64;
             audio += next - (((n - 1) as f64) * per_frame).floor() as u64;
-            let target = frames_for_audio(audio, rate);
+            let target = source.frames_for_audio(audio, rate);
             assert_eq!(target - video, 1, "frame {n}");
             video = target;
         }
@@ -393,8 +459,24 @@ mod tests {
 
     #[test]
     fn the_length_follows_the_frame_count() {
-        let length = frames_to_duration(59_727);
+        let length = Source::from(ConsoleKind::Gb).frames_to_duration(59_727);
         assert!((length.as_secs_f64() - 1000.0).abs() < 0.02, "{length:?}");
+    }
+
+    #[test]
+    fn a_game_boy_recording_keeps_its_clock() {
+        let source = Source::from(ConsoleKind::Gb);
+        assert_eq!((source.width, source.height), (160, 144));
+        assert_eq!((source.timescale, source.frame_ticks), (1_048_576, 17_556));
+        assert_eq!(Source::from(ConsoleKind::Gbc), source);
+    }
+
+    #[test]
+    fn a_gba_recording_is_its_screen_at_the_same_rate() {
+        let source = Source::from(ConsoleKind::Gba);
+        assert_eq!((source.width, source.height), (240, 160));
+        assert_eq!((source.timescale, source.frame_ticks), (4_194_304, 70_224));
+        assert_eq!(source.fps(), Source::from(ConsoleKind::Gb).fps());
     }
 
     #[test]

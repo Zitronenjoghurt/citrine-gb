@@ -1,6 +1,7 @@
 use super::*;
 use crate::emulator::Emulator;
 use citrine_gb::ReadMemory;
+use citrine_gb::gb::GbModel;
 use egui::Key;
 use std::collections::HashSet;
 use strum::IntoEnumIterator;
@@ -71,7 +72,7 @@ fn linked(name: &str) -> Emulator {
         .load_rom(&red(), GbModel::Dmg, None)
         .expect("load red");
     emulator
-        .start_link(&silver(), GbModel::Cgb, "Silver".into())
+        .start_link(&silver(), ConsoleKind::Gbc, Some("Silver"))
         .expect("link silver");
     emulator
 }
@@ -80,19 +81,27 @@ fn link(emulator: &mut Emulator) -> &mut LocalLink {
     emulator.link.as_mut().expect("a linked game")
 }
 
+fn second(link: &mut LocalLink) -> &mut GameBoy {
+    link.machine.as_gb_mut().expect("a game boy")
+}
+
 fn trade(emulator: &mut Emulator) {
     let start = Instant::now();
     let finished = (1..=200).any(|step| {
         emulator.advance(start + Duration::from_millis(step * 50), None);
-        let second = &emulator.link.as_ref().expect("a linked game").gb;
-        done(&emulator.gb) && done(second)
+        let second = emulator
+            .link
+            .as_ref()
+            .and_then(|link| link.machine.as_gb())
+            .expect("a linked game");
+        done(emulator.gb()) && done(second)
     });
     assert!(finished, "the trade did not finish in 10 seconds");
 }
 
 fn press_a_on_both(emulator: &mut Emulator) {
-    emulator.press(InputSource::Keyboard, JoypadState::A);
-    link(emulator).set_held(InputSource::Keyboard, JoypadState::A, JoypadState::A);
+    emulator.press(InputSource::Keyboard, Keys::A);
+    link(emulator).set_held(InputSource::Keyboard, Keys::A, Keys::A);
 }
 
 fn store_holds(emulator: &Emulator, key: &str, expected: &[u8]) {
@@ -103,8 +112,8 @@ fn store_holds(emulator: &Emulator, key: &str, expected: &[u8]) {
 #[test]
 fn red_and_silver_trade_and_both_saves_hold_the_other_game_after_the_link_ends() {
     let mut emulator = linked("trade");
-    assert_eq!(emulator.gb.model, GbModel::Dmg);
-    assert_eq!(link(&mut emulator).model(), GbModel::Cgb);
+    assert_eq!(emulator.gb().model, GbModel::Dmg);
+    assert_eq!(link(&mut emulator).kind(), ConsoleKind::Gbc);
     assert!(link(&mut emulator).plugged());
     press_a_on_both(&mut emulator);
     trade(&mut emulator);
@@ -116,7 +125,7 @@ fn red_and_silver_trade_and_both_saves_hold_the_other_game_after_the_link_ends()
     emulator.flush_save().expect("save red");
 
     assert!(emulator.link.is_none());
-    assert!(!emulator.gb.link_plugged());
+    assert!(!emulator.gb().link_plugged());
     store_holds(&emulator, &red_key, &sent(0x40, 3));
     store_holds(&emulator, &silver_key, &sent(0x10, 1));
     assert_eq!(emulator.store.autosave_ids(&silver_key).len(), 1);
@@ -133,10 +142,9 @@ fn the_second_game_loads_its_battery_save_like_it_does_alone() {
         .store_battery(&silver_key, &saved)
         .expect("store");
     emulator
-        .start_link(&silver(), GbModel::Cgb, "Silver".into())
+        .start_link(&silver(), ConsoleKind::Gbc, Some("Silver"))
         .expect("link again");
-    let dump = link(&mut emulator)
-        .gb
+    let dump = second(link(&mut emulator))
         .poll_sram_dump(true, now_unix())
         .expect("a battery save");
     assert_eq!(&dump.as_slice()[..saved.len()], &saved[..]);
@@ -155,12 +163,12 @@ fn a_copy_of_the_same_game_keeps_its_own_save_and_leaves_the_first_one_alone() {
         .store_battery(&red_key, &saved)
         .expect("store");
     emulator
-        .start_link(&red(), GbModel::Dmg, "Red".into())
+        .start_link(&red(), ConsoleKind::Gb, Some("Red"))
         .expect("link a copy");
     assert_eq!(link(&mut emulator).rom_key(), red_key);
     let copy_key = link(&mut emulator).save_key().to_owned();
     assert_ne!(copy_key, red_key);
-    let dump = link(&mut emulator).gb.poll_sram_dump(true, now_unix());
+    let dump = second(link(&mut emulator)).poll_sram_dump(true, now_unix());
     assert!(dump.is_none_or(|d| d.as_slice()[..saved.len()] != saved[..]));
     link(&mut emulator).started_at -= Duration::from_secs(10);
     emulator.end_link().expect("end the link");
@@ -176,9 +184,9 @@ fn with_the_cable_pulled_the_first_game_trades_with_no_one() {
     for step in 1..=40 {
         emulator.advance(start + Duration::from_millis(step * 50), None);
     }
-    assert!(done(&emulator.gb));
-    assert!(!done(&link(&mut emulator).gb));
-    assert!(!emulator.gb.link_plugged());
+    assert!(done(emulator.gb()));
+    assert!(!done(second(link(&mut emulator))));
+    assert!(!emulator.gb().link_plugged());
 }
 
 #[test]
@@ -188,7 +196,7 @@ fn closing_the_second_game_keeps_the_first_running_unplugged() {
     emulator.end_link().expect("end the link");
     assert_eq!(emulator.rom_key(), Some(red_key.as_str()));
     assert!(emulator.running);
-    assert!(!emulator.gb.link_plugged());
+    assert!(!emulator.gb().link_plugged());
 }
 
 #[test]
@@ -225,8 +233,9 @@ fn link_with(controls: Controls, swapped: bool) -> LocalLink {
     let store = SaveStore::at(root);
     let mut link = LocalLink::start(
         &silver(),
-        GbModel::Cgb,
-        "Silver".into(),
+        ConsoleKind::Gbc,
+        &Firmware::default(),
+        Some("Silver"),
         &store,
         48_000,
         None,
@@ -300,19 +309,19 @@ fn one_input_for_both_follows_the_game_with_control() {
 #[test]
 fn moving_control_lets_go_of_what_the_old_game_held() {
     let mut emulator = linked("release");
-    emulator.press(InputSource::Keyboard, JoypadState::A);
-    assert!(emulator.is_held(JoypadState::A));
+    emulator.press(InputSource::Keyboard, Keys::A);
+    assert!(emulator.is_held(Keys::A));
     emulator.set_link_control(Game::Second);
-    assert!(!emulator.is_held(JoypadState::A));
-    emulator.press(InputSource::Touch, JoypadState::B);
-    assert!(link(&mut emulator).held().contains(JoypadState::B));
-    assert!(!emulator.is_held(JoypadState::B));
+    assert!(!emulator.is_held(Keys::A));
+    emulator.press(InputSource::Touch, Keys::B);
+    assert!(link(&mut emulator).held().contains(Keys::B));
+    assert!(!emulator.is_held(Keys::B));
 }
 
 #[test]
 fn the_second_sound_mixes_in_quieter_or_not_at_all() {
     let mut link = link_with(Controls::Shared, false);
-    link.gb.apu.audio_buffer = vec![1.0; 8];
+    second(&mut link).apu.audio_buffer = vec![1.0; 8];
     let mut samples = vec![0.0; 8];
     link.mix(&mut samples);
     assert!(samples.iter().all(|s| *s > 0.0 && *s < 1.0));
@@ -320,10 +329,35 @@ fn the_second_sound_mixes_in_quieter_or_not_at_all() {
         second_sound: false,
         ..LinkSettings::default()
     });
-    link.gb.apu.audio_buffer = vec![1.0; 8];
+    second(&mut link).apu.audio_buffer = vec![1.0; 8];
     let mut samples = vec![0.0; 8];
     link.mix(&mut samples);
     assert!(samples.iter().all(|s| *s == 0.0));
 }
 
 mod real_trade;
+
+#[test]
+fn two_infrared_carts_see_each_others_light() {
+    let shining = cart(
+        0x00,
+        0xFF,
+        &[0x3E, 0x0E, 0xEA, 0x00, 0x00, 0x3E, 0x01, 0xEA, 0x00, 0xA0],
+    );
+    let watching = cart(
+        0x00,
+        0xFF,
+        &[
+            0x3E, 0x0E, 0xEA, 0x00, 0x00, 0xFA, 0x00, 0xA0, 0xEA, 0x00, 0xC0, 0x18, 0xF8,
+        ],
+    );
+    let mut first = GameBoy::new_empty(GbModel::Dmg);
+    first.load_rom_with_model(&shining, GbModel::Dmg).unwrap();
+    let mut second = GameBoy::new_empty(GbModel::Dmg);
+    second.load_rom_with_model(&watching, GbModel::Dmg).unwrap();
+    for _ in 0..3 {
+        infrared_frame([&mut first, &mut second], [Keys::empty(); 2]);
+    }
+    assert!(first.ir_led());
+    assert_eq!(second.memory.read_naive(0xC000), 0xC1);
+}
