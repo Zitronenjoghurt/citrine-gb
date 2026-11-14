@@ -1,0 +1,13 @@
+[package]
+name = "citrine-gb-blip"
+description = "Band-limited sound synthesis for the Game Boy sound chip, a fork of blip_buf 0.1.6 by Mathijs van de Nes with the same output, fewer bounds checks and one buffer for all channels."
+version.workspace = true
+authors = ["Mathijs van de Nes <git@mathijs.vd-nes.nl>"]
+edition.workspace = true
+license = "MIT"
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+blip_buf = "0.1.6"

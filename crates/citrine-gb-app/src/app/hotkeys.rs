@@ -1,6 +1,7 @@
 use super::{Citrine, QUICK_LOAD_HOLD};
+use crate::app::ui_state::ds_screens::ScreensAction;
 use crate::app::ui_state::hotkeys::HotkeyAction;
-use crate::app::widgets::snapshots::{SnapshotNews, snapshot_message};
+use crate::app::widgets::snapshots::{FailedStep, SnapshotNews, failed_message, snapshot_message};
 use citrine_gb::debug::step::Step;
 use egui::Context;
 
@@ -63,9 +64,34 @@ impl Citrine {
         }
     }
 
+    pub(super) fn follow_rewind(&mut self, ctx: &Context) {
+        let pressed = std::mem::take(&mut self.rewind_pressed);
+        let hotkeys = &self.ui.settings.hotkeys;
+        let typing = ctx.wants_keyboard_input() || self.ui.capture.is_waiting();
+        let key = !typing
+            && ctx.input(|i| {
+                hotkeys
+                    .keys_for(HotkeyAction::Rewind)
+                    .iter()
+                    .any(|hotkey| i.key_down(hotkey.key) && hotkey.matches(hotkey.key, i.modifiers))
+            });
+        let pad = !self.ui.capture.is_waiting()
+            && self
+                .emulator
+                .loose_held()
+                .iter()
+                .any(|pad| hotkeys.action_for_pad(*pad) == Some(HotkeyAction::Rewind));
+        self.emulator.together = self.play.session().is_some() || self.play.room().is_some();
+        self.emulator.rewind_held = pressed || key || pad;
+        if self.emulator.rewind_held && self.emulator.can_rewind() {
+            ctx.request_repaint();
+        }
+    }
+
     pub(super) fn raw_keys(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
         drop_stray_repeats(ctx, raw);
         self.chat_key(ctx, raw);
+        self.fast_forward_key(ctx, raw);
     }
 
     fn chat_key(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
@@ -158,7 +184,8 @@ impl Citrine {
             HotkeyAction::QuickSave => self.save_to_slot(self.ui.settings.quick_slot),
             HotkeyAction::QuickSaveNewSlot => {
                 let key = self.emulator.rom_key().unwrap_or_default().to_owned();
-                self.save_to_slot(self.emulator.store.next_free_slot(&key));
+                let slot = self.emulator.next_free_slot(&key);
+                self.save_to_slot(slot);
             }
             HotkeyAction::QuickLoad => {
                 let slot = self.ui.settings.quick_slot;
@@ -175,7 +202,11 @@ impl Citrine {
                         SnapshotNews::Empty,
                         &self.emulator.snapshot_name(slot),
                     )),
-                    Err(err) => self.toasts.error(format!("Quick load failed: {err:?}")),
+                    Err(err) => self.toasts.error(failed_message(
+                        FailedStep::Load,
+                        &format!("'{}'", self.emulator.snapshot_name(slot)),
+                        &err,
+                    )),
                 };
                 self.ui.snapshots.invalidate();
             }
@@ -189,15 +220,25 @@ impl Citrine {
             }
             HotkeyAction::ToggleFocusMode => self.toggle_focus_mode(),
             HotkeyAction::LeaveFocusMode => {
-                if self.ui.settings.focus_mode {
+                if self.ui.focus_mode {
                     self.toggle_focus_mode();
                 }
+            }
+            HotkeyAction::ToggleHuds => {
+                let hud = &mut self.ui.settings.hud;
+                hud.shown = !hud.shown;
+                self.ui.settings.dirty = true;
             }
             HotkeyAction::ToggleTouchControls => {
                 let show = &mut self.ui.settings.touch.show_controls;
                 *show = !*show;
                 self.ui.settings.dirty = true;
             }
+            HotkeyAction::SwapScreens => self.screens_action(ScreensAction::Swap),
+            HotkeyAction::OneScreen => self.screens_action(ScreensAction::OneScreen),
+            HotkeyAction::NextScreenLayout => self.screens_action(ScreensAction::NextLayout),
+            HotkeyAction::ToggleLid => self.emulator.toggle_lid(),
+            HotkeyAction::Rewind | HotkeyAction::FastForward => {}
             HotkeyAction::SwitchGame => self.switch_game(),
             HotkeyAction::FocusChat => {
                 self.ui.friends.chat.focus();
@@ -223,7 +264,11 @@ impl Citrine {
                 SnapshotNews::Saved,
                 &self.emulator.snapshot_name(slot),
             )),
-            Err(err) => self.toasts.error(format!("Quick save failed: {err:?}")),
+            Err(err) => self.toasts.error(failed_message(
+                FailedStep::Save,
+                &format!("'{}'", self.emulator.snapshot_name(slot)),
+                &err,
+            )),
         };
         self.ui.snapshots.invalidate();
     }
@@ -242,4 +287,85 @@ fn drop_stray_repeats(ctx: &Context, raw: &mut egui::RawInput) {
             } if !down.contains(key)
         )
     });
+}
+
+#[cfg(all(test, feature = "nds"))]
+mod tests {
+    use super::*;
+    use crate::app::tests::{load_game, phone_app};
+    use crate::app::ui_state::hotkeys::Hotkey;
+    use citrine_gb::nds::Cpu;
+
+    const RCNT_EXTKEYIN: u32 = 0x0400_0134;
+    const LID: u32 = 1 << 7;
+
+    fn ds_app(name: &str) -> Citrine {
+        let mut app = phone_app(name);
+        app.emulator
+            .load_nds(include_bytes!(
+                "../../fixtures/nds/blocksds-console-both-screens.nds"
+            ))
+            .unwrap();
+        app
+    }
+
+    fn core_lid_closed(app: &mut Citrine) -> bool {
+        let nds = app.emulator.as_nds_mut().expect("ds");
+        (nds.buses().peek_io(Cpu::Arm7, RCNT_EXTKEYIN) >> 16) & LID != 0
+    }
+
+    fn press(app: &mut Citrine, ctx: &Context, key: egui::Key) {
+        let event = |pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                events: vec![event(pressed)],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.handle_snapshot_hotkeys(ctx));
+        }
+    }
+
+    #[test]
+    fn a_bound_key_closes_and_opens_the_lid_and_the_core_sees_it() {
+        let mut app = ds_app("lid-key");
+        let ctx = Context::default();
+        app.ui
+            .settings
+            .hotkeys
+            .bind(Hotkey::plain(egui::Key::L), HotkeyAction::ToggleLid);
+        assert_eq!(app.emulator.lid(), Some(false));
+        assert!(!core_lid_closed(&mut app));
+        press(&mut app, &ctx, egui::Key::L);
+        assert_eq!(app.emulator.lid(), Some(true));
+        assert!(core_lid_closed(&mut app));
+        assert_eq!(app.emulator.lend_one_frame(), 1);
+        assert!(core_lid_closed(&mut app));
+        press(&mut app, &ctx, egui::Key::L);
+        assert_eq!(app.emulator.lid(), Some(false));
+        assert!(!core_lid_closed(&mut app));
+    }
+
+    #[test]
+    fn the_lid_shows_only_for_ds_games() {
+        let mut none = phone_app("lid-none");
+        assert_eq!(none.emulator.lid(), None);
+        none.run_hotkey(HotkeyAction::ToggleLid);
+        assert!(!none.emulator.lid_closed());
+        let mut crystal = phone_app("lid-crystal");
+        load_game(
+            &mut crystal,
+            &citrine_gb_gamedata::fixtures::crystal_cartridge(),
+            None,
+        );
+        assert_eq!(crystal.emulator.lid(), None);
+        crystal.run_hotkey(HotkeyAction::ToggleLid);
+        assert!(!crystal.emulator.lid_closed());
+        assert_eq!(ds_app("lid-ds").emulator.lid(), Some(false));
+    }
 }

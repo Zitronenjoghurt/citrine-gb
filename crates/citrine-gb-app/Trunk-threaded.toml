@@ -1,0 +1,5 @@
+[build]
+target = "threaded.html"
+dist = "dist/threaded"
+pattern_preload = ""
+pattern_script = '<script id="citrine-build" type="application/json" data-js="{base}{js}" data-wasm="{base}{wasm}"></script>'

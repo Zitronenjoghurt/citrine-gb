@@ -1,4 +1,5 @@
 use super::kit;
+use crate::app::big_screen::scroll::Following;
 use egui::{
     Context, CornerRadius, Frame, Id, Margin, Rect, RichText, Sense, Ui, UiBuilder, pos2, vec2,
 };
@@ -111,7 +112,7 @@ pub fn show<R>(
                             .id_salt(id.with("scroll"))
                             .max_height(room.max(80.0))
                             .auto_shrink([false, true])
-                            .show(ui, |ui| {
+                            .show_following(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 0.0;
                                 body(ui)
                             })

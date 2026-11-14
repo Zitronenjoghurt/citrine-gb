@@ -1,5 +1,6 @@
 mod limits;
 
+pub use crate::isolation::Isolation;
 pub use limits::Limits;
 
 use std::collections::BTreeSet;
@@ -14,6 +15,10 @@ pub enum ConfigError {
     Number { var: &'static str, value: String },
     #[error("CITRINE_BIND must be an IP address, not '{0}'")]
     Bind(String),
+    #[error("CITRINE_DS_NET_PUBLIC_IP must be an IPv4 address, not '{0}'")]
+    DsNetIp(String),
+    #[error("CITRINE_ISOLATION must be off, report or on, not '{0}'")]
+    Isolation(String),
     #[error(
         "the relay is on without a password. Set CITRINE_RELAY_PASSWORD, or set CITRINE_RELAY_OPEN=true to run an open relay"
     )]
@@ -23,6 +28,7 @@ pub enum ConfigError {
 #[derive(Clone)]
 pub struct Config {
     pub web: bool,
+    pub isolation: Isolation,
     pub relay: bool,
     pub relay_password: Option<String>,
     pub relay_open: bool,
@@ -38,6 +44,11 @@ pub struct Config {
     pub public_url: Option<String>,
     pub limits: Limits,
     pub trusted_proxy_hops: usize,
+    pub fcm_key_file: Option<PathBuf>,
+    pub fcm_url: String,
+    pub ds_net_public_ip: Option<std::net::Ipv4Addr>,
+    pub ds_net_private: bool,
+    pub ds_net_stun: Option<String>,
     pub given: BTreeSet<&'static str>,
 }
 
@@ -45,6 +56,7 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("web", &self.web)
+            .field("isolation", &self.isolation)
             .field("relay", &self.relay)
             .field(
                 "relay_password",
@@ -66,6 +78,11 @@ impl std::fmt::Debug for Config {
             .field("public_url", &self.public_url)
             .field("limits", &self.limits)
             .field("trusted_proxy_hops", &self.trusted_proxy_hops)
+            .field("fcm_key_file", &self.fcm_key_file)
+            .field("fcm_url", &self.fcm_url)
+            .field("ds_net_public_ip", &self.ds_net_public_ip)
+            .field("ds_net_private", &self.ds_net_private)
+            .field("ds_net_stun", &self.ds_net_stun)
             .field("given", &self.given)
             .finish()
     }
@@ -73,6 +90,7 @@ impl std::fmt::Debug for Config {
 
 const VARS: &[&str] = &[
     "CITRINE_WEB",
+    "CITRINE_ISOLATION",
     "CITRINE_RELAY",
     "CITRINE_RELAY_PASSWORD",
     "CITRINE_RELAY_OPEN",
@@ -87,6 +105,11 @@ const VARS: &[&str] = &[
     "CITRINE_PORT",
     "CITRINE_PUBLIC_URL",
     "CITRINE_TRUSTED_PROXY_HOPS",
+    "CITRINE_DS_NET_PUBLIC_IP",
+    "CITRINE_DS_NET_PRIVATE",
+    "CITRINE_DS_NET_STUN",
+    "CITRINE_FCM_KEY_FILE",
+    "CITRINE_FCM_URL",
 ];
 
 fn switch(var: &'static str, value: Option<String>, default: bool) -> Result<bool, ConfigError> {
@@ -132,8 +155,13 @@ impl Config {
             None => IpAddr::from([0, 0, 0, 0]),
             Some(text) => text.trim().parse().map_err(|_| ConfigError::Bind(text))?,
         };
+        let isolation = match var("CITRINE_ISOLATION") {
+            None => Isolation::default(),
+            Some(text) => Isolation::parse(&text).ok_or(ConfigError::Isolation(text))?,
+        };
         Ok(Self {
             web: switch("CITRINE_WEB", var("CITRINE_WEB"), true)?,
+            isolation,
             relay: switch("CITRINE_RELAY", var("CITRINE_RELAY"), false)?,
             relay_password: var("CITRINE_RELAY_PASSWORD"),
             relay_open: switch("CITRINE_RELAY_OPEN", var("CITRINE_RELAY_OPEN"), false)?,
@@ -164,6 +192,17 @@ impl Config {
                 var("CITRINE_TRUSTED_PROXY_HOPS"),
                 0,
             )?,
+            fcm_key_file: var("CITRINE_FCM_KEY_FILE").map(PathBuf::from),
+            fcm_url: var("CITRINE_FCM_URL").unwrap_or_else(|| crate::push::DEFAULT_ENDPOINT.into()),
+            ds_net_public_ip: var("CITRINE_DS_NET_PUBLIC_IP")
+                .map(|text| text.trim().parse().map_err(|_| ConfigError::DsNetIp(text)))
+                .transpose()?,
+            ds_net_private: switch(
+                "CITRINE_DS_NET_PRIVATE",
+                var("CITRINE_DS_NET_PRIVATE"),
+                false,
+            )?,
+            ds_net_stun: var("CITRINE_DS_NET_STUN"),
             given,
         })
     }
@@ -196,6 +235,7 @@ mod tests {
     fn defaults_match_the_design() {
         let c = config(&[]).unwrap();
         assert!(c.web);
+        assert_eq!(c.isolation, Isolation::Report);
         assert!(!c.relay);
         assert_eq!(c.relay_password, None);
         assert!(!c.relay_open);
@@ -216,6 +256,7 @@ mod tests {
     fn reads_every_var() {
         let c = config(&[
             ("CITRINE_WEB", "false"),
+            ("CITRINE_ISOLATION", "on"),
             ("CITRINE_RELAY", "true"),
             ("CITRINE_RELAY_PASSWORD", "pw"),
             ("CITRINE_RELAY_OPEN", "true"),
@@ -233,6 +274,7 @@ mod tests {
         ])
         .unwrap();
         assert!(!c.web);
+        assert_eq!(c.isolation, Isolation::On);
         assert!(c.relay);
         assert_eq!(c.relay_password.as_deref(), Some("pw"));
         assert!(c.relay_open);
@@ -288,6 +330,10 @@ mod tests {
         assert!(matches!(
             config(&[("CITRINE_BIND", "localhost")]),
             Err(ConfigError::Bind(_))
+        ));
+        assert!(matches!(
+            config(&[("CITRINE_ISOLATION", "true")]),
+            Err(ConfigError::Isolation(_))
         ));
     }
 

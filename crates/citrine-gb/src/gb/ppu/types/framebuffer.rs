@@ -63,6 +63,61 @@ impl Framebuffer {
         self.0[index * 4 + 3] = color.a();
     }
 
+    pub fn set_span(&mut self, index: usize, colors: [RGBA; 8]) {
+        let Some(span) = self.0.get_mut(index * 4..index * 4 + 32) else {
+            return;
+        };
+        for (pixel, color) in span.as_chunks_mut::<4>().0.iter_mut().zip(colors) {
+            *pixel = [color.r(), color.g(), color.b(), color.a()];
+        }
+    }
+
+    pub fn set_run(&mut self, index: usize, colors: &[RGBA]) {
+        let Some(run) = self.0.get_mut(index * 4..(index + colors.len()) * 4) else {
+            return;
+        };
+        for (pixel, color) in run.as_chunks_mut::<4>().0.iter_mut().zip(colors) {
+            *pixel = [color.r(), color.g(), color.b(), color.a()];
+        }
+    }
+
+    #[inline(always)]
+    pub fn put_span(&mut self, row: usize, x: u8, colors: [RGBA; 8]) {
+        if x <= 152 {
+            self.set_span(row + x as usize, colors);
+            return;
+        }
+        for (i, color) in colors.into_iter().enumerate() {
+            let x = x.wrapping_add(i as u8);
+            if x < 160 {
+                self.set(row + x as usize, color);
+            }
+        }
+    }
+
+    pub fn bytes_mut(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
+        self.0.get_mut(at..at + len)
+    }
+
+    #[inline(always)]
+    pub fn put_pairs(&mut self, row: usize, x: u8, pairs: [u64; 4]) {
+        if x <= 152 {
+            let at = (row + x as usize) * 4;
+            if let Some(span) = self.0.get_mut(at..at + 32) {
+                for (chunk, pair) in span.as_chunks_mut::<8>().0.iter_mut().zip(pairs) {
+                    *chunk = pair.to_ne_bytes();
+                }
+            }
+            return;
+        }
+        let colors = std::array::from_fn(|i| {
+            let bytes = pairs[i / 2].to_ne_bytes();
+            let at = i % 2 * 4;
+            RGBA::new(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3])
+        });
+        self.put_span(row, x, colors);
+    }
+
     pub fn set_xy(&mut self, x: usize, y: usize, color: RGBA) {
         self.set(y * 160 + x, color);
     }
@@ -85,6 +140,10 @@ impl Framebuffer {
 
     pub fn as_slice(&self) -> &[u8] {
         self.0.as_slice()
+    }
+
+    pub fn copy_from_slice(&mut self, pixels: &[u8]) {
+        self.0.copy_from_slice(pixels);
     }
 
     #[cfg(feature = "png")]

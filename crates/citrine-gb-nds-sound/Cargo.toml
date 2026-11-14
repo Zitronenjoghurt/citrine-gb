@@ -1,0 +1,16 @@
+[package]
+name = "citrine-gb-nds-sound"
+description = "Plays DS sound data (SSEQ sequences with their banks and wave archives) through the DS sound mixer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+citrine-gb = { workspace = true, features = ["nds"] }
+citrine-gb-nds-files.workspace = true
+
+[dev-dependencies]
+citrine-gb-nds-files = { workspace = true, features = ["fixtures"] }

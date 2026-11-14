@@ -25,7 +25,7 @@ pub fn show(_viewer: &mut TabViewer, ui: &mut egui::Ui) {
             if ui.button("Create & export").clicked() {
                 crate::utils::file_loader::FolderPicker::new()
                     .title("Export E2E test to folder")
-                    .dispatch(_viewer.files.folder_tx.clone());
+                    .dispatch(&_viewer.files.spawner, _viewer.files.folder_tx.clone());
             }
         });
     }

@@ -2,15 +2,14 @@ use super::JoinForm;
 use crate::app::tabs::friends::ago;
 use crate::app::widgets::avatar::ONLINE;
 use crate::app::widgets::confirm;
-use crate::app::widgets::info_mark::info_mark;
 use crate::icons;
 use crate::online::Online;
 use citrine_gb_net::{DeviceId, DeviceInfo};
 use egui::{Align, Layout, RichText, Sense, TextStyle, Ui, vec2};
 
-const ABOUT: &str = "Every device signed in with your sign-in key. Signing one out removes the key and your chats from it.";
+pub(super) const ABOUT: &str = "Every device signed in with your relay ID. Signing one out clears the relay ID and your chats from that device.";
 const TWO_FACTOR_OFF: &str =
-    "Anyone with your sign-in key can still sign in. Two-factor sign-in stops that.";
+    "Anyone with your relay ID can still sign in. Two-factor sign-in stops that.";
 
 pub(super) fn any(online: &Online) -> bool {
     !online.devices().0.is_empty()
@@ -24,10 +23,6 @@ pub(super) fn devices(ui: &mut Ui, online: &mut Online, form: &mut JoinForm) {
     let list = in_order(list, this);
     let connected = online.is_connected();
     let unix_now = jiff::Timestamp::now().as_second().max(0) as u64;
-    ui.horizontal(|ui| {
-        ui.label("Devices");
-        info_mark(ui, ABOUT);
-    });
     for device in &list {
         ui.push_id(("device", device.id), |ui| {
             if row(ui, device, this == Some(device.id), connected, unix_now) {
@@ -118,4 +113,44 @@ fn status(ui: &mut Ui, device: &DeviceInfo, unix_now: u64) {
         ui.painter().circle_filled(rect.center(), 3.0, ONLINE);
         ui.label(RichText::new("Online").small().color(ONLINE));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    fn device(id: u64, online: bool, last_seen: u64) -> citrine_gb_net::DeviceInfo {
+        citrine_gb_net::DeviceInfo {
+            id,
+            name: format!("Device {id}"),
+            added: 1,
+            last_seen,
+            online,
+        }
+    }
+
+    #[test]
+    fn this_device_comes_first_then_online_ones_then_the_latest_seen() {
+        let list = [
+            device(1, false, 50),
+            device(2, true, 10),
+            device(3, false, 90),
+            device(4, true, 20),
+        ];
+        let order: Vec<u64> = super::in_order(&list, Some(1))
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(order, [1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn signing_out_warns_about_the_relay_id_only_without_two_factor() {
+        let on = super::sign_out_question("Firefox on Mac", true);
+        assert_eq!(
+            on,
+            "Sign out Firefox on Mac? It forgets this account and its chats here."
+        );
+        let off = super::sign_out_question("Firefox on Mac", false);
+        assert!(off.starts_with(&on));
+        assert!(off.ends_with("Two-factor sign-in stops that."));
+    }
 }

@@ -7,19 +7,19 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const LIBRARY: &str = ".library";
-const TEMP: &str = "temp";
 const INFO_SUFFIX: &str = ".json";
 const THUMB_SUFFIX: &str = ".thumb.png";
 const MAX_DECODE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub struct MediaStore {
     root: PathBuf,
+    temp: PathBuf,
     items: Vec<MediaItem>,
 }
 
 impl Default for MediaStore {
     fn default() -> Self {
-        let store = Self::at(media_root());
+        let store = Self::with_temp(media_root(), media_temp());
         store.clear_temp();
         store
     }
@@ -29,13 +29,16 @@ fn media_root() -> PathBuf {
     crate::storage::data_dir().join("media")
 }
 
-pub fn recording_temp_path() -> io::Result<PathBuf> {
-    temp_path_in(&media_root())
+fn media_temp() -> PathBuf {
+    crate::storage::cache_dir().join(crate::storage::MEDIA_TEMP)
 }
 
-fn temp_path_in(root: &Path) -> io::Result<PathBuf> {
-    let dir = root.join(LIBRARY).join(TEMP);
-    std::fs::create_dir_all(&dir)?;
+pub fn recording_temp_path() -> io::Result<PathBuf> {
+    temp_path_in(&media_temp())
+}
+
+fn temp_path_in(dir: &Path) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
     let stamp = web_time::SystemTime::now()
         .duration_since(web_time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -45,8 +48,16 @@ fn temp_path_in(root: &Path) -> io::Result<PathBuf> {
 
 impl MediaStore {
     pub fn at(root: PathBuf) -> Self {
+        let mut temp = root.file_name().unwrap_or_default().to_os_string();
+        temp.push("-cache");
+        let temp = root.with_file_name(temp).join(crate::storage::MEDIA_TEMP);
+        Self::with_temp(root, temp)
+    }
+
+    fn with_temp(root: PathBuf, temp: PathBuf) -> Self {
         let mut store = Self {
             root,
+            temp,
             items: Vec::new(),
         };
         store.refresh();
@@ -66,7 +77,7 @@ impl MediaStore {
     }
 
     pub fn temp_path(&self) -> io::Result<PathBuf> {
-        temp_path_in(&self.root)
+        temp_path_in(&self.temp)
     }
 
     fn folder(&self, kind: MediaKind) -> PathBuf {
@@ -88,7 +99,7 @@ impl MediaStore {
     }
 
     fn clear_temp(&self) {
-        let _ = std::fs::remove_dir_all(self.root.join(LIBRARY).join(TEMP));
+        let _ = std::fs::remove_dir_all(&self.temp);
     }
 
     pub fn add_screenshot(&mut self, new: NewMedia, png: &[u8]) -> io::Result<MediaItem> {
@@ -154,13 +165,17 @@ impl MediaStore {
         Ok(())
     }
 
-    pub fn read_files(&self, mut each: impl FnMut(Option<(MediaId, Vec<u8>)>) + Send + 'static) {
+    pub fn read_files(
+        &self,
+        spawner: &citrine_gb_threads::Spawner,
+        mut each: impl FnMut(Option<(MediaId, Vec<u8>)>) + Send + 'static,
+    ) {
         let files: Vec<_> = self
             .items
             .iter()
             .map(|item| (item.id.clone(), self.path(&item.id)))
             .collect();
-        std::thread::spawn(move || {
+        spawner.run("media read", move || {
             for (id, path) in files {
                 if let Ok(bytes) = std::fs::read(path) {
                     each(Some((id, bytes)));
@@ -350,6 +365,9 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("citrine-media-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(
+            root.with_file_name(format!("citrine-media-{name}-{}-cache", std::process::id())),
+        );
         (MediaStore::at(root.clone()), root)
     }
 
@@ -442,7 +460,7 @@ mod tests {
     fn a_recording_moves_into_the_recordings_folder() {
         let (mut store, root) = store("recording");
         let temp = store.temp_path().unwrap();
-        assert!(temp.starts_with(root.join(LIBRARY)));
+        assert!(!temp.starts_with(&root), "the temp file waits in the cache");
         std::fs::write(&temp, vec![7; 1234]).unwrap();
         let item = store
             .add_recording(&temp, new_media(MediaKind::Recording, 50))

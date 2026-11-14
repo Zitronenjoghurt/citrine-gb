@@ -11,6 +11,10 @@ const DPAD_SHARE: f32 = 0.42;
 
 const DPAD_START_MARGIN: f32 = 14.0;
 
+const COLUMN_DPAD_SHARE: f32 = 0.92;
+
+pub const XY_DPAD_FLOOR: f32 = 140.0;
+
 const EDGE_CLEAR: f32 = 24.0;
 
 const FACE_RADIUS: f32 = 0.22;
@@ -21,15 +25,47 @@ const FACE_REACH: f32 = 1.6;
 
 const BOTH_RADIUS: f32 = 0.5;
 
+const DIAMOND_REACH: f32 = 1.63;
+
 const SHOULDER_MIN_HEIGHT: f32 = 44.0;
 
 const SHOULDER_WIDTH: f32 = 0.7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaceButton {
+    A,
+    B,
+    X,
+    Y,
+}
+
+impl FaceButton {
+    fn key(self) -> Keys {
+        match self {
+            Self::A => Keys::A,
+            Self::B => Keys::B,
+            Self::X => Keys::X,
+            Self::Y => Keys::Y,
+        }
+    }
+}
+
+impl std::fmt::Display for FaceButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::X => "X",
+            Self::Y => "Y",
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TouchLayout {
     dpad: Rect,
     dpad_start: Rect,
-    face: Vec<(GbButton, Pos2, f32)>,
+    face: Vec<(FaceButton, Pos2, f32)>,
     both: (Pos2, f32),
     pills: Vec<(Keys, &'static str, Rect)>,
 }
@@ -140,6 +176,10 @@ impl TouchLayout {
         ));
     }
 
+    pub fn column_for_dpad(dpad: f32) -> f32 {
+        dpad / COLUMN_DPAD_SHARE + EDGE_CLEAR * 2.0
+    }
+
     pub fn columns(left: Rect, right: Rect, settings: &TouchSettings, shoulders: bool) -> Self {
         let scale = settings.clamped_scale();
         let pad = (left.width() * 0.06).clamp(4.0, 20.0);
@@ -161,7 +201,7 @@ impl TouchLayout {
         };
         let column_height = dpad_area.bottom() - column_top - pill_height - pad;
 
-        let dpad_size = (dpad_area.width() * 0.92 * scale)
+        let dpad_size = (dpad_area.width() * COLUMN_DPAD_SHARE * scale)
             .min(dpad_area.width() + side)
             .min(column_height);
         let face_radius = dpad_size * FACE_RADIUS;
@@ -235,8 +275,8 @@ impl TouchLayout {
                 .expand(DPAD_START_MARGIN)
                 .intersect(bounds.shrink2(vec2(Self::edge_clear(bounds.width()), 0.0))),
             face: vec![
-                (GbButton::A, face_centre + a_offset, face_radius),
-                (GbButton::B, face_centre + b_offset, face_radius),
+                (FaceButton::A, face_centre + a_offset, face_radius),
+                (FaceButton::B, face_centre + b_offset, face_radius),
             ],
             both: (face_centre, face_radius * BOTH_RADIUS),
             pills: pills
@@ -251,6 +291,27 @@ impl TouchLayout {
                 })
                 .collect(),
         }
+    }
+
+    pub fn with_xy(mut self, xy: bool) -> Self {
+        if !xy {
+            return self;
+        }
+        let [(_, a, radius), (_, b, _)] = [self.face[0], self.face[1]];
+        let centre = a.lerp(b, 0.5);
+        let radius = radius * (1.0 + FACE_SPREAD) / (1.0 + DIAMOND_REACH);
+        let reach = radius * DIAMOND_REACH;
+        let side = if a.x < b.x { -reach } else { reach };
+        let a = centre + vec2(side, 0.0);
+        let b = centre + vec2(0.0, reach);
+        self.face = vec![
+            (FaceButton::A, a, radius),
+            (FaceButton::B, b, radius),
+            (FaceButton::X, centre - vec2(0.0, reach), radius),
+            (FaceButton::Y, centre - vec2(side, 0.0), radius),
+        ];
+        self.both = (a.lerp(b, 0.5), radius * BOTH_RADIUS);
+        self
     }
 
     pub fn starts_dpad(&self, pos: Pos2) -> bool {
@@ -293,6 +354,19 @@ impl TouchLayout {
             .iter()
             .map(|(_, _, rect)| rect.distance_to_pos(pos));
         face.chain(pills).fold(f32::INFINITY, f32::min)
+    }
+
+    #[cfg(test)]
+    pub fn dpad_width(&self) -> f32 {
+        self.dpad.width()
+    }
+
+    #[cfg(test)]
+    pub fn smallest_face(&self) -> f32 {
+        self.face
+            .iter()
+            .map(|(_, _, radius)| radius * 2.0)
+            .fold(f32::INFINITY, f32::min)
     }
 
     pub fn reach(&self) -> Rect {
@@ -487,19 +561,26 @@ impl TouchInput {
             self.lift(Contact::Pointer);
         }
 
+        let covered = |pos: Pos2| {
+            ctx.layer_id_at(pos)
+                .is_some_and(|layer| layer != ui.layer_id())
+        };
         for event in &events {
             let egui::Event::Touch { id, phase, pos, .. } = event else {
                 continue;
             };
             let contact = Contact::Finger(id.0);
             match phase {
+                egui::TouchPhase::Start | egui::TouchPhase::Move if covered(*pos) => {
+                    self.lift(contact)
+                }
                 egui::TouchPhase::Start => self.press(contact, *pos, layout),
                 egui::TouchPhase::Move => self.slide(contact, *pos, layout),
                 egui::TouchPhase::End | egui::TouchPhase::Cancel => self.lift(contact),
             }
         }
 
-        match pointer.filter(|_| !any_touches) {
+        match pointer.filter(|&pos| !any_touches && !covered(pos)) {
             Some(pos) => self.slide(Contact::Pointer, pos, layout),
             None => self.lift(Contact::Pointer),
         }
@@ -1151,6 +1232,58 @@ mod tests {
         held
     }
 
+    fn frame_under_popup(
+        ctx: &egui::Context,
+        input: &mut TouchInput,
+        events: Vec<egui::Event>,
+        popup: Option<Pos2>,
+    ) -> Keys {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(412.0, 915.0))),
+            events,
+            ..Default::default()
+        };
+        let mut held = Keys::empty();
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                held = input.update(ui, &phone_layout());
+            });
+            if let Some(centre) = popup {
+                egui::Area::new(egui::Id::new("popup"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(centre - vec2(40.0, 40.0))
+                    .show(ctx, |ui| ui.allocate_space(vec2(80.0, 80.0)));
+            }
+        });
+        held
+    }
+
+    #[test]
+    fn a_finger_on_a_popup_over_a_button_presses_nothing() {
+        let (button, centre, _) = phone_layout().face[0];
+        let ctx = egui::Context::default();
+        let mut bare = TouchInput::default();
+        let held = frame_under_popup(
+            &ctx,
+            &mut bare,
+            vec![finger(egui::TouchPhase::Start, centre)],
+            None,
+        );
+        assert_eq!(held, button.key());
+        let ctx = egui::Context::default();
+        let mut covered = TouchInput::default();
+        for _ in 0..2 {
+            frame_under_popup(&ctx, &mut covered, Vec::new(), Some(centre));
+        }
+        let held = frame_under_popup(
+            &ctx,
+            &mut covered,
+            vec![finger(egui::TouchPhase::Start, centre)],
+            Some(centre),
+        );
+        assert_eq!(held, Keys::empty());
+    }
+
     fn press_at(pos: Pos2) -> egui::Event {
         egui::Event::PointerButton {
             pos,
@@ -1264,6 +1397,43 @@ mod tests {
                 Keys::empty(),
                 &format!("frame {n} after, with the mouse press never released"),
             );
+        }
+    }
+
+    #[test]
+    fn ds_face_buttons_sit_in_a_diamond() {
+        for mirrored in [false, true] {
+            let settings = TouchSettings {
+                mirrored,
+                ..TouchSettings::default()
+            };
+            let plain = TouchLayout::bar(phone(412.0), &settings, true);
+            let layout = plain.clone().with_xy(true);
+            assert_eq!(layout.face.len(), 4);
+            let cluster = plain
+                .face
+                .iter()
+                .map(|(_, c, r)| Rect::from_center_size(*c, Vec2::splat(r * 2.0)))
+                .fold(Rect::NOTHING, Rect::union)
+                .expand(0.5);
+            for (button, centre, radius) in &layout.face {
+                assert_buttons(layout.buttons(*centre), button.key(), &button.to_string());
+                let rect = Rect::from_center_size(*centre, Vec2::splat(radius * 2.0));
+                assert!(cluster.contains_rect(rect), "{button} leaves the face area");
+            }
+            for (i, (_, a, ra)) in layout.face.iter().enumerate() {
+                for (_, b, rb) in &layout.face[i + 1..] {
+                    assert!(a.distance(*b) > ra + rb);
+                }
+            }
+            let [(_, a, _), (_, b, _), (_, x, _), (_, y, _)] = [
+                layout.face[0],
+                layout.face[1],
+                layout.face[2],
+                layout.face[3],
+            ];
+            assert!(x.y < a.y && a.y < b.y);
+            assert_eq!(a.x > y.x, !mirrored);
         }
     }
 }

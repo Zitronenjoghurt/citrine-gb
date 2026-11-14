@@ -1,5 +1,5 @@
 use super::psr::{FLAG_F, FLAG_I, FLAG_T, MODE_MASK, Mode};
-use super::{Cpu, CpuBus};
+use super::{Core, CpuBus, Refetch};
 use crate::gba::wait::Width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,7 +49,7 @@ impl Exception {
     }
 }
 
-impl Cpu {
+impl<const V5: bool> Core<V5> {
     pub fn interrupt(&mut self, bus: &mut impl CpuBus, exception: Exception) -> Option<u32> {
         let masked = match exception {
             Exception::Irq => self.irq_masked || self.irq_held,
@@ -66,13 +66,17 @@ impl Cpu {
         } else {
             Width::Word
         };
-        self.code(bus, pc, width, self.next_fetch);
+        if !V5 {
+            self.code(bus, pc, width, self.next_fetch);
+        }
         let link = match (self.thumb(), exception) {
             (false, _) => pc.wrapping_sub(4),
             (true, Exception::DataAbort) => pc.wrapping_add(2),
             (true, _) => pc,
         };
-        Some(self.enter(bus, exception, link))
+        let cycles = self.enter(bus, exception, link);
+        self.refetched = Refetch(0);
+        Some(if V5 { cycles } else { bus.settle(cycles) })
     }
 
     pub(super) fn enter(&mut self, bus: &mut impl CpuBus, exception: Exception, link: u32) -> u32 {
@@ -84,8 +88,12 @@ impl Cpu {
         self.regs.set_cpsr(cpsr);
         self.regs.set_spsr(old);
         self.regs.r[14] = link;
-        self.regs.r[15] = exception.vector();
-        self.reload(bus);
+        self.regs.r[15] = if V5 {
+            bus.vector_base().wrapping_add(exception.vector())
+        } else {
+            exception.vector()
+        };
+        self.jump_arm(bus);
         self.cycles
     }
 }

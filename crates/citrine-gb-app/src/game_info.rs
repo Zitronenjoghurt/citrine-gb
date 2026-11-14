@@ -1,4 +1,6 @@
-use citrine_gb_gamedata::{GameState, Ram, SaveCopy, Tables};
+use citrine_gb_gamedata::{GameState, Generation, Ram, SaveCopy, Tables};
+use citrine_gb_threads::{Pending, Threads};
+use std::sync::Arc;
 use web_time::{Duration, Instant};
 
 use crate::icons;
@@ -11,6 +13,7 @@ pub const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 pub struct GameInfo {
     rom_key: Option<String>,
     game: Option<Game>,
+    loading: Option<Loading>,
     next_read: Option<Instant>,
     next_progress: Option<Instant>,
     pub view: View,
@@ -85,7 +88,16 @@ impl Page {
         if state.battle.is_some() {
             pages.push(Page::Battle);
         }
-        pages.extend([Page::Party, Page::Boxes, Page::Bag, Page::Pokedex]);
+        let ds = matches!(state.game.generation(), Generation::Four | Generation::Five);
+        if ds {
+            pages.push(Page::Party);
+            if !state.boxes.is_empty() {
+                pages.push(Page::Boxes);
+            }
+            pages.push(Page::Pokedex);
+        } else {
+            pages.extend([Page::Party, Page::Boxes, Page::Bag, Page::Pokedex]);
+        }
         if !state.journey.is_empty() {
             pages.push(Page::Journey);
         }
@@ -93,9 +105,15 @@ impl Page {
     }
 }
 
+struct Loading {
+    tables: Pending<Option<Tables>>,
+    rom: Arc<[u8]>,
+    saved_at: Option<u64>,
+}
+
 pub struct Game {
     pub tables: Tables,
-    pub rom: Vec<u8>,
+    pub rom: Arc<[u8]>,
     battery: Vec<u8>,
     pub saved: Option<GameState>,
     pub saved_at: Option<u64>,
@@ -124,23 +142,55 @@ impl GameInfo {
         self.game.is_some() && self.view.details
     }
 
-    pub fn set_rom(&mut self, key: Option<&str>, rom: &[u8], saved_at: Option<u64>) {
+    pub fn set_rom(
+        &mut self,
+        key: Option<&str>,
+        rom: Arc<[u8]>,
+        saved_at: Option<u64>,
+        threads: &Threads,
+    ) {
         self.rom_key = key.map(str::to_owned);
         self.next_read = None;
         self.next_progress = None;
         self.view = View::default();
-        self.game = key.and_then(|_| {
-            let tables = Tables::load(rom)?;
-            Some(Game {
+        self.game = None;
+        self.loading = key.map(|_| {
+            let source = Arc::clone(&rom);
+            Loading {
+                tables: threads.background("game info", move || Tables::load(&source)),
+                rom,
+                saved_at,
+            }
+        });
+    }
+
+    #[cfg(test)]
+    pub fn set_rom_now(&mut self, key: Option<&str>, rom: Arc<[u8]>, saved_at: Option<u64>) {
+        self.set_rom(key, rom, saved_at, &Threads::default());
+        self.settle();
+    }
+
+    pub fn loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    pub fn settle(&mut self) -> Option<bool> {
+        let done = self.loading.as_mut()?.tables.try_take()?;
+        let Loading { rom, saved_at, .. } = self.loading.take()?;
+        self.game = done
+            .inspect_err(|err| log::error!("could not read the game info tables: {}", err.0))
+            .ok()
+            .flatten()
+            .map(|tables| Game {
                 tables,
-                rom: rom.to_vec(),
+                rom,
                 battery: Vec::new(),
                 saved: None,
                 saved_at,
                 live: None,
                 behind: false,
-            })
-        });
+            });
+        Some(self.game.is_some())
     }
 
     pub fn due(&mut self, now: Instant) -> bool {
@@ -248,10 +298,11 @@ mod tests {
         crystal_cartridge, crystal_live_wram, crystal_save, japanese_cartridge_in_latin,
         set_crystal_live_money,
     };
+    use citrine_gb_threads::Mode;
 
     fn crystal() -> GameInfo {
         let mut info = GameInfo::default();
-        info.set_rom(Some("crystal"), &crystal_cartridge(), Some(100));
+        info.set_rom_now(Some("crystal"), crystal_cartridge().into(), Some(100));
         info
     }
 
@@ -259,12 +310,33 @@ mod tests {
     fn a_pokemon_rom_is_recognised_and_others_are_not() {
         assert!(crystal().recognised());
         let mut info = GameInfo::default();
-        info.set_rom(Some("zero"), &vec![0u8; 0x8000], None);
+        info.set_rom_now(Some("zero"), vec![0u8; 0x8000].into(), None);
         assert!(!info.recognised());
-        info.set_rom(Some("midori"), &japanese_cartridge_in_latin(), None);
+        info.set_rom_now(Some("midori"), japanese_cartridge_in_latin().into(), None);
         assert!(!info.recognised());
-        info.set_rom(None, &crystal_cartridge(), None);
+        info.set_rom_now(None, crystal_cartridge().into(), None);
         assert!(!info.recognised());
+    }
+
+    #[test]
+    fn the_tables_load_beside_the_game_and_count_once_settled() {
+        for mode in [Mode::Threads, Mode::Inline, Mode::Shuffled(5)] {
+            let threads = Threads::new(mode);
+            for (rom, known) in [(crystal_cartridge(), true), (vec![0u8; 0x8000], false)] {
+                let mut info = GameInfo::default();
+                info.set_rom(Some("game"), rom.into(), None, &threads);
+                assert!(!info.recognised() && info.loading(), "{mode:?}");
+                let settled = loop {
+                    if let Some(settled) = info.settle() {
+                        break settled;
+                    }
+                    std::thread::yield_now();
+                };
+                assert_eq!((settled, info.recognised()), (known, known), "{mode:?}");
+                assert!(!info.loading());
+                assert_eq!(info.settle(), None);
+            }
+        }
     }
 
     #[test]
@@ -296,6 +368,18 @@ mod tests {
         saved[0x4000] ^= 1;
         info.read(&saved, Ram::Gb(&wram), 700);
         assert_eq!(info.game().unwrap().saved_at, Some(700));
+    }
+
+    #[test]
+    fn ds_games_show_boxes_once_their_pc_reads() {
+        let mut info = crystal();
+        info.read(&crystal_save(), Ram::Gb(&vec![0u8; 0x2000]), 500);
+        let mut state = info.game().unwrap().state().unwrap().clone();
+        state.game.version = citrine_gb_gamedata::Version::HeartGold;
+        assert!(Page::available(&state).contains(&Page::Boxes));
+        assert!(!Page::available(&state).contains(&Page::Bag));
+        state.boxes.clear();
+        assert!(!Page::available(&state).contains(&Page::Boxes));
     }
 
     #[test]
@@ -410,7 +494,11 @@ mod tests {
         use citrine_gb_gamedata::fixtures::gen3_rom::{SPOTS, gen3_rom};
         let layout = citrine_gb_gamedata::gen3::Layout::Emerald;
         let mut info = GameInfo::default();
-        info.set_rom(Some("emerald"), &gen3_rom(rom_code(layout), 0, SPOTS), None);
+        info.set_rom_now(
+            Some("emerald"),
+            gen3_rom(rom_code(layout), 0, SPOTS).into(),
+            None,
+        );
         info
     }
 

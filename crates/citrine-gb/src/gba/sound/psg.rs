@@ -121,31 +121,39 @@ impl Psg {
     }
 
     fn run_channels(&mut self, ticks: u16) {
-        if !self.ch1.sweep_busy() && self.quiet(ticks) {
+        if !self.ch1.sweep_busy() && self.ch1.quiet(ticks) {
             self.ch1.skip(ticks);
-            self.ch2.skip(ticks);
-            self.ch3.skip(ticks);
-            self.ch4.skip(ticks);
             self.phase_ticks = self.phase_ticks.wrapping_add(ticks as u8);
-            return;
-        }
-        for _ in 0..ticks {
-            self.phase_ticks = self.phase_ticks.wrapping_add(1);
-            if self.phase_ticks.is_multiple_of(2) && self.ch1.sweep_busy() {
-                self.ch1.sweep_tick(self.write_context().lf_div);
+        } else {
+            for _ in 0..ticks {
+                self.phase_ticks = self.phase_ticks.wrapping_add(1);
+                if self.phase_ticks.is_multiple_of(2) && self.ch1.sweep_busy() {
+                    self.ch1.sweep_tick(self.write_context().lf_div);
+                }
+                self.ch1.tick();
             }
-            self.ch1.tick();
-            self.ch2.tick();
-            self.ch3.tick();
-            self.ch4.tick();
         }
-    }
-
-    fn quiet(&self, ticks: u16) -> bool {
-        self.ch1.quiet(ticks)
-            && self.ch2.quiet(ticks)
-            && self.ch3.quiet(ticks)
-            && self.ch4.quiet(ticks)
+        if self.ch2.quiet(ticks) {
+            self.ch2.skip(ticks);
+        } else {
+            for _ in 0..ticks {
+                self.ch2.tick();
+            }
+        }
+        if self.ch3.quiet(ticks) {
+            self.ch3.skip(ticks);
+        } else {
+            for _ in 0..ticks {
+                self.ch3.tick();
+            }
+        }
+        run_channel(
+            &mut self.ch4,
+            ticks,
+            Channel4::unheard_quiet_ticks,
+            Channel4::advance_unheard,
+            Channel4::tick,
+        );
     }
 
     fn sequencer_step(&mut self) {
@@ -192,29 +200,50 @@ impl Psg {
         ]
     }
 
-    pub fn levels(&self, muted: &[bool]) -> Levels {
-        let channels = self.channel_levels();
-        let routes = [
-            (self.panning.channel_1_left, self.panning.channel_1_right),
-            (self.panning.channel_2_left, self.panning.channel_2_right),
-            (self.panning.channel_3_left, self.panning.channel_3_right),
-            (self.panning.channel_4_left, self.panning.channel_4_right),
+    pub fn levels(&self, muted: [bool; 4]) -> Levels {
+        let [ch1, ch2, ch3, ch4] = self.channel_levels();
+        let heard = |level: i32, muted: bool| if muted { 0 } else { level };
+        let [ch1, ch2, ch3, ch4] = [
+            heard(ch1, muted[0]),
+            heard(ch2, muted[1]),
+            heard(ch3, muted[2]),
+            heard(ch4, muted[3]),
         ];
-        let mut levels = Levels::default();
-        for ((level, (left, right)), muted) in channels.into_iter().zip(routes).zip(muted) {
-            if *muted {
-                continue;
-            }
-            if left {
-                levels.left += level;
-            }
-            if right {
-                levels.right += level;
-            }
+        let routed = |level: i32, on: bool| if on { level } else { 0 };
+        let pan = &self.panning;
+        let left = routed(ch1, pan.channel_1_left)
+            + routed(ch2, pan.channel_2_left)
+            + routed(ch3, pan.channel_3_left)
+            + routed(ch4, pan.channel_4_left);
+        let right = routed(ch1, pan.channel_1_right)
+            + routed(ch2, pan.channel_2_right)
+            + routed(ch3, pan.channel_3_right)
+            + routed(ch4, pan.channel_4_right);
+        Levels {
+            left: left * (i32::from(self.master_volume.volume_left) + 1),
+            right: right * (i32::from(self.master_volume.volume_right) + 1),
         }
-        levels.left *= i32::from(self.master_volume.volume_left) + 1;
-        levels.right *= i32::from(self.master_volume.volume_right) + 1;
-        levels
+    }
+}
+
+#[inline(always)]
+fn run_channel<C>(
+    channel: &mut C,
+    ticks: u16,
+    quiet_ticks: fn(&C) -> u32,
+    advance: fn(&mut C, u32),
+    tick: fn(&mut C) -> bool,
+) {
+    let mut left = u32::from(ticks);
+    while left > 0 {
+        let quiet = quiet_ticks(channel).min(left);
+        if quiet > 0 {
+            advance(channel, quiet);
+            left -= quiet;
+        } else {
+            tick(channel);
+            left -= 1;
+        }
     }
 }
 
@@ -226,5 +255,75 @@ fn square_level(dac_enabled: bool, sample: u8, volume: u8, enabled: bool) -> i32
         i32::from(volume)
     } else {
         -i32::from(volume)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REGISTERS: [usize; 20] = [
+        0x00, 0x02, 0x03, 0x04, 0x05, 0x08, 0x09, 0x0C, 0x0D, 0x10, 0x12, 0x13, 0x14, 0x15, 0x18,
+        0x19, 0x1C, 0x1D, 0x20, 0x21,
+    ];
+    const ENVELOPES: [usize; 3] = [0x03, 0x09, 0x19];
+    const TRIGGERS: [usize; 4] = [0x05, 0x0D, 0x15, 0x1D];
+
+    fn random() -> impl Iterator<Item = u64> {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        std::iter::repeat_with(move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        })
+    }
+
+    fn random_psg(random: &mut impl Iterator<Item = u64>) -> Psg {
+        let mut psg = Psg::default();
+        psg.power_on();
+        for offset in REGISTERS {
+            let r = random.next().unwrap();
+            let mut value = r as u8;
+            if ENVELOPES.contains(&offset) {
+                value |= 0x08;
+            }
+            if TRIGGERS.contains(&offset) && r >> 8 & 3 != 0 {
+                value |= 0x80;
+            }
+            psg.write(offset, value);
+        }
+        psg.run((random.next().unwrap() % 20_000) as u32);
+        psg
+    }
+
+    fn ticked(mut psg: Psg, ticks: u16) -> Psg {
+        for _ in 0..ticks {
+            psg.phase_ticks = psg.phase_ticks.wrapping_add(1);
+            if psg.phase_ticks.is_multiple_of(2) && psg.ch1.sweep_busy() {
+                psg.ch1.sweep_tick(psg.write_context().lf_div);
+            }
+            psg.ch1.tick();
+            psg.ch2.tick();
+            psg.ch3.tick();
+            psg.ch4.tick();
+        }
+        psg
+    }
+
+    #[test]
+    fn running_channels_over_quiet_spans_matches_ticking_them_one_by_one() {
+        let mut random = random();
+        for _ in 0..2000 {
+            let start = random_psg(&mut random);
+            let ticks = (random.next().unwrap() % 4096) as u16 + 1;
+            let mut ran = start.clone();
+            ran.run_channels(ticks);
+            assert_eq!(
+                format!("{ran:?}"),
+                format!("{:?}", ticked(start.clone(), ticks)),
+                "{start:?} {ticks}"
+            );
+        }
     }
 }

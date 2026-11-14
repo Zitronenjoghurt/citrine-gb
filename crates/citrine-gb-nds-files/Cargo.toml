@@ -1,0 +1,15 @@
+[package]
+name = "citrine-gb-nds-files"
+description = "Reads the file system of DS carts, NARC archives and the Nintendo file formats inside them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+fixtures = []
+
+[dependencies]
+thiserror = "2.0.18"

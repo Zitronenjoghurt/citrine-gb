@@ -70,8 +70,16 @@ fn bytes_of(done: u64, total: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * KB;
     let (done, total) = (done as f64, total as f64);
+    let mb = |bytes: f64| {
+        let value = bytes / MB;
+        if value >= 10.0 {
+            format!("{value:.0}")
+        } else {
+            format!("{value:.1}")
+        }
+    };
     if total >= MB {
-        format!("{:.1} of {:.1} MB", done / MB, total / MB)
+        format!("{} of {} MB", mb(done), mb(total))
     } else {
         format!("{:.0} of {:.0} KB", (done / KB).ceil(), (total / KB).ceil())
     }
@@ -141,6 +149,19 @@ mod tests {
     }
 
     #[test]
+    fn megabytes_from_ten_drop_the_decimal() {
+        let mb = 1024 * 1024;
+        assert_eq!(
+            Progress::bytes(44 * mb, 96 * mb).amount().as_deref(),
+            Some("44 of 96 MB")
+        );
+        assert_eq!(
+            Progress::bytes(mb * 19 / 2, 96 * mb).amount().as_deref(),
+            Some("9.5 of 96 MB")
+        );
+    }
+
+    #[test]
     fn items_count_with_their_noun() {
         assert_eq!(
             Progress::items(3, 12, "files").amount().as_deref(),
@@ -176,6 +197,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reports from a second thread on purpose"
+    )]
     fn a_counter_reports_from_another_thread() {
         let counter = Counter::default();
         assert_eq!(counter.bytes(), Progress::unknown());

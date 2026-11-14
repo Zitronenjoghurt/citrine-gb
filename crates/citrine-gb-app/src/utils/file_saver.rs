@@ -35,9 +35,14 @@ impl FileSaver {
         self
     }
 
-    pub fn dispatch(self, data: Vec<u8>, tx: Sender<SaveOutcome>) {
+    pub fn dispatch(
+        self,
+        spawner: &citrine_gb_threads::Spawner,
+        data: Vec<u8>,
+        tx: Sender<SaveOutcome>,
+    ) {
         #[cfg(not(target_arch = "wasm32"))]
-        crate::utils::spawn(async move {
+        spawner.run_future("file dialog", async move {
             let outcome = match self.dialog.save_file().await {
                 Some(handle) => match handle.write(&data).await {
                     Ok(()) => SaveOutcome::Saved(handle.file_name()),
@@ -50,6 +55,7 @@ impl FileSaver {
 
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = spawner;
             let outcome = match trigger_download(&self.name, &data) {
                 Ok(()) => SaveOutcome::Saved(self.name.clone()),
                 Err(err) => SaveOutcome::Failed(err),
@@ -59,8 +65,13 @@ impl FileSaver {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn dispatch_copy(self, source: std::path::PathBuf, tx: Sender<SaveOutcome>) {
-        crate::utils::spawn(async move {
+    pub fn dispatch_copy(
+        self,
+        spawner: &citrine_gb_threads::Spawner,
+        source: std::path::PathBuf,
+        tx: Sender<SaveOutcome>,
+    ) {
+        spawner.run_future("file dialog", async move {
             let outcome = match self.dialog.save_file().await {
                 Some(handle) => match copy_unless_same(&source, handle.path()) {
                     Ok(()) => SaveOutcome::Saved(handle.file_name()),
@@ -73,7 +84,12 @@ impl FileSaver {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn dispatch_blob(self, blob: &web_sys::Blob, tx: Sender<SaveOutcome>) {
+    pub fn dispatch_blob(
+        self,
+        _spawner: &citrine_gb_threads::Spawner,
+        blob: &web_sys::Blob,
+        tx: Sender<SaveOutcome>,
+    ) {
         let outcome = match download_blob(&self.name, blob) {
             Ok(()) => SaveOutcome::Saved(self.name.clone()),
             Err(err) => SaveOutcome::Failed(err),
@@ -83,13 +99,14 @@ impl FileSaver {
 
     pub fn dispatch_pair(
         self,
+        spawner: &citrine_gb_threads::Spawner,
         data: Vec<u8>,
         companion_extension: &'static str,
         companion: Vec<u8>,
         tx: Sender<SaveOutcome>,
     ) {
         #[cfg(not(target_arch = "wasm32"))]
-        crate::utils::spawn(async move {
+        spawner.run_future("file dialog", async move {
             let outcome = match self.dialog.save_file().await {
                 Some(handle) => {
                     let companion_path = handle.path().with_extension(companion_extension);
@@ -113,6 +130,7 @@ impl FileSaver {
 
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = spawner;
             let companion_name = std::path::Path::new(&self.name)
                 .with_extension(companion_extension)
                 .to_string_lossy()

@@ -4,15 +4,17 @@ use crate::debug::step::Stop;
 use crate::error::GbResult;
 use crate::rom::Rom;
 use crate::{ReadMemory, WriteMemory};
+use bus::CpuBusInterface;
 use ppu::types::framebuffer::Framebuffer;
 
+const POWER_ON_DIV: u16 = 4;
 const DMG_POST_BOOT_DIV: u16 = 0xABC8;
 const CGB_POST_BOOT_DIV: u16 = 0x1EA0;
 const CGB_DMG_MODE_POST_BOOT_DIV: u16 = 0x2674;
 
 fn post_boot_div(model: GbModel, boot_rom_mounted: bool) -> u16 {
     if boot_rom_mounted {
-        0
+        POWER_ON_DIV
     } else if model.is_cgb() {
         CGB_POST_BOOT_DIV
     } else {
@@ -22,7 +24,11 @@ fn post_boot_div(model: GbModel, boot_rom_mounted: bool) -> u16 {
 
 macro_rules! cpu_bus {
     ($gb:ident) => {
-        bus::CpuBus {
+        cpu_bus!($gb, true)
+    };
+    ($gb:ident, $windows:expr) => {
+        bus::CpuBus::<{ $windows }> {
+            rom_window: bus::mapped_rom_window::<{ $windows }>(&$gb.boot_rom, &$gb.cartridge),
             boot_rom: &mut $gb.boot_rom,
             cartridge: &mut $gb.cartridge,
             cgb: &mut $gb.cgb,
@@ -39,15 +45,25 @@ macro_rules! cpu_bus {
             serial: &mut $gb.serial,
             model: $gb.model,
             cycles: &mut $gb.cycle_counter,
+            acknowledge: None,
+            quiet: 0,
+            quiet_left: 0,
+            dma_room: 0,
+            p1_written: false,
+            ticked: true,
+            hdma_due: true,
+            parts_noisy: true,
         }
     };
 }
 
+mod achievements;
 pub mod apu;
 pub(crate) mod boot_rom;
 pub mod bus;
 pub mod cartridge;
 pub mod cgb;
+mod cheats;
 mod console;
 pub mod cpu;
 mod dma;
@@ -81,6 +97,7 @@ pub struct GameBoy {
     pub ic: ic::InterruptController,
     pub memory: memory::Memory,
     pub timer: timer::Timer,
+    #[cfg_attr(feature = "serde", serde(serialize_with = "ppu::serialize_settled"))]
     pub ppu: ppu::Ppu,
     pub apu: apu::Apu,
     pub joypad: joypad::Joypad,
@@ -237,12 +254,73 @@ impl GameBoy {
     }
 
     pub fn step(&mut self) {
+        self.step_unsettled(1);
+        self.settle_apu();
+    }
+
+    fn settle_apu(&mut self) {
+        self.timer.settle(&mut self.serial, self.cgb.cgb_mode);
+        self.cartridge.settle();
+        self.apu.settle(
+            self.timer.div,
+            self.cgb.double_speed,
+            #[cfg(feature = "debug")]
+            &mut self.debugger,
+        );
+    }
+
+    #[inline(always)]
+    fn step_unsettled(&mut self, halt_budget: u32) {
+        if self.stalled() {
+            return;
+        }
+        if self.serial.plugged() {
+            self.cpu
+                .step_halting(&mut cpu_bus!(self, false), halt_budget);
+        } else {
+            self.cpu.step_halting(&mut cpu_bus!(self), halt_budget);
+        }
+    }
+
+    fn stalled(&mut self) -> bool {
+        self.joypad.cycle(&mut self.ic);
         let frame_cycles = self.frame_cycles();
         if self.serial.stall(1, frame_cycles, &mut self.ic) {
             self.cycle_counter = self.cycle_counter.wrapping_add(1);
+            return true;
+        }
+        false
+    }
+
+    fn run_burst(&mut self) {
+        if self.stalled() {
             return;
         }
-        self.cpu.step(&mut cpu_bus!(self));
+        self.cpu.run_until(&mut cpu_bus!(self), |bus, fetched| {
+            if !bus.ticked {
+                return false;
+            }
+            if fetched {
+                bus.service_hdma();
+            }
+            bus.ticked = bus.hdma_due;
+            if bus.ppu.frame_ready || bus.serial.awaiting() {
+                return true;
+            }
+            if bus.p1_written {
+                bus.p1_written = false;
+                bus.joypad.cycle(bus.ic);
+            }
+            false
+        });
+    }
+
+    #[cfg(feature = "debug")]
+    fn frame_halt_budget(&self) -> u32 {
+        if self.debugger.breakpoints.armed() {
+            return 1;
+        }
+        u32::MAX
     }
 
     #[cfg(feature = "debug")]
@@ -257,37 +335,42 @@ impl GameBoy {
 
     pub fn run_frame(&mut self) {
         self.ppu.frame_ready = false;
+        self.serial.next_traffic_frame();
 
         while !self.ppu.frame_ready {
             let frame_cycles = self.frame_cycles();
             if self.serial.stall(frame_cycles, frame_cycles, &mut self.ic) {
                 break;
             }
-            self.step();
 
             #[cfg(feature = "debug")]
-            if self.at_breakpoint() {
-                self.debugger.hit_breakpoint = true;
-                return;
+            if self.debugger.breakpoints.armed() || self.debugger.breakpoints.watching() {
+                self.step_unsettled(self.frame_halt_budget());
+                if self.at_breakpoint() {
+                    self.debugger.hit_breakpoint = true;
+                    self.settle_apu();
+                    return;
+                }
+                continue;
             }
 
-            if !self.ppu.lcdc.lcd_enabled && self.cycle_counter >= self.frame_cycles() {
-                break;
-            }
+            self.run_burst();
         }
 
         if self.cycle_counter >= self.frame_cycles() {
             self.cycle_counter -= self.frame_cycles();
         }
 
+        self.settle_apu();
         self.apu.flush_audio();
     }
 
     pub fn run_cycles(&mut self, cycles: u32) {
         self.cycle_counter = 0;
         while self.cycle_counter < cycles {
-            self.step();
+            self.step_unsettled(cycles - self.cycle_counter);
         }
+        self.settle_apu();
     }
 
     #[cfg(feature = "debug")]
@@ -295,7 +378,8 @@ impl GameBoy {
         let start = self.cycle_counter;
         let mut stop = Stop::Finished;
         while self.cycle_counter.wrapping_sub(start) < cycles {
-            self.step();
+            let left = cycles - self.cycle_counter.wrapping_sub(start);
+            self.step_unsettled(left.min(self.frame_halt_budget()));
             if let Some(hit) = self.breakpoint_hit() {
                 stop = hit;
                 break;
@@ -305,6 +389,7 @@ impl GameBoy {
         while self.cycle_counter >= frame_cycles {
             self.cycle_counter -= frame_cycles;
         }
+        self.settle_apu();
         self.apu.flush_audio();
         stop
     }
@@ -404,6 +489,7 @@ impl GameBoy {
         self.serial.set_timeout_frames(frames);
     }
 
+    #[inline]
     pub fn take_link_messages(&mut self) -> Vec<serial::LinkMessage> {
         self.serial.take_messages()
     }
@@ -576,5 +662,326 @@ impl GbModel {
 
     pub fn is_cgb(&self) -> bool {
         matches!(self, GbModel::Cgb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPIN: [u8; 2] = [0x18, 0xFE];
+
+    fn boot(model: GbModel, parts: &[(usize, &[u8])]) -> GameBoy {
+        let mut rom = vec![0u8; if model.is_cgb() { 0x900 } else { 0x100 }];
+        for (at, bytes) in parts {
+            rom[*at..*at + bytes.len()].copy_from_slice(bytes);
+        }
+        GameBoy::new(model, Some(rom), 0)
+    }
+
+    fn hram(gb: &mut GameBoy) -> u8 {
+        gb.with_bus(|bus| bus.read_naive(0xFF80))
+    }
+
+    fn div_after_nops(model: GbModel, nops: usize) -> u8 {
+        let read = [0xF0, 0x04, 0xE0, 0x80, 0x18, 0xFE];
+        let mut gb = boot(model, &[(nops, &read)]);
+        gb.with_bus(|bus| bus.write_naive(0xFF80, 0xAA));
+        for _ in 0..nops + 10 {
+            gb.step();
+        }
+        hram(&mut gb)
+    }
+
+    fn first_div_tick(model: GbModel) -> usize {
+        (0..0x80)
+            .find(|&nops| div_after_nops(model, nops) == 1)
+            .expect("div ticks")
+    }
+
+    #[test]
+    fn div_ticks_like_sameboy_after_power_on() {
+        assert_eq!(
+            (first_div_tick(GbModel::Dmg), first_div_tick(GbModel::Cgb)),
+            (60, 60)
+        );
+    }
+
+    fn cycles_to_frame_end(gb: &mut GameBoy) -> u32 {
+        gb.ppu.frame_ready = false;
+        let start = gb.cycle_counter;
+        while !gb.ppu.frame_ready {
+            gb.step();
+            assert!(gb.cycle_counter - start < 3 * 17556);
+        }
+        gb.cycle_counter - start
+    }
+
+    #[test]
+    fn a_frame_with_the_lcd_off_lasts_70224_dots() {
+        let mut gb = boot(GbModel::Dmg, &[(0, &SPIN)]);
+        let first = cycles_to_frame_end(&mut gb);
+        assert!((17556..17559).contains(&first), "{first}");
+        let second = cycles_to_frame_end(&mut gb);
+        assert!((17554..17559).contains(&second), "{second}");
+    }
+
+    fn lcd_on_after_delay(loops: u16) -> u32 {
+        let [lo, hi] = loops.to_le_bytes();
+        let program = [
+            0x01, lo, hi, 0x0B, 0x78, 0xB1, 0x20, 0xFB, 0x3E, 0x91, 0xE0, 0x40, 0x18, 0xFE,
+        ];
+        let mut gb = boot(GbModel::Dmg, &[(0, &program)]);
+        cycles_to_frame_end(&mut gb)
+    }
+
+    #[test]
+    fn turning_the_lcd_on_after_ten_lines_ends_the_frame() {
+        let frame = lcd_on_after_delay(200);
+        assert!((1400..1420).contains(&frame), "{frame}");
+    }
+
+    #[test]
+    fn turning_the_lcd_on_early_keeps_the_frame() {
+        let frame = lcd_on_after_delay(100);
+        assert!(frame > 16000, "{frame}");
+    }
+
+    #[test]
+    fn the_vector_is_picked_after_the_low_push() {
+        let setup = [
+            0x31, 0x11, 0xFF, 0x3E, 0x05, 0xE0, 0xFF, 0x3E, 0x04, 0xE0, 0x0F, 0xFB, 0x00,
+        ];
+        let mut gb = boot(
+            GbModel::Dmg,
+            &[
+                (0x00, &setup),
+                (0x40, &[0x3E, 0x40, 0xE0, 0x80, 0x18, 0xFE]),
+                (0x50, &[0x3E, 0x50, 0xE0, 0x80, 0x18, 0xFE]),
+            ],
+        );
+        for _ in 0..30 {
+            gb.step();
+        }
+        assert_eq!(hram(&mut gb), 0x40);
+    }
+
+    #[test]
+    fn a_selected_key_raises_the_joypad_interrupt() {
+        let mut gb = boot(GbModel::Dmg, &[(0, &SPIN)]);
+        gb.with_bus(|bus| bus.write_naive(0xFF00, 0x20));
+        gb.ic.flag.set(ic::Interrupt::Joypad, false);
+        gb.joypad.press(joypad::JoypadState::DOWN);
+        gb.step();
+        assert!(gb.ic.flag.is_enabled(ic::Interrupt::Joypad));
+    }
+
+    fn acknowledge_rom(cgb: bool, scx: u8) -> Rom {
+        let mut data = vec![0u8; 0x8000];
+        data[0x0100..0x0104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
+        if cgb {
+            data[0x0143] = 0x80;
+        }
+        let mut program = vec![
+            0xF3, 0x31, 0xFE, 0xDF, 0x3E, scx, 0xE0, 0x43, 0x3E, 0x91, 0xE0, 0x40, 0x1E, 0x00,
+        ];
+        let lp = 0x150 + program.len() as u16;
+        program.extend([
+            0xF3, 0x3E, 0x20, 0xE0, 0x41, 0x3E, 0x02, 0xE0, 0xFF, 0xAF, 0xE0, 0x0F, 0x76, 0x00,
+            0x3E, 0x08, 0xE0, 0x41, 0x3E, 0x02, 0xE0, 0x0F,
+        ]);
+        let sled_end = 0x150 + program.len() as u16 + 11 + 120;
+        let [end_lo, end_hi] = sled_end.to_le_bytes();
+        program.extend([
+            0x21, end_lo, end_hi, 0x7D, 0x93, 0x6F, 0x7C, 0xDE, 0x00, 0x67, 0xE9,
+        ]);
+        program.extend([0x00; 120]);
+        program.extend([0xFB, 0x00, 0x18, 0xFE]);
+        data[0x0150..0x0150 + program.len()].copy_from_slice(&program);
+        let [lp_lo, lp_hi] = lp.to_le_bytes();
+        let handler = [
+            0xF0, 0x0F, 0x21, 0x00, 0xC0, 0x16, 0x00, 0x19, 0x77, 0x31, 0xFE, 0xDF, 0x1C, 0x7B,
+            0xFE, 100, 0x28, 0x03, 0xC3, lp_lo, lp_hi, 0x3E, 0xAA, 0xEA, 0xFF, 0xC0, 0x18, 0xFE,
+        ];
+        data[0x48..0x48 + handler.len()].copy_from_slice(&handler);
+        Rom::new(&data)
+    }
+
+    fn stat_still_pending(model: GbModel, scx: u8) -> Vec<u8> {
+        let mut gb = boot(
+            model,
+            &[
+                (0x00, &[0x3E, 0x11, 0xC3, 0xFE, 0x00]),
+                (0xFE, &[0xE0, 0x50]),
+            ],
+        );
+        gb.load_rom(&acknowledge_rom(model.is_cgb(), scx))
+            .expect("load");
+        let wram = |gb: &mut GameBoy, addr: u16| gb.with_bus(|bus| bus.read_naive(addr));
+        while wram(&mut gb, 0xC0FF) != 0xAA {
+            gb.step();
+            assert!(gb.cycle_counter < 40 * 17556);
+        }
+        (0..100)
+            .filter(|&delay| wram(&mut gb, 0xC000 + delay as u16) & 0x02 != 0)
+            .collect()
+    }
+
+    #[test]
+    fn a_stat_rise_right_after_the_vector_pick_is_acknowledged_like_sameboy() {
+        let sameboy: [&[u8]; 8] = [
+            &[32, 33],
+            &[32, 33, 34],
+            &[32, 33, 34],
+            &[33, 34],
+            &[33, 34],
+            &[33, 34, 35],
+            &[33, 34, 35],
+            &[34, 35],
+        ];
+        for model in [GbModel::Dmg, GbModel::Cgb] {
+            for (scx, expected) in sameboy.iter().enumerate() {
+                assert_eq!(
+                    stat_still_pending(model, scx as u8),
+                    *expected,
+                    "{model:?} scx {scx}"
+                );
+            }
+        }
+    }
+
+    fn run_one_frame(gb: &mut GameBoy, batched: bool) {
+        if batched {
+            gb.run_frame();
+            return;
+        }
+        gb.ppu.frame_ready = false;
+        while !gb.ppu.frame_ready {
+            gb.step();
+        }
+        if gb.cycle_counter >= gb.frame_cycles() {
+            gb.cycle_counter -= gb.frame_cycles();
+        }
+    }
+
+    fn halting_frames(
+        model: GbModel,
+        program: &[u8],
+        batched: bool,
+    ) -> Vec<(u32, u16, u16, u8, u8, u8)> {
+        let mut gb = boot(model, &[(0, program), (0x40, &[0xD9]), (0x50, &[0xD9])]);
+        (0..6)
+            .map(|_| {
+                run_one_frame(&mut gb, batched);
+                (
+                    gb.cycle_counter,
+                    gb.cpu.pc,
+                    gb.timer.div,
+                    gb.timer.tima,
+                    gb.ppu.ly,
+                    gb.ic.flag.into(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn halted_frames_run_in_batches_like_single_steps() {
+        let slow_timer = [
+            0x3E, 0x91, 0xE0, 0x40, 0x3E, 0x05, 0xE0, 0xFF, 0x3E, 0x04, 0xE0, 0x07, 0xFB, 0x76,
+            0x18, 0xFD,
+        ];
+        let fast_timer_and_serial = [
+            0x3E, 0x91, 0xE0, 0x40, 0x3E, 0x05, 0xE0, 0xFF, 0x3E, 0x05, 0xE0, 0x07, 0x3E, 0x80,
+            0xE0, 0x02, 0xFB, 0x76, 0x18, 0xFD,
+        ];
+        let lcd_off = [
+            0x3E, 0x11, 0xE0, 0x40, 0x3E, 0x04, 0xE0, 0xFF, 0x3E, 0x06, 0xE0, 0x07, 0xFB, 0x76,
+            0x18, 0xFD,
+        ];
+        for program in [&slow_timer[..], &fast_timer_and_serial, &lcd_off] {
+            for model in [GbModel::Dmg, GbModel::Cgb] {
+                let batched = halting_frames(model, program, true);
+                assert_eq!(
+                    batched,
+                    halting_frames(model, program, false),
+                    "{model:?} {program:02X?}"
+                );
+                assert!(batched.iter().any(|frame| frame.3 > 0), "{model:?}");
+            }
+        }
+    }
+
+    fn busy_frames(model: GbModel, batched: bool) -> Vec<(u32, u16, u8, u8, u8)> {
+        let program = [
+            0x3E, 0x91, 0xE0, 0x40, 0x3E, 0x10, 0xE0, 0xFF, 0xFB, 0x3E, 0x20, 0xE0, 0x00, 0x3E,
+            0x10, 0xE0, 0x00, 0x18, 0xF6,
+        ];
+        let mut gb = boot(model, &[(0, &program), (0x60, &[0x04, 0xD9])]);
+        gb.joypad.press(joypad::JoypadState::A);
+        (0..4)
+            .map(|_| {
+                run_one_frame(&mut gb, batched);
+                (
+                    gb.cycle_counter,
+                    gb.cpu.pc,
+                    gb.cpu.b,
+                    gb.ppu.ly,
+                    gb.ic.flag.into(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn busy_frames_run_in_bursts_like_single_steps() {
+        for model in [GbModel::Dmg, GbModel::Cgb] {
+            let burst = busy_frames(model, true);
+            assert_eq!(burst, busy_frames(model, false), "{model:?}");
+            assert!(burst.iter().any(|frame| frame.2 > 0), "{model:?}");
+        }
+    }
+
+    fn cartridge_frames(model: GbModel, batched: bool) -> Vec<(u32, u16, u8, u8, u8, u8)> {
+        let mut data = vec![0u8; 0x8000];
+        data[0x0040..0x004A]
+            .copy_from_slice(&[0xF5, 0xFA, 0x00, 0xC2, 0x3C, 0xEA, 0x00, 0xC2, 0xF1, 0xD9]);
+        data[0x0060] = 0xD9;
+        data[0x0100..0x0104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
+        let program = [
+            0x31, 0xFE, 0xDF, 0x3E, 0x91, 0xE0, 0x40, 0x3E, 0x11, 0xE0, 0xFF, 0xFB, 0x21, 0x00,
+            0xC0, 0x06, 0x20, 0x2A, 0x3C, 0xEA, 0x00, 0xC1, 0xFA, 0x00, 0xC1, 0xC5, 0xCD, 0x80,
+            0x01, 0xC1, 0x3E, 0x20, 0xE0, 0x00, 0x3E, 0x10, 0xE0, 0x00, 0x05, 0x20, 0xE8, 0x7D,
+            0xE6, 0x3F, 0x6F, 0x18, 0xE0,
+        ];
+        data[0x0150..0x0150 + program.len()].copy_from_slice(&program);
+        data[0x0180..0x0183].copy_from_slice(&[0x0C, 0xC0, 0xC9]);
+        let mut gb = GameBoy::new_empty(model);
+        gb.load_rom_with_model(&Rom::new(&data), model)
+            .expect("load");
+        gb.joypad.press(joypad::JoypadState::A);
+        (0..6)
+            .map(|_| {
+                run_one_frame(&mut gb, batched);
+                let vblanks = gb.with_bus(|bus| bus.read_naive(0xC200));
+                (
+                    gb.cycle_counter,
+                    gb.cpu.pc,
+                    gb.cpu.c,
+                    gb.ppu.ly,
+                    gb.ic.flag.into(),
+                    vblanks,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cartridge_frames_run_in_bursts_like_single_steps() {
+        for model in [GbModel::Dmg, GbModel::Cgb] {
+            let burst = cartridge_frames(model, true);
+            assert_eq!(burst, cartridge_frames(model, false), "{model:?}");
+            assert!(burst.iter().any(|frame| frame.5 > 0), "{model:?}");
+        }
     }
 }

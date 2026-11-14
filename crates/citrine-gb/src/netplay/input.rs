@@ -1,4 +1,4 @@
-use crate::console::Keys;
+use crate::console::{Keys, Touch};
 
 pub(crate) const LOG_LEN: usize = 512;
 
@@ -35,11 +35,28 @@ pub enum CableEvent {
     Pull,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CablePace {
+    Exact,
+    Windows,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Input {
     pub buttons: Keys,
     pub cable: Option<CableEvent>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub pace: Option<CablePace>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub touch: Option<Touch>,
 }
 
 impl Input {
@@ -47,6 +64,19 @@ impl Input {
         Self {
             buttons,
             cable: None,
+            pace: None,
+            touch: None,
+        }
+    }
+
+    pub fn with_touch(self, touch: Option<Touch>) -> Self {
+        Self { touch, ..self }
+    }
+
+    pub fn with_pace(self, pace: CablePace) -> Self {
+        Self {
+            pace: Some(pace),
+            ..self
         }
     }
 
@@ -58,7 +88,7 @@ impl Input {
     }
 
     fn held(self) -> Self {
-        Self::new(self.buttons)
+        Self::new(self.buttons).with_touch(self.touch)
     }
 }
 

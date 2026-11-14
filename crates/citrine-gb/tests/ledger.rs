@@ -1,8 +1,17 @@
+#![expect(
+    clippy::disallowed_types,
+    reason = "the ledger runs test ROMs in parallel outside the app"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the ledger runs test ROMs in parallel outside the app"
+)]
+
 mod archives;
 
-use archives::{Source, fetch, ledger_dir, read_entry, read_manifest, sha256_hex};
+use archives::{Source, cache_dir, fetch, ledger_dir, read_entry, read_manifest, sha256_hex};
 use citrine_gb::ReadMemory;
-#[cfg(feature = "gba")]
+#[cfg(any(feature = "gba", feature = "nds"))]
 use citrine_gb::console::Keys;
 use citrine_gb::console::{ConsoleKind, detect};
 use citrine_gb::gb::joypad::JoypadState;
@@ -12,10 +21,13 @@ use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::gba::bios::{Bios, Boot};
 #[cfg(feature = "gba")]
 use citrine_gb::gba::machine::{Fault, Gba};
+#[cfg(feature = "nds")]
+use citrine_gb::nds::machine::{Nds, NdsFirmware};
 use citrine_gb::rom::Rom;
 use citrine_gb::rom::id::RomId;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -56,11 +68,28 @@ const BIOS_END: u32 = 0x4000;
 #[cfg(feature = "gba")]
 const SPIN_START: u32 = 0x0200_0000;
 const BIOS_BOOT_CYCLES: u64 = 100_000_000;
+const DS_HEADER_CRC: usize = 0x15E;
+const CRC16_POLY: u16 = 0xA001;
+const DS_FRAME_BYTES: usize = 256 * 384 * 4;
+const DS_WIDTH: usize = 256;
+const DS_HEIGHT: usize = 384;
+const GLYPH: usize = 8;
+const GLYPH_BYTES: usize = GLYPH * GLYPH;
+const TEXT_PASS: &str = "OK";
+const TEXT_FAILS: [&str; 3] = ["BAD", "FAIL", "TIMEOUT"];
 
 #[derive(Deserialize)]
 struct Manifest {
-    sources: BTreeMap<String, Source>,
+    sources: BTreeMap<String, LedgerSource>,
     suites: BTreeMap<String, Suite>,
+}
+
+#[derive(Deserialize)]
+struct LedgerSource {
+    #[serde(flatten)]
+    source: Source,
+    #[serde(default)]
+    built: bool,
 }
 
 #[derive(Deserialize)]
@@ -70,7 +99,19 @@ struct Suite {
     rule: Rule,
     cycles: u32,
     register: Option<u8>,
+    font: Option<FontSpec>,
     roms: Vec<RomEntry>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+struct FontSpec {
+    offset: usize,
+    glyphs: usize,
+    first: u8,
+}
+
+struct Font {
+    glyphs: BTreeMap<u64, char>,
 }
 
 #[derive(Deserialize)]
@@ -98,14 +139,16 @@ enum Rule {
     Timed,
     Register,
     Console,
+    Text,
 }
 
 impl Rule {
-    fn runs_on(self, kind: ConsoleKind) -> bool {
+    fn runs_on(self, console: Console) -> bool {
         match self {
-            Rule::Fibonacci | Rule::Blargg => matches!(kind, ConsoleKind::Gb | ConsoleKind::Gbc),
+            Rule::Fibonacci | Rule::Blargg => matches!(console, Console::Dmg | Console::Cgb),
             Rule::Screenshot | Rule::Timed => true,
-            Rule::Register | Rule::Console => kind == ConsoleKind::Gba,
+            Rule::Register | Rule::Console => console == Console::Gba,
+            Rule::Text => console == Console::Nds,
         }
     }
 }
@@ -144,24 +187,18 @@ enum Console {
     Dmg,
     Cgb,
     Gba,
+    Nds,
 }
 
 impl Console {
-    const ALL: [Console; 3] = [Console::Dmg, Console::Cgb, Console::Gba];
+    const ALL: [Console; 4] = [Console::Dmg, Console::Cgb, Console::Gba, Console::Nds];
 
     fn name(self) -> &'static str {
         match self {
             Console::Dmg => "dmg",
             Console::Cgb => "cgb",
             Console::Gba => "gba",
-        }
-    }
-
-    fn kind(self) -> ConsoleKind {
-        match self {
-            Console::Dmg => ConsoleKind::Gb,
-            Console::Cgb => ConsoleKind::Gbc,
-            Console::Gba => ConsoleKind::Gba,
+            Console::Nds => "nds",
         }
     }
 }
@@ -175,6 +212,7 @@ struct Job {
     cycles: u32,
     rom: Vec<u8>,
     image: Option<Vec<u8>>,
+    font: Option<Font>,
     press: Vec<Button>,
     finish: Option<String>,
     unpassable: Option<String>,
@@ -270,14 +308,61 @@ fn decode_png(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(rgba)
 }
 
-fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
+fn reads_as_ds(rom: &[u8]) -> bool {
+    let Some(header) = rom.get(..DS_HEADER_CRC + 2) else {
+        return false;
+    };
+    let crc = header[..DS_HEADER_CRC]
+        .iter()
+        .fold(0xFFFF_u16, |crc, &byte| {
+            (0..8).fold(crc ^ u16::from(byte), |crc, _| match crc & 1 {
+                1 => crc >> 1 ^ CRC16_POLY,
+                _ => crc >> 1,
+            })
+        });
+    crc.to_le_bytes() == header[DS_HEADER_CRC..]
+}
+
+fn open_built(source: &Source) -> Result<Option<zip::ZipArchive<File>>, String> {
+    let path = cache_dir().join(format!("built-{}.zip", source.sha256));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    zip::ZipArchive::new(file)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn load_jobs(manifest: &Manifest) -> Result<(Vec<Job>, BTreeSet<String>), String> {
     let mut archives = BTreeMap::new();
+    let mut unbuilt = Vec::new();
     for (name, source) in &manifest.sources {
-        archives.insert(name.as_str(), fetch(name, source)?);
+        if !source.built {
+            archives.insert(name.as_str(), fetch(name, &source.source)?);
+        } else if let Some(archive) = open_built(&source.source)? {
+            archives.insert(name.as_str(), archive);
+        } else {
+            unbuilt.push(name.as_str());
+        }
+    }
+    if !unbuilt.is_empty() {
+        citrine_gb_test_roms::missing(
+            "ledger",
+            format_args!(
+                "the built {} archives, which `make ledger-nds` builds with docker",
+                unbuilt.join(", ")
+            ),
+        );
     }
 
     let mut jobs = Vec::new();
+    let mut skipped = BTreeSet::new();
     for (suite_name, suite) in &manifest.suites {
+        if unbuilt.contains(&suite.source.as_str()) {
+            skipped.insert(suite_name.clone());
+            continue;
+        }
         let archive = archives
             .get_mut(suite.source.as_str())
             .ok_or_else(|| format!("suite {suite_name} uses unknown source {}", suite.source))?;
@@ -293,13 +378,20 @@ fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
             if RomId::new(&rom).sha256_hex_string().to_ascii_lowercase() != entry.sha256 {
                 return Err(format!("{suite_name}/{} has a different RomId", entry.path));
             }
-            let reads_as_gba = detect(&rom, Some(entry.path.as_str())) == Some(ConsoleKind::Gba)
-                || detect(&rom, None) == Some(ConsoleKind::Gba);
+            let reads_as_ds = reads_as_ds(&rom);
+            let reads_as_gba = !reads_as_ds
+                && (detect(&rom, Some(entry.path.as_str())) == Some(ConsoleKind::Gba)
+                    || detect(&rom, None) == Some(ConsoleKind::Gba));
             let register = entry.register.or(suite.register);
             match (suite.rule, register) {
                 (Rule::Register, Some(0..=15))
                 | (
-                    Rule::Fibonacci | Rule::Blargg | Rule::Screenshot | Rule::Timed | Rule::Console,
+                    Rule::Fibonacci
+                    | Rule::Blargg
+                    | Rule::Screenshot
+                    | Rule::Timed
+                    | Rule::Console
+                    | Rule::Text,
                     None,
                 ) => {}
                 (Rule::Register, _) => {
@@ -316,14 +408,16 @@ fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
                 }
             }
             for &console in &entry.consoles {
-                if reads_as_gba != (console.kind() == ConsoleKind::Gba) {
+                if reads_as_gba != (console == Console::Gba)
+                    || reads_as_ds != (console == Console::Nds)
+                {
                     return Err(format!(
                         "{suite_name}/{} does not read as a {} game",
                         entry.path,
                         console.name()
                     ));
                 }
-                if !suite.rule.runs_on(console.kind()) {
+                if !suite.rule.runs_on(console) {
                     return Err(format!(
                         "{suite_name}/{} uses a rule {} has no use for",
                         entry.path,
@@ -331,16 +425,27 @@ fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
                     ));
                 }
                 let image = match suite.rule {
-                    Rule::Screenshot | Rule::Timed => {
-                        let image = entry.images.get(&console).ok_or_else(|| {
-                            format!(
-                                "{suite_name}/{} has no {} image",
-                                entry.path,
-                                console.name()
-                            )
-                        })?;
-                        let data = read_entry(archive, &format!("{}/{image}", suite.root))?;
-                        Some(decode_png(&data).map_err(|e| format!("{image}: {e}"))?)
+                    Rule::Screenshot | Rule::Timed => match entry.images.get(&console) {
+                        Some(image) => {
+                            let data = read_entry(archive, &format!("{}/{image}", suite.root))?;
+                            let pixels = decode_png(&data).map_err(|e| format!("{image}: {e}"))?;
+                            if console == Console::Nds && pixels.len() != DS_FRAME_BYTES {
+                                return Err(format!("{image} is not 256x384"));
+                            }
+                            Some(pixels)
+                        }
+                        None => None,
+                    },
+                    _ => None,
+                };
+                let font = match (suite.rule, suite.font) {
+                    (Rule::Text, Some(spec)) => {
+                        Some(Font::from_rom(&rom, spec).ok_or_else(|| {
+                            format!("{suite_name}/{} has no font at its offset", entry.path)
+                        })?)
+                    }
+                    (Rule::Text, None) => {
+                        return Err(format!("{suite_name} reads text but names no font"));
                     }
                     _ => None,
                 };
@@ -357,6 +462,7 @@ fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
                     cycles: entry.cycles.unwrap_or(suite.cycles),
                     rom: rom.clone(),
                     image,
+                    font,
                     press: entry.press.clone(),
                     finish: entry.finish.clone(),
                     unpassable: entry.unpassable.clone(),
@@ -364,7 +470,7 @@ fn load_jobs(manifest: &Manifest) -> Result<Vec<Job>, String> {
             }
         }
     }
-    Ok(jobs)
+    Ok((jobs, skipped))
 }
 
 fn fibonacci(gb: &GameBoy) -> Result<(), String> {
@@ -379,7 +485,7 @@ fn fibonacci(gb: &GameBoy) -> Result<(), String> {
 fn shade(kind: ConsoleKind, px: &[u8]) -> u16 {
     match kind {
         ConsoleKind::Gb => (px[0] as u16 + px[1] as u16 + px[2] as u16 + 127) / 255,
-        ConsoleKind::Gbc | ConsoleKind::Gba => {
+        ConsoleKind::Gbc | ConsoleKind::Gba | ConsoleKind::Nds => {
             (px[0] >> 3) as u16 | ((px[1] >> 3) as u16) << 5 | ((px[2] >> 3) as u16) << 10
         }
     }
@@ -445,13 +551,120 @@ impl Blargg {
 }
 
 fn run(job: &Job, setup: &Setup) -> Result<(), String> {
-    match job.console.kind() {
-        ConsoleKind::Gb => run_game_boy(job, GbModel::Dmg),
-        ConsoleKind::Gbc => run_game_boy(job, GbModel::Cgb),
+    if matches!(job.rule, Rule::Screenshot | Rule::Timed) && job.image.is_none() {
+        return Err("no reference picture yet".into());
+    }
+    match job.console {
+        Console::Dmg => run_game_boy(job, GbModel::Dmg, ConsoleKind::Gb),
+        Console::Cgb => run_game_boy(job, GbModel::Cgb, ConsoleKind::Gbc),
         #[cfg(feature = "gba")]
-        ConsoleKind::Gba => run_gba(job, setup),
+        Console::Gba => run_gba(job, setup),
         #[cfg(not(feature = "gba"))]
-        ConsoleKind::Gba => Err("no GBA core to run it on".into()),
+        Console::Gba => Err("no GBA core to run it on".into()),
+        #[cfg(feature = "nds")]
+        Console::Nds => run_nds(job),
+        #[cfg(not(feature = "nds"))]
+        Console::Nds => Err("no DS core to run it on".into()),
+    }
+}
+
+impl Font {
+    fn from_rom(rom: &[u8], spec: FontSpec) -> Option<Self> {
+        let bytes = rom.get(spec.offset..spec.offset + spec.glyphs * GLYPH_BYTES)?;
+        let mut glyphs = BTreeMap::new();
+        for (index, glyph) in bytes.chunks(GLYPH_BYTES).enumerate() {
+            let mask = glyph
+                .iter()
+                .enumerate()
+                .filter(|&(_, &pixel)| pixel != 0)
+                .fold(0u64, |mask, (at, _)| mask | 1 << at);
+            if mask != 0 && mask != u64::MAX {
+                let code = u32::from(spec.first) + index as u32;
+                glyphs
+                    .entry(mask)
+                    .or_insert(char::from_u32(code).unwrap_or('?'));
+            }
+        }
+        Some(Self { glyphs })
+    }
+
+    fn lines(&self, frame: &[u8]) -> Vec<String> {
+        (0..DS_HEIGHT / GLYPH)
+            .map(|row| {
+                let text: String = (0..DS_WIDTH / GLYPH)
+                    .map(|column| self.cell(frame, row, column))
+                    .collect();
+                text.split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    fn cell(&self, frame: &[u8], row: usize, column: usize) -> char {
+        let mut mask = 0u64;
+        for y in 0..GLYPH {
+            for x in 0..GLYPH {
+                let at = ((row * GLYPH + y) * DS_WIDTH + column * GLYPH + x) * 4;
+                if frame[at..at + 3] != [0, 0, 0] {
+                    mask |= 1 << (y * GLYPH + x);
+                }
+            }
+        }
+        match mask {
+            0 | u64::MAX => ' ',
+            mask => self.glyphs.get(&mask).copied().unwrap_or('?'),
+        }
+    }
+}
+
+fn judge_text(lines: &[String]) -> Result<(), String> {
+    let failed: Vec<&str> = lines
+        .iter()
+        .filter(|line| TEXT_FAILS.iter().any(|mark| line.contains(mark)))
+        .map(String::as_str)
+        .collect();
+    if !failed.is_empty() {
+        return Err(failed.join("; "));
+    }
+    if lines
+        .iter()
+        .any(|line| line.split(' ').any(|word| word == TEXT_PASS))
+    {
+        Ok(())
+    } else {
+        Err(format!("no result on screen: {}", lines.join(" | ")))
+    }
+}
+
+#[cfg(feature = "nds")]
+fn run_nds(job: &Job) -> Result<(), String> {
+    let mut nds =
+        Nds::new(job.rom.as_slice().into(), NdsFirmware::default()).map_err(|e| e.to_string())?;
+    let mut frames = 0;
+    while nds.cycles() < u64::from(job.cycles) {
+        nds.run_frame();
+        if let Some(fault) = nds.faults().into_iter().flatten().next() {
+            return Err(format!(
+                "the {:?} stopped at {:08X}, an instruction it can't run yet",
+                fault.cpu, fault.pc
+            ));
+        }
+        frames += 1;
+        if let Some((button, down)) = press_step(&job.press, frames) {
+            nds.set_keys(if down {
+                Keys::from(button.state())
+            } else {
+                Keys::empty()
+            });
+        }
+    }
+    match (job.rule, &job.font) {
+        (Rule::Text, Some(font)) => judge_text(&font.lines(nds.frame())),
+        _ => screenshot(
+            nds.frame(),
+            ConsoleKind::Gba,
+            job.image.as_deref().unwrap_or_default(),
+        ),
     }
 }
 
@@ -482,7 +695,7 @@ fn boot_gba(job: &Job, setup: &Setup) -> Result<(Gba, u64), String> {
         let booted = gba.cycles();
         return Ok((gba, booted));
     };
-    let mut gba = Gba::with_bios(&job.rom, bios.clone(), Boot::Intro);
+    let mut gba = Gba::with_bios(job.rom.as_slice().into(), bios.clone(), Boot::Intro);
     while gba.cpu().pc() < BIOS_END {
         if gba.cycles() > BIOS_BOOT_CYCLES {
             return Err(format!(
@@ -583,8 +796,7 @@ fn describe_fault(fault: Fault) -> String {
     }
 }
 
-fn run_game_boy(job: &Job, model: GbModel) -> Result<(), String> {
-    let kind = job.console.kind();
+fn run_game_boy(job: &Job, model: GbModel, kind: ConsoleKind) -> Result<(), String> {
     let mut gb = GameBoy::new_empty(model);
     gb.load_rom(&Rom::new(&job.rom))
         .map_err(|e| format!("failed to load: {e:?}"))?;
@@ -713,7 +925,13 @@ fn setup(args: &Args) -> Result<Option<Setup>, String> {
     };
     let image = match std::fs::read(path) {
         Ok(image) => image,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            citrine_gb_test_roms::missing(
+                "the BIOS ledger",
+                format_args!("the BIOS file {}", path.display()),
+            );
+            return Ok(None);
+        }
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let bios = Bios::user(&image).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -732,7 +950,6 @@ fn setup(args: &Args) -> Result<Option<Setup>, String> {
 fn ledger() -> Result<ExitCode, String> {
     let args = parse_args()?;
     let Some(setup) = setup(&args)? else {
-        println!("no BIOS file, skipping the BIOS ledger");
         return Ok(ExitCode::SUCCESS);
     };
     let ledger_path = ledger_dir().join(args.mode.ledger_file());
@@ -744,7 +961,7 @@ fn ledger() -> Result<ExitCode, String> {
         .map(str::to_string)
         .collect();
 
-    let mut jobs = load_jobs(&manifest)?;
+    let (mut jobs, skipped) = load_jobs(&manifest)?;
     if !matches!(args.mode, Mode::Skip) {
         jobs.retain(|job| job.console == Console::Gba);
     }
@@ -806,6 +1023,12 @@ fn ledger() -> Result<ExitCode, String> {
     let dropped: Vec<&String> = listed
         .difference(&passing)
         .filter(|line| args.only.is_empty() || outcomes.contains_key(line.as_str()))
+        .filter(|line| {
+            !line
+                .split_once(' ')
+                .and_then(|(_, rest)| rest.split_once('/'))
+                .is_some_and(|(suite, _)| skipped.contains(suite))
+        })
         .collect();
     let added: Vec<&String> = passing.difference(&listed).collect();
 

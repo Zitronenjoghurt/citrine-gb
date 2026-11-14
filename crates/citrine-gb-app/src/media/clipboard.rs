@@ -63,6 +63,10 @@ pub fn run(way: Way, store: &MediaStore, id: &MediaId, done: Sender<Result<Strin
 use crate::platform::android::clipboard as platform;
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[expect(
+    clippy::disallowed_types,
+    reason = "the app opens one arboard clipboard on first use and keeps it"
+)]
 mod platform {
     use super::{MediaId, MediaKind, MediaStore, Sender, copied};
     use std::sync::{Mutex, OnceLock};
@@ -223,7 +227,7 @@ mod platform {
     }
 
     fn settle(promise: Promise, done: Sender<Result<String, String>>, ok: Option<String>) {
-        wasm_bindgen_futures::spawn_local(async move {
+        citrine_gb_threads::spawn_local(async move {
             let result = match wasm_bindgen_futures::JsFuture::from(promise).await {
                 Ok(_) => ok.ok_or_else(String::new),
                 Err(err) => {

@@ -4,9 +4,12 @@ const LCD_GAMMA: f64 = 4.0;
 const OUT_GAMMA: f64 = 2.2;
 const COLOURS: usize = 1 << 15;
 
-pub(crate) fn rgba(color: u16) -> [u8; 4] {
-    static TABLE: OnceLock<Box<[[u8; 4]]>> = OnceLock::new();
-    TABLE.get_or_init(|| (0..COLOURS as u16).map(mix).collect())[usize::from(color & 0x7FFF)]
+pub(crate) fn table() -> &'static [[u8; 4]; COLOURS] {
+    static TABLE: OnceLock<Box<[[u8; 4]; COLOURS]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let colors: Box<[[u8; 4]]> = (0..COLOURS as u16).map(mix).collect();
+        colors.try_into().unwrap()
+    })
 }
 
 fn mix(color: u16) -> [u8; 4] {
@@ -27,6 +30,10 @@ fn mix(color: u16) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgba(color: u16) -> [u8; 4] {
+        table()[usize::from(color & 0x7FFF)]
+    }
 
     #[test]
     fn black_stays_black_and_white_turns_the_screen_s_warm_white() {

@@ -1,5 +1,5 @@
 use crate::app::ui_state::ui_theme;
-use egui::{Response, Sense, Stroke, TextStyle, Ui, Widget, WidgetText, pos2, vec2};
+use egui::{Rect, Response, Sense, Stroke, TextStyle, Ui, Widget, WidgetText, pos2, vec2};
 
 pub struct Check<'a> {
     on: &'a mut bool,
@@ -17,6 +17,38 @@ impl<'a> Check<'a> {
 
 pub fn checkbox(ui: &mut Ui, on: &mut bool, text: impl Into<WidgetText>) -> Response {
     ui.add(Check::new(on, text))
+}
+
+pub fn paint_box(ui: &Ui, rect: Rect, response: &Response, on: bool) {
+    let visuals = ui.style().interact(response);
+    let spacing = ui.spacing();
+    let share = spacing.icon_width_inner / spacing.icon_width.max(1.0);
+    let small = Rect::from_center_size(rect.center(), rect.size() * share);
+    let (fill, stroke) = if on {
+        (ui_theme::brand(ui.visuals()), Stroke::NONE)
+    } else {
+        (
+            visuals.bg_fill,
+            Stroke::new(1.0_f32, ui_theme::box_edge(ui.visuals())),
+        )
+    };
+    ui.painter().rect(
+        rect.expand(visuals.expansion),
+        visuals.corner_radius,
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    if on {
+        ui.painter().line(
+            vec![
+                pos2(small.left(), small.center().y),
+                pos2(small.center().x, small.bottom()),
+                pos2(small.right(), small.top()),
+            ],
+            Stroke::new(2.0_f32, ui_theme::ink_on(fill)),
+        );
+    }
 }
 
 impl Widget for Check<'_> {
@@ -38,6 +70,7 @@ impl Widget for Check<'_> {
             size.x += icon_spacing + galley.size().x;
             size.y = galley.size().y;
         }
+        super::settings::form::need(ui, size.x);
         let size = size.max(egui::Vec2::splat(interact_height));
         let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
         if response.clicked() {
@@ -56,29 +89,8 @@ impl Widget for Check<'_> {
             return response;
         }
         let visuals = ui.style().interact(&response);
-        let (small, big) = ui.spacing().icon_rectangles(rect);
-        let (fill, stroke) = if on {
-            (ui_theme::brand(ui.visuals()), Stroke::NONE)
-        } else {
-            (visuals.bg_fill, visuals.bg_stroke)
-        };
-        ui.painter().rect(
-            big.expand(visuals.expansion),
-            visuals.corner_radius,
-            fill,
-            stroke,
-            egui::StrokeKind::Inside,
-        );
-        if on {
-            ui.painter().line(
-                vec![
-                    pos2(small.left(), small.center().y),
-                    pos2(small.center().x, small.bottom()),
-                    pos2(small.right(), small.top()),
-                ],
-                Stroke::new(2.0_f32, ui_theme::ink_on(fill)),
-            );
-        }
+        let (_, big) = ui.spacing().icon_rectangles(rect);
+        paint_box(ui, big, &response, on);
         if let Some(galley) = galley {
             let pos = pos2(
                 big.right() + icon_spacing,
@@ -95,6 +107,7 @@ mod tests {
     use super::*;
     use crate::app::ui_state::ui_theme::{BRAND, BRAND_DARK, ON_BRAND, UiTheme};
     use egui::{Pos2, Rect, Shape};
+    use strum::IntoEnumIterator;
 
     fn shapes(theme: UiTheme, on: bool) -> Vec<Shape> {
         let ctx = egui::Context::default();
@@ -130,6 +143,24 @@ mod tests {
                     .iter()
                     .any(|s| matches!(s, Shape::Path(p) if p.stroke.color == egui::epaint::ColorMode::Solid(ON_BRAND))),
                 "{theme}: no dark tick"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_box_has_an_edge_that_reads_in_every_theme() {
+        for theme in UiTheme::iter() {
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let ground = ctx.style().visuals.panel_fill;
+            let shapes = shapes(theme, false);
+            assert!(
+                shapes.iter().any(|s| matches!(
+                    s,
+                    Shape::Rect(r) if r.stroke.width >= 1.0
+                        && crate::app::ui_state::ui_theme::contrast(r.stroke.color, ground) >= 3.0
+                )),
+                "{theme}: the empty box has no edge that reads"
             );
         }
     }

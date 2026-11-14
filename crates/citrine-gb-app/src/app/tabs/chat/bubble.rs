@@ -572,3 +572,225 @@ pub(super) fn long_pressed(input: &egui::InputState, rect: Rect) -> bool {
             .press_start_time()
             .is_some_and(|start| input.time - start >= LONG_PRESS_SECS)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::shapes_in;
+    use super::super::*;
+    use super::{bubble_fill, long_pressed, receipt_text, stamp_mark};
+    use crate::game_name::GameNames;
+    use crate::online::chat::{Change, ChatEntry};
+    use citrine_gb_net::Body;
+    use egui::{Color32, Rect};
+
+    #[test]
+    fn one_tick_on_the_relay_two_once_delivered_and_read_says_when() {
+        let clock = Clock::new();
+        let now = jiff::Timestamp::now().as_second() as u64;
+        assert_eq!(stamp_mark(Delivery::Sent), Some(icons::CHECK));
+        assert_eq!(stamp_mark(Delivery::Delivered(now)), Some(icons::CHECKS));
+        assert_eq!(stamp_mark(Delivery::Read(now)), Some(icons::CHECKS));
+        assert_eq!(stamp_mark(Delivery::Received), None);
+        assert_eq!(stamp_mark(Delivery::Seen), None);
+        assert_eq!(
+            receipt_text(Delivery::Sent, &clock).as_deref(),
+            Some("Sent")
+        );
+        assert_eq!(
+            receipt_text(Delivery::Read(now), &clock),
+            Some(format!("Read {}", clock.time(now)))
+        );
+        assert_eq!(
+            receipt_text(Delivery::Delivered(now), &clock),
+            Some(format!("Delivered {}", clock.time(now)))
+        );
+        let long_ago = now - 40 * 86_400;
+        let text = receipt_text(Delivery::Read(long_ago), &clock).unwrap();
+        assert!(text.starts_with("Read ") && text.contains(", "), "{text}");
+        assert_eq!(receipt_text(Delivery::Seen, &clock), None);
+    }
+
+    #[test]
+    fn a_long_press_on_a_bubble_shows_its_receipt() {
+        let ctx = egui::Context::default();
+        let bubble = Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(100.0, 40.0));
+        let at = egui::pos2(40.0, 20.0);
+        let touch = |phase, time| {
+            let mut events = vec![egui::Event::Touch {
+                device_id: egui::TouchDeviceId(1),
+                id: egui::TouchId(1),
+                phase,
+                pos: at,
+                force: None,
+            }];
+            if phase == egui::TouchPhase::Start {
+                events.push(egui::Event::PointerMoved(at));
+                events.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+            egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            }
+        };
+        let mut held = Vec::new();
+        for (input, at) in [
+            (touch(egui::TouchPhase::Start, 0.0), 0.0),
+            (touch(egui::TouchPhase::Move, 0.2), 0.2),
+            (
+                egui::RawInput {
+                    time: Some(0.7),
+                    ..Default::default()
+                },
+                0.7,
+            ),
+        ] {
+            let _ = ctx.run(input, |ctx| {
+                held.push((at, ctx.input(|i| long_pressed(i, bubble))))
+            });
+        }
+        assert_eq!(held, [(0.0, false), (0.2, false), (0.7, true)]);
+        let elsewhere = Rect::from_min_size(egui::pos2(200.0, 10.0), vec2(100.0, 40.0));
+        let later = egui::RawInput {
+            time: Some(0.8),
+            ..Default::default()
+        };
+        let _ = ctx.run(later, |ctx| {
+            assert!(!ctx.input(|i| long_pressed(i, elsewhere)))
+        });
+    }
+
+    fn luminance(c: Color32) -> f32 {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
+    #[test]
+    fn message_text_reads_clearly_on_both_bubbles_in_both_themes() {
+        for visuals in [egui::Visuals::light(), egui::Visuals::dark()] {
+            for mine in [true, false] {
+                let fill = bubble_fill(&visuals, mine);
+                let back = if fill.a() == 255 {
+                    fill
+                } else {
+                    let a = fill.a() as f32 / 255.0;
+                    let p = visuals.panel_fill;
+                    let mix = |f: u8, b: u8| (f as f32 + b as f32 * (1.0 - a)).min(255.0) as u8;
+                    Color32::from_rgb(
+                        mix(fill.r(), p.r()),
+                        mix(fill.g(), p.g()),
+                        mix(fill.b(), p.b()),
+                    )
+                };
+                let (a, b) = (luminance(visuals.strong_text_color()), luminance(back));
+                let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                assert!(
+                    ratio >= 4.5,
+                    "dark {} mine {mine}: {ratio:.2}",
+                    visuals.dark_mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_time_in_my_bubble_reads_in_dark_mode() {
+        let entry = ChatEntry {
+            id: 1,
+            mine: true,
+            at: 1_793_448_000,
+            body: Body::Text("See you at 3".into()),
+            delivery: Delivery::Sent,
+            change: Change::Kept,
+        };
+        let ctx = egui::Context::default();
+        ctx.set_visuals(egui::Visuals::dark());
+        let shapes = shapes_in(ctx, &entry, &GameNames::default(), 412.0);
+        let fill = bubble_fill(&egui::Visuals::dark(), true);
+        let stamp = shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains(':') => {
+                    text.galley.job.sections.first().map(|s| s.format.color)
+                }
+                _ => None,
+            })
+            .expect("the time");
+        let shown = blend(stamp, fill);
+        let ratio = contrast(shown, fill);
+        assert!(ratio >= 4.5, "{ratio} {stamp:?} on {fill:?}");
+    }
+
+    #[test]
+    fn read_ticks_stand_out_from_delivered_ones_in_my_bubble() {
+        let tick = |visuals: &egui::Visuals, delivery| {
+            let entry = ChatEntry {
+                id: 1,
+                mine: true,
+                at: 1_793_448_000,
+                body: Body::Text("See you at 3".into()),
+                delivery,
+                change: Change::Kept,
+            };
+            let ctx = egui::Context::default();
+            ctx.set_visuals(visuals.clone());
+            shapes_in(ctx, &entry, &GameNames::default(), 412.0)
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text().contains(icons::CHECKS) => {
+                        text.galley.job.sections.last().map(|s| s.format.color)
+                    }
+                    _ => None,
+                })
+                .expect("the ticks")
+        };
+        for visuals in [egui::Visuals::light(), egui::Visuals::dark()] {
+            let fill = bubble_fill(&visuals, true);
+            let read = blend(tick(&visuals, Delivery::Read(1_793_448_060)), fill);
+            let delivered = blend(tick(&visuals, Delivery::Delivered(1_793_448_060)), fill);
+            assert!(contrast(read, fill) >= 4.5, "{read:?} on {fill:?}");
+            assert!(
+                contrast(read, delivered) >= 2.0,
+                "{read:?} vs {delivered:?}"
+            );
+        }
+    }
+
+    fn blend(top: Color32, under: Color32) -> Color32 {
+        let a = top.a() as f32 / 255.0;
+        let mix = |t: u8, u: u8| (t as f32 + u as f32 * (1.0 - a)).round().min(255.0) as u8;
+        Color32::from_rgb(
+            mix(top.r(), under.r()),
+            mix(top.g(), under.g()),
+            mix(top.b(), under.b()),
+        )
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let lin = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+}

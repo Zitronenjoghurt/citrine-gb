@@ -103,9 +103,21 @@ where
                     })
                 })
             };
+            let variants = self
+                .variants
+                .into_iter()
+                .filter(|&variant| self.filter.as_ref().is_none_or(|keep| keep(variant)))
+                .collect::<Vec<_>>();
+            let current = ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(self.value.to_string(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            });
+            super::settings::form::need(ui, current + ui.available_width() - room);
             let full = self.value.to_string();
             let selected = shown(*self.value);
-            let shortened = selected != full;
+            let shortened = selected != full || current > room;
             let mut response = ui
                 .allocate_ui(egui::vec2(width, height), |ui| {
                     combo
@@ -113,12 +125,7 @@ where
                         .truncate()
                         .selected_text(selected)
                         .show_ui(ui, |ui| {
-                            for variant in self.variants {
-                                if let Some(ref filter_fn) = self.filter
-                                    && !filter_fn(variant)
-                                {
-                                    continue;
-                                }
+                            for &variant in &variants {
                                 let full = variant.to_string();
                                 let text = shown(variant);
                                 let item = ui.selectable_value(self.value, variant, text.clone());

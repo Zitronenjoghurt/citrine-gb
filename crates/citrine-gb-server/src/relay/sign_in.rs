@@ -6,9 +6,9 @@ use crate::now;
 use crate::settings::Check;
 use crate::stats::Refused;
 use citrine_gb_net::{
-    AuthKey, ChatMessage, DeviceId, DeviceInfo, DeviceKey, ErrorCode, InviteCode, Notice, OldChat,
-    OneTimeCode, PROTOCOL_VERSION, Presence, PublicKey, RelayPassword, ServerMsg, display_name,
-    speaks_protocol,
+    AuthKey, ChatMessage, DeviceId, DeviceInfo, DeviceKey, ErrorCode, InviteCode,
+    MAX_PUSH_TOKEN_BYTES, Notice, OldChat, OneTimeCode, PROTOCOL_VERSION, Presence, PublicKey,
+    PushKinds, RelayPassword, ServerMsg, display_name, speaks_protocol,
 };
 
 impl Client {
@@ -160,6 +160,12 @@ impl Client {
         let presence = Presence::Online { away: false };
         let device = self.device.ok_or(ErrorCode::Server)?;
         self.slot.signed_in();
+        log::info!(
+            "relay connection {}: {:?} signed in with {:?}",
+            self.conn_id,
+            account.display_name,
+            self.app_name
+        );
         self.me = Some(Me {
             id: account.id,
             online_id: account.online_id,
@@ -193,6 +199,9 @@ impl Client {
             .map(|(row, state)| self.friend(&row, state))
             .collect();
         self.send(ServerMsg::Friends(friends)).await;
+        for invite in self.app.hub.open_invites(account.id) {
+            self.send(invite).await;
+        }
         let mut after = 0;
         loop {
             let page = db(self
@@ -265,6 +274,26 @@ impl Client {
             this: device as DeviceId,
         });
         Ok(())
+    }
+
+    pub(super) async fn set_push(
+        &mut self,
+        token: Option<String>,
+        kinds: PushKinds,
+    ) -> Result<(), ErrorCode> {
+        let me = self.me()?.id;
+        let device = self.device.ok_or(ErrorCode::Server)?;
+        match token {
+            Some(token) if token.is_empty() || token.len() > MAX_PUSH_TOKEN_BYTES => {
+                Err(ErrorCode::TooLarge)
+            }
+            Some(token) => db(self
+                .app
+                .db
+                .set_push_token(me, device, &token, kinds, now())
+                .await),
+            None => db(self.app.db.remove_push_token(device).await),
+        }
     }
 
     pub(super) async fn sign_out_device(&mut self, device: DeviceId) -> Result<(), ErrorCode> {

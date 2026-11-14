@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_search FROM gts_profiles WHERE pid = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_search",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_profiles",
+            "name": "last_search"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9cbad67f6767a08352fdc8d768401804dc1eb6e4f654bfaf03b2e85365bdd336"
+}

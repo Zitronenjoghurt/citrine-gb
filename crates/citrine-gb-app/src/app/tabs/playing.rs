@@ -21,8 +21,8 @@ mod screen;
 mod sound;
 
 pub use actions::{
-    group_link, group_partners, invite, join, join_with, link_theirs, shelf_from, unlink_group,
-    watch,
+    group_link, group_partners, invite, join, join_theirs, join_with, link_theirs, shelf_from,
+    unlink_group, watch,
 };
 pub use banners::{Answer, BannerAction, ask_banner, banner};
 pub use bar::{BarFacts, Switch, bar, bar_switches, server_latency, settle_bar};
@@ -30,8 +30,8 @@ pub use bar::{BarFacts, Switch, bar, bar_switches, server_latency, settle_bar};
 pub use confirms::switch_lines;
 pub use confirms::{join_confirm, relink_confirm, stop_confirm, switch_confirm};
 pub use lines::{
-    ending_line, friend_tab_line, full_name, game_title, member_name, play_subtitle, quality,
-    screen_note, short_name,
+    ending_line, failed_line, friend_tab_line, full_name, game_title, invite_line, member_name,
+    play_subtitle, quality, screen_note, short_name,
 };
 pub use picker::{Pick, picker};
 #[cfg(test)]
@@ -40,9 +40,11 @@ pub use room::{RoomFacts, adds_to_room, in_room, invite_closed, invite_note};
 pub use room_bar::{
     MemberAction, MyMenu, RoomAction, header_ui, member_menu_ui, member_row, request_card,
 };
+#[cfg(test)]
+pub use screen::fetch_screen;
 pub use screen::{
-    WatchCaption, WatchTap, arriving, friend_console, note_over, paint_friend_screen,
-    watch_thumbnail, watched_friend, watched_name,
+    WatchCaption, WatchTap, arriving, download_screen, friend_picture, friend_video, note_over,
+    paint_friend_screen, watch_thumbnail, watched_friend, watched_name,
 };
 pub use sound::{FriendSound, friend_sound, friend_sound_bar};
 
@@ -55,6 +57,8 @@ const STRIP_AVATAR: f32 = 22.0;
 pub struct PlayingUi {
     friend_screen: Option<egui::TextureHandle>,
     painted_pass: u64,
+    fetch_icon: Option<(Vec<u8>, egui::TextureHandle)>,
+    fetch_pressed: bool,
     pub asking_stop: bool,
     pub ended: Option<Ended>,
     pub shown: bool,
@@ -73,13 +77,17 @@ pub struct PlayingUi {
     pub room_sheet: Option<RoomSheet>,
     pub room_seen: usize,
     pub room_draft: String,
+    pub join_looking: Option<IncomingInvite>,
+    pub opened_invite: Option<crate::app::push::OpenedInvite>,
     pick_shown: bool,
     fits: HashMap<(SessionId, Option<GameHash>), Fit>,
+    shelf_paths: Option<Vec<std::path::PathBuf>>,
+    shelf_index: std::sync::Arc<crate::play::shelf::ShelfIndex>,
 }
 
 impl PlayingUi {
     pub fn handed_back(&mut self, friend: OnlineId, name: &str) {
-        self.ended = ending_line(name, Ending::Dropped, true).map(|line| Ended {
+        self.ended = ending_line(name, "", Ending::Dropped, true).map(|line| Ended {
             friend,
             line,
             paused: true,
@@ -180,6 +188,10 @@ pub fn play_button(play: &Play, online: &Online, friend: OnlineId) -> Option<Pla
     }
 }
 
+pub fn can_play_again(play: &Play, online: &Online, emulator: &Emulator, friend: OnlineId) -> bool {
+    play_button(play, online, friend) == Some(PlayButton::Ready) && !emulator.holds_download()
+}
+
 pub fn can_watch(play: &Play, online: &Online, friend: OnlineId, game_open: bool) -> bool {
     !game_open
         && !play.is_live()
@@ -189,31 +201,39 @@ pub fn can_watch(play: &Play, online: &Online, friend: OnlineId, game_open: bool
 
 pub fn fit_of(
     playing: &mut PlayingUi,
-    play: &mut Play,
+    play: &Play,
     online: &Online,
     emulator: &Emulator,
-    recent: &RecentRoms,
     invite: &IncomingInvite,
-) -> Fit {
+) -> Option<Fit> {
     let open = emulator.open_game();
     let key = (invite.session, open);
     if let Some(found) = playing.fits.get(&key) {
-        return *found;
+        return Some(*found);
     }
-    play.set_shelf(shelf_from(recent));
     let sharing = online.info().is_some_and(|i| i.game_sharing);
     let found = match &invite.game {
         None if open.is_some() => Fit::Open,
         None => Fit::Watch,
-        Some(game) => fit(
-            open == Some(game.hash),
-            play.holds(&game.hash),
-            sharing,
-            open.is_some(),
-        ),
+        Some(game) if open == Some(game.hash) => Fit::Open,
+        Some(game) => fit(false, play.holds(&game.hash)?, sharing, open.is_some()),
     };
     playing.fits.insert(key, found);
-    found
+    Some(found)
+}
+
+pub fn refresh_shelf(play: &mut Play, playing: &mut PlayingUi, recent: &RecentRoms) {
+    let paths = recent.entries().iter().map(|e| &e.path);
+    if playing
+        .shelf_paths
+        .as_ref()
+        .is_some_and(|kept| kept.iter().eq(paths.clone()))
+    {
+        return;
+    }
+    playing.shelf_paths = Some(paths.cloned().collect());
+    playing.fits.clear();
+    play.set_shelf(shelf_from(recent, &playing.shelf_index));
 }
 
 pub fn watching(session: &PlaySession) -> bool {
@@ -228,7 +248,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     let group_watch = viewer
         .play
         .room()
-        .is_some_and(|r| r.watched_console().is_some());
+        .is_some_and(|r| r.watched_picture().is_some());
     if group_watch || (session.stage() == Stage::Playing && watching(session)) {
         if !group_watch {
             let sound = FriendSound::of(&viewer.ui.settings.online);
@@ -239,15 +259,15 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
         }
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, egui::Sense::hover());
-        let console = friend_console(viewer.play, session);
-        paint_friend_screen(&mut viewer.ui.playing, ui, console, area);
+        let picture = friend_picture(viewer.play, session);
+        paint_friend_screen(&mut viewer.ui.playing, ui, picture, area);
         return;
     }
     let area = ui.available_rect_before_wrap();
     ui.allocate_rect(area, egui::Sense::hover());
     let name = member_name(viewer.play, viewer.online, session.friend());
     let line = friend_tab_line(&name, session);
-    note_over(ui, area, &line, None);
+    note_over(ui, area, friend_video(viewer.play, session), &line, None);
 }
 
 pub fn room_facts(play: &Play, online: &Online, playing: &PlayingUi) -> Option<RoomFacts> {
@@ -354,6 +374,10 @@ pub fn transfer(session: &PlaySession, name: &str) -> Option<(String, Progress)>
         let label = format!("{}  Getting {title} from {name}", icons::DOWNLOAD_SIMPLE);
         return Some((label, Progress::bytes(u64::from(got), u64::from(total))));
     }
+    if let Some((got, total)) = session.state_received() {
+        let label = format!("{}  Getting {name}'s running game", icons::DOWNLOAD_SIMPLE);
+        return Some((label, Progress::bytes(got, total)));
+    }
     if session.sends_game() {
         let title = session
             .my_game()
@@ -361,10 +385,248 @@ pub fn transfer(session: &PlaySession, name: &str) -> Option<(String, Progress)>
             .filter(|title| !title.is_empty())
             .unwrap_or("your game");
         let label = format!("{}  Sending {title} to {name}", icons::UPLOAD_SIMPLE);
-        return Some((label, Progress::unknown()));
+        let progress = match session.game_sent() {
+            Some((done, total)) => Progress::bytes(done, total),
+            None => Progress::unknown(),
+        };
+        return Some((label, progress));
     }
     None
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::bar::{Tail, bar_line};
+    use super::*;
+    use crate::play::Ending;
+
+    #[test]
+    fn the_friends_game_comes_first_then_borrowing_then_the_cable_then_watching() {
+        assert_eq!(fit(true, true, true, true), Fit::Open);
+        assert_eq!(fit(false, true, true, true), Fit::Shelf);
+        assert_eq!(fit(false, false, true, true), Fit::Borrow);
+        assert_eq!(fit(false, false, false, true), Fit::Cable);
+        assert_eq!(fit(false, false, false, false), Fit::Watch);
+    }
+
+    #[test]
+    fn an_ending_says_only_what_happened() {
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::FriendLeft, true).as_deref(),
+            Some("Mia left.")
+        );
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::Dropped, true).as_deref(),
+            Some("Lost the connection to Mia.")
+        );
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::Failed, true).as_deref(),
+            Some("Playing with Mia stopped.")
+        );
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::FriendLeft, false).as_deref(),
+            Some("Mia left.")
+        );
+        assert_eq!(ending_line("Mia", "Pong", Ending::Left, true), None);
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::Declined, false).as_deref(),
+            Some("Mia declined your invite.")
+        );
+    }
+
+    #[test]
+    fn a_console_handed_back_in_a_room_shows_the_resume_banner() {
+        let mut playing = PlayingUi::default();
+        let jonas = OnlineId::random();
+        playing.ended = Some(Ended {
+            friend: jonas,
+            line: "Jonas left.".into(),
+            paused: false,
+        });
+        let mia = OnlineId::random();
+        playing.handed_back(mia, "Mia");
+        assert_eq!(
+            playing.ended,
+            Some(Ended {
+                friend: mia,
+                line: "Lost the connection to Mia.".into(),
+                paused: true,
+            })
+        );
+    }
+
+    fn line_right_edge(width: f32, name: &str, title: &str) -> (f32, f32) {
+        let ctx = egui::Context::default();
+        let mut right = 0.0;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width + 100.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let mut start = 0.0;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.set_max_width(width);
+                start = ui.min_rect().left();
+                ui.horizontal(|ui| {
+                    ui.set_max_width(width);
+                    let tail = Tail {
+                        full: "Good \u{b7} 42 ms".into(),
+                        short: "Good".into(),
+                        hover: Some("42 ms".into()),
+                    };
+                    bar_line(ui, name, Some(title), tail);
+                    right = ui.min_rect().right();
+                });
+            });
+        });
+        (start, right)
+    }
+
+    #[test]
+    fn the_bar_line_never_runs_past_its_room() {
+        for width in [20.0, 60.0, 120.0, 200.0, 320.0, 900.0] {
+            let (start, right) =
+                line_right_edge(width, "Maximiliane", "Pok\u{e9}mon - Goldene Edition");
+            assert!(
+                right - start <= width + 0.5,
+                "{width}: line ends at {}",
+                right - start
+            );
+        }
+    }
+
+    #[test]
+    fn the_friends_mute_toggles_and_a_silent_slider_comes_back_at_half() {
+        let playing = FriendSound {
+            volume: 0.7,
+            muted: false,
+        };
+        assert_eq!(
+            playing.toggled(),
+            FriendSound {
+                volume: 0.7,
+                muted: true
+            }
+        );
+        assert_eq!(playing.toggled().toggled(), playing);
+        let zero = FriendSound {
+            volume: 0.0,
+            muted: false,
+        };
+        assert_eq!(
+            zero.toggled(),
+            FriendSound {
+                volume: 0.5,
+                muted: false
+            }
+        );
+    }
+
+    fn fetch_frame(
+        ctx: &egui::Context,
+        app: &mut crate::app::Citrine,
+        fetch: Option<&crate::play::fetch::Fetch>,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(412.0, 915.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let area = ui.available_rect_before_wrap();
+                assert_eq!(
+                    fetch_screen(
+                        &mut app.ui.playing,
+                        ui,
+                        area,
+                        fetch,
+                        "Mia",
+                        &mut app.emulator
+                    ),
+                    fetch.is_some()
+                );
+            });
+        })
+    }
+
+    fn click(at: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        vec![egui::Event::PointerMoved(at), button(true), button(false)]
+    }
+
+    fn mario_kart_offer() -> crate::play::fetch::Offered {
+        crate::play::fetch::Offered {
+            title: "MARIO KART DS\nNintendo".into(),
+            host: "Mia".into(),
+            icon: None,
+        }
+    }
+
+    #[test]
+    fn the_download_button_holds_a_until_the_download_starts() {
+        use crate::play::fetch::Fetch;
+        use citrine_gb::console::Keys;
+        let mut app = crate::app::tests::phone_app("download-button");
+        let ctx = egui::Context::default();
+        let offer = mario_kart_offer();
+        let offered = Fetch::Offered(offer.clone());
+        let shown = fetch_frame(&ctx, &mut app, Some(&offered), Vec::new());
+        let label = format!("{}  Download", crate::icons::DOWNLOAD_SIMPLE);
+        let button = crate::app::tests::text_rect(&shown, &label).expect("a Download button");
+        assert!(crate::app::tests::text_rect(&shown, "MARIO KART DS").is_some());
+        fetch_frame(&ctx, &mut app, Some(&offered), click(button.center()));
+        assert!(app.emulator.is_held(Keys::A));
+        fetch_frame(&ctx, &mut app, Some(&offered), Vec::new());
+        assert!(app.emulator.is_held(Keys::A));
+        fetch_frame(
+            &ctx,
+            &mut app,
+            Some(&Fetch::Joining(offer.clone())),
+            Vec::new(),
+        );
+        assert!(!app.emulator.is_held(Keys::A));
+        let waiting = Fetch::Receiving {
+            offer,
+            got: 0,
+            total: 1 << 20,
+        };
+        let shown = fetch_frame(&ctx, &mut app, Some(&waiting), Vec::new());
+        assert!(crate::app::tests::text_rect(&shown, "Waiting for Mia to start").is_some());
+        assert!(crate::app::tests::text_rect(&shown, "Downloading").is_none());
+        fetch_frame(&ctx, &mut app, None, Vec::new());
+        assert!(!app.emulator.is_held(Keys::A));
+    }
+
+    #[test]
+    fn a_stopped_download_holds_a_on_try_again_until_the_console_joins_again() {
+        use crate::play::fetch::Fetch;
+        use citrine_gb::console::Keys;
+        let mut app = crate::app::tests::phone_app("download-again");
+        let ctx = egui::Context::default();
+        let offer = mario_kart_offer();
+        let failed = Fetch::Failed(offer.clone());
+        let shown = fetch_frame(&ctx, &mut app, Some(&failed), Vec::new());
+        assert!(crate::app::tests::text_rect(&shown, "The download stopped").is_some());
+        let label = format!("{}  Try again", crate::icons::ARROW_CLOCKWISE);
+        let again = crate::app::tests::text_rect(&shown, &label).expect("a Try again button");
+        fetch_frame(&ctx, &mut app, Some(&failed), click(again.center()));
+        assert!(app.emulator.is_held(Keys::A));
+        fetch_frame(&ctx, &mut app, Some(&failed), Vec::new());
+        assert!(app.emulator.is_held(Keys::A));
+        fetch_frame(&ctx, &mut app, Some(&Fetch::Joining(offer)), Vec::new());
+        assert!(!app.emulator.is_held(Keys::A));
+    }
+}

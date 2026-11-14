@@ -1,4 +1,4 @@
-use super::date::{self, CENTURY, DateTime};
+use crate::utils::date::{self, CENTURY, DateTime};
 
 const CYCLES_PER_SECOND: u32 = 16_777_216;
 const SCK: u8 = 1 << 0;
@@ -104,6 +104,13 @@ impl Rtc {
         self.seconds = date::from_unix(unix);
         self.cycles = 0;
         self.weekday_shift = 0;
+    }
+
+    pub fn hold(&mut self, secs: f64) -> f64 {
+        let want = (secs.max(0.0) * f64::from(CYCLES_PER_SECOND)) as u32;
+        let take = want.min(self.cycles);
+        self.cycles -= take;
+        f64::from(take) / f64::from(CYCLES_PER_SECOND)
     }
 
     pub fn tick(&mut self, cycles: u32) {

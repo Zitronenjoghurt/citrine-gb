@@ -1,5 +1,6 @@
 use crate::storage::SaveStore;
 use crate::storage::cloud::OtherBattery;
+use citrine_gb::error::GbError;
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 
 #[derive(Default)]
@@ -47,6 +48,73 @@ pub fn snapshot_message(news: SnapshotNews, name: &str) -> String {
         SnapshotNews::Empty => format!("'{name}' is empty"),
         SnapshotNews::Deleted => format!("Deleted '{name}'"),
         SnapshotNews::Renamed => format!("Renamed to '{name}'"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedStep {
+    Load,
+    Save,
+    Delete,
+    Rename,
+    SwitchConsole,
+    Import,
+    Switch,
+    Close,
+}
+
+pub fn failed_message(step: FailedStep, what: &str, err: &GbError) -> String {
+    log::warn!("{step:?} of {what} failed: {err:?}");
+    let text = match step {
+        FailedStep::Load => return format!("Couldn't load {what}. {}", load_failure(err)),
+        FailedStep::Save => format!("Couldn't save {what}."),
+        FailedStep::Delete => format!("Couldn't delete {what}."),
+        FailedStep::Rename => format!("Couldn't rename {what}."),
+        FailedStep::SwitchConsole => format!("Couldn't switch {what}."),
+        FailedStep::Import => format!("Couldn't import {what}."),
+        FailedStep::Switch => format!("Couldn't switch to {what}."),
+        FailedStep::Close => format!("Couldn't save {what}, so it stays open."),
+    };
+    match write_failure(err) {
+        Some(reason) => format!("{text} {reason}"),
+        None => text,
+    }
+}
+
+pub fn named(name: &str, fallback: &str) -> String {
+    if name.is_empty() {
+        fallback.to_string()
+    } else {
+        format!("'{name}'")
+    }
+}
+
+fn write_failure(err: &GbError) -> Option<&'static str> {
+    let GbError::IO(err) = err else {
+        return None;
+    };
+    (err.kind() == std::io::ErrorKind::StorageFull).then_some("The device is out of storage.")
+}
+
+const OTHER_CONSOLE: &str = "It's for a different console.";
+
+fn load_failure(err: &GbError) -> &'static str {
+    match err {
+        #[cfg(feature = "gba")]
+        GbError::NewerState => "It needs a newer version of Citrine.",
+        #[cfg(feature = "gba")]
+        GbError::OlderState => "It was saved by an older version of Citrine.",
+        GbError::RmpDecode(_) => "It was saved by a different version of Citrine.",
+        #[cfg(feature = "gba")]
+        GbError::NotGba => OTHER_CONSOLE,
+        #[cfg(feature = "nds")]
+        GbError::NotNds => OTHER_CONSOLE,
+        GbError::GbaGame
+        | GbError::NdsGame
+        | GbError::MissingRomCartridgeType
+        | GbError::RomTooSmall
+        | GbError::RomTooBig => OTHER_CONSOLE,
+        _ => "The file is damaged.",
     }
 }
 
@@ -180,12 +248,9 @@ impl SnapshotsState {
         })
     }
 
-    pub fn answer_use_battery(&mut self, choice: Option<bool>) -> Option<String> {
+    pub fn answer_use_battery(&mut self, choice: Option<bool>) -> Option<(String, String)> {
         let confirmed = choice?;
-        self.using_battery
-            .take()
-            .filter(|_| confirmed)
-            .map(|(token, _)| token)
+        self.using_battery.take().filter(|_| confirmed)
     }
 
     pub fn ask_delete_battery(&mut self, token: String, name: String) {
@@ -202,12 +267,9 @@ impl SnapshotsState {
         })
     }
 
-    pub fn answer_delete_battery(&mut self, choice: Option<bool>) -> Option<String> {
+    pub fn answer_delete_battery(&mut self, choice: Option<bool>) -> Option<(String, String)> {
         let confirmed = choice?;
-        self.deleting_battery
-            .take()
-            .filter(|_| confirmed)
-            .map(|(token, _)| token)
+        self.deleting_battery.take().filter(|_| confirmed)
     }
 
     pub fn invalidate(&mut self) {
@@ -447,6 +509,189 @@ pub fn relative_time(saved_at: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn undecodable() -> GbError {
+        use citrine_gb::console::ConsoleKind;
+        use citrine_gb::machine::{Firmware, Machine};
+        use citrine_gb::persistence::state::{SAVE_QUALITY, StateBody};
+        let packed = StateBody {
+            kind: ConsoleKind::Gb,
+            data: vec![0xc3],
+        }
+        .pack(SAVE_QUALITY)
+        .expect("pack");
+        let rom = citrine_gb::rom::Rom::new(&[0; 0x8000]);
+        match Machine::from_state(&packed, &rom, 0, &Firmware::default()) {
+            Ok(_) => panic!("a lone true loaded as a state"),
+            Err(err) => err,
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn each_load_failure_has_its_sentence() {
+        let damaged = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+        let cases = [
+            (GbError::NewerState, "It needs a newer version of Citrine."),
+            (
+                GbError::OlderState,
+                "It was saved by an older version of Citrine.",
+            ),
+            (
+                undecodable(),
+                "It was saved by a different version of Citrine.",
+            ),
+            (GbError::IO(damaged), "The file is damaged."),
+            (GbError::NotGba, "It's for a different console."),
+            (GbError::NotNds, "It's for a different console."),
+            (GbError::RomTooSmall, "It's for a different console."),
+        ];
+        for (err, reason) in cases {
+            assert_eq!(
+                failed_message(FailedStep::Load, "'Boss fight'", &err),
+                format!("Couldn't load 'Boss fight'. {reason}")
+            );
+        }
+    }
+
+    #[test]
+    fn each_failed_step_names_the_item() {
+        let err = GbError::IO(std::io::Error::other("lost"));
+        let cases = [
+            (
+                FailedStep::SwitchConsole,
+                "'Tetris' to Game Boy Color",
+                "Couldn't switch 'Tetris' to Game Boy Color.",
+            ),
+            (
+                FailedStep::Import,
+                "'red.sav'",
+                "Couldn't import 'red.sav'.",
+            ),
+            (
+                FailedStep::Switch,
+                "'Old run'",
+                "Couldn't switch to 'Old run'.",
+            ),
+            (
+                FailedStep::Delete,
+                "'Old run'",
+                "Couldn't delete 'Old run'.",
+            ),
+            (
+                FailedStep::Rename,
+                "'Old run'",
+                "Couldn't rename 'Old run'.",
+            ),
+            (
+                FailedStep::Close,
+                "'Tetris'",
+                "Couldn't save 'Tetris', so it stays open.",
+            ),
+        ];
+        for (step, what, text) in cases {
+            assert_eq!(failed_message(step, what, &err), text);
+        }
+    }
+
+    #[test]
+    fn a_full_disk_says_so() {
+        let full = GbError::IO(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert_eq!(
+            failed_message(FailedStep::Rename, "'Old run'", &full),
+            "Couldn't rename 'Old run'. The device is out of storage."
+        );
+        assert_eq!(
+            failed_message(FailedStep::Close, "'Tetris'", &full),
+            "Couldn't save 'Tetris', so it stays open. The device is out of storage."
+        );
+        let locked = GbError::IO(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            failed_message(FailedStep::Rename, "'Old run'", &locked),
+            "Couldn't rename 'Old run'."
+        );
+    }
+
+    #[test]
+    fn an_unnamed_item_uses_its_fallback() {
+        assert_eq!(named("", "the game"), "the game");
+        assert_eq!(named("Tetris", "the game"), "'Tetris'");
+    }
+
+    #[test]
+    fn a_gb_state_that_does_not_decode_is_a_decode_error() {
+        assert!(matches!(undecodable(), GbError::RmpDecode(_)));
+    }
+
+    fn debug_args(text: &str) -> Vec<String> {
+        let calls = ["error", "success", "info", "hint", "notify", "notify_error"]
+            .map(|name| format!("{name}("))
+            .into_iter()
+            .chain([format!("Err({}!(", "format")]);
+        let mut found = Vec::new();
+        for call in calls {
+            for (start, _) in text.match_indices(&call) {
+                let before = text[..start].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                let mut depth = 1;
+                let args = &text[start + call.len()..];
+                let end = args
+                    .char_indices()
+                    .find(|&(_, c)| {
+                        depth += match c {
+                            '(' => 1,
+                            ')' => -1,
+                            _ => 0,
+                        };
+                        depth == 0
+                    })
+                    .map_or(args.len(), |(end, _)| end);
+                let arg = &args[..end];
+                if arg.contains(":?}") || arg.contains(":#?}") {
+                    let line = text[..start].matches('\n').count() + 1;
+                    found.push(format!("{line}: {}{}", call, arg.trim()));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_notice_scan_reads_calls_split_over_lines() {
+        let call = "error";
+        let split =
+            format!("toasts\n    .{call}(format!(\n        \"Couldn't: {{err:?}}\"\n    ));");
+        let hits = debug_args(&split);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].starts_with("2: "), "{hits:?}");
+        let fine = format!("log::{call}!(\"{{err:?}}\"); toasts.{call}(\"Saved\");");
+        assert!(debug_args(&fine).is_empty());
+    }
+
+    #[test]
+    fn no_error_notice_shows_debug_text() {
+        let mut found = Vec::new();
+        let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                for hit in debug_args(&text) {
+                    found.push(format!("{}:{hit}", path.display()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "notices show Debug text; use failed_message: {found:#?}"
+        );
+    }
 
     #[test]
     fn snapshot_messages_use_the_name() {

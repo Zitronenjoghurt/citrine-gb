@@ -1,5 +1,5 @@
 use crate::gb::GbModel;
-use crate::gb::bus::CpuBusInterface;
+use crate::gb::bus::{CpuBusInterface, HaltedRun};
 use crate::gb::ic::ICInterface;
 use crate::instructions::{Cond, Instruction, R8, R16, R16Mem, R16Stk};
 use crate::utils::bit::{
@@ -19,6 +19,41 @@ impl<T: CpuBusInterface + ICInterface + crate::debug::DebuggerInterface> Bus for
 
 const SPEED_SWITCH_HALT_CYCLES: u32 = 0x20000 / 4;
 const HALT_SAMPLE_DOT: u8 = 2;
+
+macro_rules! by_opcode {
+    ($cpu:expr, $bus:expr, $decode:path $(, $special:literal => $body:expr)?) => {
+        by_opcode!(@arms $cpu, $bus, $decode; $($special => $body)?;
+            0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08 0x09 0x0A 0x0B 0x0C 0x0D 0x0E 0x0F
+            0x10 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18 0x19 0x1A 0x1B 0x1C 0x1D 0x1E 0x1F
+            0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27 0x28 0x29 0x2A 0x2B 0x2C 0x2D 0x2E 0x2F
+            0x30 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38 0x39 0x3A 0x3B 0x3C 0x3D 0x3E 0x3F
+            0x40 0x41 0x42 0x43 0x44 0x45 0x46 0x47 0x48 0x49 0x4A 0x4B 0x4C 0x4D 0x4E 0x4F
+            0x50 0x51 0x52 0x53 0x54 0x55 0x56 0x57 0x58 0x59 0x5A 0x5B 0x5C 0x5D 0x5E 0x5F
+            0x60 0x61 0x62 0x63 0x64 0x65 0x66 0x67 0x68 0x69 0x6A 0x6B 0x6C 0x6D 0x6E 0x6F
+            0x70 0x71 0x72 0x73 0x74 0x75 0x76 0x77 0x78 0x79 0x7A 0x7B 0x7C 0x7D 0x7E 0x7F
+            0x80 0x81 0x82 0x83 0x84 0x85 0x86 0x87 0x88 0x89 0x8A 0x8B 0x8C 0x8D 0x8E 0x8F
+            0x90 0x91 0x92 0x93 0x94 0x95 0x96 0x97 0x98 0x99 0x9A 0x9B 0x9C 0x9D 0x9E 0x9F
+            0xA0 0xA1 0xA2 0xA3 0xA4 0xA5 0xA6 0xA7 0xA8 0xA9 0xAA 0xAB 0xAC 0xAD 0xAE 0xAF
+            0xB0 0xB1 0xB2 0xB3 0xB4 0xB5 0xB6 0xB7 0xB8 0xB9 0xBA 0xBB 0xBC 0xBD 0xBE 0xBF
+            0xC0 0xC1 0xC2 0xC3 0xC4 0xC5 0xC6 0xC7 0xC8 0xC9 0xCA 0xCB 0xCC 0xCD 0xCE 0xCF
+            0xD0 0xD1 0xD2 0xD3 0xD4 0xD5 0xD6 0xD7 0xD8 0xD9 0xDA 0xDB 0xDC 0xDD 0xDE 0xDF
+            0xE0 0xE1 0xE2 0xE3 0xE4 0xE5 0xE6 0xE7 0xE8 0xE9 0xEA 0xEB 0xEC 0xED 0xEE 0xEF
+            0xF0 0xF1 0xF2 0xF3 0xF4 0xF5 0xF6 0xF7 0xF8 0xF9 0xFA 0xFB 0xFC 0xFD 0xFE 0xFF
+        )
+    };
+    (@arms $cpu:expr, $bus:expr, $decode:path; $($special:literal => $body:expr)?; $($opcode:literal)*) => {
+        match $cpu.ir {
+            $($special => $body,)?
+            $(
+                #[allow(unreachable_patterns)]
+                $opcode => (
+                    $cpu.execute($bus, const { $decode($opcode) }),
+                    const { $decode($opcode).may_halt() },
+                ),
+            )*
+        }
+    };
+}
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -118,42 +153,179 @@ impl Cpu {
         }
     }
 
+    fn halted_cycles<B: Bus, const BOUNDED: bool>(&mut self, bus: &mut B, budget: u32) {
+        let mut left = budget;
+        if !B::LINKED {
+            loop {
+                let mut skip = self.speed_switch_halt == 0 && (!BOUNDED || left > 1);
+                if self.speed_switch_halt == 0 {
+                    match bus.run_halted::<BOUNDED>(&mut left, HALT_SAMPLE_DOT, self.model.is_cgb())
+                    {
+                        HaltedRun::Unhandled => {}
+                        HaltedRun::Noisy | HaltedRun::Plugged => skip = false,
+                        HaltedRun::Woke => {
+                            self.halted = false;
+                            bus.halt_ended();
+                            return;
+                        }
+                        HaltedRun::Stopped => return,
+                    }
+                }
+                if skip {
+                    let skipped = bus.skip_halted(left - 1);
+                    if BOUNDED {
+                        left -= skipped;
+                    }
+                }
+                self.halted_cycle(bus);
+                if BOUNDED {
+                    left = left.saturating_sub(1);
+                }
+                if !self.halted || (BOUNDED && left == 0) || !bus.keep_halting() {
+                    return;
+                }
+            }
+        }
+        let mut plugged = false;
+        loop {
+            let mut skip = self.speed_switch_halt == 0 && (!BOUNDED || left > 1) && !plugged;
+            if skip {
+                match bus.run_halted::<BOUNDED>(&mut left, HALT_SAMPLE_DOT, self.model.is_cgb()) {
+                    HaltedRun::Unhandled => {}
+                    HaltedRun::Noisy => skip = false,
+                    HaltedRun::Plugged => {
+                        skip = false;
+                        plugged = true;
+                    }
+                    HaltedRun::Woke => {
+                        self.halted = false;
+                        bus.halt_ended();
+                        return;
+                    }
+                    HaltedRun::Stopped => return,
+                }
+            }
+            if skip {
+                let skipped = bus.skip_halted(left - 1);
+                if BOUNDED {
+                    left -= skipped;
+                }
+            }
+            self.halted_cycle(bus);
+            if BOUNDED {
+                left = left.saturating_sub(1);
+            }
+            if !self.halted || (BOUNDED && left == 0) || !bus.keep_halting() {
+                return;
+            }
+        }
+    }
+
+    fn halted_cycle<B: Bus>(&mut self, bus: &mut B) {
+        let pending = if !B::LINKED {
+            let pending_before = bus.has_pending_interrupt();
+            let pending = bus
+                .cycle_halted(HALT_SAMPLE_DOT)
+                .unwrap_or_else(|| bus.has_pending_interrupt());
+            if self.model.is_cgb() {
+                pending_before
+            } else {
+                pending
+            }
+        } else if self.model.is_cgb() {
+            let pending_before = bus.has_pending_interrupt();
+            bus.cycle_halted(HALT_SAMPLE_DOT);
+            pending_before
+        } else {
+            bus.cycle_halted(HALT_SAMPLE_DOT)
+                .unwrap_or_else(|| bus.has_pending_interrupt())
+        };
+        if self.speed_switch_halt > 0 {
+            self.speed_switch_halt -= 1;
+            if self.speed_switch_halt == 0 {
+                self.halted = false;
+            }
+        }
+        if pending {
+            self.halted = false;
+            self.speed_switch_halt = 0;
+        }
+        if !self.halted {
+            bus.halt_ended();
+        }
+    }
+
     pub fn step(&mut self, bus: &mut impl Bus) {
+        self.step_halting(bus, 1);
+    }
+
+    pub fn step_halting(&mut self, bus: &mut impl Bus, budget: u32) {
+        self.step_inline(bus, budget);
+    }
+
+    pub fn run_until<B: Bus>(&mut self, bus: &mut B, mut done: impl FnMut(&mut B, bool) -> bool) {
+        loop {
+            if self.invalid_opcode {
+                bus.cycle();
+            } else if self.halted {
+                self.halted_cycles::<B, false>(bus, u32::MAX);
+            } else {
+                loop {
+                    let may_halt = self.run_instruction::<false>(bus);
+                    if may_halt && (self.halted || self.invalid_opcode) {
+                        break;
+                    }
+                    if done(bus, !may_halt) {
+                        return;
+                    }
+                }
+            }
+            if done(bus, false) {
+                return;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn step_inline(&mut self, bus: &mut impl Bus, budget: u32) {
         if self.invalid_opcode {
             bus.cycle();
             return;
         }
 
         if self.halted {
-            let pending = bus
-                .cycle_halted(HALT_SAMPLE_DOT)
-                .unwrap_or_else(|| bus.has_pending_interrupt());
-            if self.speed_switch_halt > 0 {
-                self.speed_switch_halt -= 1;
-                if self.speed_switch_halt == 0 {
-                    self.halted = false;
-                }
-            }
-            if pending {
-                // ToDo: Halt bug => https://gbdev.io/pandocs/halt.html#halt-bug
-                if self.speed_switch_halt > 0 {
-                    bus.cycle_halted(HALT_SAMPLE_DOT);
-                }
-                self.halted = false;
-                self.speed_switch_halt = 0;
-            }
-            if !self.halted {
-                bus.halt_ended();
-            }
+            self.halted_cycles::<_, true>(bus, budget);
             return;
         }
 
+        self.run_instruction::<true>(bus);
+    }
+
+    #[inline(always)]
+    fn run_instruction<const SERVICE_HDMA: bool>(&mut self, bus: &mut impl Bus) -> bool {
         self.interrupt_handler(bus);
 
         #[cfg(feature = "debug")]
         bus.on_instruction(self);
 
-        match self.decode(bus) {
+        let (fetch_next, may_halt) = by_opcode!(self, bus, Instruction::decode, 0xCB => {
+            self.fetch(bus);
+            by_opcode!(self, bus, Instruction::decode_prefixed)
+        });
+        if fetch_next {
+            self.fetch(bus);
+            if SERVICE_HDMA {
+                bus.service_hdma();
+            }
+        } else if SERVICE_HDMA && !may_halt {
+            bus.service_hdma();
+        }
+        may_halt
+    }
+
+    #[inline(always)]
+    fn execute<B: Bus>(&mut self, bus: &mut B, instruction: Instruction) -> bool {
+        match instruction {
             Instruction::NOP => {}
             Instruction::LD_rr_nn(r16) => self.ld_rr_nn(bus, r16),
             Instruction::LD_rr_A(r16mem) => self.ld_rr_a(bus, r16mem),
@@ -164,6 +336,9 @@ impl Cpu {
             Instruction::ADD_HL_rr(r16) => self.add_hl_rr(bus, r16),
             Instruction::INC_r(r8) => self.inc_r(bus, r8),
             Instruction::DEC_r(r8) => self.dec_r(bus, r8),
+            Instruction::LD_r_n(r8) if !matches!(r8, R8::HL) => {
+                return self.operand_then_fetch(bus, |cpu, bus, value| cpu.set_r8(bus, r8, value));
+            }
             Instruction::LD_r_n(r8) => self.ld_r_n(bus, r8),
             Instruction::RLCA => self.rlca(),
             Instruction::RRCA => self.rrca(),
@@ -173,9 +348,19 @@ impl Cpu {
             Instruction::CPL => self.cpl(),
             Instruction::SCF => self.scf(),
             Instruction::CCF => self.ccf(),
-            Instruction::JR_n => self.jr_n(bus),
-            Instruction::JR_c_n(cond) => self.jr_c_n(bus, cond),
-            Instruction::STOP => self.stop(bus),
+            Instruction::JR_n => return self.jr_then_fetch(bus),
+            Instruction::JR_c_n(cond) if B::LINKED => self.jr_c_n(bus, cond),
+            Instruction::JR_c_n(cond) => {
+                if !self.f.cond_true(cond) {
+                    return self.operand_then_fetch(bus, |_, _, _| {});
+                }
+                return self.jr_then_fetch(bus);
+            }
+            Instruction::STOP => {
+                self.stop(bus);
+                self.fetch_serviced(bus);
+                return false;
+            }
             Instruction::HALT | Instruction::LD_r_r(R8::HL, R8::HL) => {
                 self.fetch(bus);
                 if bus.has_pending_interrupt() {
@@ -184,7 +369,7 @@ impl Cpu {
                     self.halted = true;
                 }
                 bus.service_hdma();
-                return;
+                return false;
             }
             Instruction::LD_r_r(dest, src) => self.ld_r_r(bus, dest, src),
             Instruction::ADD_r(r8) => self.add_r(bus, r8),
@@ -195,19 +380,41 @@ impl Cpu {
             Instruction::XOR_r(r8) => self.xor_r(bus, r8),
             Instruction::OR_r(r8) => self.or_r(bus, r8),
             Instruction::CP_r(r8) => self.cp_r(bus, r8),
-            Instruction::ADD_n => self.add_n(bus),
-            Instruction::ADC_n => self.adc_n(bus),
-            Instruction::SUB_n => self.sub_n(bus),
-            Instruction::SBC_n => self.sbc_n(bus),
-            Instruction::AND_n => self.and_n(bus),
-            Instruction::XOR_n => self.xor_n(bus),
-            Instruction::OR_n => self.or_n(bus),
-            Instruction::CP_n => self.cp_n(bus),
-            Instruction::POP(stk) => self.pop_rr(bus, stk),
+            Instruction::ADD_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.add_a(n)),
+            Instruction::ADC_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.adc_a(n)),
+            Instruction::SUB_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.sub_a(n)),
+            Instruction::SBC_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.sbc_a(n)),
+            Instruction::AND_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.and_a(n)),
+            Instruction::XOR_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.xor_a(n)),
+            Instruction::OR_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.or_a(n)),
+            Instruction::CP_n => return self.operand_then_fetch(bus, |cpu, _, n| cpu.cp_a(n)),
+            Instruction::POP(stk) if B::LINKED => self.pop_rr(bus, stk),
+            Instruction::POP(stk) => {
+                let value = self.pop_word_and_fetch(bus);
+                self.set_r16stk(stk, value);
+                return false;
+            }
             Instruction::PUSH(stk) => self.push_rr(bus, stk),
-            Instruction::RET => self.ret(bus),
-            Instruction::RETI => self.reti(bus),
-            Instruction::RET_c(cond) => self.ret_c(bus, cond),
+            Instruction::RET if B::LINKED => self.ret(bus),
+            Instruction::RET => {
+                self.return_and_fetch(bus);
+                return false;
+            }
+            Instruction::RETI if B::LINKED => self.reti(bus),
+            Instruction::RETI => {
+                self.return_and_fetch(bus);
+                self.ime = true;
+                self.ime_next = true;
+                return false;
+            }
+            Instruction::RET_c(cond) if B::LINKED => self.ret_c(bus, cond),
+            Instruction::RET_c(cond) => {
+                bus.cycle();
+                if self.f.cond_true(cond) {
+                    self.return_and_fetch(bus);
+                    return false;
+                }
+            }
             Instruction::JP_nn => self.jump_nn(bus),
             Instruction::JP_c_nn(cond) => self.jump_c_nn(bus, cond),
             Instruction::JP_HL => self.jump_hl(),
@@ -239,9 +446,18 @@ impl Cpu {
             Instruction::BIT_r(index, r8) => self.bit_r(bus, r8, index),
             Instruction::RES_r(index, r8) => self.res_r(bus, r8, index),
             Instruction::SET_r(index, r8) => self.set_r(bus, r8, index),
-            Instruction::Invalid(_) => self.invalid_opcode = true,
+            Instruction::Invalid(_) => {
+                self.invalid_opcode = true;
+                self.fetch_serviced(bus);
+                return false;
+            }
         }
+        true
+    }
 
+    #[cold]
+    #[inline(never)]
+    fn fetch_serviced(&mut self, bus: &mut impl Bus) {
         self.fetch(bus);
         bus.service_hdma();
     }
@@ -306,25 +522,63 @@ impl Cpu {
         }
     }
 
-    fn interrupt_handler(&mut self, bus: &mut impl Bus) {
-        if self.ime && bus.has_pending_interrupt() {
-            self.ime = false;
-            self.ime_next = false;
+    #[inline(never)]
+    fn dispatch_interrupt(&mut self, bus: &mut impl Bus) {
+        if self.dispatch_interrupt_quiet(bus) {
+            return;
+        }
+        self.dispatch_interrupt_open(bus);
+    }
 
-            bus.cycle();
-            bus.cycle_with_address(self.sp);
+    #[inline(never)]
+    fn dispatch_interrupt_open(&mut self, bus: &mut impl Bus) {
+        self.ime = false;
+        self.ime_next = false;
 
-            let return_address = self.pc.wrapping_sub(1);
+        bus.cycle();
+        bus.cycle_with_address(self.sp);
+
+        let return_address = self.pc.wrapping_sub(1);
+        let enabled = if bus.push_quiet(self.sp, return_address) {
+            self.sp = self.sp.wrapping_sub(2);
+            bus.enabled_interrupts()
+        } else {
             self.push(bus, hi(return_address));
-
-            let vector = bus
-                .take_interrupt()
-                .map_or(0x0000, |interrupt| interrupt.vector());
-
+            let enabled = bus.enabled_interrupts();
             self.push(bus, lo(return_address));
-            self.pc = vector;
+            enabled
+        };
+        let interrupt = bus.next_interrupt(enabled);
+        self.pc = interrupt.map_or(0x0000, |interrupt| interrupt.vector());
+        if let Some(interrupt) = interrupt {
+            bus.acknowledge_in_next_cycle(interrupt);
+        }
 
-            self.fetch(bus);
+        self.fetch(bus);
+    }
+
+    #[inline(always)]
+    fn dispatch_interrupt_quiet(&mut self, bus: &mut impl Bus) -> bool {
+        let Some((vector, ir)) = bus.dispatch_quiet(self.sp, self.pc.wrapping_sub(1)) else {
+            return false;
+        };
+        self.ime = false;
+        self.ime_next = false;
+        self.sp = self.sp.wrapping_sub(2);
+        #[cfg(feature = "debug")]
+        bus.on_fetch(vector);
+        self.pc = vector.wrapping_add(1);
+        self.ir = ir;
+        true
+    }
+
+    #[inline(always)]
+    fn interrupt_handler(&mut self, bus: &mut impl Bus) {
+        if self.ime {
+            if bus.has_pending_interrupt() {
+                self.dispatch_interrupt(bus);
+            }
+            return;
         }
 
         // EI is delayed by one instruction
@@ -347,12 +601,73 @@ impl Cpu {
         byte
     }
 
-    pub fn read_program_lh(&mut self, bus: &mut impl Bus) -> (u8, u8) {
+    #[inline(always)]
+    pub fn read_program_lh<B: Bus>(&mut self, bus: &mut B) -> (u8, u8) {
+        if B::LINKED {
+            return self.read_program_pair(bus);
+        }
+        if let Some(value) = bus.read_pair_quiet(self.pc) {
+            self.pc = self.pc.wrapping_add(2);
+            return (lo(value), hi(value));
+        }
         (self.read_program(bus), self.read_program(bus))
     }
 
-    pub fn read_program_nn(&mut self, bus: &mut impl Bus) -> u16 {
+    #[inline(always)]
+    pub fn read_program_nn<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        if B::LINKED {
+            let (low, high) = self.read_program_pair(bus);
+            return word(low, high);
+        }
+        if let Some(value) = bus.read_pair_quiet(self.pc) {
+            self.pc = self.pc.wrapping_add(2);
+            return value;
+        }
+        self.read_program_nn_open(bus)
+    }
+
+    #[inline(never)]
+    fn read_program_nn_open(&mut self, bus: &mut impl Bus) -> u16 {
         word(self.read_program(bus), self.read_program(bus))
+    }
+
+    #[inline(always)]
+    fn read_program_pair(&mut self, bus: &mut impl Bus) -> (u8, u8) {
+        let pair = bus.read_pair_open(self.pc);
+        self.pc = self.pc.wrapping_add(2);
+        pair
+    }
+
+    #[inline(always)]
+    fn operand_then_fetch<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        apply: impl FnOnce(&mut Self, &mut B, u8),
+    ) -> bool {
+        if let Some(pair) = bus.read_pair_quiet(self.pc) {
+            apply(self, bus, lo(pair));
+            #[cfg(feature = "debug")]
+            bus.on_fetch(self.pc.wrapping_add(1));
+            self.ir = hi(pair);
+            self.pc = self.pc.wrapping_add(2);
+            return false;
+        }
+        let value = self.read_program(bus);
+        apply(self, bus, value);
+        true
+    }
+
+    #[inline(always)]
+    fn jr_then_fetch(&mut self, bus: &mut impl Bus) -> bool {
+        if let Some((target, ir)) = bus.jump_relative_quiet(self.pc) {
+            #[cfg(feature = "debug")]
+            bus.on_fetch(target);
+            self.pc = target.wrapping_add(1);
+            self.ir = ir;
+            return false;
+        }
+        self.jr_n(bus);
+        true
     }
 }
 
@@ -364,7 +679,96 @@ impl Cpu {
         value
     }
 
-    pub fn pop_word(&mut self, bus: &mut impl Bus) -> u16 {
+    #[inline(never)]
+    pub fn pop_word<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        if B::LINKED {
+            let (low, high) = bus.pop_pair_open(self.sp);
+            self.sp = self.sp.wrapping_add(2);
+            return word(low, high);
+        }
+        if let Some(value) = bus.pop_quiet(self.sp) {
+            self.sp = self.sp.wrapping_add(2);
+            return value;
+        }
+        self.pop_word_open(bus)
+    }
+
+    #[inline(never)]
+    fn pop_word_and_fetch(&mut self, bus: &mut impl Bus) -> u16 {
+        if let Some((value, ir)) = bus.pop_and_fetch_quiet(self.sp, self.pc) {
+            self.sp = self.sp.wrapping_add(2);
+            let Some(ir) = ir else {
+                return self.fetch_returning(bus, value);
+            };
+            #[cfg(feature = "debug")]
+            bus.on_fetch(self.pc);
+            self.ir = ir;
+            self.pc = self.pc.wrapping_add(1);
+            return value;
+        }
+        if let Some(value) = bus.pop_quiet(self.sp) {
+            self.sp = self.sp.wrapping_add(2);
+            return self.fetch_returning(bus, value);
+        }
+        self.pop_word_open_then_fetch(bus)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fetch_returning(&mut self, bus: &mut impl Bus, value: u16) -> u16 {
+        self.fetch(bus);
+        value
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_word_open_then_fetch(&mut self, bus: &mut impl Bus) -> u16 {
+        let low = bus.read_increment(self.sp);
+        self.sp = self.sp.wrapping_add(1);
+        let value = word(low, self.pop(bus));
+        self.fetch(bus);
+        value
+    }
+
+    #[inline(never)]
+    fn return_and_fetch(&mut self, bus: &mut impl Bus) {
+        if let Some((address, ir)) = bus.return_and_fetch_quiet(self.sp) {
+            self.sp = self.sp.wrapping_add(2);
+            let Some(ir) = ir else {
+                return self.fetch_at(bus, address);
+            };
+            #[cfg(feature = "debug")]
+            bus.on_fetch(address);
+            self.pc = address.wrapping_add(1);
+            self.ir = ir;
+            return;
+        }
+        self.return_open_then_fetch(bus);
+    }
+
+    #[inline(never)]
+    fn return_open_then_fetch(&mut self, bus: &mut impl Bus) {
+        let address = if let Some(value) = bus.pop_quiet(self.sp) {
+            self.sp = self.sp.wrapping_add(2);
+            value
+        } else {
+            self.pop_word_open(bus)
+        };
+        bus.cycle();
+        self.pc = address;
+        self.fetch(bus);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fetch_at(&mut self, bus: &mut impl Bus, address: u16) {
+        self.pc = address;
+        self.fetch(bus);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_word_open(&mut self, bus: &mut impl Bus) -> u16 {
         let low = bus.read_increment(self.sp);
         self.sp = self.sp.wrapping_add(1);
         word(low, self.pop(bus))
@@ -375,7 +779,23 @@ impl Cpu {
         bus.write(self.sp, value);
     }
 
-    pub fn push_word(&mut self, bus: &mut impl Bus, value: u16) {
+    #[inline(never)]
+    pub fn push_word<B: Bus>(&mut self, bus: &mut B, value: u16) {
+        if B::LINKED {
+            bus.push_pair_open(self.sp, value);
+            self.sp = self.sp.wrapping_sub(2);
+            return;
+        }
+        if bus.push_quiet(self.sp, value) {
+            self.sp = self.sp.wrapping_sub(2);
+            return;
+        }
+        self.push_word_open(bus, value);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn push_word_open(&mut self, bus: &mut impl Bus, value: u16) {
         self.push(bus, hi(value));
         self.push(bus, lo(value));
     }
@@ -383,6 +803,7 @@ impl Cpu {
 
 // Instruction execution
 impl Cpu {
+    #[inline(always)]
     pub fn ld_rr_nn(&mut self, bus: &mut impl Bus, r16: R16) {
         let (low, high) = self.read_program_lh(bus);
         self.set_r16_lh(r16, low, high);
@@ -393,6 +814,7 @@ impl Cpu {
         bus.write(address, self.a);
     }
 
+    #[inline(always)]
     pub fn ld_a_rr(&mut self, bus: &mut impl Bus, r16_mem: R16Mem) {
         let address = self.get_r16mem(r16_mem);
         self.a = match r16_mem {
@@ -418,6 +840,7 @@ impl Cpu {
         self.set_r16_nn(r16, self.get_r16_nn(r16).wrapping_sub(1));
     }
 
+    #[inline(always)]
     pub fn add_hl_rr(&mut self, bus: &mut impl Bus, r16: R16) {
         bus.cycle();
 
@@ -444,6 +867,7 @@ impl Cpu {
         self.f.half_carry = hc;
     }
 
+    #[inline(always)]
     pub fn ld_r_n(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.read_program(bus);
         self.set_r8(bus, r8, value);
@@ -532,25 +956,40 @@ impl Cpu {
         self.f.half_carry = false;
     }
 
+    #[inline(always)]
     pub fn jr_n(&mut self, bus: &mut impl Bus) {
-        let offset = self.read_program(bus) as i8;
-
-        bus.cycle();
+        let offset = if let Some(offset) = bus.read_program_byte_and_cycle(self.pc) {
+            self.pc = self.pc.wrapping_add(1);
+            offset as i8
+        } else {
+            let offset = self.read_program(bus) as i8;
+            bus.cycle();
+            offset
+        };
         let (new_pc, _, _) = add_word_signed_byte(self.pc, offset);
 
         self.pc = new_pc;
     }
 
-    pub fn jr_c_n(&mut self, bus: &mut impl Bus, cond: Cond) {
-        let offset = self.read_program(bus) as i8;
-
+    #[inline(always)]
+    pub fn jr_c_n<B: Bus>(&mut self, bus: &mut B, cond: Cond) {
+        if B::LINKED {
+            let offset = self.read_program(bus) as i8;
+            if self.f.cond_true(cond) {
+                bus.cycle();
+                let (new_pc, _, _) = add_word_signed_byte(self.pc, offset);
+                self.pc = new_pc;
+            }
+            return;
+        }
         if self.f.cond_true(cond) {
-            bus.cycle();
-            let (new_pc, _, _) = add_word_signed_byte(self.pc, offset);
-            self.pc = new_pc;
+            self.jr_n(bus);
+        } else {
+            self.read_program(bus);
         }
     }
 
+    #[inline(always)]
     pub fn ld_r_r(&mut self, bus: &mut impl Bus, dest: R8, src: R8) {
         let value = self.get_r8(bus, src);
         self.set_r8(bus, dest, value);
@@ -586,6 +1025,7 @@ impl Cpu {
         self.xor_a(value);
     }
 
+    #[inline(always)]
     pub fn or_r(&mut self, bus: &mut impl Bus, r8: R8) {
         let value = self.get_r8(bus, r8);
         self.or_a(value);
@@ -631,16 +1071,19 @@ impl Cpu {
         self.or_a(value);
     }
 
+    #[inline(always)]
     pub fn cp_n(&mut self, bus: &mut impl Bus) {
         let value = self.read_program(bus);
         self.cp_a(value);
     }
 
+    #[inline(always)]
     pub fn pop_rr(&mut self, bus: &mut impl Bus, r16stk: R16Stk) {
         let value = self.pop_word(bus);
         self.set_r16stk(r16stk, value);
     }
 
+    #[inline(always)]
     pub fn push_rr(&mut self, bus: &mut impl Bus, r16stk: R16Stk) {
         // Internal cycle: CPU computes decremented SP before first write
         bus.cycle_with_address(self.sp);
@@ -649,10 +1092,11 @@ impl Cpu {
         self.push_word(bus, value);
     }
 
+    #[inline(always)]
     pub fn ret(&mut self, bus: &mut impl Bus) {
         let address = self.pop_word(bus);
-
         bus.cycle();
+
         self.pc = address;
     }
 
@@ -662,6 +1106,7 @@ impl Cpu {
         self.ime_next = true;
     }
 
+    #[inline(always)]
     pub fn ret_c(&mut self, bus: &mut impl Bus, cond: Cond) {
         bus.cycle();
 
@@ -670,6 +1115,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     pub fn jump_nn(&mut self, bus: &mut impl Bus) {
         let address = self.read_program_nn(bus);
 
@@ -677,6 +1123,7 @@ impl Cpu {
         self.pc = address;
     }
 
+    #[inline(always)]
     pub fn jump_c_nn(&mut self, bus: &mut impl Bus, cond: Cond) {
         let address = self.read_program_nn(bus);
 
@@ -690,6 +1137,7 @@ impl Cpu {
         self.pc = self.get_r16_nn(R16::HL);
     }
 
+    #[inline(always)]
     pub fn call_nn(&mut self, bus: &mut impl Bus) {
         let address = self.read_program_nn(bus);
 
@@ -723,22 +1171,26 @@ impl Cpu {
         self.a = bus.read(word(self.c, 0xFF));
     }
 
+    #[inline(always)]
     pub fn ldh_n_a(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         bus.write(word(address_low, 0xFF), self.a);
     }
 
+    #[inline(always)]
     pub fn ldh_a_n(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         self.a = bus.read(word(address_low, 0xFF));
     }
 
+    #[inline(always)]
     pub fn ld_nn_a(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         let address_high = self.read_program(bus);
         bus.write(word(address_low, address_high), self.a);
     }
 
+    #[inline(always)]
     pub fn ld_a_nn(&mut self, bus: &mut impl Bus) {
         let address_low = self.read_program(bus);
         let address_high = self.read_program(bus);
@@ -952,6 +1404,7 @@ impl Cpu {
 
 // Register helpers
 impl Cpu {
+    #[inline(always)]
     pub fn get_r8(&self, bus: &mut impl Bus, r8: R8) -> u8 {
         match r8 {
             R8::B => self.b,
@@ -965,6 +1418,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     pub fn set_r8(&mut self, bus: &mut impl Bus, r8: R8, value: u8) {
         match r8 {
             R8::B => self.b = value,
@@ -1050,6 +1504,7 @@ impl Cpu {
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[repr(C)]
 pub struct Flags {
     /// Z = Set to true if the result of the operation is equal to 0
     pub zero: bool,
@@ -1072,22 +1527,222 @@ impl Flags {
     }
 }
 
+static FLAGS_BY_HIGH_NIBBLE: [Flags; 16] = {
+    let mut table = [Flags {
+        zero: false,
+        subtract: false,
+        half_carry: false,
+        carry: false,
+    }; 16];
+    let mut nibble = 0;
+    while nibble < 16 {
+        table[nibble] = Flags {
+            zero: nibble & 0b1000 != 0,
+            subtract: nibble & 0b0100 != 0,
+            half_carry: nibble & 0b0010 != 0,
+            carry: nibble & 0b0001 != 0,
+        };
+        nibble += 1;
+    }
+    table
+};
+
 impl From<Flags> for u8 {
     fn from(value: Flags) -> Self {
-        (if value.zero { 0b1000_0000 } else { 0 })
-            | (if value.subtract { 0b0100_0000 } else { 0 })
-            | (if value.half_carry { 0b0010_0000 } else { 0 })
-            | (if value.carry { 0b0001_0000 } else { 0 })
+        let bytes = u32::from_le_bytes([
+            value.zero.into(),
+            value.subtract.into(),
+            value.half_carry.into(),
+            value.carry.into(),
+        ]);
+        (bytes.wrapping_mul(0x8040_2010) >> 24) as u8
     }
 }
 
 impl From<u8> for Flags {
     fn from(value: u8) -> Self {
-        Self {
-            zero: (value & 0b1000_0000) != 0,
-            subtract: (value & 0b0100_0000) != 0,
-            half_carry: (value & 0b0010_0000) != 0,
-            carry: (value & 0b0001_0000) != 0,
+        FLAGS_BY_HIGH_NIBBLE[usize::from(value >> 4)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gb::bus::CpuBusInterface;
+    use crate::gb::cpu::Cpu;
+    use crate::gb::ic::ICInterface;
+    use crate::gb::ic::Interrupt;
+
+    struct WakeBus {
+        mem: Vec<u8>,
+        cycles: u32,
+        raised_in_cycle: u32,
+    }
+
+    impl WakeBus {
+        fn raised(&self) -> bool {
+            self.cycles >= self.raised_in_cycle
         }
+    }
+
+    impl CpuBusInterface for WakeBus {
+        fn cycle(&mut self) {
+            self.cycles += 1;
+        }
+
+        fn cycle_halted(&mut self, _sample_dot: u8) -> Option<bool> {
+            self.cycles += 1;
+            Some(self.raised())
+        }
+
+        fn read(&mut self, addr: u16) -> u8 {
+            self.mem[addr as usize]
+        }
+
+        fn write(&mut self, addr: u16, value: u8) {
+            self.mem[addr as usize] = value;
+        }
+    }
+
+    impl ICInterface for WakeBus {
+        fn request_interrupt(&mut self, _interrupt: Interrupt) {}
+
+        fn has_pending_interrupt(&self) -> bool {
+            self.raised()
+        }
+    }
+
+    #[cfg(feature = "debug")]
+    impl crate::debug::DebuggerInterface for WakeBus {}
+
+    fn halted_steps_until_wake(model: GbModel) -> u32 {
+        let mut bus = WakeBus {
+            mem: vec![0; 0x10000],
+            cycles: 0,
+            raised_in_cycle: 4,
+        };
+        let mut cpu = Cpu::new_with_boot_rom(model);
+        cpu.halted = true;
+        let mut steps = 0;
+        while cpu.halted {
+            cpu.step(&mut bus);
+            steps += 1;
+            assert!(steps < 100);
+        }
+        steps
+    }
+
+    #[test]
+    fn dmg_wakes_in_the_cycle_an_interrupt_is_raised() {
+        assert_eq!(halted_steps_until_wake(GbModel::Dmg), 4);
+    }
+
+    #[test]
+    fn cgb_wakes_one_cycle_after_an_interrupt_is_raised() {
+        assert_eq!(halted_steps_until_wake(GbModel::Cgb), 5);
+    }
+
+    fn halted_cycles_until_wake(speed_switch_halt: u32) -> u32 {
+        let mut bus = WakeBus {
+            mem: vec![0; 0x10000],
+            cycles: 0,
+            raised_in_cycle: 4,
+        };
+        let mut cpu = Cpu::new_with_boot_rom(GbModel::Cgb);
+        cpu.halted = true;
+        cpu.speed_switch_halt = speed_switch_halt;
+        while cpu.halted {
+            cpu.step(&mut bus);
+            assert!(bus.cycles < 100);
+        }
+        bus.cycles
+    }
+
+    #[test]
+    fn an_interrupt_ends_the_speed_switch_halt_like_a_halt() {
+        assert_eq!(
+            halted_cycles_until_wake(0x8000),
+            halted_cycles_until_wake(0)
+        );
+    }
+
+    #[test]
+    fn flag_bytes_round_trip_through_every_value() {
+        for value in 0..=u8::MAX {
+            let flags = Flags::from(value);
+            assert_eq!(flags.zero, value & 0x80 != 0);
+            assert_eq!(flags.subtract, value & 0x40 != 0);
+            assert_eq!(flags.half_carry, value & 0x20 != 0);
+            assert_eq!(flags.carry, value & 0x10 != 0);
+            assert_eq!(u8::from(flags), value & 0xF0);
+        }
+    }
+
+    struct HaltBus {
+        mem: Vec<u8>,
+        pending: bool,
+    }
+
+    impl HaltBus {
+        fn new(pending: bool) -> Self {
+            Self {
+                mem: vec![0; 0x10000],
+                pending,
+            }
+        }
+    }
+
+    impl CpuBusInterface for HaltBus {
+        fn cycle(&mut self) {}
+
+        fn read(&mut self, addr: u16) -> u8 {
+            self.mem[addr as usize]
+        }
+
+        fn write(&mut self, addr: u16, value: u8) {
+            self.mem[addr as usize] = value;
+        }
+    }
+
+    impl ICInterface for HaltBus {
+        fn request_interrupt(&mut self, _interrupt: Interrupt) {}
+
+        fn has_pending_interrupt(&self) -> bool {
+            self.pending
+        }
+    }
+
+    #[cfg(feature = "debug")]
+    impl crate::debug::DebuggerInterface for HaltBus {}
+
+    fn run(pending: bool) -> Cpu {
+        let mut bus = HaltBus::new(pending);
+        bus.mem[0x0200] = 0x76;
+        bus.mem[0x0201] = 0x3C;
+        bus.mem[0x0202] = 0x00;
+
+        let mut cpu = Cpu::new_dmg(0x01);
+        cpu.a = 0x00;
+        cpu.ime = false;
+        cpu.pc = 0x0201;
+        cpu.ir = 0x76;
+
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        cpu
+    }
+
+    #[test]
+    fn halt_bug_executes_following_opcode_twice() {
+        let cpu = run(true);
+        assert_eq!(cpu.a, 0x02, "INC A after HALT should execute twice");
+        assert!(!cpu.halted);
+    }
+
+    #[test]
+    fn no_halt_bug_without_pending_interrupt() {
+        let cpu = run(false);
+        assert!(cpu.halted, "HALT without a pending interrupt should halt");
     }
 }

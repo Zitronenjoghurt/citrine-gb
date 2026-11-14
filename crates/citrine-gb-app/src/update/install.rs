@@ -216,9 +216,7 @@ pub fn relaunch() {
 
 #[cfg(target_os = "android")]
 fn apk_path() -> anyhow::Result<PathBuf> {
-    let dir = crate::platform::android::data_dir()
-        .context("Citrine couldn't find its data folder.")?
-        .join("updates");
+    let dir = crate::storage::cache_dir().join(crate::storage::UPDATES);
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("citrine-update.apk"))
 }
@@ -248,5 +246,136 @@ fn hand_to_installer(path: &Path) -> anyhow::Result<()> {
 pub fn reopen() {
     if let Ok(path) = apk_path() {
         let _ = hand_to_installer(&path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::tar_gz;
+    use super::{binary_from_tar_gz, binary_from_zip, bundle_of, replace_file};
+    use std::io::Cursor;
+    use std::io::Write;
+    use std::path::Path;
+
+    fn zip_of(dir: &str, name: &str, binary: &[u8]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file(format!("{dir}/CHANGELOG.md"), options)
+            .unwrap();
+        zip.write_all(b"changes").unwrap();
+        zip.start_file(format!("{dir}/{name}"), options).unwrap();
+        zip.write_all(binary).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn the_app_finds_its_binary_in_each_archive() {
+        let tar = tar_gz("citrine-v0.11.0-linux-x86_64", "citrine", b"elf");
+        assert_eq!(binary_from_tar_gz(&tar, "citrine").unwrap(), b"elf");
+        let nested = tar_gz("a/b", "citrine", b"elf");
+        assert!(binary_from_tar_gz(&nested, "citrine").is_err());
+        let zip = zip_of("citrine-v0.11.0-windows-x86_64", "citrine.exe", b"pe");
+        assert_eq!(binary_from_zip(&zip, "citrine.exe").unwrap(), b"pe");
+        assert!(binary_from_zip(&zip, "citrine").is_err());
+        assert!(binary_from_tar_gz(b"junk", "citrine").is_err());
+    }
+
+    #[test]
+    fn the_new_binary_takes_the_old_ones_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("citrine");
+        std::fs::write(&target, b"old").unwrap();
+        replace_file(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!dir.path().join(".citrine-update").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111);
+        }
+    }
+
+    #[test]
+    fn a_mac_update_needs_the_app_bundle() {
+        let bundle = bundle_of(Path::new(
+            "/Applications/Citrine.app/Contents/MacOS/citrine",
+        ))
+        .unwrap();
+        assert_eq!(bundle, Path::new("/Applications/Citrine.app"));
+        assert!(bundle_of(Path::new("/usr/local/bin/citrine")).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_update_swaps_the_whole_bundle() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = |root: &Path, marker: &str| {
+            let app = root.join("Citrine.app");
+            let macos = app.join("Contents/MacOS");
+            std::fs::create_dir_all(&macos).unwrap();
+            std::fs::copy("/usr/bin/true", macos.join("citrine")).unwrap();
+            std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+            std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>citrine</string>
+<key>CFBundleIdentifier</key><string>io.github.zitronenjoghurt.citrine.test</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+            std::fs::write(app.join("Contents/Resources/marker.txt"), marker).unwrap();
+            let signed = Command::new("codesign")
+                .args(["--force", "--deep", "--sign", "-"])
+                .arg(&app)
+                .status()
+                .unwrap();
+            assert!(signed.success());
+            let check = Command::new("codesign")
+                .args(["--verify", "--deep", "--strict", "--verbose=2"])
+                .arg(&app)
+                .output()
+                .unwrap();
+            assert!(
+                check.status.success(),
+                "{}",
+                String::from_utf8_lossy(&check.stderr)
+            );
+            app
+        };
+        let source = dir.path().join("source");
+        bundle(&source, "new");
+        let image = dir.path().join("update.dmg");
+        let made = Command::new("hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-format",
+                "UDZO",
+                "-volname",
+                "Citrine",
+                "-srcfolder",
+            ])
+            .arg(&source)
+            .arg(&image)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let apps = dir.path().join("Applications");
+        let installed = bundle(&apps, "old");
+        super::replace_bundle(&std::fs::read(&image).unwrap(), &installed).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(installed.join("Contents/Resources/marker.txt")).unwrap(),
+            "new"
+        );
+        let left: Vec<_> = std::fs::read_dir(&apps)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["Citrine.app"]);
     }
 }

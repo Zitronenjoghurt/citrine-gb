@@ -1,6 +1,7 @@
 use super::{Client, MAX_OLD_CHATS, db, quota_of};
 use crate::db::{AccountRow, OldRow};
 use crate::now;
+use crate::push::Event;
 use crate::stats::Refused;
 use citrine_gb_net::{
     Account, ChatMessage, ErrorCode, Friend, FriendState, OldChat, OnlineId, Presence, Sealed,
@@ -125,6 +126,9 @@ impl Client {
                 other.id,
                 ServerMsg::Friend(self.friend(&row, FriendState::Incoming)),
             );
+            if fresh {
+                app.notify(other.id, Event::FriendRequest { from: me });
+            }
         }
         Ok(())
     }
@@ -244,6 +248,7 @@ impl Client {
             },
         );
         self.app.hub.send(other.id, ServerMsg::Chat(message));
+        self.app.notify(other.id, Event::Chat { from: me_id });
         Ok(())
     }
 

@@ -1,0 +1,9 @@
+[package]
+name = "citrine-gb-test-roms"
+description = "How every real-ROM test finds its game files, and fails instead of skipping when a run expects them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false

@@ -1,19 +1,22 @@
+use crate::ds::DsTables;
 use crate::game::{Game, Generation, identify};
 use crate::gen3::{self, Growth, Layout, Memory, RegionMaps};
 use crate::matchups::Effect;
 use crate::moves::MoveData;
 use crate::region_map::Marker;
 use crate::rom::{Place, RomTables};
-use crate::state::{Caught, GameState, Gender, Genes, Mon, MoveSlot, Position, Stats, TimeOfDay};
+use crate::state::{
+    Caught, DsGenes, GameState, Gender, Genes, Mon, MoveSlot, Position, Stats, TimeOfDay,
+};
 use crate::wild::WildList;
 use crate::{ReadError, read_live, read_save};
 
 const GEN3_TYPES: [u8; 18] = [
     0, 1, 2, 3, 4, 5, 7, 8, 9, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B,
 ];
-const GEN3_GIFT_EGG: u8 = 0xFD;
-const GEN3_TRADE: u8 = 0xFE;
-const GEN3_EVENT: u8 = 0xFF;
+const GEN3_GIFT_EGG: u16 = 0xFD;
+const GEN3_TRADE: u16 = 0xFE;
+const GEN3_EVENT: u16 = 0xFF;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tables {
@@ -22,12 +25,14 @@ pub enum Tables {
         tables: Box<gen3::RomTables>,
         maps: Option<Box<RegionMaps>>,
     },
+    Ds(Box<DsTables>),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Ram<'a> {
     Gb(&'a [u8]),
     Gba(Memory<'a>),
+    Ds(&'a [u8]),
 }
 
 impl Tables {
@@ -36,6 +41,9 @@ impl Tables {
             return RomTables::load(game, rom)
                 .ok()
                 .map(|tables| Tables::Gb(Box::new(tables)));
+        }
+        if let Some(tables) = DsTables::load(rom) {
+            return Some(Tables::Ds(Box::new(tables)));
         }
         let tables = gen3::RomTables::load(rom).ok()?;
         Some(Tables::Gba {
@@ -48,6 +56,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.game,
             Tables::Gba { tables, .. } => tables.game,
+            Tables::Ds(tables) => tables.game,
         }
     }
 
@@ -58,7 +67,14 @@ impl Tables {
     pub fn gb(&self) -> Option<&RomTables> {
         match self {
             Tables::Gb(tables) => Some(tables),
-            Tables::Gba { .. } => None,
+            Tables::Gba { .. } | Tables::Ds(_) => None,
+        }
+    }
+
+    pub fn ds(&self) -> Option<&DsTables> {
+        match self {
+            Tables::Ds(tables) => Some(tables),
+            Tables::Gb(_) | Tables::Gba { .. } => None,
         }
     }
 
@@ -70,10 +86,11 @@ impl Tables {
                 let layout = Layout::of(game.version).ok_or(ReadError::RomTables)?;
                 Ok(gen3::read_save(battery, layout, game.language)?.to_game_state(tables))
             }
+            Tables::Ds(_) => Err(ReadError::NotRunning),
         }
     }
 
-    pub fn read_live(&self, ram: Ram, battery: &[u8]) -> Result<GameState, ReadError> {
+    pub fn read_live(&mut self, ram: Ram, battery: &[u8]) -> Result<GameState, ReadError> {
         match (self, ram) {
             (Tables::Gb(tables), Ram::Gb(wram)) => read_live(tables, wram, battery),
             (Tables::Gba { tables, .. }, Ram::Gba(memory)) => {
@@ -81,9 +98,8 @@ impl Tables {
                 let layout = Layout::of(game.version).ok_or(ReadError::RomTables)?;
                 Ok(gen3::read_live(memory, layout, game.language)?.to_game_state(tables))
             }
-            (Tables::Gb(_), Ram::Gba(_)) | (Tables::Gba { .. }, Ram::Gb(_)) => {
-                Err(ReadError::NotRunning)
-            }
+            (Tables::Ds(tables), Ram::Ds(main_ram)) => tables.read_live(main_ram),
+            _ => Err(ReadError::NotRunning),
         }
     }
 
@@ -91,6 +107,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.species_name(species),
             Tables::Gba { tables, .. } => tables.species_name(species),
+            Tables::Ds(tables) => tables.species_name(species),
         }
     }
 
@@ -98,6 +115,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.dex_number(species),
             Tables::Gba { tables, .. } => tables.national_number(species),
+            Tables::Ds(tables) => tables.species_name(species).map(|_| species),
         }
     }
 
@@ -105,6 +123,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.species_for_dex(dex),
             Tables::Gba { tables, .. } => tables.species_for_national(dex),
+            Tables::Ds(tables) => tables.species_name(dex).map(|_| dex),
         }
     }
 
@@ -112,6 +131,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.pokedex_size(),
             Tables::Gba { tables, .. } => tables.pokedex_size(),
+            Tables::Ds(tables) => tables.pokedex_size(),
         }
     }
 
@@ -119,6 +139,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.move_name(id),
             Tables::Gba { tables, .. } => tables.move_name(id),
+            Tables::Ds(tables) => tables.move_name(id),
         }
     }
 
@@ -126,6 +147,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.item_name(id),
             Tables::Gba { tables, .. } => tables.item_name(id).map(str::to_owned),
+            Tables::Ds(tables) => tables.item_name(id).map(str::to_owned),
         }
     }
 
@@ -136,6 +158,7 @@ impl Tables {
                 let own = GEN3_TYPES.iter().position(|&gb| gb == id)?;
                 tables.type_name(own as u8)
             }
+            Tables::Ds(tables) => tables.type_name(id),
         }
     }
 
@@ -149,6 +172,7 @@ impl Tables {
                 .base_stats(species)
                 .map(|base| base.types.iter().filter_map(|&id| gb_type(id)).collect())
                 .unwrap_or_default(),
+            Tables::Ds(tables) => tables.species_type_ids(species),
         };
         ids.dedup();
         ids
@@ -158,6 +182,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => mon.stats.or_else(|| tables.mon_stats(mon)),
             Tables::Gba { .. } => mon.stats,
+            Tables::Ds(_) => mon.stats,
         }
     }
 
@@ -167,11 +192,15 @@ impl Tables {
             (Tables::Gba { tables, .. }, Genes::Gba(genes)) => {
                 tables.base_stats(mon.species)?.gender(genes.personality)
             }
-            (Tables::Gba { .. }, Genes::Gb { .. }) => None,
+            (Tables::Ds(tables), _) => tables.gender(mon),
+            (Tables::Gba { .. }, Genes::Gb { .. } | Genes::Ds(_)) => None,
         }
     }
 
     pub fn mon_ability(&self, mon: &Mon) -> Option<&str> {
+        if let (Tables::Ds(tables), Genes::Ds(genes)) = (self, &mon.genes) {
+            return tables.ability_name(genes.ability);
+        }
         let (Tables::Gba { tables, .. }, Genes::Gba(genes)) = (self, &mon.genes) else {
             return None;
         };
@@ -192,6 +221,7 @@ impl Tables {
                 let growth: Growth = tables.base_stats(mon.species)?.growth;
                 Some((growth.exp(mon.level), growth.exp(mon.level + 1)))
             }
+            Tables::Ds(tables) => tables.exp_span(mon),
         }
     }
 
@@ -201,8 +231,12 @@ impl Tables {
             Tables::Gba { maps, .. } => match caught.location {
                 GEN3_GIFT_EGG | GEN3_TRADE => Some(Place::Gift),
                 GEN3_EVENT => Some(Place::Event),
-                section => maps.as_ref()?.section_name(section).map(Place::Landmark),
+                section => maps
+                    .as_ref()?
+                    .section_name(u8::try_from(section).ok()?)
+                    .map(Place::Landmark),
             },
+            Tables::Ds(tables) => tables.caught_place(caught),
         }
     }
 
@@ -212,7 +246,14 @@ impl Tables {
             (Tables::Gba { maps, .. }, Position::Gba(whereabouts)) => {
                 maps.as_ref()?.marker(whereabouts)
             }
-            (Tables::Gb(_), Position::Gba(_)) | (Tables::Gba { .. }, Position::Gb(_)) => None,
+            _ => None,
+        }
+    }
+
+    pub fn position_name(&self, position: &Position) -> Option<&str> {
+        match (self, position) {
+            (Tables::Ds(tables), Position::Ds(spot)) => tables.spot_name(spot),
+            _ => self.marker(position).map(|marker| marker.name),
         }
     }
 
@@ -222,7 +263,8 @@ impl Tables {
             (Tables::Gba { tables, .. }, Position::Gba(whereabouts)) => {
                 tables.wild(whereabouts.location)
             }
-            (Tables::Gb(_), Position::Gba(_)) | (Tables::Gba { .. }, Position::Gb(_)) => Vec::new(),
+            (Tables::Ds(tables), Position::Ds(spot)) => tables.wild(spot, time),
+            _ => Vec::new(),
         }
     }
 
@@ -237,6 +279,7 @@ impl Tables {
                     ..data
                 })
             }
+            Tables::Ds(tables) => tables.move_data(id),
         }
     }
 
@@ -247,6 +290,7 @@ impl Tables {
                 let pp = u16::from(tables.move_data(slot.id)?.pp);
                 Some((pp + pp * 20 * u16::from(slot.pp_ups.min(3)) / 100) as u8)
             }
+            Tables::Ds(tables) => tables.max_pp(slot),
         }
     }
 
@@ -258,6 +302,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.machine_move(item),
             Tables::Gba { tables, .. } => tables.machine_move(item),
+            Tables::Ds(_) => None,
         }
     }
 
@@ -265,6 +310,7 @@ impl Tables {
         match self {
             Tables::Gb(tables) => tables.is_hm(item),
             Tables::Gba { tables, .. } => tables.is_hm(item),
+            Tables::Ds(_) => false,
         }
     }
 
@@ -272,6 +318,7 @@ impl Tables {
         match self {
             Tables::Gb(_) => None,
             Tables::Gba { tables, .. } => tables.front_picture(rom, species, shiny),
+            Tables::Ds(_) => None,
         }
     }
 
@@ -279,7 +326,10 @@ impl Tables {
         match (self.generation(), &mon.genes) {
             (Generation::One, _) => None,
             (Generation::Two, Genes::Gb { dvs, .. }) => Some(dvs.hidden_power()),
-            (Generation::Three, Genes::Gba(genes)) => {
+            (
+                Generation::Three | Generation::Four | Generation::Five,
+                Genes::Gba(genes) | Genes::Ds(DsGenes { genes, .. }),
+            ) => {
                 let iv = genes.ivs;
                 let order = [
                     iv.hp,
@@ -306,8 +356,15 @@ impl Tables {
     }
 }
 
-fn gb_type(own: u8) -> Option<u8> {
+pub(crate) fn gb_type(own: u8) -> Option<u8> {
     GEN3_TYPES.get(usize::from(own)).copied()
+}
+
+pub(crate) fn own_type(gb: u8) -> Option<u8> {
+    GEN3_TYPES
+        .iter()
+        .position(|&id| id == gb)
+        .map(|own| own as u8)
 }
 
 #[cfg(test)]

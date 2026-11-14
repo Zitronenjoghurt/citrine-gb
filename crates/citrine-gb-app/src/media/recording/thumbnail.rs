@@ -23,10 +23,19 @@ impl Thumbnails {
         frame == 0 || self.source.second_of(frame) != self.source.second_of(frame - 1)
     }
 
+    fn keeps(&self, frame: u64) -> bool {
+        self.starts_second(frame) && self.source.second_of(frame).is_multiple_of(self.step)
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    pub fn wants(&self, frame: u64) -> bool {
+        self.source.second_of(frame) < 2 || self.keeps(frame)
+    }
+
     pub fn push(&mut self, frame: u64, rgba: &[u8]) {
         self.last.clear();
         self.last.extend_from_slice(rgba);
-        if !self.starts_second(frame) || !self.source.second_of(frame).is_multiple_of(self.step) {
+        if !self.keeps(frame) {
             return;
         }
         self.kept.push((frame, rgba.to_vec()));
@@ -66,6 +75,24 @@ mod tests {
 
     fn frame_of(rgba: Vec<u8>) -> u64 {
         u64::from_le_bytes(rgba.try_into().unwrap())
+    }
+
+    #[test]
+    #[cfg(feature = "nds")]
+    fn past_two_seconds_only_kept_frames_are_wanted() {
+        let thumbs = record(60 * 70);
+        let fps = thumbs.source.fps();
+        let wanted: Vec<u64> = (0..60 * 70).filter(|&f| thumbs.wants(f)).collect();
+        assert!(
+            wanted.len() < (2.0 * fps) as usize + 70,
+            "{} wanted",
+            wanted.len()
+        );
+        assert!(
+            wanted
+                .iter()
+                .all(|&f| f < (2.0 * fps) as u64 + 1 || thumbs.keeps(f))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::app::ui_state::settings::Settings;
 use crate::app::widgets::generic_select::GenericSelect;
-use crate::app::widgets::section::section_with_hint;
 use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::settings::page::{Heading, Page};
 use crate::discord::{GameNow, Presence, ShotInterval, presence};
 use crate::icons;
 use egui::{CornerRadius, RichText, Ui, Widget, vec2};
@@ -10,54 +10,38 @@ const DISCORD_NOTE: &str =
     "Your Discord profile shows what you play while Discord runs on this computer.";
 
 pub fn section(
-    ui: &mut Ui,
+    page: &mut Page,
     s: &mut Settings,
     game: Option<&GameNow>,
     screen: Option<egui::TextureId>,
     pictures_off: bool,
 ) {
-    section_with_hint(ui, icons::DISCORD_LOGO, "Discord", DISCORD_NOTE, |ui| {
+    page.section(Heading::new(icons::DISCORD_LOGO, "Discord").hint(DISCORD_NOTE), |ui| {
         Form::show(ui, "discord", |form| {
-            form.row("Show activity", |ui| {
-                s.dirty |= ui
-                    .add(egui::Checkbox::without_text(&mut s.discord.enabled))
-                    .changed();
-            });
+            s.dirty |= form.toggle("Show activity", &mut s.discord.enabled);
             if !s.discord.enabled {
                 return;
             }
-            form.row("Game name", |ui| {
-                s.dirty |= ui
-                    .add(egui::Checkbox::without_text(&mut s.discord.game))
-                    .changed();
-            });
-            form.row_with_hint(
+            s.dirty |= form.toggle("Game name", &mut s.discord.game);
+            s.dirty |= form.toggle_with_hint(
                 "Details",
                 "In Pokémon games: badges, Pokédex and play time. Hovering over the image shows your first Pokémon and money.",
-                |ui| {
-                    s.dirty |= ui
-                        .add(egui::Checkbox::without_text(&mut s.discord.details))
-                        .changed();
-                },
+                &mut s.discord.details,
             );
-            form.row("Session time", |ui| {
-                s.dirty |= ui
-                    .add(egui::Checkbox::without_text(&mut s.discord.play_time))
-                    .changed();
-            });
-            form.row_with_hint(
+            s.dirty |= form.toggle("Session time", &mut s.discord.play_time);
+            let mut off = false;
+            let shot = if pictures_off {
+                &mut off
+            } else {
+                &mut s.discord.screenshot
+            };
+            let changed = form.toggle_when(
                 "Screenshot",
-                "Your Discord profile shows your game screen instead of the Citrine icon.",
-                |ui| {
-                    if pictures_off {
-                        ui.add_enabled(false, egui::Checkbox::without_text(&mut false));
-                    } else {
-                        s.dirty |= ui
-                            .add(egui::Checkbox::without_text(&mut s.discord.screenshot))
-                            .changed();
-                    }
-                },
+                Some("Your Discord profile shows your game screen instead of the Citrine icon."),
+                !pictures_off,
+                shot,
             );
+            s.dirty |= changed;
             if pictures_off {
                 form.hint("Off on this server.");
             } else if s.discord.screenshot {
@@ -69,14 +53,13 @@ pub fn section(
                             .changed();
                 });
             }
+            if let Some(shown) = presence(&s.discord, game, None) {
+                form.custom(|ui| {
+                    ui.weak("Your Discord profile");
+                    card(ui, &shown, screen.filter(|_| !pictures_off));
+                });
+            }
         });
-        if let Some(shown) = presence(&s.discord, game, None) {
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.add_space(6.0);
-                ui.weak("Your Discord profile");
-                card(ui, &shown, screen.filter(|_| !pictures_off));
-            });
-        }
     });
 }
 

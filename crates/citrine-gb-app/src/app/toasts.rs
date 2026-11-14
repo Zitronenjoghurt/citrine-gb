@@ -3,7 +3,7 @@ use crate::app::widgets::action::dismiss_button;
 use crate::app::widgets::progress::ProgressBar;
 use crate::icons;
 use crate::progress::Progress;
-use egui::{Align2, Color32, Context, Id, Label, Order, Rect, RichText, Ui, pos2, vec2};
+use egui::{Align2, Color32, Context, Id, Label, Order, Rect, RichText, Ui, Vec2, pos2, vec2};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -11,12 +11,21 @@ const LIFETIME: f32 = 3.5;
 const BUTTON_LIFETIME: f32 = 6.0;
 const FADE: f32 = 0.15;
 const HINT_LIFETIME: f32 = 3.0;
+const READ_START: f32 = 2.0;
+const CHARS_PER_SECOND: f32 = 15.0;
+
+pub fn reading_time(text: &str, floor: f32) -> f32 {
+    (READ_START + text.chars().count() as f32 / CHARS_PER_SECOND).max(floor)
+}
 const HINT_FADE: f32 = 0.3;
 const MARGIN: f32 = 8.0;
 const SPACING: f32 = 6.0;
 const MAX_WIDTH: f32 = 420.0;
 const MIN_WIDTH: f32 = 280.0;
+const BANNER_WIDTH: f32 = 520.0;
 const LOAD_SHOWS_AFTER: Duration = Duration::from_millis(400);
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const CARD_LIFETIME: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
@@ -34,22 +43,47 @@ pub struct Toast {
     closing: Option<f32>,
     fade: f32,
     button: Option<(String, AppEvent)>,
+    needs_action: bool,
     load: Option<(&'static str, Progress)>,
+    card: Option<Card>,
+    drawn: Option<f32>,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub struct Card {
+    pub badge: Option<egui::TextureHandle>,
+    pub side: f32,
+    pub title: String,
+    pub detail: String,
+    pub aside: String,
 }
 
 impl Toast {
     fn new(kind: Kind, text: impl Into<String>) -> Self {
+        let text = text.into();
         Self {
             id: 0,
             kind,
-            text: text.into(),
-            remaining: Some(LIFETIME),
+            remaining: Some(reading_time(&text, LIFETIME)),
+            text,
             age: 0.0,
             closing: None,
             fade: FADE,
             button: None,
+            needs_action: false,
+            drawn: None,
             load: None,
+            card: None,
         }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn card(card: Card) -> Self {
+        let mut toast = Self::new(Kind::Success, card.title.clone());
+        let text = format!("{} {}", card.title, card.detail);
+        toast.remaining = Some(reading_time(&text, CARD_LIFETIME));
+        toast.card = Some(card);
+        toast
     }
 
     pub fn info(text: impl Into<String>) -> Self {
@@ -70,9 +104,14 @@ impl Toast {
 
     pub fn button(&mut self, label: impl Into<String>, event: AppEvent) -> &mut Self {
         if self.remaining.is_some() {
-            self.remaining = Some(BUTTON_LIFETIME);
+            self.remaining = Some(reading_time(&self.text, BUTTON_LIFETIME));
         }
         self.button = Some((label.into(), event));
+        self
+    }
+
+    pub fn needs_action(&mut self) -> &mut Self {
+        self.needs_action = true;
         self
     }
 
@@ -95,7 +134,7 @@ impl Toast {
             *closing += dt;
             return;
         }
-        if hovered {
+        if hovered || self.needs_action {
             return;
         }
         if let Some(remaining) = &mut self.remaining {
@@ -104,6 +143,16 @@ impl Toast {
                 self.closing = Some(0.0);
             }
         }
+    }
+
+    fn repeats(&self, other: &Toast) -> bool {
+        self.closing.is_none()
+            && self.kind == other.kind
+            && self.text == other.text
+            && self.button.is_none()
+            && self.load.is_none()
+            && self.card.is_none()
+            && other.card.is_none()
     }
 
     fn gone(&self) -> bool {
@@ -117,16 +166,23 @@ pub struct Toasts {
     next_id: u64,
     area: Option<Rect>,
     picture: Option<Rect>,
-    dock: Option<Rect>,
-    strip: Option<Rect>,
-    needs_strip: bool,
-    held_strip: Option<f32>,
+    page: Option<Rect>,
+    banner: Option<Rect>,
+    spare: Option<Rect>,
+    held: Option<f32>,
     dismissed: Vec<&'static str>,
     waiting: Vec<(&'static str, Instant)>,
 }
 
 impl Toasts {
     pub fn add(&mut self, mut toast: Toast) -> &mut Toast {
+        if let Some(at) = self.toasts.iter().position(|shown| shown.repeats(&toast)) {
+            let shown = &mut self.toasts[at];
+            if shown.remaining.is_some() {
+                shown.remaining = toast.remaining;
+            }
+            return shown;
+        }
         toast.id = self.next_id;
         self.next_id += 1;
         self.toasts.push(toast);
@@ -190,6 +246,10 @@ impl Toasts {
         }
     }
 
+    pub fn dismissed(&self, key: &'static str) -> bool {
+        self.dismissed.contains(&key)
+    }
+
     pub fn loads(&self) -> Vec<(&str, Progress)> {
         self.toasts
             .iter()
@@ -199,7 +259,13 @@ impl Toasts {
     }
 
     pub fn dismiss_all_toasts(&mut self) {
-        for toast in &mut self.toasts {
+        for toast in self.toasts.iter_mut().filter(|t| !t.needs_action) {
+            toast.closing.get_or_insert(0.0);
+        }
+    }
+
+    pub fn close(&mut self, text: &str) {
+        for toast in self.toasts.iter_mut().filter(|t| t.text == text) {
             toast.closing.get_or_insert(0.0);
         }
     }
@@ -212,12 +278,22 @@ impl Toasts {
         self.picture = Some(picture);
     }
 
-    pub fn place_dock(&mut self, dock: Rect) {
-        self.dock = Some(dock);
+    pub fn place_page(&mut self, page: Rect) {
+        self.page = Some(page);
     }
 
-    pub fn place_strip(&mut self, strip: Rect) {
-        self.strip = Some(strip);
+    pub fn place_banner(&mut self, banner: Rect) {
+        self.banner = Some(banner);
+    }
+
+    pub fn place_spare(&mut self, spare: Rect) {
+        self.spare = Some(spare);
+    }
+
+    pub fn reserve(&mut self, ctx: &Context, free: Rect, picture: Rect) -> Option<f32> {
+        let need = vec2(MIN_WIDTH + MARGIN * 2.0, self.held_need(ctx));
+        let shown = !self.toasts.is_empty() && !crate::app::widgets::confirm::is_open(ctx);
+        (shown && fitting(free, picture, need, Edge::Bottom).is_none()).then_some(need.y)
     }
 
     #[cfg(test)]
@@ -243,28 +319,31 @@ impl Toasts {
             .collect()
     }
 
-    pub fn wants_strip(&self) -> bool {
-        self.needs_strip && !self.toasts.is_empty()
+    #[cfg(test)]
+    pub fn open_texts(&self) -> Vec<&str> {
+        self.toasts
+            .iter()
+            .filter(|toast| toast.closing.is_none())
+            .map(|toast| toast.text.as_str())
+            .collect()
     }
 
-    pub fn strip_height(&self, ctx: &Context) -> f32 {
-        let one = ctx.style().spacing.interact_size.y + frame_height(ctx) + MARGIN * 2.0;
-        self.held_strip.map_or(one, |held| held.max(one))
-    }
-
-    pub fn held_height(&self, ctx: &Context) -> f32 {
-        if self.held_strip.is_some() && !self.toasts.is_empty() {
-            self.strip_height(ctx)
-        } else {
-            0.0
+    fn held_need(&mut self, ctx: &Context) -> f32 {
+        if self.toasts.is_empty() {
+            self.held = None;
+            return 0.0;
         }
+        let need = self.stack_height(ctx) + MARGIN * 2.0;
+        let held = self.held.map_or(need, |held| held.max(need));
+        self.held = Some(held);
+        held
     }
 
     fn stack_height(&self, ctx: &Context) -> f32 {
         let heights: Vec<f32> = self
             .toasts
             .iter()
-            .map(|toast| toast_height(ctx, toast))
+            .map(|toast| toast.drawn.unwrap_or_else(|| toast_height(ctx, toast)))
             .collect();
         heights.iter().sum::<f32>() + SPACING * heights.len().saturating_sub(1) as f32
     }
@@ -273,27 +352,21 @@ impl Toasts {
         let mut events = Vec::new();
         let game = self.area.take();
         let picture = self.picture.take();
-        let dock = self.dock.take();
-        let strip = self.strip.take();
-        if self.toasts.is_empty() {
-            self.held_strip = None;
-        }
-        let need = self.stack_height(ctx) + MARGIN * 2.0;
-        let spot = match (game, picture) {
-            (Some(area), Some(picture)) if self.held_strip.is_none() => {
-                free_spot(dock.unwrap_or(area), area, picture, need)
+        let page = self.page.take();
+        let banner = self.banner.take();
+        let spare = self.spare.take();
+        let need = vec2(MIN_WIDTH + MARGIN * 2.0, self.held_need(ctx));
+        let spot = match game {
+            Some(game) => {
+                let game = banner.map_or(game, |banner| without(game, banner));
+                Some(spare_spot(game, picture, spare, need))
             }
-            _ => game,
+            None => page.map(|page| Spot {
+                rect: page,
+                edge: Edge::Bottom,
+            }),
         };
-        if spot.is_none() && dock.is_some() && !self.toasts.is_empty() {
-            self.held_strip = Some(self.held_strip.unwrap_or(0.0).max(need));
-        }
-        self.needs_strip = game.is_none() || self.held_strip.is_some();
-        let area = match self.held_strip {
-            Some(_) => strip,
-            None => spot.or(strip),
-        };
-        let Some(area) = area else {
+        let Some(Spot { rect: area, edge }) = spot else {
             return events;
         };
         if self.toasts.is_empty() || crate::app::widgets::confirm::is_open(ctx) {
@@ -303,13 +376,16 @@ impl Toasts {
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
         let pointer = ctx.input(|i| i.pointer.hover_pos());
         let width = (area.width() - MARGIN * 2.0).clamp(0.0, MAX_WIDTH);
-        let mut bottom = area.bottom() - MARGIN;
+        let (mut edge_y, pivot, step) = match edge {
+            Edge::Bottom => (area.bottom() - MARGIN, Align2::CENTER_BOTTOM, -1.0),
+            Edge::Top => (area.top() + MARGIN, Align2::CENTER_TOP, 1.0),
+        };
 
         for toast in self.toasts.iter_mut().rev() {
             let response = egui::Area::new(Id::new(("toast", toast.id)))
                 .order(Order::Middle)
-                .fixed_pos(pos2(area.center().x, bottom))
-                .pivot(Align2::CENTER_BOTTOM)
+                .fixed_pos(pos2(area.center().x, edge_y))
+                .pivot(pivot)
                 .constrain(false)
                 .show(ctx, |ui| {
                     ui.set_opacity(toast.opacity());
@@ -330,9 +406,10 @@ impl Toasts {
                 }
                 Clicked::Nothing => {}
             }
+            toast.drawn = Some(response.response.rect.height());
             let hovered = pointer.is_some_and(|p| response.response.rect.contains(p));
             toast.advance(dt, hovered);
-            bottom -= response.response.rect.height() + SPACING;
+            edge_y += step * (response.response.rect.height() + SPACING);
         }
 
         self.toasts.retain(|toast| !toast.gone());
@@ -348,7 +425,11 @@ fn frame_height(ctx: &Context) -> f32 {
 fn toast_height(ctx: &Context, toast: &Toast) -> f32 {
     let style = ctx.style();
     let row = style.spacing.interact_size.y;
-    let content = if toast.load.is_some() {
+    let content = if let Some(card) = &toast.card {
+        let font = egui::TextStyle::Body.resolve(&style);
+        let line = ctx.fonts_mut(|fonts| fonts.row_height(&font));
+        card.side.max(line * 2.0)
+    } else if toast.load.is_some() {
         let font = egui::TextStyle::Body.resolve(&style);
         let line = ctx.fonts_mut(|fonts| fonts.row_height(&font));
         crate::app::widgets::progress::ProgressBar::tallest(line).max(row)
@@ -358,17 +439,130 @@ fn toast_height(ctx: &Context, toast: &Toast) -> f32 {
     content + frame_height(ctx)
 }
 
-fn free_spot(window: Rect, panel: Rect, picture: Rect, need: f32) -> Option<Rect> {
-    let below = Rect::from_min_max(pos2(panel.left(), picture.bottom()), panel.max);
-    let right = Rect::from_min_max(pos2(picture.right(), panel.top()), panel.max);
-    let left = Rect::from_min_max(panel.min, pos2(picture.left(), panel.bottom()));
-    let above = Rect::from_min_max(panel.min, pos2(panel.right(), picture.top()));
-    let dock_right = Rect::from_min_max(pos2(panel.right(), window.top()), window.max);
-    let dock_left = Rect::from_min_max(window.min, pos2(panel.left(), window.bottom()));
-    let dock_below = Rect::from_min_max(pos2(window.left(), panel.bottom()), window.max);
-    [below, right, left, above, dock_right, dock_left, dock_below]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spot {
+    pub rect: Rect,
+    pub edge: Edge,
+}
+
+pub fn free_spot(panel: Rect, picture: Rect, need: Vec2) -> Option<Rect> {
+    fitting(panel, picture, need, Edge::Bottom).map(|spot| spot.rect)
+}
+
+fn fitting(panel: Rect, picture: Rect, need: Vec2, prefer: Edge) -> Option<Spot> {
+    let below = Spot {
+        rect: Rect::from_min_max(pos2(panel.left(), picture.bottom()), panel.max),
+        edge: Edge::Bottom,
+    };
+    let right = Spot {
+        rect: Rect::from_min_max(pos2(picture.right(), panel.top()), panel.max),
+        edge: Edge::Bottom,
+    };
+    let left = Spot {
+        rect: Rect::from_min_max(panel.min, pos2(picture.left(), panel.bottom())),
+        edge: Edge::Bottom,
+    };
+    let above = Spot {
+        rect: Rect::from_min_max(panel.min, pos2(panel.right(), picture.top())),
+        edge: Edge::Top,
+    };
+    let order = match prefer {
+        Edge::Bottom => [below, right, left, above],
+        Edge::Top => [above, below, right, left],
+    };
+    order
         .into_iter()
-        .find(|spot| spot.width() >= MIN_WIDTH + MARGIN * 2.0 && spot.height() >= need)
+        .find(|spot| spot.rect.width() >= need.x && spot.rect.height() >= need.y)
+}
+
+fn spare_spot(panel: Rect, picture: Option<Rect>, spare: Option<Rect>, need: Vec2) -> Spot {
+    match spare.filter(|spare| spare.width() >= need.x && spare.height() >= need.y - 0.5) {
+        Some(spare) => Spot {
+            rect: spare,
+            edge: Edge::Bottom,
+        },
+        None => float_spot(panel, picture, need, Edge::Bottom),
+    }
+}
+
+pub fn float_spot(panel: Rect, picture: Option<Rect>, need: Vec2, prefer: Edge) -> Spot {
+    let band = |edge| {
+        let height = need.y.min(panel.height());
+        let rect = match edge {
+            Edge::Top => panel.with_max_y(panel.top() + height),
+            Edge::Bottom => panel.with_min_y(panel.bottom() - height),
+        };
+        Spot { rect, edge }
+    };
+    let Some(picture) = picture else {
+        return band(prefer);
+    };
+    if let Some(spot) = fitting(panel, picture, need, prefer) {
+        return spot;
+    }
+    let gap_above = picture.top() - panel.top();
+    let gap_below = panel.bottom() - picture.bottom();
+    let edge = if gap_above > gap_below {
+        Edge::Top
+    } else if gap_below > gap_above {
+        Edge::Bottom
+    } else {
+        prefer
+    };
+    band(edge)
+}
+
+pub fn without(area: Rect, banner: Rect) -> Rect {
+    if banner.center().y < area.center().y {
+        area.with_min_y(banner.bottom().min(area.bottom()))
+    } else {
+        area.with_max_y(banner.top().max(area.top()))
+    }
+}
+
+pub fn banner<R>(
+    ctx: &Context,
+    id: Id,
+    panel: Rect,
+    picture: Option<Rect>,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> (R, Rect) {
+    let width = (panel.width() - MARGIN * 2.0).clamp(0.0, BANNER_WIDTH);
+    let height = ctx.memory(|mem| mem.area_rect(id)).map_or_else(
+        || ctx.style().spacing.interact_size.y * 2.0,
+        |rect| rect.height(),
+    );
+    let spot = float_spot(
+        panel,
+        picture,
+        vec2(width, height + MARGIN * 2.0),
+        Edge::Top,
+    );
+    let (y, pivot) = match spot.edge {
+        Edge::Top => (spot.rect.top() + MARGIN, Align2::CENTER_TOP),
+        Edge::Bottom => (spot.rect.bottom() - MARGIN, Align2::CENTER_BOTTOM),
+    };
+    let shown = egui::Area::new(id)
+        .order(Order::Middle)
+        .fixed_pos(pos2(panel.center().x, y))
+        .pivot(pivot)
+        .constrain(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .show(ui, |ui| {
+                    ui.set_width(width - ui.spacing().menu_margin.sum().x);
+                    add(ui)
+                })
+                .inner
+        });
+    let rect = shown.response.rect.expand(MARGIN);
+    (shown.inner, rect)
 }
 
 enum Clicked {
@@ -377,7 +571,59 @@ enum Clicked {
     Close,
 }
 
+fn card_body(ui: &mut Ui, card: &Card, width: f32) -> Clicked {
+    ui.horizontal(|ui| {
+        let spacing = ui.spacing().item_spacing.x;
+        let inner = width - ui.spacing().menu_margin.sum().x;
+        let side = vec2(card.side, card.side);
+        match &card.badge {
+            Some(badge) => {
+                ui.add(egui::Image::new((badge.id(), side)).corner_radius(4));
+            }
+            None => {
+                let (rect, _) = ui.allocate_exact_size(side, egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 4, ui.visuals().widgets.inactive.bg_fill);
+            }
+        }
+        let measure = |ui: &Ui, text: &str, style: egui::TextStyle| {
+            ui.fonts_mut(|f| {
+                f.layout_no_wrap(text.to_owned(), style.resolve(ui.style()), Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
+        let aside_width = measure(ui, &card.aside, egui::TextStyle::Body);
+        let close_width =
+            measure(ui, icons::X, egui::TextStyle::Body) + ui.spacing().button_padding.x * 2.0;
+        let room = (inner - card.side - aside_width - close_width - spacing * 3.0).max(0.0);
+        ui.allocate_ui_with_layout(
+            vec2(room, card.side),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(room);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let font = egui::TextStyle::Body.resolve(ui.style());
+                let line = ui.fonts_mut(|f| f.row_height(&font));
+                ui.add_space(((card.side - line * 2.0) / 2.0).max(0.0));
+                ui.add(Label::new(RichText::new(&card.title).strong()).truncate());
+                ui.add(Label::new(RichText::new(&card.detail).weak()).truncate());
+            },
+        );
+        ui.label(RichText::new(&card.aside).weak());
+        if ui.add(dismiss_button()).on_hover_text("Dismiss").clicked() {
+            Clicked::Close
+        } else {
+            Clicked::Nothing
+        }
+    })
+    .inner
+}
+
 fn body(ui: &mut Ui, toast: &Toast, width: f32) -> Clicked {
+    if let Some(card) = &toast.card {
+        return card_body(ui, card, width);
+    }
     let (icon, color) = match toast.kind {
         Kind::Info => (icons::INFO, ui.visuals().hyperlink_color),
         Kind::Success => (
@@ -430,7 +676,8 @@ fn body(ui: &mut Ui, toast: &Toast, width: f32) -> Clicked {
         }
         ui.allocate_ui(vec2(room, ui.spacing().interact_size.y), |ui| {
             ui.set_width(room);
-            ui.add(Label::new(toast.text.as_str()).truncate());
+            ui.set_min_height(ui.spacing().interact_size.y);
+            ui.add(Label::new(toast.text.as_str()).wrap());
         });
         let mut clicked = Clicked::Nothing;
         if let Some((label, _)) = &toast.button {
@@ -533,6 +780,32 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_repeated_every_frame_shows_once_per_cause() {
+        let mut toasts = Toasts::default();
+        for _ in 0..120 {
+            toasts.error("Emulation error: no snapshot");
+            toasts.error("Couldn't answer the invite");
+        }
+        assert_eq!(
+            toasts.open_texts(),
+            ["Emulation error: no snapshot", "Couldn't answer the invite"]
+        );
+        toasts.toasts[0].closing = Some(0.0);
+        toasts.error("Emulation error: no snapshot");
+        assert_eq!(
+            toasts.open_texts(),
+            ["Couldn't answer the invite", "Emulation error: no snapshot"]
+        );
+        let mut undos = Toasts::default();
+        for _ in 0..2 {
+            undos
+                .info("HUD removed")
+                .button("Undo", AppEvent::OpenTab { tab: Tab::Media });
+        }
+        assert_eq!(undos.open_texts(), ["HUD removed", "HUD removed"]);
+    }
+
+    #[test]
     fn a_toast_stays_while_hovered() {
         let mut toast = Toast::new(Kind::Success, "Saved");
         toast.advance(LIFETIME * 2.0, true);
@@ -551,6 +824,50 @@ mod tests {
         assert!(toasts.toasts[0].closing.is_none());
         toasts.dismiss_all_toasts();
         assert!(toasts.toasts[0].closing.is_some());
+    }
+
+    #[test]
+    fn a_toast_that_needs_action_stays_until_pressed_or_closed() {
+        let mut toasts = Toasts::default();
+        toasts
+            .error("Add a file to start the game")
+            .button("Add", AppEvent::OpenTab { tab: Tab::Media })
+            .needs_action()
+            .duration(Some(Duration::from_secs(1)));
+        toasts.toasts[0].advance(600.0, false);
+        toasts.dismiss_all_toasts();
+        assert!(toasts.toasts[0].closing.is_none());
+        toasts.close("Add a file to start the game");
+        assert!(toasts.toasts[0].closing.is_some());
+    }
+
+    #[test]
+    fn a_long_notice_stays_long_enough_to_read() {
+        let stop = "Recording stopped because this device couldn't keep up";
+        let mut long = Toast::new(Kind::Error, stop);
+        long.advance(5.5, false);
+        assert!(long.closing.is_none());
+        long.advance(0.2, false);
+        assert!(long.closing.is_some());
+        let mut short = Toast::new(Kind::Success, "Saved");
+        short.advance(LIFETIME + 0.01, false);
+        assert!(short.closing.is_some());
+        let mut with_button = Toast::info(format!("{stop}. Saved the part recorded so far"));
+        with_button.button("Open", AppEvent::OpenTab { tab: Tab::Media });
+        with_button.advance(BUTTON_LIFETIME + 0.01, false);
+        assert!(with_button.closing.is_none());
+        with_button.advance(1.8, false);
+        assert!(with_button.closing.is_some());
+    }
+
+    #[test]
+    fn a_toast_with_an_optional_button_still_fades() {
+        let mut toast = Toast::info("Saved");
+        toast.button("Open", AppEvent::OpenTab { tab: Tab::Media });
+        toast.advance(BUTTON_LIFETIME - 0.01, false);
+        assert!(toast.closing.is_none());
+        toast.advance(0.02, false);
+        assert!(toast.closing.is_some());
     }
 
     #[test]
@@ -616,6 +933,48 @@ mod tests {
     }
 
     #[test]
+    fn a_long_notice_wraps_inside_its_toast_instead_of_cutting_off() {
+        let ctx = egui::Context::default();
+        let mut toasts = Toasts::default();
+        let text = "Couldn't load 'Slot 1'. It was saved by a different version of Citrine.";
+        toasts.error(text);
+        let area = Rect::from_min_max(pos2(0.0, 48.0), pos2(412.0, 860.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(412.0, 915.0))),
+            ..Default::default()
+        };
+        let mut output = None;
+        for _ in 0..3 {
+            output = Some(ctx.run(input(), |ctx| {
+                crate::app::mobile::touch_spacing(ctx, true);
+                toasts.place(area);
+                toasts.show(ctx);
+            }));
+        }
+        let frame = ctx
+            .memory(|mem| mem.area_rect(Id::new(("toast", toasts.toasts[0].id))))
+            .unwrap();
+        let (galley, bounds) = output
+            .unwrap()
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == text => {
+                    Some((shape.galley.clone(), clipped.shape.visual_bounding_rect()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(!galley.elided, "{text}");
+        assert!(galley.rows.len() > 1, "{}", galley.rows.len());
+        assert!(frame.contains_rect(bounds), "{frame:?} {bounds:?}");
+        assert!(
+            (toasts.toasts[0].drawn.unwrap() - frame.height()).abs() < 0.5,
+            "{frame:?}"
+        );
+    }
+
+    #[test]
     fn on_a_phone_a_download_and_an_error_toast_share_one_width_and_the_bar_sits_centred() {
         let ctx = egui::Context::default();
         let mut toasts = Toasts::default();
@@ -674,21 +1033,72 @@ mod tests {
     }
 
     #[test]
-    fn the_free_spot_is_the_band_under_the_picture_then_beside_it_then_another_pane() {
-        let window = Rect::from_min_max(pos2(0.0, 30.0), pos2(1280.0, 800.0));
+    fn a_popup_takes_the_free_band_under_the_picture_then_beside_it() {
         let panel = Rect::from_min_max(pos2(0.0, 30.0), pos2(800.0, 800.0));
+        let need = vec2(MIN_WIDTH + MARGIN * 2.0, 60.0);
         let picture = Rect::from_min_max(pos2(80.0, 60.0), pos2(720.0, 700.0));
         assert_eq!(
-            free_spot(window, panel, picture, 60.0),
-            Some(Rect::from_min_max(pos2(0.0, 700.0), panel.max))
+            float_spot(panel, Some(picture), need, Edge::Bottom),
+            Spot {
+                rect: Rect::from_min_max(pos2(0.0, 700.0), panel.max),
+                edge: Edge::Bottom
+            }
         );
         let tall = Rect::from_min_max(pos2(160.0, 40.0), pos2(480.0, 790.0));
-        let beside = free_spot(window, panel, tall, 60.0).unwrap();
-        assert_eq!(beside, Rect::from_min_max(pos2(480.0, 30.0), panel.max));
-        let wide = Rect::from_min_max(pos2(10.0, 40.0), pos2(790.0, 790.0));
-        let pane = free_spot(window, panel, wide, 60.0).unwrap();
-        assert_eq!(pane.left(), 800.0);
-        assert!(!pane.intersects(wide));
-        assert_eq!(free_spot(panel, panel, wide, 60.0), None);
+        assert_eq!(
+            float_spot(panel, Some(tall), need, Edge::Bottom).rect,
+            Rect::from_min_max(pos2(480.0, 30.0), panel.max)
+        );
+        assert_eq!(
+            float_spot(panel, Some(picture), need, Edge::Top).rect,
+            Rect::from_min_max(pos2(0.0, 700.0), panel.max)
+        );
+    }
+
+    #[test]
+    fn without_room_a_popup_floats_over_the_picture_edge_that_leaves_more_of_it() {
+        let panel = Rect::from_min_max(pos2(0.0, 30.0), pos2(800.0, 800.0));
+        let need = vec2(MIN_WIDTH + MARGIN * 2.0, 60.0);
+        let low = Rect::from_min_max(pos2(10.0, 70.0), pos2(790.0, 790.0));
+        assert_eq!(
+            float_spot(panel, Some(low), need, Edge::Bottom),
+            Spot {
+                rect: Rect::from_min_max(pos2(0.0, 30.0), pos2(800.0, 90.0)),
+                edge: Edge::Top
+            }
+        );
+        let high = Rect::from_min_max(pos2(10.0, 40.0), pos2(790.0, 760.0));
+        assert_eq!(
+            float_spot(panel, Some(high), need, Edge::Top),
+            Spot {
+                rect: Rect::from_min_max(pos2(0.0, 740.0), panel.max),
+                edge: Edge::Bottom
+            }
+        );
+        let full = Rect::from_min_max(pos2(10.0, 30.0), pos2(790.0, 800.0));
+        assert_eq!(
+            float_spot(panel, Some(full), need, Edge::Top).edge,
+            Edge::Top
+        );
+        assert_eq!(
+            float_spot(panel, None, need, Edge::Bottom).rect,
+            Rect::from_min_max(pos2(0.0, 740.0), panel.max)
+        );
+    }
+
+    #[test]
+    fn the_spot_holds_its_height_until_every_toast_is_gone() {
+        let ctx = Context::default();
+        let mut toasts = Toasts::default();
+        assert_eq!(toasts.held_need(&ctx), 0.0);
+        toasts.info("one");
+        let one = toasts.held_need(&ctx);
+        toasts.info("two");
+        let two = toasts.held_need(&ctx);
+        assert!(two > one);
+        toasts.toasts.remove(0);
+        assert_eq!(toasts.held_need(&ctx), two);
+        toasts.toasts.clear();
+        assert_eq!(toasts.held_need(&ctx), 0.0);
     }
 }

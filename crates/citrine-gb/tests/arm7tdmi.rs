@@ -498,9 +498,13 @@ fn run() -> Result<bool, String> {
         .ok_or("the manifest has no [cpu.arm7tdmi]")?;
     let cached = cache_dir().join(format!("{}.zip", suite.sha256));
     if !args.fetch && !cached.is_file() {
-        println!(
-            "arm7tdmi: skipped, {} is not in the ledger cache; run with --fetch to download it",
-            suite.url
+        citrine_gb_test_roms::missing(
+            "arm7tdmi",
+            format_args!(
+                "{} in the ledger cache; run with --fetch to download {}",
+                cached.display(),
+                suite.url
+            ),
         );
         return Ok(true);
     }

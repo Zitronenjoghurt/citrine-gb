@@ -32,6 +32,18 @@ impl Default for CpuState {
     }
 }
 
+#[cfg(jit)]
+pub(crate) const CPSR_OFFSET: usize = std::mem::offset_of!(Registers, cpsr);
+
+#[cfg(jit)]
+pub(crate) const USER_HIGH_OFFSET: usize = std::mem::offset_of!(Registers, user_high);
+
+#[cfg(jit)]
+pub(crate) const BANKED_OFFSET: usize = std::mem::offset_of!(Registers, banked);
+
+#[cfg(jit)]
+pub(crate) const SPSR_OFFSET: usize = std::mem::offset_of!(Registers, spsr);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Registers {
@@ -83,6 +95,12 @@ impl Registers {
 
     pub fn set_cpsr(&mut self, value: u32) {
         self.switch_bank(Bank::of(value));
+        self.cpsr = value;
+    }
+
+    pub fn set_flags(&mut self, value: u32) {
+        debug_assert_eq!((value ^ self.cpsr) & MODE_MASK, 0);
+        debug_assert_eq!(self.bank, Bank::of(value));
         self.cpsr = value;
     }
 

@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pid AS \"pid!\", generation, record, received, deposited_at, traded_at, traded_with\n                 FROM gts_sim_records WHERE pid = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "pid!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "name": "generation",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "generation"
+          }
+        }
+      },
+      {
+        "name": "record",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "record"
+          }
+        }
+      },
+      {
+        "name": "received",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "received"
+          }
+        }
+      },
+      {
+        "name": "deposited_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "deposited_at"
+          }
+        }
+      },
+      {
+        "name": "traded_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "traded_at"
+          }
+        }
+      },
+      {
+        "name": "traded_with",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "traded_with"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "67753aaa108457bc74709b5a0d963f9af77fd52e1ec9b7356d223a07acb83442"
+}

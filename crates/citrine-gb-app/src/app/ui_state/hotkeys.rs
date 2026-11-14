@@ -84,6 +84,8 @@ impl Display for Hotkey {
     }
 }
 
+pub const FAST_FORWARD_KEY: egui::Key = egui::Key::Space;
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, serde::Serialize, serde::Deserialize,
 )]
@@ -101,11 +103,18 @@ pub enum HotkeyAction {
     ToggleTouchControls,
     SwitchGame,
     FocusChat,
+    SwapScreens,
+    OneScreen,
+    NextScreenLayout,
+    ToggleLid,
+    Rewind,
+    FastForward,
     StepInstruction,
     StepOver,
     StepOut,
     StepLine,
     StepFrame,
+    ToggleHuds,
 }
 
 impl HotkeyAction {
@@ -117,11 +126,17 @@ impl HotkeyAction {
             Self::Screenshot => "Screenshot",
             Self::ToggleRecording => "Record video",
             Self::TogglePause => "Pause / resume",
+            Self::Rewind => "Rewind",
+            Self::FastForward => "Fast forward",
             Self::SoftReset => "Reset the game",
             Self::ToggleMute => "Mute",
             Self::ToggleFocusMode => "Focus mode",
             Self::LeaveFocusMode => "Leave focus mode",
             Self::ToggleTouchControls => "On-screen buttons",
+            Self::SwapScreens => "Swap screens",
+            Self::OneScreen => "Only one screen",
+            Self::NextScreenLayout => "Next screen layout",
+            Self::ToggleLid => "Close the lid",
             Self::SwitchGame => "Switch game",
             Self::FocusChat => "Type in chat",
             Self::StepInstruction => "Step one instruction",
@@ -129,6 +144,7 @@ impl HotkeyAction {
             Self::StepOut => "Step out",
             Self::StepLine => "Step one line",
             Self::StepFrame => "Step one frame",
+            Self::ToggleHuds => "Show HUDs",
         }
     }
 
@@ -140,11 +156,17 @@ impl HotkeyAction {
             Self::Screenshot => "Save the screen to Media",
             Self::ToggleRecording => "Start or stop recording the screen and sound",
             Self::TogglePause => "Stop and start emulation",
+            Self::Rewind => "Hold to play the game backwards",
+            Self::FastForward => "Hold to run the game at the fast forward speed",
             Self::SoftReset => "Reset as if the console was power cycled",
             Self::ToggleMute => "Silence the sound without changing the volume",
             Self::ToggleFocusMode => "Hide everything but the screen, or show it all again",
             Self::LeaveFocusMode => "Show everything again when only the screen shows",
             Self::ToggleTouchControls => "Show or hide the on-screen buttons",
+            Self::SwapScreens => "Also picks the big screen, or the one shown alone",
+            Self::OneScreen => "Show only one DS screen, or both again",
+            Self::NextScreenLayout => "Switch between Stacked, Side by side and Big and small",
+            Self::ToggleLid => "Close or open the DS lid. Most games sleep while it is closed",
             Self::SwitchGame => "Play the other linked game with the same controls",
             Self::FocusChat => "Move into the open chat and back to the game",
             Self::StepInstruction => "Run the next instruction, into a call too",
@@ -152,6 +174,7 @@ impl HotkeyAction {
             Self::StepOut => "Run until the current call returns",
             Self::StepLine => "Run until the screen moves to its next line",
             Self::StepFrame => "Run until the next frame is drawn",
+            Self::ToggleHuds => "Show or hide the HUDs over the game",
         }
     }
 
@@ -159,16 +182,24 @@ impl HotkeyAction {
         match self {
             Self::TogglePause if on => icons::PAUSE,
             Self::TogglePause => icons::PLAY,
+            Self::Rewind => icons::REWIND,
+            Self::FastForward => icons::FAST_FORWARD,
             Self::SoftReset => icons::ARROW_COUNTER_CLOCKWISE,
             Self::Screenshot => icons::CAMERA,
             Self::ToggleMute if on => icons::SPEAKER_SLASH,
             Self::ToggleMute => icons::SPEAKER_HIGH,
             Self::ToggleFocusMode | Self::LeaveFocusMode => icons::FRAME_CORNERS,
+            Self::SwapScreens => icons::ARROWS_DOWN_UP,
+            Self::OneScreen => icons::MONITOR,
+            Self::NextScreenLayout => icons::SQUARE_SPLIT_VERTICAL,
+            Self::ToggleLid if on => icons::SUN,
+            Self::ToggleLid => icons::MOON,
             Self::StepInstruction => icons::ARROW_DOWN,
             Self::StepOver => icons::ARROW_BEND_DOWN_RIGHT,
             Self::StepOut => icons::ARROW_BEND_LEFT_UP,
             Self::StepLine => icons::ROWS,
             Self::StepFrame => icons::FILM_STRIP,
+            Self::ToggleHuds => icons::GAUGE,
             _ => "",
         }
     }
@@ -178,8 +209,17 @@ impl HotkeyAction {
             Self::TogglePause if on => "Pause",
             Self::TogglePause => "Resume",
             Self::ToggleMute if on => "Unmute",
+            Self::ToggleLid if on => "Open the lid",
+            Self::Rewind => "Hold to rewind",
             other => other.label(),
         }
+    }
+
+    pub fn is_ds(self) -> bool {
+        matches!(
+            self,
+            Self::SwapScreens | Self::OneScreen | Self::NextScreenLayout | Self::ToggleLid
+        )
     }
 
     pub fn is_debugger(self) -> bool {
@@ -191,6 +231,18 @@ impl HotkeyAction {
                 | Self::StepLine
                 | Self::StepFrame
         )
+    }
+
+    pub fn is_rewind(self) -> bool {
+        self == Self::Rewind
+    }
+
+    pub fn is_fast_forward(self) -> bool {
+        self == Self::FastForward
+    }
+
+    pub fn is_hud(self) -> bool {
+        self == Self::ToggleHuds
     }
 
     pub fn is_hold(self) -> bool {
@@ -206,17 +258,23 @@ impl HotkeyAction {
             Self::Screenshot => Hotkey::plain(Key::F12),
             Self::ToggleRecording => Hotkey::shift(Key::F12),
             Self::TogglePause => Hotkey::plain(Key::F5),
+            Self::Rewind => Hotkey::plain(Key::R),
+            Self::FastForward => Hotkey::plain(FAST_FORWARD_KEY),
             Self::SoftReset => Hotkey::ctrl(Key::R),
             Self::ToggleMute => Hotkey::plain(Key::F10),
             Self::ToggleFocusMode => Hotkey::plain(Key::F11),
             Self::LeaveFocusMode => Hotkey::plain(Key::Escape),
             Self::ToggleTouchControls => return None,
+            Self::SwapScreens => Hotkey::plain(Key::F2),
+            Self::OneScreen => Hotkey::shift(Key::F2),
+            Self::NextScreenLayout => Hotkey::ctrl(Key::F2),
             Self::SwitchGame => Hotkey::plain(Key::F6),
             Self::FocusChat => Hotkey::plain(Key::Tab),
             Self::StepInstruction => Hotkey::plain(Key::F7),
             Self::StepOver => Hotkey::plain(Key::F3),
             Self::StepOut => Hotkey::plain(Key::F4),
-            Self::StepLine | Self::StepFrame => return None,
+            Self::ToggleHuds => Hotkey::shift(Key::F3),
+            Self::ToggleLid | Self::StepLine | Self::StepFrame => return None,
         })
     }
 }
@@ -244,66 +302,97 @@ struct StoredHotkeys {
     #[serde(default = "Vec::new")]
     offered: Vec<HotkeyAction>,
     #[serde(default)]
-    debugger: DebuggerHotkeys,
+    screens: LaterHotkeys,
+    #[serde(default)]
+    debugger: LaterHotkeys,
+    #[serde(default)]
+    rewind: LaterHotkeys,
+    #[serde(default)]
+    fast_forward: LaterHotkeys,
+    #[serde(default)]
+    hud: LaterHotkeys,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct DebuggerHotkeys {
+struct LaterHotkeys {
     bindings: Vec<(Hotkey, HotkeyAction)>,
     pads: Vec<(PadButton, HotkeyAction)>,
     offered: Vec<HotkeyAction>,
 }
 
+impl LaterHotkeys {
+    fn take(hotkeys: &mut Hotkeys, later: fn(HotkeyAction) -> bool) -> Self {
+        Self {
+            bindings: hotkeys
+                .bindings
+                .extract_if(.., |(_, action)| later(*action))
+                .collect(),
+            pads: hotkeys
+                .pads
+                .extract_if(.., |(_, action)| later(*action))
+                .collect(),
+            offered: hotkeys
+                .offered
+                .extract_if(.., |action| later(*action))
+                .collect(),
+        }
+    }
+
+    fn put(self, hotkeys: &mut Hotkeys) {
+        hotkeys.bindings.extend(self.bindings);
+        hotkeys.pads.extend(self.pads);
+        if !hotkeys.offered.is_empty() {
+            hotkeys.offered.extend(self.offered);
+        }
+    }
+}
+
 impl Default for StoredHotkeys {
     fn default() -> Self {
         let mut stored = Self::from(Hotkeys::default());
-        stored.debugger = DebuggerHotkeys::default();
+        stored.screens = LaterHotkeys::default();
+        stored.debugger = LaterHotkeys::default();
+        stored.rewind = LaterHotkeys::default();
+        stored.fast_forward = LaterHotkeys::default();
+        stored.hud = LaterHotkeys::default();
         stored
     }
 }
 
-fn split<T>(list: Vec<T>, action: impl Fn(&T) -> HotkeyAction) -> (Vec<T>, Vec<T>) {
-    list.into_iter()
-        .partition(|item| !action(item).is_debugger())
-}
-
 impl From<Hotkeys> for StoredHotkeys {
-    fn from(hotkeys: Hotkeys) -> Self {
-        let (bindings, debugger_bindings) = split(hotkeys.bindings, |(_, action)| *action);
-        let (pads, debugger_pads) = split(hotkeys.pads, |(_, action)| *action);
-        let (offered, debugger_offered) = split(hotkeys.offered, |action| *action);
+    fn from(mut hotkeys: Hotkeys) -> Self {
+        let debugger = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_debugger);
+        let screens = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_ds);
+        let rewind = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_rewind);
+        let fast_forward = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_fast_forward);
+        let hud = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_hud);
         Self {
-            bindings,
-            pads,
-            offered,
-            debugger: DebuggerHotkeys {
-                bindings: debugger_bindings,
-                pads: debugger_pads,
-                offered: debugger_offered,
-            },
+            bindings: hotkeys.bindings,
+            pads: hotkeys.pads,
+            offered: hotkeys.offered,
+            screens,
+            debugger,
+            rewind,
+            fast_forward,
+            hud,
         }
     }
 }
 
 impl From<StoredHotkeys> for Hotkeys {
     fn from(stored: StoredHotkeys) -> Self {
-        let StoredHotkeys {
-            mut bindings,
-            mut pads,
-            mut offered,
-            debugger,
-        } = stored;
-        bindings.extend(debugger.bindings);
-        pads.extend(debugger.pads);
-        if !offered.is_empty() {
-            offered.extend(debugger.offered);
-        }
-        Self {
-            bindings,
-            pads,
-            offered,
-        }
+        let mut hotkeys = Self {
+            bindings: stored.bindings,
+            pads: stored.pads,
+            offered: stored.offered,
+        };
+        stored.screens.put(&mut hotkeys);
+        stored.rewind.put(&mut hotkeys);
+        stored.fast_forward.put(&mut hotkeys);
+        stored.debugger.put(&mut hotkeys);
+        stored.hud.put(&mut hotkeys);
+        hotkeys
     }
 }
 
@@ -384,6 +473,16 @@ impl Hotkeys {
         *self == Self::default()
     }
 
+    pub fn offers(&self, action: HotkeyAction) -> bool {
+        self.offered.contains(&action)
+    }
+
+    pub fn offer_unbound(&mut self, action: HotkeyAction) {
+        if !self.offered.is_empty() && !self.offers(action) {
+            self.offered.push(action);
+        }
+    }
+
     pub fn bind_new_defaults(&mut self) {
         if self.offered.is_empty() {
             self.offered = HotkeyAction::iter()
@@ -448,6 +547,10 @@ mod tests {
         assert_eq!(
             hotkeys.action_for(Key::F5, Modifiers::NONE),
             Some(HotkeyAction::TogglePause)
+        );
+        assert_eq!(
+            hotkeys.action_for(Key::R, Modifiers::NONE),
+            Some(HotkeyAction::Rewind)
         );
     }
 
@@ -532,6 +635,7 @@ mod tests {
                 !matches!(
                     action,
                     HotkeyAction::ToggleTouchControls
+                        | HotkeyAction::ToggleLid
                         | HotkeyAction::StepLine
                         | HotkeyAction::StepFrame
                 ),
@@ -584,6 +688,7 @@ mod tests {
     fn hotkeys_from_before_the_debugger_gain_its_steps() {
         let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
         old.as_object_mut().unwrap().remove("debugger");
+        old.as_object_mut().unwrap().remove("hud");
         let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
         assert!(hotkeys.keys_for(HotkeyAction::StepInstruction).is_empty());
 
@@ -597,6 +702,53 @@ mod tests {
     }
 
     #[test]
+    fn a_build_from_before_rewind_still_reads_the_hotkeys() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind_pad(PadButton::iter().next().unwrap(), HotkeyAction::Rewind);
+        let stored = serde_json::to_string(&hotkeys).unwrap();
+
+        let older: Result<OlderHotkeys, _> = serde_json::from_str(&stored);
+
+        assert!(older.is_ok(), "{stored}");
+        let back: Hotkeys = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, hotkeys);
+    }
+
+    #[test]
+    fn hotkeys_from_before_rewind_gain_its_key() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("rewind");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::Rewind).is_empty());
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::R, Modifiers::NONE),
+            Some(HotkeyAction::Rewind)
+        );
+    }
+
+    #[test]
+    fn hotkeys_from_before_the_ds_screens_gain_their_keys() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("screens");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::SwapScreens).is_empty());
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::F2, Modifiers::NONE),
+            Some(HotkeyAction::SwapScreens)
+        );
+        assert_eq!(
+            hotkeys.action_for(Key::F2, Modifiers::CTRL),
+            Some(HotkeyAction::NextScreenLayout)
+        );
+    }
+
+    #[test]
     fn the_debugger_steps_have_their_keys() {
         let hotkeys = Hotkeys::default();
         for (key, action) in [
@@ -606,6 +758,79 @@ mod tests {
         ] {
             assert_eq!(hotkeys.action_for(key, Modifiers::NONE), Some(action));
         }
+    }
+
+    #[test]
+    fn holding_space_fast_forwards_by_default() {
+        let hotkeys = Hotkeys::default();
+        assert_eq!(
+            hotkeys.action_for(Key::Space, Modifiers::NONE),
+            Some(HotkeyAction::FastForward)
+        );
+        assert_eq!(
+            hotkeys.action_for(Key::Tab, Modifiers::NONE),
+            Some(HotkeyAction::FocusChat)
+        );
+    }
+
+    #[test]
+    fn a_build_from_before_fast_forward_still_reads_the_hotkeys() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind_pad(PadButton::iter().next().unwrap(), HotkeyAction::FastForward);
+        let stored = serde_json::to_string(&hotkeys).unwrap();
+
+        let older: Result<OlderHotkeys, _> = serde_json::from_str(&stored);
+
+        assert!(older.is_ok(), "{stored}");
+        let back: Hotkeys = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, hotkeys);
+    }
+
+    #[test]
+    fn hotkeys_from_before_fast_forward_gain_its_key() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("fast_forward");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::FastForward).is_empty());
+        assert!(!hotkeys.offers(HotkeyAction::FastForward));
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::Space, Modifiers::NONE),
+            Some(HotkeyAction::FastForward)
+        );
+        assert!(hotkeys.offers(HotkeyAction::FastForward));
+    }
+
+    #[test]
+    fn a_build_from_before_the_hud_still_reads_the_hotkeys() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind_pad(PadButton::iter().next().unwrap(), HotkeyAction::ToggleHuds);
+        let stored = serde_json::to_string(&hotkeys).unwrap();
+
+        let older: Result<OlderHotkeys, _> = serde_json::from_str(&stored);
+
+        assert!(older.is_ok(), "{stored}");
+        let back: Hotkeys = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, hotkeys);
+    }
+
+    #[test]
+    fn hotkeys_from_before_the_hud_gain_its_key() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("hud");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::ToggleHuds).is_empty());
+        assert!(!hotkeys.offers(HotkeyAction::ToggleHuds));
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::F3, Modifiers::SHIFT),
+            Some(HotkeyAction::ToggleHuds)
+        );
+        assert!(hotkeys.offers(HotkeyAction::ToggleHuds));
     }
 
     #[test]

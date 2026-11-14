@@ -9,15 +9,25 @@ pub enum FileKind {
     Other,
 }
 
-pub const ROM_FILTER: (&str, &[&str]) = ("Game Boy and GBA ROMs", &["gb", "gbc", "gba"]);
+pub const LINK_ROM_FILTER: (&str, &[&str]) =
+    ("Game Boy and GBA ROMs", &["gb", "gbc", "gba", "zip"]);
+#[cfg(not(feature = "nds"))]
+pub const ROM_FILTER: (&str, &[&str]) = LINK_ROM_FILTER;
+#[cfg(feature = "nds")]
+pub const ROM_FILTER: (&str, &[&str]) = (
+    "Game Boy, GBA and DS ROMs",
+    &["gb", "gbc", "gba", "nds", "zip"],
+);
 
 pub fn kind_of(name: &str) -> FileKind {
     let extension = std::path::Path::new(name)
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match extension.as_deref() {
-        Some("gb" | "gbc" | "gba") => FileKind::Rom,
-        Some("sav" | "srm") => FileKind::Save,
+        Some("gb" | "gbc" | "gba" | "zip") => FileKind::Rom,
+        #[cfg(feature = "nds")]
+        Some("nds") => FileKind::Rom,
+        Some("sav" | "srm" | "dsv") => FileKind::Save,
         Some("rtc") => FileKind::Clock,
         _ => FileKind::Other,
     }
@@ -60,9 +70,10 @@ mod tests {
     fn file(name: &str, data: &[u8]) -> PickedFile {
         PickedFile {
             name: name.to_string(),
-            data: data.to_vec(),
+            data: data.into(),
             #[cfg(not(target_arch = "wasm32"))]
             path: None,
+            seen: None,
         }
     }
 
@@ -83,8 +94,17 @@ mod tests {
         assert_eq!(kind_of("silver.srm"), FileKind::Save);
         assert_eq!(kind_of("silver.SAV"), FileKind::Save);
         assert_eq!(kind_of("silver.rtc"), FileKind::Clock);
+        assert_eq!(kind_of("soulsilver.DSV"), FileKind::Save);
         assert_eq!(kind_of("notes.txt"), FileKind::Other);
         assert_eq!(kind_of("rtc"), FileKind::Other);
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_file_is_a_rom_and_shows_in_the_picker() {
+        assert_eq!(kind_of("Both Screens.NDS"), FileKind::Rom);
+        assert!(ROM_FILTER.1.contains(&"nds"));
+        assert!(!LINK_ROM_FILTER.1.contains(&"nds"));
     }
 
     #[test]
@@ -94,7 +114,7 @@ mod tests {
             file("silver.srm", b"ram"),
         ])
         .expect("sorted");
-        assert_eq!(sorted.save.expect("save").data, b"ram");
+        assert_eq!(&sorted.save.expect("save").data[..], b"ram");
         let (name, footer) = sorted.clock.expect("clock");
         assert_eq!(name, "silver.rtc");
         assert_eq!(footer.real.to_bytes(), [26, 19, 5, 1, 0]);

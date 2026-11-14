@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.device_id AS \"device!: i64\", p.token, p.kinds AS \"kinds!: i64\"\n                 FROM push_tokens p JOIN devices d ON d.id = p.device_id\n                WHERE p.account_id = ?1 AND d.left_at IS NULL\n                ORDER BY p.device_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "device!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "push_tokens",
+            "name": "device_id"
+          }
+        }
+      },
+      {
+        "name": "token",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "push_tokens",
+            "name": "token"
+          }
+        }
+      },
+      {
+        "name": "kinds!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "push_tokens",
+            "name": "kinds"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "93c588abf192fb8e5c3d2193184a93f79cb05fa81ead58d240bc7bb3bf839c7e"
+}

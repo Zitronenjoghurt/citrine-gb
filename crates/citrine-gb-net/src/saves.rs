@@ -10,6 +10,12 @@ pub const MAX_SLOT_CHARS: usize = 64;
 pub const MAX_LABEL_BYTES: usize = 1024;
 pub const MAX_SAVE_BYTES: usize = crate::MAX_FRAME_BYTES - 8 * 1024;
 pub const STORAGE_BLOCK: u64 = 4096;
+pub const SAVE_PART_BYTES: usize = 512 * 1024;
+pub const MAX_CLOUD_SAVE_BYTES: usize = 24 << 20;
+
+pub fn last_part_at(len: usize) -> usize {
+    len.saturating_sub(1) / SAVE_PART_BYTES * SAVE_PART_BYTES
+}
 
 pub fn storage_cost(bytes: u64) -> u64 {
     bytes.max(STORAGE_BLOCK)
@@ -238,5 +244,17 @@ mod tests {
         assert_eq!(payload().hash(), payload().hash());
         assert_eq!(payload().file("meta").map(<[u8]>::len), Some(8));
         assert_eq!(payload().size(), 32 * 1024 + 8);
+    }
+
+    #[test]
+    fn a_save_splits_into_full_parts_and_a_last_part_that_is_never_empty() {
+        assert_eq!(last_part_at(0), 0);
+        assert_eq!(last_part_at(1), 0);
+        assert_eq!(last_part_at(SAVE_PART_BYTES), 0);
+        assert_eq!(last_part_at(SAVE_PART_BYTES + 1), SAVE_PART_BYTES);
+        let three_mb = 3 << 20;
+        let cut = last_part_at(three_mb);
+        assert_eq!(cut % SAVE_PART_BYTES, 0);
+        assert!((1..=SAVE_PART_BYTES).contains(&(three_mb - cut)));
     }
 }

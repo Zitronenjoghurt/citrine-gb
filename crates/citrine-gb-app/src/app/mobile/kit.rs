@@ -1,3 +1,5 @@
+use crate::app::big_screen::scroll::Following;
+use crate::app::widgets::text::one_line;
 use crate::icons;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, Response, RichText,
@@ -8,8 +10,10 @@ pub const SIDE: f32 = 14.0;
 pub const ROW_HEIGHT: f32 = 50.0;
 pub const RADIUS: u8 = 14;
 pub const VALUE_EDGE: f32 = 16.0;
+pub const TITLE_GAP: f32 = 4.0;
 const ICON_COLUMN: f32 = 50.0;
 const ICON_TILE: f32 = 36.0;
+const PICTURE_SIZE: f32 = 32.0;
 
 pub fn page_fill(visuals: &egui::Visuals) -> Color32 {
     if visuals.dark_mode {
@@ -29,6 +33,18 @@ pub fn card_fill(visuals: &egui::Visuals) -> Color32 {
     }
 }
 
+pub fn focus_fill(visuals: &egui::Visuals) -> Color32 {
+    crate::app::big_screen::ring::fill_color(visuals, card_fill(visuals))
+}
+
+fn paint_row_focus(ui: &Ui, rect: Rect) {
+    ui.painter().rect_filled(
+        rect.shrink2(vec2(4.0, 1.0)),
+        CornerRadius::same(10),
+        focus_fill(ui.visuals()),
+    );
+}
+
 pub fn icon_tile_fill(visuals: &egui::Visuals) -> Color32 {
     if visuals.dark_mode {
         Color32::from_white_alpha(18)
@@ -41,7 +57,7 @@ pub fn place<R>(ui: &mut Ui, id: &str, body: impl FnOnce(&mut Ui) -> R) -> R {
     egui::ScrollArea::vertical()
         .id_salt(id)
         .auto_shrink(false)
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             Frame::new()
                 .inner_margin(Margin {
                     left: SIDE as i8,
@@ -78,7 +94,7 @@ pub fn place_title(ui: &mut Ui, title: &str, actions: impl FnOnce(&mut Ui)) {
         ui.label(RichText::new(title).size(24.0).strong());
         ui.with_layout(Layout::right_to_left(Align::Center), actions);
     });
-    ui.add_space(4.0);
+    ui.add_space(TITLE_GAP);
 }
 
 pub fn page_title(ui: &mut Ui, title: &str, actions: impl FnOnce(&mut Ui)) -> bool {
@@ -93,7 +109,7 @@ pub fn page_title(ui: &mut Ui, title: &str, actions: impl FnOnce(&mut Ui)) -> bo
         ui.add(egui::Label::new(RichText::new(title).size(20.0).strong()).truncate());
         ui.with_layout(Layout::right_to_left(Align::Center), actions);
     });
-    ui.add_space(4.0);
+    ui.add_space(TITLE_GAP);
     back
 }
 
@@ -123,6 +139,15 @@ pub fn scrim(visuals: &egui::Visuals) -> Color32 {
 
 pub fn section_label(ui: &mut Ui, text: &str) {
     ui.add_space(12.0);
+    section_title(ui, text, None);
+    ui.add_space(2.0);
+}
+
+pub fn section_title(ui: &mut Ui, text: &str, hint: Option<&str>) -> f32 {
+    let label = ui.fonts_mut(|fonts| fonts.row_height(&FontId::proportional(13.0)));
+    let mark = crate::app::mobile::touch_square(ui).max(ui.spacing().interact_size.y);
+    let overhang = hint.map_or(0.0, |_| ((mark - label) / 2.0).max(0.0));
+    ui.add_space(-overhang);
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         ui.label(
@@ -130,8 +155,11 @@ pub fn section_label(ui: &mut Ui, text: &str) {
                 .size(13.0)
                 .color(section_color(ui.visuals())),
         );
+        if let Some(hint) = hint {
+            crate::app::widgets::info_mark::info_mark(ui, hint);
+        }
     });
-    ui.add_space(2.0);
+    overhang
 }
 
 pub fn section_label_button(ui: &mut Ui, text: &str, button: &str, hint: &str) -> bool {
@@ -159,21 +187,6 @@ pub fn section_label_button(ui: &mut Ui, text: &str, button: &str, hint: &str) -
     clicked
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn section_label_with(ui: &mut Ui, text: &str, right: &str) {
-    ui.add_space(12.0);
-    ui.horizontal(|ui| {
-        ui.add_space(6.0);
-        let secondary = section_color(ui.visuals());
-        ui.label(RichText::new(text).size(13.0).color(secondary));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(6.0);
-            ui.label(RichText::new(right).size(13.0).color(secondary));
-        });
-    });
-    ui.add_space(2.0);
-}
-
 pub fn card<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
     Frame::new()
         .fill(card_fill(ui.visuals()))
@@ -197,6 +210,24 @@ pub fn padded<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
+#[cfg(feature = "nds")]
+fn picture_rect(ctx: &egui::Context, center: egui::Pos2) -> Rect {
+    crate::ds_banner::icon_rect(ctx, center, PICTURE_SIZE)
+}
+
+#[cfg(not(feature = "nds"))]
+fn picture_rect(_ctx: &egui::Context, center: egui::Pos2) -> Rect {
+    Rect::from_center_size(center, Vec2::splat(PICTURE_SIZE))
+}
+
+pub fn fit_inside(image: Vec2, room: Rect) -> Rect {
+    if image.x <= 0.0 || image.y <= 0.0 {
+        return room;
+    }
+    let scale = (room.width() / image.x).min(room.height() / image.y);
+    Rect::from_center_size(room.center(), image * scale)
+}
+
 pub fn divider(ui: &mut Ui) {
     let rect = ui.available_rect_before_wrap();
     let y = rect.top();
@@ -206,6 +237,8 @@ pub fn divider(ui: &mut Ui) {
 
 pub struct Row<'a> {
     icon: Option<&'a str>,
+    picture: Option<egui::TextureId>,
+    cover: Option<(egui::TextureId, Vec2)>,
     label: &'a str,
     detail: Option<&'a str>,
     info: Option<&'a str>,
@@ -215,12 +248,16 @@ pub struct Row<'a> {
     checked: Option<bool>,
     danger: bool,
     accent: bool,
+    enabled: bool,
+    stepper: bool,
 }
 
 impl<'a> Row<'a> {
     pub fn new(label: &'a str) -> Self {
         Self {
             icon: None,
+            picture: None,
+            cover: None,
             label,
             detail: None,
             info: None,
@@ -230,11 +267,29 @@ impl<'a> Row<'a> {
             checked: None,
             danger: false,
             accent: false,
+            enabled: true,
+            stepper: false,
         }
+    }
+
+    #[cfg(feature = "nds")]
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 
     pub fn icon(mut self, icon: &'a str) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    pub fn picture(mut self, picture: Option<egui::TextureId>) -> Self {
+        self.picture = picture;
+        self
+    }
+
+    pub fn cover(mut self, cover: Option<(egui::TextureId, Vec2)>) -> Self {
+        self.cover = cover;
         self
     }
 
@@ -281,15 +336,33 @@ impl<'a> Row<'a> {
         self
     }
 
-    pub fn show(self, ui: &mut Ui) -> Response {
+    pub fn stepper(mut self) -> Self {
+        self.stepper = true;
+        self
+    }
+
+    pub fn show(mut self, ui: &mut Ui) -> Response {
+        if !self.enabled {
+            self.enabled = true;
+            return ui.add_enabled_ui(false, |ui| self.show(ui)).inner;
+        }
         let height = row_height(ui, self.detail.is_some());
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+        crate::app::widgets::settings::page::mark(
+            crate::app::widgets::settings::page::Mark::Row,
+            rect,
+        );
+        if self.stepper {
+            crate::app::big_screen::offer_steps(ui.ctx(), &response);
+        }
         if !ui.is_rect_visible(rect) {
             return response;
         }
         let visuals = ui.visuals();
-        if response.is_pointer_button_down_on() || response.has_focus() {
+        if crate::app::big_screen::ring::fill(&response) {
+            paint_row_focus(ui, rect);
+        } else if response.is_pointer_button_down_on() || response.has_focus() {
             ui.painter().rect_filled(
                 rect.shrink2(vec2(4.0, 1.0)),
                 CornerRadius::same(10),
@@ -311,17 +384,34 @@ impl<'a> Row<'a> {
             );
             ui.painter()
                 .rect_filled(tile, CornerRadius::same(10), icon_tile_fill(visuals));
-            ui.painter().text(
-                tile.center(),
-                Align2::CENTER_CENTER,
-                icon,
-                FontId::proportional(20.0),
-                if self.danger {
-                    strong
-                } else {
-                    visuals.text_color()
-                },
-            );
+            match (self.cover, self.picture) {
+                (Some((cover, size)), _) => {
+                    egui::Image::new((cover, size))
+                        .corner_radius(CornerRadius::same(4))
+                        .paint_at(ui, fit_inside(size, tile.shrink(2.0)));
+                }
+                (None, Some(picture)) => {
+                    ui.painter().image(
+                        picture,
+                        picture_rect(ui.ctx(), tile.center()),
+                        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                (None, None) => {
+                    ui.painter().text(
+                        tile.center(),
+                        Align2::CENTER_CENTER,
+                        icon,
+                        FontId::proportional(20.0),
+                        if self.danger {
+                            strong
+                        } else {
+                            visuals.text_color()
+                        },
+                    );
+                }
+            }
             left += ICON_COLUMN;
         }
         let mut right = rect.right() - 12.0;
@@ -366,6 +456,16 @@ impl<'a> Row<'a> {
                 ))
                 .galley(pos, galley, color);
             right -= width + 10.0;
+            if self.stepper && crate::app::big_screen::ring::shown(&response) {
+                ui.painter().text(
+                    egui::pos2(right + 4.0, rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    icons::CARET_LEFT,
+                    FontId::proportional(15.0),
+                    weak,
+                );
+                right -= 22.0;
+            }
         }
         let text_rect = Rect::from_min_max(
             egui::pos2(left, rect.top()),
@@ -427,21 +527,6 @@ fn row_height(ui: &Ui, detail: bool) -> f32 {
     if detail { base + 8.0 } else { base }
 }
 
-pub fn one_line(
-    ui: &Ui,
-    text: &str,
-    size: f32,
-    color: Color32,
-    width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::single_section(
-        text.to_owned(),
-        egui::TextFormat::simple(FontId::proportional(size), color),
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(1.0));
-    ui.fonts_mut(|fonts| fonts.layout_job(job))
-}
-
 pub fn rows(ui: &mut Ui, rows: Vec<Row<'_>>) -> Option<usize> {
     let mut clicked = None;
     card(ui, |ui| {
@@ -462,6 +547,13 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     let height = ui.spacing().interact_size.y.max(26.0);
     let (cell, mut response) = ui.allocate_exact_size(vec2(52.0, height), Sense::click());
     let rect = Rect::from_center_size(cell.center(), vec2(44.0, 26.0));
+    crate::app::big_screen::ring::mark(
+        &response,
+        crate::app::big_screen::ring::Mark::Ring {
+            rect,
+            radius: rect.height() / 2.0,
+        },
+    );
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
@@ -530,6 +622,10 @@ impl<'a> SwitchRow<'a> {
         let height = row_height(ui, self.detail.is_some());
         let (rect, row) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+        crate::app::widgets::settings::page::mark(
+            crate::app::widgets::settings::page::Mark::Row,
+            rect,
+        );
         let enabled = self.enabled && ui.is_enabled();
         row.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *self.on, self.label)
@@ -538,6 +634,9 @@ impl<'a> SwitchRow<'a> {
         if enabled && row.clicked() {
             *self.on = !*self.on;
             changed = true;
+        }
+        if crate::app::big_screen::ring::fill(&row) && ui.is_rect_visible(rect) {
+            paint_row_focus(ui, rect);
         }
         let switch_width = 52.0;
         let switch_rect = Rect::from_center_size(
@@ -631,7 +730,16 @@ impl List<'_> {
 
     pub fn custom<R>(&mut self, body: impl FnOnce(&mut Ui) -> R) -> R {
         self.gap();
-        body(self.ui)
+        let top = self.ui.cursor().top();
+        let inner = body(self.ui);
+        crate::app::widgets::settings::page::mark(
+            crate::app::widgets::settings::page::Mark::Row,
+            Rect::from_x_y_ranges(
+                self.ui.max_rect().x_range(),
+                top..=self.ui.min_rect().bottom(),
+            ),
+        );
+        inner
     }
 }
 
@@ -722,4 +830,56 @@ pub fn field(ui: &mut Ui, edit: egui::TextEdit<'_>) -> Response {
 
 pub fn primary_button(ui: &mut Ui, text: &str) -> bool {
     wide_button(ui, text, true).clicked()
+}
+
+pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, options: &[(T, &str)], current: T) -> Option<T> {
+    let height = 38.0_f32.max(ui.spacing().interact_size.y);
+    let (whole, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let visuals = ui.visuals().clone();
+    let radius = height / 2.0;
+    ui.painter()
+        .rect_filled(whole, radius, icon_tile_fill(&visuals));
+    let inner = whole.shrink(3.0);
+    let width = inner.width() / options.len().max(1) as f32;
+    let mut picked = None;
+    for (index, (value, label)) in options.iter().enumerate() {
+        let rect = Rect::from_min_size(
+            egui::pos2(inner.left() + width * index as f32, inner.top()),
+            vec2(width, inner.height()),
+        );
+        let on = *value == current;
+        let response = ui.interact(rect, ui.id().with(("segment", index)), Sense::click());
+        response.widget_info(|| {
+            let mut info = egui::WidgetInfo::labeled(egui::WidgetType::Button, true, *label);
+            info.selected = Some(on);
+            info
+        });
+        if on {
+            let shadow = egui::Shadow {
+                offset: [0, 1],
+                blur: 2,
+                spread: 0,
+                color: Color32::from_black_alpha(40),
+            };
+            ui.painter().add(shadow.as_shape(rect, radius - 3.0));
+            ui.painter()
+                .rect_filled(rect, radius - 3.0, card_fill(&visuals));
+        }
+        let ink = if on {
+            visuals.strong_text_color()
+        } else {
+            visuals.text_color()
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            FontId::proportional(15.0),
+            ink,
+        );
+        if response.clicked() && !on {
+            picked = Some(*value);
+        }
+    }
+    picked
 }

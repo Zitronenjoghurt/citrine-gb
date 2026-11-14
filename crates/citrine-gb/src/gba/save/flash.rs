@@ -184,3 +184,45 @@ impl Flash {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Flash, FlashChip};
+
+    #[test]
+    fn every_flash_chip_answers_with_its_id() {
+        let chips = [
+            (FlashChip::Sst, [0xBF, 0xD4]),
+            (FlashChip::Macronix64K, [0xC2, 0x1C]),
+            (FlashChip::Panasonic, [0x32, 0x1B]),
+            (FlashChip::Atmel, [0x1F, 0x3D]),
+            (FlashChip::Sanyo, [0x62, 0x13]),
+            (FlashChip::Macronix128K, [0xC2, 0x09]),
+        ];
+        for (chip, [maker, device]) in chips {
+            let mut flash = Flash::new(chip);
+            for (offset, value) in [(0x5555, 0xAA), (0x2AAA, 0x55), (0x5555, 0x90)] {
+                flash.write(offset, value);
+            }
+            assert_eq!([flash.read(0), flash.read(1)], [maker, device], "{chip:?}");
+            for (offset, value) in [(0x5555, 0xAA), (0x2AAA, 0x55), (0x5555, 0xF0)] {
+                flash.write(offset, value);
+            }
+            assert_eq!([flash.read(0), flash.read(1)], [0xFF, 0xFF], "{chip:?}");
+        }
+    }
+
+    #[test]
+    fn atmel_writes_a_128_byte_page_per_command() {
+        let mut flash = Flash::new(FlashChip::Atmel);
+        for (offset, value) in [(0x5555, 0xAA), (0x2AAA, 0x55), (0x5555, 0xA0)] {
+            flash.write(offset, value);
+        }
+        for i in 0..128 {
+            assert!(flash.write(0x80 + i, i as u8));
+        }
+        assert!(!flash.write(0x100, 0x00));
+        assert_eq!(flash.read(0xFF), 0x7F);
+        assert_eq!(flash.read(0x100), 0xFF);
+    }
+}

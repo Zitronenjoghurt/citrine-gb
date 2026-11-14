@@ -1,7 +1,13 @@
+pub mod even_clock;
+pub mod follow;
 pub mod mix;
 pub mod pacer;
+pub mod preview;
 pub mod queue;
 pub mod resampler;
+#[cfg(any(test, all(threaded, target_arch = "wasm32")))]
+pub mod shared;
+pub mod stretch;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
@@ -293,6 +299,13 @@ impl Audio {
 
     pub fn get_device_description(&self) -> &Option<cpal::DeviceDescription> {
         &self.device_description
+    }
+
+    #[cfg(all(threaded, target_arch = "wasm32"))]
+    pub fn pump(&self) {
+        if let Some(stream) = &self.stream {
+            stream.pump();
+        }
     }
 
     pub fn reset_stats(&self) {

@@ -1,4 +1,5 @@
 use super::{SaveStore, autosave_cloud, console_code, console_of_code, decode_meta, decompress};
+use crate::media::Frame;
 use citrine_gb::console::ConsoleKind;
 use citrine_gb::persistence::state::is_gba_state;
 use citrine_gb_net::SavePayload;
@@ -109,7 +110,10 @@ pub struct OtherBattery {
 impl SaveStore {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn in_dir(root: std::path::PathBuf) -> Self {
+        let mut cache = root.file_name().unwrap_or_default().to_os_string();
+        cache.push("-cache");
         Self {
+            cache: super::Backend::at(root.with_file_name(cache)),
             backend: super::Backend::at(root),
             touched: Default::default(),
         }
@@ -385,8 +389,15 @@ pub fn is_gba_payload(payload: &SavePayload) -> bool {
     payload.file(CONSOLE_ROLE) == Some(&[console_code(ConsoleKind::Gba)][..])
 }
 
-pub fn thumb_of(payload: &SavePayload) -> Option<Vec<u8>> {
-    payload.file("thumb").and_then(decompress)
+pub fn thumb_of(payload: &SavePayload) -> Option<Frame> {
+    let console = payload.file("meta").and_then(|meta| decode_meta(meta).1);
+    let [width, height] = super::thumb_size(console);
+    let frame = Frame {
+        width: width as u32,
+        height: height as u32,
+        rgba: payload.file("thumb").and_then(decompress)?,
+    };
+    frame.is_valid().then_some(frame)
 }
 
 pub fn saved_at_of(payload: &SavePayload) -> u64 {
@@ -491,6 +502,24 @@ mod tests {
         );
         store.prune_autosaves(KEY, 1).unwrap();
         assert_eq!(store.autosave_ids(KEY), [0]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_thumbnail_takes_its_size_from_the_saved_console() {
+        let (store, root) = new_store("thumbs");
+        store
+            .store_snapshot(KEY, 0, &[1; 20], &[9; 240 * 160 * 4], ConsoleKind::Gba)
+            .unwrap();
+        store
+            .store_autosave(KEY, &[2; 20], &[9; 160 * 144 * 4], ConsoleKind::Gbc, 5)
+            .unwrap();
+        let sizes: Vec<_> = store
+            .local_items(KEY, "dev1")
+            .iter()
+            .map(|item| thumb_of(&item.payload).map(|t| (t.width, t.height)))
+            .collect();
+        assert_eq!(sizes, [Some((120, 80)), Some((80, 72))]);
         let _ = std::fs::remove_dir_all(root);
     }
 

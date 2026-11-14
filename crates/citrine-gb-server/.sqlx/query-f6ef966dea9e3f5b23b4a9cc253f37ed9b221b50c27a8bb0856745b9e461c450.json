@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM push_tokens WHERE token = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f6ef966dea9e3f5b23b4a9cc253f37ed9b221b50c27a8bb0856745b9e461c450"
+}

@@ -1,3 +1,4 @@
+use crate::app::big_screen::scroll::Following;
 use parts::{badges, badges_width, card, fact, fact_width, money, text_width, tile_color};
 use sprites::sprite_texture;
 use status::{Clock, status_line};
@@ -5,12 +6,13 @@ mod bag;
 mod battle;
 mod boxes;
 mod journey;
+mod legality;
 mod map;
 mod parts;
 mod party;
 mod pokedex;
 mod region_map;
-mod sprites;
+pub(crate) mod sprites;
 mod status;
 
 use crate::app::tabs::TabViewer;
@@ -28,6 +30,8 @@ const DETAILS_TWO_COLUMNS: f32 = 520.0;
 const HERE_TWO_COLUMNS: f32 = 560.0;
 const GRID_CELL: f32 = 76.0;
 const DEX_CELL: f32 = 96.0;
+const DEX_ROW: f32 = 170.0;
+const DEX_ROW_HEIGHT: f32 = 30.0;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     let mobile = viewer.ui.settings.layout.is_touch(ui.ctx());
@@ -51,7 +55,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
         egui::ScrollArea::vertical()
             .id_salt("game_info_scroll")
             .auto_shrink(false)
-            .show(ui, |ui| {
+            .show_following(ui, |ui| {
                 ui.set_max_width(ui.available_width() - gutter);
                 ui.style_mut().interaction.selectable_labels = false;
                 ui.spacing_mut().interact_size.y = egui::style::Spacing::default().interact_size.y;
@@ -195,10 +199,11 @@ impl Pages<'_> {
                 ui.label(RichText::new(&trainer.name).size(19.0).strong());
                 ui.label(RichText::new(format!("ID {:05}", trainer.id)).weak());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let shown = self.shown_badges(state);
                     ui.label(format!(
                         "{} of {} badges",
-                        state.badge_count(),
-                        trainer.badges.len()
+                        shown.iter().filter(|b| **b).count(),
+                        shown.len()
                     ));
                 });
             });
@@ -237,17 +242,18 @@ impl Pages<'_> {
                     state.pokedex.seen.len()
                 ),
             ));
+            let shown = self.shown_badges(state);
             let badge_fact = |ui: &mut Ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     ui.add(egui::Label::new(RichText::new("Badges").weak()).extend());
-                    badges(ui, &trainer.badges);
+                    badges(ui, shown);
                 })
                 .response
                 .on_hover_text(format!(
                     "{} of {} badges",
-                    state.badge_count(),
-                    trainer.badges.len()
+                    shown.iter().filter(|b| **b).count(),
+                    shown.len()
                 ));
             };
             let gap = 22.0;
@@ -255,7 +261,7 @@ impl Pages<'_> {
                 .iter()
                 .map(|(label, value)| fact_width(ui, label, value))
                 .collect();
-            widths.push(badges_width(trainer.badges.len()));
+            widths.push(badges_width(shown.len()));
             if let Some((label, value)) = &last {
                 widths.push(fact_width(ui, label, value));
             }
@@ -305,6 +311,7 @@ impl Pages<'_> {
         };
         let Some(texture) = sprite_texture(ui.ctx(), self.key, self.game, species, shiny, letter)
         else {
+            paint_ball(&painter, rect.center(), size * 0.28, tile_color(ui));
             return;
         };
         let [w, h] = texture.size();
@@ -320,5 +327,273 @@ impl Pages<'_> {
     }
 }
 
+fn paint_ball(painter: &egui::Painter, center: egui::Pos2, radius: f32, fill: Color32) {
+    let stroke = egui::Stroke::new((radius / 8.0).max(1.0), Color32::from_gray(0xb4));
+    painter.circle_stroke(center, radius, stroke);
+    painter.line_segment(
+        [center - vec2(radius, 0.0), center + vec2(radius, 0.0)],
+        stroke,
+    );
+    painter.circle(center, radius * 0.3, fill, stroke);
+}
+
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::pokedex;
+    use super::status::Clock;
+    use super::*;
+    use crate::game_info::GameInfo;
+    use citrine_gb_gamedata::Ram;
+    use citrine_gb_gamedata::fixtures::{crystal_cartridge, crystal_live_wram, crystal_save};
+
+    pub(super) const NOON: i64 = 1_761_912_000;
+
+    pub(super) fn clock() -> Clock {
+        Clock::in_zone(
+            jiff::tz::TimeZone::UTC,
+            jiff::Timestamp::from_second(NOON).unwrap(),
+        )
+    }
+
+    pub(super) fn crystal(saved_at: Option<u64>) -> GameInfo {
+        let mut info = GameInfo::default();
+        info.set_rom_now(Some("crystal"), crystal_cartridge().into(), saved_at);
+        info
+    }
+
+    #[test]
+    fn every_page_fits_a_narrow_desktop_panel() {
+        let save = crystal_save();
+        let mut info = crystal(Some(NOON as u64));
+        info.read(&save, Ram::Gb(&crystal_live_wram(&save)), NOON as u64);
+        let game = info.game().unwrap();
+        let ctx = egui::Context::default();
+        let mut wide = Vec::new();
+        for width in [
+            280.0, 300.0, 320.0, 340.0, 360.0, 380.0, 400.0, 419.0, 460.0, 500.0, 540.0, 580.0,
+            640.0,
+        ] {
+            for page in [
+                Page::Map,
+                Page::Party,
+                Page::Journey,
+                Page::Bag,
+                Page::Pokedex,
+            ] {
+                let pages = Pages {
+                    key: "crystal",
+                    name: "POKEMON_SLV",
+                    touch: 24.0,
+                    game,
+                    mobile: false,
+                    clock: clock(),
+                };
+                let mut view = View::default();
+                view.page = page;
+                for frame in 0..2 {
+                    let _ = ctx.run(Default::default(), |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let rect = Rect::from_min_size(ui.min_rect().min, vec2(width, 4000.0));
+                            let used = ui
+                                .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                                    pages.show(ui, &mut view, None);
+                                })
+                                .response
+                                .rect
+                                .width();
+                            if frame == 1 && used > width + 0.5 {
+                                wide.push(format!("{page:?} takes {used} in a {width} panel"));
+                            }
+                        });
+                    });
+                }
+            }
+        }
+        assert!(wide.is_empty(), "{wide:#?}");
+    }
+
+    #[test]
+    fn details_with_long_facts_fit_a_narrow_desktop_panel() {
+        use citrine_gb_gamedata::{Caught, Gender, Place, TimeOfDay};
+        let save = crystal_save();
+        let mut info = crystal(Some(NOON as u64));
+        info.read(&save, Ram::Gb(&crystal_live_wram(&save)), NOON as u64);
+        let game = info.game().unwrap();
+        let tables = &game.tables;
+        let state = game.state().unwrap();
+        let mut mon = state
+            .party
+            .iter()
+            .find_map(|pokemon| match pokemon {
+                Pokemon::Hatched(mon) => Some(mon.clone()),
+                Pokemon::Egg => None,
+            })
+            .unwrap();
+        let place_len = |location: u16| {
+            let caught = Caught {
+                time_of_day: TimeOfDay::Morning,
+                level: 100,
+                ot_gender: Gender::Male,
+                location,
+            };
+            match tables.caught_place(&caught) {
+                Some(Place::Landmark(name)) => name.len(),
+                _ => 0,
+            }
+        };
+        let location = (0..=0x7D)
+            .max_by_key(|location| place_len(*location))
+            .unwrap();
+        mon.caught = Some(Caught {
+            time_of_day: TimeOfDay::Morning,
+            level: 100,
+            ot_gender: Gender::Male,
+            location,
+        });
+        mon.held_item = (1..=u16::from(u8::MAX))
+            .max_by_key(|item| tables.item_name(*item).map_or(0, |name| name.len()));
+        mon.ot_name = "WWWWWWW".to_owned();
+        mon.ot_id = state.trainer.id.wrapping_add(1);
+        let ctx = egui::Context::default();
+        let mut wide = Vec::new();
+        for width in [
+            260.0, 280.0, 300.0, 320.0, 360.0, 400.0, 460.0, 520.0, 600.0,
+        ] {
+            let pages = Pages {
+                key: "crystal",
+                name: "POKEMON_SLV",
+                touch: 24.0,
+                game,
+                mobile: false,
+                clock: clock(),
+            };
+            for frame in 0..2 {
+                let _ = ctx.run(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let rect = Rect::from_min_size(ui.min_rect().min, vec2(width, 4000.0));
+                        let used = ui
+                            .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                                pages.details(ui, &mon);
+                            })
+                            .response
+                            .rect
+                            .width();
+                        if frame == 1 && used > width + 0.5 {
+                            wide.push(format!("details take {used} in a {width} panel"));
+                        }
+                    });
+                });
+            }
+        }
+        assert!(wide.is_empty(), "{wide:#?}");
+    }
+
+    #[test]
+    fn long_facts_wrap_inside_a_narrow_card() {
+        let facts = [
+            ("Held item", "CHARCOAL".to_owned()),
+            ("Hidden Power", "FLYING, power 70".to_owned()),
+            ("Original trainer", "WWWWWWW, ID 24602".to_owned()),
+            ("Caught", "NEW BARK TOWN in the morning, Lv 5".to_owned()),
+        ];
+        let ctx = egui::Context::default();
+        let mut wide = Vec::new();
+        for width in [200.0, 240.0, 280.0, 320.0, 360.0] {
+            for frame in 0..2 {
+                let _ = ctx.run(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let rect = Rect::from_min_size(ui.min_rect().min, vec2(width, 4000.0));
+                        let used = ui
+                            .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                                party::fact_rows(ui, &facts, |ui, value: &String| {
+                                    ui.add(egui::Label::new(value.as_str()).wrap());
+                                });
+                            })
+                            .response
+                            .rect
+                            .width();
+                        if frame == 1 && used > width + 0.5 {
+                            wide.push(format!("facts take {used} in {width}"));
+                        }
+                    });
+                });
+            }
+        }
+        assert!(wide.is_empty(), "{wide:#?}");
+    }
+
+    #[test]
+    fn the_trainer_card_keeps_its_height_on_every_page() {
+        let save = crystal_save();
+        let mut info = crystal(Some(NOON as u64));
+        info.read(&save, Ram::Gb(&crystal_live_wram(&save)), NOON as u64);
+        let game = info.game().unwrap();
+        let state = game.state().unwrap();
+        let pages = Pages {
+            key: "crystal",
+            name: "POKEMON_SLV",
+            touch: 24.0,
+            game,
+            mobile: false,
+            clock: clock(),
+        };
+        let goal = pages.goal_text(state).expect("next goal");
+        let place = "ROUTE 38, Night".to_owned();
+        let ctx = egui::Context::default();
+        let mut moved = Vec::new();
+        for width in [280.0, 320.0, 360.0, 400.0, 460.0, 540.0, 640.0, 800.0] {
+            let mut heights = Vec::new();
+            for last in [("Next goal", goal.clone()), ("Now at", place.clone())] {
+                let mut height = 0.0;
+                for _ in 0..2 {
+                    let _ = ctx.run(Default::default(), |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let rect = Rect::from_min_size(ui.min_rect().min, vec2(width, 4000.0));
+                            height = ui
+                                .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                                    pages.trainer(ui, state, Some(last.clone()));
+                                })
+                                .response
+                                .rect
+                                .height();
+                        });
+                    });
+                }
+                heights.push(height);
+            }
+            if (heights[0] - heights[1]).abs() > 0.5 {
+                moved.push(format!("{heights:?} at {width}"));
+            }
+        }
+        assert!(moved.is_empty(), "{moved:#?}");
+    }
+
+    #[test]
+    fn a_dex_row_keeps_number_name_and_mark_on_one_line() {
+        let ctx = egui::Context::default();
+        for name in ["Floink", "Fletchinder of a very long name"] {
+            let mut row = Rect::NOTHING;
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    row = ui
+                        .scope(|ui| pokedex::dex_row(ui, DEX_ROW, 498, Some(name), true))
+                        .response
+                        .rect;
+                });
+            });
+            assert_eq!(row.size(), vec2(DEX_ROW, DEX_ROW_HEIGHT), "{name}");
+            let texts: Vec<Rect> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.visual_bounding_rect()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts.len(), 2, "{name}");
+            for text in texts {
+                assert!(row.contains_rect(text), "{name}: {text:?} outside {row:?}");
+            }
+        }
+    }
+}

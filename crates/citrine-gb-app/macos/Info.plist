@@ -26,6 +26,8 @@
 	<string>11.0</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.games</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Citrine finds your phones and tablets on this network to use them as second screens.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>

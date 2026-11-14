@@ -3,9 +3,8 @@ use crate::gb::apu::channels::channel_1::Channel1;
 use crate::gb::apu::channels::channel_2::Channel2;
 use crate::gb::apu::channels::channel_3::Channel3;
 use crate::gb::apu::channels::channel_4::Channel4;
-use crate::gb::timer::Timer;
 use crate::{ReadMemory, WriteMemory};
-use blip_buf::BlipBuf;
+use citrine_gb_blip::BlipBuf;
 use registers::audio_master_control::AudioMasterControl;
 use registers::master_volume_vin::MasterVolumeVin;
 use registers::sound_panning::SoundPanning;
@@ -22,6 +21,13 @@ pub struct WriteContext {
     pub double_speed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Step {
+    Idle,
+    Same,
+    Changed,
+}
+
 const SKIP_DIV_EVENT: u8 = 2;
 const SKIPPED_DIV_EVENT: u8 = 1;
 pub const APU_CLOCK_RATE: u32 = 4_194_304;
@@ -30,6 +36,15 @@ pub const CHANNEL_NAMES: [&str; 4] = ["Pulse 1", "Pulse 2", "Wave", "Noise"];
 const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 const MAX_FRAME_SAMPLES: u64 = 2048;
 const BLIP_SCALE: f32 = 16_000.0;
+static LEVELS: [f32; 256] = {
+    let mut levels = [0.0; 256];
+    let mut level = 0;
+    while level < levels.len() {
+        levels[level] = 1.0 - (level as f32 / 7.5);
+        level += 1;
+    }
+    levels
+};
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
@@ -54,9 +69,7 @@ pub struct Apu {
     hpf_capacitor_l: f32,
     hpf_capacitor_r: f32,
     #[cfg_attr(feature = "serde", serde(skip, default = "default_blip_buf"))]
-    pub blip_l: BlipBuf,
-    #[cfg_attr(feature = "serde", serde(skip, default = "default_blip_buf"))]
-    pub blip_r: BlipBuf,
+    pub blip: BlipBuf<2>,
     time: u32,
     #[cfg_attr(feature = "serde", serde(skip, default = "default_max_frame_time"))]
     max_frame_time: u32,
@@ -71,6 +84,10 @@ pub struct Apu {
     pub(crate) muted: bool,
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) muted_channels: [bool; 4],
+    #[cfg_attr(feature = "serde", serde(skip))]
+    owed: u32,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    mixed: bool,
 }
 
 #[cfg(feature = "serde")]
@@ -84,16 +101,14 @@ fn default_max_frame_time() -> u32 {
 }
 
 #[cfg(feature = "serde")]
-fn default_blip_buf() -> BlipBuf {
+fn default_blip_buf() -> BlipBuf<2> {
     BlipBuf::new(MAX_AUDIO_BUFFER_SIZE)
 }
 
 impl Default for Apu {
     fn default() -> Self {
-        let mut blip_l = BlipBuf::new(MAX_AUDIO_BUFFER_SIZE);
-        let mut blip_r = BlipBuf::new(MAX_AUDIO_BUFFER_SIZE);
-        blip_l.set_rates(APU_CLOCK_RATE as f64, DEFAULT_SAMPLE_RATE as f64);
-        blip_r.set_rates(APU_CLOCK_RATE as f64, DEFAULT_SAMPLE_RATE as f64);
+        let mut blip = BlipBuf::new(MAX_AUDIO_BUFFER_SIZE);
+        blip.set_rates(APU_CLOCK_RATE as f64, DEFAULT_SAMPLE_RATE as f64);
 
         Self {
             cgb: false,
@@ -114,8 +129,7 @@ impl Default for Apu {
             ch4: Default::default(),
             hpf_capacitor_l: 0.0,
             hpf_capacitor_r: 0.0,
-            blip_l,
-            blip_r,
+            blip,
             time: 0,
             max_frame_time: max_frame_time(DEFAULT_SAMPLE_RATE),
             prev_l: 0,
@@ -126,6 +140,8 @@ impl Default for Apu {
             output_dirty: true,
             muted: false,
             muted_channels: [false; 4],
+            owed: 0,
+            mixed: false,
         }
     }
 }
@@ -164,8 +180,7 @@ impl Apu {
             ch4,
             hpf_capacitor_l: _,
             hpf_capacitor_r: _,
-            blip_l: _,
-            blip_r: _,
+            blip: _,
             time: _,
             max_frame_time: _,
             prev_l: _,
@@ -176,6 +191,8 @@ impl Apu {
             output_dirty,
             muted: _,
             muted_channels: _,
+            owed,
+            mixed,
         } = self;
         *cgb = source.cgb;
         *div_apu = source.div_apu;
@@ -194,6 +211,8 @@ impl Apu {
         ch3.clone_from(&source.ch3);
         ch4.clone_from(&source.ch4);
         *output_dirty = source.output_dirty;
+        *owed = source.owed;
+        *mixed = false;
     }
 
     pub fn channel_enabled(&self, index: usize) -> bool {
@@ -225,70 +244,244 @@ impl Apu {
         self.ch1.enabled = true;
     }
 
-    pub fn cycle(
+    pub(crate) fn owe_cycle(&mut self) {
+        self.owed += 1;
+    }
+
+    pub(crate) fn owe_cycles(&mut self, cycles: u32) {
+        self.owed += cycles;
+    }
+
+    pub fn settle(
         &mut self,
-        timer: &Timer,
+        div: u16,
         double_speed: bool,
         #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
     ) {
-        if self.time >= self.max_frame_time {
-            self.flush_audio();
+        let owed = std::mem::take(&mut self.owed);
+        if owed == 0 {
+            return;
         }
-        self.update_frame_sequencer(timer, double_speed);
-        let ticks = if double_speed { 2 } else { 4 };
 
         #[cfg(feature = "debug")]
         let always_sample = debugger.wants_apu_channels();
         #[cfg(not(feature = "debug"))]
         let always_sample = false;
 
+        let mut div = div.wrapping_sub(owed.wrapping_sub(1).wrapping_mul(4) as u16);
+        let mut left = owed;
+        let mut edge_ticks = 0;
+        while left > 0 {
+            let span = if always_sample {
+                0
+            } else {
+                self.quiet_cycles(div, double_speed, edge_ticks).min(left)
+            };
+            if span == 0 {
+                if edge_ticks > 0 {
+                    self.run_ticks(
+                        edge_ticks,
+                        #[cfg(feature = "debug")]
+                        debugger,
+                    );
+                }
+                edge_ticks = self.cycle(
+                    div,
+                    double_speed,
+                    always_sample,
+                    #[cfg(feature = "debug")]
+                    debugger,
+                );
+                div = div.wrapping_add(4);
+                left -= 1;
+            } else {
+                self.run_span(
+                    span,
+                    edge_ticks,
+                    div,
+                    double_speed,
+                    #[cfg(feature = "debug")]
+                    debugger,
+                );
+                edge_ticks = 0;
+                div = div.wrapping_add(span.wrapping_mul(4) as u16);
+                left -= span;
+            }
+        }
+        if edge_ticks > 0 {
+            self.run_ticks(
+                edge_ticks,
+                #[cfg(feature = "debug")]
+                debugger,
+            );
+        }
+    }
+
+    fn quiet_cycles(&self, div: u16, double_speed: bool, edge_ticks: u32) -> u32 {
+        let time = self.time + edge_ticks;
+        if self.pending_envelope_tick || self.ch1.sweep_busy() || time >= self.max_frame_time {
+            return 0;
+        }
+        let ticks = if double_speed { 2 } else { 4 };
+        let flush = (self.max_frame_time - time).div_ceil(ticks);
+        if !self.nr52.audio_enabled {
+            return flush;
+        }
+        let bit = if double_speed { 13 } else { 12 };
+        let delayed = self.ds_delay && double_speed;
+        let first = if delayed { self.lagged_div } else { div };
+        let set = |value: u16| (value >> bit) & 1;
+        if set(self.prev_div) != set(first) {
+            return 0;
+        }
+        if delayed && set(first) != set(div) {
+            return 1;
+        }
+        let boundary = ((u32::from(div) >> bit) + 1) << bit;
+        let edge = (boundary - u32::from(div)).div_ceil(4) + u32::from(delayed);
+        edge.min(flush)
+    }
+
+    fn run_span(
+        &mut self,
+        cycles: u32,
+        edge_ticks: u32,
+        div: u16,
+        double_speed: bool,
+        #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
+    ) {
+        let ticks: u32 = if double_speed { 2 } else { 4 };
+        let last = div.wrapping_add(cycles.wrapping_sub(1).wrapping_mul(4) as u16);
+        self.div_bit = if double_speed { 13 } else { 12 };
+        self.prev_div = match (self.ds_delay && double_speed, cycles) {
+            (false, _) => last,
+            (true, 1) => self.lagged_div,
+            (true, _) => last.wrapping_sub(4),
+        };
+        self.lagged_div = last;
+        self.apu_phase = self.apu_phase.wrapping_add((cycles * ticks / 2) as u8);
+        self.run_ticks(
+            edge_ticks + cycles * ticks,
+            #[cfg(feature = "debug")]
+            debugger,
+        );
+    }
+
+    fn cycle(
+        &mut self,
+        div: u16,
+        double_speed: bool,
+        always_sample: bool,
+        #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
+    ) -> u32 {
+        if self.time >= self.max_frame_time {
+            self.flush_audio();
+        }
+        self.update_frame_sequencer(div, double_speed);
+        let ticks = if double_speed { 2 } else { 4 };
+
         if self.ch1.sweep_busy() {
+            let enabled = self.ch1.enabled;
             for step in 1..=ticks / 2 {
                 let lf_div = 1 ^ (self.apu_phase.wrapping_add(step) & 1) as u16;
                 self.ch1.sweep_tick(lf_div);
             }
+            self.mixed &= self.ch1.enabled == enabled;
         }
         self.apu_phase = self.apu_phase.wrapping_add(ticks / 2);
 
-        if !self.output_dirty && !always_sample && self.quiet(ticks as u16) {
-            self.skip(ticks as u16);
-            self.time += ticks as u32;
-            return;
+        if !always_sample {
+            return u32::from(ticks);
         }
 
         for _ in 0..ticks {
-            let moved = self.tick();
-
-            if moved || self.output_dirty || always_sample {
-                self.output_dirty = false;
-                if self.muted {
-                    self.time += 1;
-                    continue;
-                }
-
-                let (out_l_f, out_r_f) = self.sample(
+            self.tick();
+            self.output_dirty = false;
+            if self.muted {
+                self.mixed = false;
+            } else {
+                self.mix(
                     #[cfg(feature = "debug")]
                     debugger,
                 );
-                let current_l = (out_l_f * BLIP_SCALE) as i32;
-                let current_r = (out_r_f * BLIP_SCALE) as i32;
-
-                let delta_l = current_l - self.prev_l;
-                let delta_r = current_r - self.prev_r;
-
-                if delta_l != 0 {
-                    self.blip_l.add_delta(self.time, delta_l);
-                    self.prev_l = current_l;
-                }
-
-                if delta_r != 0 {
-                    self.blip_r.add_delta(self.time, delta_r);
-                    self.prev_r = current_r;
-                }
             }
-
             self.time += 1;
         }
+        0
+    }
+
+    fn run_ticks(
+        &mut self,
+        mut left: u32,
+        #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
+    ) {
+        #[cfg(feature = "debug")]
+        let every_step = debugger.wants_apu_channels();
+        #[cfg(not(feature = "debug"))]
+        let every_step = false;
+        while left > 0 {
+            let quiet = if self.output_dirty {
+                0
+            } else {
+                self.quiet_ticks(self.ch4_unheard(), every_step)
+            };
+            if quiet >= left {
+                self.advance(left);
+                self.time += left;
+                return;
+            }
+            let step = if quiet == 0 {
+                self.tick()
+            } else if self.muted || every_step {
+                self.advance(quiet);
+                self.time += quiet;
+                left -= quiet;
+                continue;
+            } else {
+                self.advance(quiet + 1);
+                self.time += quiet;
+                left -= quiet;
+                Step::Changed
+            };
+            if step == Step::Changed
+                || self.output_dirty
+                || (step == Step::Same && (every_step || !self.mixed))
+            {
+                self.output_dirty = false;
+                if self.muted {
+                    self.mixed = false;
+                } else {
+                    self.mix(
+                        #[cfg(feature = "debug")]
+                        debugger,
+                    );
+                }
+            }
+            self.time += 1;
+            left -= 1;
+        }
+    }
+
+    fn mix(
+        &mut self,
+        #[cfg(feature = "debug")] debugger: &mut impl crate::debug::DebuggerInterface,
+    ) {
+        let (out_l_f, out_r_f) = self.sample(
+            #[cfg(feature = "debug")]
+            debugger,
+        );
+        let current_l = (out_l_f * BLIP_SCALE) as i32;
+        let current_r = (out_r_f * BLIP_SCALE) as i32;
+
+        let delta_l = current_l - self.prev_l;
+        let delta_r = current_r - self.prev_r;
+
+        if delta_l != 0 || delta_r != 0 {
+            self.blip.add_delta(self.time, [delta_l, delta_r]);
+            self.prev_l = current_l;
+            self.prev_r = current_r;
+        }
+        self.mixed = true;
     }
 
     pub fn flush_audio(&mut self) {
@@ -296,29 +489,22 @@ impl Apu {
             self.time = 0;
             return;
         }
-        self.blip_l.end_frame(self.time);
-        self.blip_r.end_frame(self.time);
+        self.blip.end_frame(self.time);
         self.time = 0;
 
-        let available_samples = self.blip_l.samples_avail() as usize;
-        let mut out_l = vec![0i16; available_samples];
-        let mut out_r = vec![0i16; available_samples];
-
-        self.blip_l.read_samples(&mut out_l, false);
-        self.blip_r.read_samples(&mut out_r, false);
-
-        for i in 0..available_samples {
-            let raw_l = out_l[i] as f32 / BLIP_SCALE;
-            let raw_r = out_r[i] as f32 / BLIP_SCALE;
-
-            let filtered_l = raw_l - self.hpf_capacitor_l;
-            let filtered_r = raw_r - self.hpf_capacitor_r;
-
-            self.hpf_capacitor_l = raw_l - filtered_l * self.charge_factor;
-            self.hpf_capacitor_r = raw_r - filtered_r * self.charge_factor;
-
-            self.audio_buffer.push(filtered_l);
-            self.audio_buffer.push(filtered_r);
+        let available_samples = self.blip.samples_avail() as usize;
+        if available_samples > 0 {
+            let start = self.audio_buffer.len();
+            self.audio_buffer.resize(start + available_samples * 2, 0.0);
+            let mut capacitor = [self.hpf_capacitor_l, self.hpf_capacitor_r];
+            let read = self.blip.read_high_passed(
+                self.audio_buffer[start..].as_chunks_mut::<2>().0,
+                BLIP_SCALE,
+                self.charge_factor,
+                &mut capacitor,
+            );
+            self.audio_buffer.truncate(start + read * 2);
+            [self.hpf_capacitor_l, self.hpf_capacitor_r] = capacitor;
         }
 
         let max_len = self.output_sample_rate as usize * 2;
@@ -345,14 +531,14 @@ impl Apu {
         }
     }
 
-    fn update_frame_sequencer(&mut self, timer: &Timer, double_speed: bool) {
+    fn update_frame_sequencer(&mut self, timer_div: u16, double_speed: bool) {
         self.div_bit = if double_speed { 13 } else { 12 };
         let div = if self.ds_delay && double_speed {
             self.lagged_div
         } else {
-            timer.div
+            timer_div
         };
-        self.lagged_div = timer.div;
+        self.lagged_div = timer_div;
         let set_prev = ((self.prev_div >> self.div_bit) & 1) == 1;
         let set_now = ((div >> self.div_bit) & 1) == 1;
         self.prev_div = div;
@@ -471,26 +657,49 @@ impl Apu {
         .into()
     }
 
-    fn quiet(&self, ticks: u16) -> bool {
-        self.ch1.quiet(ticks)
-            && self.ch2.quiet(ticks)
-            && self.ch3.quiet(ticks)
-            && self.ch4.quiet(ticks)
+    fn quiet_ticks(&self, ch4_unheard: bool, every_step: bool) -> u32 {
+        let steady = self.mixed && !every_step;
+        let ch4 = if ch4_unheard {
+            self.ch4.unheard_quiet_ticks()
+        } else if steady {
+            self.ch4.steady_ticks()
+        } else {
+            self.ch4.quiet_ticks()
+        };
+        let squares = if steady {
+            self.ch1.steady_ticks().min(self.ch2.steady_ticks())
+        } else {
+            self.ch1.quiet_ticks().min(self.ch2.quiet_ticks())
+        };
+        let others = squares.min(ch4);
+        let wave = self.ch3.quiet_ticks();
+        if steady && wave < others {
+            return self.ch3.steady_ticks().min(others);
+        }
+        wave.min(others)
     }
 
-    fn skip(&mut self, ticks: u16) {
-        self.ch1.skip(ticks);
-        self.ch2.skip(ticks);
-        self.ch3.skip(ticks);
-        self.ch4.skip(ticks);
+    fn advance(&mut self, ticks: u32) {
+        self.ch1.advance(ticks);
+        self.ch2.advance(ticks);
+        self.ch3.advance(ticks);
+        self.ch4.advance_unheard(ticks);
     }
 
-    fn tick(&mut self) -> bool {
+    fn ch4_unheard(&self) -> bool {
+        self.muted
+            || (self.mixed
+                && (self.muted_channels[3]
+                    || !(self.nr51.channel_4_left || self.nr51.channel_4_right)
+                    || self.ch4.volume_envelope.current_volume == 0))
+    }
+
+    fn tick(&mut self) -> Step {
         let ch1 = self.ch1.tick();
         let ch2 = self.ch2.tick();
         let ch3 = self.ch3.tick();
-        let ch4 = self.ch4.tick();
-        ch1 || ch2 || ch3 || ch4
+        let ch4 = self.ch4.step();
+        ch1.max(ch2).max(ch3).max(ch4)
     }
 
     fn clock_length_counters(&mut self) {
@@ -522,53 +731,36 @@ impl Apu {
             return (0.0, 0.0);
         };
 
-        let ch1_sample = 'ch1: {
-            if !self.ch1.dac_enabled() {
-                break 'ch1 0.0;
+        let mut samples = [
+            if self.ch1.dac_enabled() {
+                LEVELS[usize::from(self.ch1.sample())]
+            } else {
+                0.0
+            },
+            if self.ch2.dac_enabled() {
+                LEVELS[usize::from(self.ch2.sample())]
+            } else {
+                0.0
+            },
+            if self.ch3.dac_enabled() {
+                LEVELS[usize::from(self.ch3.sample())]
+            } else {
+                0.0
+            },
+            if self.ch4.dac_enabled() {
+                LEVELS[usize::from(self.ch4.sample())]
+            } else {
+                0.0
+            },
+        ];
+        if self.muted_channels != [false; 4] {
+            for (sample, muted) in samples.iter_mut().zip(self.muted_channels) {
+                if muted {
+                    *sample = 0.0;
+                }
             }
-
-            if self.muted_channels[0] {
-                break 'ch1 0.0;
-            }
-
-            1.0 - (self.ch1.sample() as f32 / 7.5)
-        };
-
-        let ch2_sample = 'ch2: {
-            if !self.ch2.dac_enabled() {
-                break 'ch2 0.0;
-            }
-
-            if self.muted_channels[1] {
-                break 'ch2 0.0;
-            }
-
-            1.0 - (self.ch2.sample() as f32 / 7.5)
-        };
-
-        let ch3_sample = 'ch3: {
-            if !self.ch3.dac_enabled() {
-                break 'ch3 0.0;
-            }
-
-            if self.muted_channels[2] {
-                break 'ch3 0.0;
-            }
-
-            1.0 - (self.ch3.sample() as f32 / 7.5)
-        };
-
-        let ch4_sample = 'ch4: {
-            if !self.ch4.dac_enabled() {
-                break 'ch4 0.0;
-            }
-
-            if self.muted_channels[3] {
-                break 'ch4 0.0;
-            }
-
-            1.0 - (self.ch4.sample() as f32 / 7.5)
-        };
+        }
+        let [ch1_sample, ch2_sample, ch3_sample, ch4_sample] = samples;
 
         #[cfg(feature = "debug")]
         if debugger.wants_apu_channels() {
@@ -618,23 +810,12 @@ impl Apu {
         right *= (self.nr50.volume_right + 1) as f32;
         right /= 64.0;
 
-        let any_dac_enabled = self.ch1.dac_enabled()
-            || self.ch2.dac_enabled()
-            || self.ch3.dac_enabled()
-            || self.ch4.dac_enabled();
-
-        if any_dac_enabled {
-            (left, right)
-        } else {
-            (0.0, 0.0)
-        }
+        (left, right)
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
         self.output_sample_rate = sample_rate;
-        self.blip_l
-            .set_rates(APU_CLOCK_RATE as f64, sample_rate as f64);
-        self.blip_r
+        self.blip
             .set_rates(APU_CLOCK_RATE as f64, sample_rate as f64);
         self.charge_factor = charge_factor(sample_rate);
         self.max_frame_time = max_frame_time(sample_rate);
@@ -696,4 +877,183 @@ pub fn charge_factor(sample_rate: u32) -> f32 {
 fn max_frame_time(sample_rate: u32) -> u32 {
     (APU_CLOCK_RATE as u64 * MAX_FRAME_SAMPLES / sample_rate.max(1) as u64).min(u32::MAX as u64)
         as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::gb::{GameBoy, GbModel};
+    use crate::rom::Rom;
+
+    const TONE: [u8; 22] = [
+        0x3E, 0xF0, 0xE0, 0x17, 0x3E, 0x80, 0xE0, 0x16, 0x3E, 0x00, 0xE0, 0x18, 0x3E, 0x87, 0xE0,
+        0x19, 0x3E, 0xFF, 0xE0, 0x25, 0x18, 0xFE,
+    ];
+
+    fn tone_rom() -> Rom {
+        let mut data = vec![0u8; 0x8000];
+        data[0x0100..0x0104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
+        data[0x0150..0x0150 + TONE.len()].copy_from_slice(&TONE);
+        Rom::new(&data)
+    }
+
+    #[test]
+    fn undrained_audio_stays_bounded() {
+        for sample_rate in [8_000, 44_100, 48_000, 192_000] {
+            let mut gb = GameBoy::new_empty(GbModel::Dmg);
+            gb.load_rom(&tone_rom()).expect("load");
+            gb.apu.set_sample_rate(sample_rate);
+
+            gb.run_cycles(5_000_000);
+
+            let max_len = sample_rate as usize * 2;
+            let len = gb.apu.audio_buffer.len();
+            assert!(len > max_len / 2, "{sample_rate} Hz: {len} samples");
+            assert!(len <= max_len, "{sample_rate} Hz: {len} samples");
+            assert!(gb.apu.audio_buffer.iter().any(|s| s.abs() > 0.01));
+        }
+    }
+
+    fn loud(gb: &mut GameBoy) -> bool {
+        for _ in 0..5 {
+            gb.run_frame();
+        }
+        gb.apu.audio_buffer.clear();
+        for _ in 0..10 {
+            gb.run_frame();
+        }
+        gb.apu.audio_buffer.iter().any(|s| s.abs() > 0.01)
+    }
+
+    #[test]
+    fn a_muted_channel_stays_silent_across_a_reset_and_a_new_game() {
+        let mut gb = GameBoy::new_empty(GbModel::Dmg);
+        gb.load_rom(&tone_rom()).expect("load");
+        assert!(loud(&mut gb));
+
+        gb.apu.set_channel_enabled(1, false);
+        assert!(!loud(&mut gb));
+        gb.soft_reset();
+        assert!(!loud(&mut gb));
+        gb.load_rom(&tone_rom()).expect("load");
+        assert!(!loud(&mut gb));
+
+        gb.apu.set_channel_enabled(1, true);
+        assert!(loud(&mut gb));
+    }
+
+    #[test]
+    fn a_channel_mute_stays_out_of_the_saved_state() {
+        let mut gb = GameBoy::new_empty(GbModel::Dmg);
+        gb.load_rom(&tone_rom()).expect("load");
+        gb.run_frame();
+        let audible = gb.dump_full(0).unwrap();
+
+        gb.apu.set_channel_enabled(1, false);
+
+        assert!(gb.dump_full(0).unwrap() == audible);
+    }
+
+    fn writes_rom(writes: &[(u8, u8)]) -> Rom {
+        let mut code = vec![];
+        for &(reg, value) in writes {
+            code.extend_from_slice(&[0x3E, value, 0xE0, reg]);
+        }
+        code.extend_from_slice(&[0x18, 0xFE]);
+        let mut data = vec![0u8; 0x8000];
+        data[0x0100..0x0104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
+        data[0x0150..0x0150 + code.len()].copy_from_slice(&code);
+        Rom::new(&data)
+    }
+
+    fn four_channels_at_full_volume() -> Rom {
+        let mut writes = vec![(0x26, 0x80), (0x24, 0x77), (0x25, 0xFF)];
+        for i in 0..16 {
+            writes.push((0x30 + i, if i < 8 { 0xFF } else { 0x00 }));
+        }
+        writes.extend_from_slice(&[
+            (0x11, 0x80),
+            (0x12, 0xF0),
+            (0x13, 0x00),
+            (0x16, 0x80),
+            (0x17, 0xF0),
+            (0x18, 0x00),
+            (0x1A, 0x80),
+            (0x1C, 0x20),
+            (0x1D, 0x00),
+            (0x21, 0xF0),
+            (0x22, 0x00),
+            (0x14, 0x87),
+            (0x19, 0x87),
+            (0x1E, 0x87),
+            (0x23, 0x80),
+        ]);
+        writes_rom(&writes)
+    }
+
+    #[test]
+    fn four_full_channels_peak_at_half_scale() {
+        let mut gb = GameBoy::new_empty(GbModel::Dmg);
+        gb.load_rom(&four_channels_at_full_volume()).expect("load");
+        gb.apu.set_sample_rate(48_000);
+
+        let mut peak = 0.0f32;
+        for _ in 0..60 {
+            gb.run_frame();
+            for s in gb.apu.audio_buffer.drain(..) {
+                peak = peak.max(s.abs());
+            }
+        }
+
+        assert!(peak > 0.45, "peak {peak}");
+        assert!(peak < 0.55, "peak {peak}");
+    }
+
+    #[cfg(feature = "debug")]
+    fn wave_fingerprint(gb: &GameBoy) -> Vec<(usize, u64)> {
+        gb.debugger
+            .waves()
+            .iter()
+            .map(|ring| {
+                let hash = ring.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, sample| {
+                    (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0100_0000_01b3)
+                });
+                (ring.len(), hash)
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "debug")]
+    #[test]
+    fn the_wave_rings_keep_their_samples_for_a_fixed_run() {
+        let mut gb = GameBoy::new_empty(GbModel::Dmg);
+        gb.load_rom(&four_channels_at_full_volume()).expect("load");
+        gb.apu.set_sample_rate(48_000);
+        gb.debugger.record_channels = true;
+
+        for _ in 0..20 {
+            gb.run_frame();
+            gb.apu.audio_buffer.clear();
+        }
+        gb.apu.set_channel_enabled(1, false);
+        for _ in 0..5 {
+            gb.run_frame();
+            gb.apu.audio_buffer.clear();
+        }
+
+        assert_eq!(
+            wave_fingerprint(&gb),
+            vec![
+                (2048, 15466843843163243301),
+                (2048, 2937223237197546277),
+                (2048, 1756449107157631781),
+                (2048, 10978820079561392933),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_game_boy_names_its_four_channels() {
+        let gb = GameBoy::new_empty(GbModel::Dmg);
+        assert_eq!(gb.audio_channels(), ["Pulse 1", "Pulse 2", "Wave", "Noise"]);
+    }
 }

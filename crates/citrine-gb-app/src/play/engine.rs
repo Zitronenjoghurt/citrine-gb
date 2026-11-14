@@ -1,28 +1,68 @@
+use super::pace;
 use super::rejoin::KEPT_FRAMES;
-use citrine_gb::console::{Console, ConsoleKind, Keys};
+use crate::utils::avg_timer::AvgTimer;
+use citrine_gb::console::{Console, ConsoleKind, Keys, Timing, Touch};
 use citrine_gb::error::{GbError, GbResult};
 use citrine_gb::gb::GameBoy;
 #[cfg(feature = "gba")]
 use citrine_gb::gba::machine::Gba;
 use citrine_gb::machine::Machine;
+#[cfg(feature = "nds")]
+use citrine_gb::nds::machine::{Nds, NdsFirmware};
 use citrine_gb::netplay::{
-    Advance, CableEvent, Check, ConsoleSetup, Input, InputError, LinkPort, NEVER, Player,
-    ResyncError, Session, SessionConfig, Sync,
+    Advance, CableEvent, CablePace, Check, ConsoleSetup, DEFAULT_CHECK_INTERVAL, Input, InputError,
+    LinkPort, NEVER, Player, ResyncError, Session, SessionConfig, Sync,
 };
 use citrine_gb::persistence::sram_dump::SramDump;
 use citrine_gb::rom::Rom;
-use citrine_gb_net::{Origin, Pad, PlayMsg, Start};
+use citrine_gb_net::{DsUser, Origin, Pad, PlayMsg, Start};
+use citrine_gb_threads::{Lendable, Split};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
-const FRAME_MS: f64 = 70_224.0 * 1000.0 / 4_194_304.0;
 const SAVE_EVERY: u32 = 60;
 const SKIP_EVERY: u32 = 6;
 const AHEAD_LIMIT: f64 = 1.5;
+const MAX_OWED: u32 = 8;
+const REPAY_ROOM: f64 = 1.0;
+const REPAY_SPARE: u32 = 1;
+const REPAY_GAP: u32 = 3;
 const WATCH_BEHIND: u32 = 6;
+const WAIT_WINDOW: u32 = 300;
+const WAIT_LIMIT: usize = 5;
+const CALM_FRAMES: u32 = 1200;
+const EASE_SLACK: u32 = 2;
+const PACE_STEP: u32 = 30;
+const PACE_SAMPLES: usize = 9;
+const SLOW_PACE: f64 = 0.98;
 
-pub type Setup = (Vec<u8>, ConsoleKind, Origin);
+pub type Setup = (Arc<[u8]>, ConsoleKind, Origin);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub ran: u64,
+    pub waited: u64,
+    pub skipped: u64,
+    pub repaid: u64,
+}
+
+pub struct Ticks {
+    pub pads: Vec<Keys>,
+    pub touch: Option<Touch>,
+    pub cable: Option<bool>,
+    pub saves: bool,
+    pub round_trip_ms: u32,
+    pub now: Instant,
+}
+
+#[derive(Default)]
+pub struct Ticked {
+    pub ran: bool,
+    pub outbox: Vec<PlayMsg>,
+    pub saves: Vec<SramDump>,
+}
 
 pub struct WatchPoint {
     pub frame: u32,
@@ -38,6 +78,10 @@ enum Linked {
     Gba(Session<Gba>),
     #[cfg(feature = "gba")]
     Group(Box<Session<Gba, GROUP_UNITS>>),
+    #[cfg(feature = "nds")]
+    Nds(Box<Session<Nds>>),
+    #[cfg(feature = "nds")]
+    NdsGroup(Box<Session<Nds, GROUP_UNITS>>),
 }
 
 macro_rules! each {
@@ -48,12 +92,29 @@ macro_rules! each {
             Linked::Gba($session) => $body,
             #[cfg(feature = "gba")]
             Linked::Group($session) => $body,
+            #[cfg(feature = "nds")]
+            Linked::Nds($session) => $body,
+            #[cfg(feature = "nds")]
+            Linked::NdsGroup($session) => $body,
         }
     };
 }
 
 impl Linked {
-    fn new(config: SessionConfig, setups: [Option<ConsoleSetup>; 2]) -> GbResult<Self> {
+    fn new(
+        config: SessionConfig,
+        setups: [Option<ConsoleSetup>; 2],
+        users: &[Option<DsUser>; 2],
+        downloads: [bool; 2],
+    ) -> GbResult<Self> {
+        if ds_session(&setups)? {
+            #[cfg(feature = "nds")]
+            return Ok(Self::Nds(Box::new(Session::new_nds(
+                config,
+                nds_setups(setups, users, downloads),
+            )?)));
+        }
+        let _ = (users, downloads);
         let kinds: Vec<bool> = setups
             .iter()
             .flatten()
@@ -72,7 +133,17 @@ impl Linked {
     fn group(
         config: SessionConfig<GROUP_UNITS>,
         setups: [Option<ConsoleSetup>; GROUP_UNITS],
+        users: &[Option<DsUser>; GROUP_UNITS],
+        downloads: [bool; GROUP_UNITS],
     ) -> GbResult<Self> {
+        if ds_session(&setups)? {
+            #[cfg(feature = "nds")]
+            return Ok(Self::NdsGroup(Box::new(Session::new_nds(
+                config,
+                nds_setups(setups, users, downloads),
+            )?)));
+        }
+        let _ = (users, downloads);
         if setups.iter().flatten().any(|s| s.kind != ConsoleKind::Gba) {
             return Err(GbError::GbaGame);
         }
@@ -87,6 +158,17 @@ impl Linked {
 
     fn console(&self, player: Player) -> Option<&dyn Console> {
         each!(self, s => s.present(player).then(|| s.console(player) as &dyn Console))
+    }
+
+    fn fetch(&self, player: Player) -> Option<super::fetch::Fetch> {
+        match self {
+            #[cfg(feature = "nds")]
+            Self::Nds(s) => s.console(player).download().map(super::fetch::Fetch::of),
+            _ => {
+                let _ = player;
+                None
+            }
+        }
     }
 
     #[cfg(test)]
@@ -104,6 +186,10 @@ impl Linked {
             Self::Gba(s) => Machine::Gba(Box::new(unplugged(s, player, confirmed))),
             #[cfg(feature = "gba")]
             Self::Group(s) => Machine::Gba(Box::new(unplugged(*s, player, confirmed))),
+            #[cfg(feature = "nds")]
+            Self::Nds(s) => Machine::Nds(Box::new(unplugged(*s, player, confirmed))),
+            #[cfg(feature = "nds")]
+            Self::NdsGroup(s) => Machine::Nds(Box::new(unplugged(*s, player, confirmed))),
         }
     }
 
@@ -134,6 +220,10 @@ impl Linked {
             Self::Gba(_) => 2,
             #[cfg(feature = "gba")]
             Self::Group(_) => GROUP_UNITS,
+            #[cfg(feature = "nds")]
+            Self::Nds(_) => 2,
+            #[cfg(feature = "nds")]
+            Self::NdsGroup(_) => GROUP_UNITS,
         }
     }
 
@@ -200,16 +290,32 @@ impl Linked {
         each!(self, s => s.add_remote_input(frame, input))
     }
 
+    fn cable_pace(&self) -> Option<CablePace> {
+        each!(self, s => s.cable_pace())
+    }
+
     fn add_player_input(&mut self, player: Player, frame: u32, input: Input) {
         each!(self, s => s.add_player_input(player, frame, input))
     }
 
-    fn leave(&mut self, player: Player, at: u32) -> bool {
-        each!(self, s => s.leave(player, at.max(s.confirmed_frame())).is_ok())
+    fn leave(&mut self, player: Player, at: u32) -> Option<u32> {
+        each!(self, s => {
+            let at = at.max(s.confirmed_frame());
+            s.leave(player, at).ok().map(|()| at)
+        })
     }
 
-    fn advance(&mut self) -> Advance {
-        each!(self, s => s.advance())
+    fn leave_from(&mut self, player: Player, at: u32) -> Option<u32> {
+        let exact = each!(self, s => s.leave_from(player, at).is_ok());
+        if exact {
+            Some(at)
+        } else {
+            self.leave(player, at)
+        }
+    }
+
+    fn advance(&mut self, split: &mut Split<'_>) -> Advance {
+        each!(self, s => s.advance_on(split))
     }
 
     fn take_check(&mut self) -> Option<(u32, Vec<u64>)> {
@@ -222,13 +328,32 @@ impl Linked {
         })
     }
 
-    fn resync(&mut self, frame: u32, player: Player, data: &[u8]) -> Result<(), ResyncError> {
-        each!(self, s => s.resync(frame, player, data))
+    fn resync(
+        &mut self,
+        frame: u32,
+        player: Player,
+        data: &[u8],
+        cable: Option<&[u8]>,
+    ) -> Result<(), ResyncError> {
+        each!(self, s => s.resync_with_cable(frame, player, data, cable))
+    }
+
+    fn checkpoint_cable(&self, frame: u32) -> Option<Vec<u8>> {
+        each!(self, s => s.checkpoint_cable(frame))
+    }
+
+    fn input(&self, player: Player, frame: u32) -> Option<Input> {
+        each!(self, s => s.input(player, frame))
     }
 
     #[cfg(test)]
     fn cable_transfers(&self) -> Vec<u64> {
         each!(self, s => s.cable_transfers().to_vec())
+    }
+
+    #[cfg(test)]
+    fn latest_checkpoint(&self) -> Option<u32> {
+        each!(self, s => s.latest_checkpoint())
     }
 
     fn keeping_confirmed(self, frames: u32) -> Self {
@@ -238,6 +363,24 @@ impl Linked {
             Self::Gba(s) => Self::Gba(s.keeping_confirmed(frames)),
             #[cfg(feature = "gba")]
             Self::Group(s) => Self::Group(Box::new(s.keeping_confirmed(frames))),
+            #[cfg(feature = "nds")]
+            Self::Nds(s) => Self::Nds(Box::new(s.keeping_confirmed(frames))),
+            #[cfg(feature = "nds")]
+            Self::NdsGroup(s) => Self::NdsGroup(Box::new(s.keeping_confirmed(frames))),
+        }
+    }
+
+    fn trailing_checks(self, frames: u32) -> Self {
+        match self {
+            Self::Gb(s) => Self::Gb(s.trailing_checks(frames)),
+            #[cfg(feature = "gba")]
+            Self::Gba(s) => Self::Gba(s.trailing_checks(frames)),
+            #[cfg(feature = "gba")]
+            Self::Group(s) => Self::Group(Box::new(s.trailing_checks(frames))),
+            #[cfg(feature = "nds")]
+            Self::Nds(s) => Self::Nds(Box::new(s.trailing_checks(frames))),
+            #[cfg(feature = "nds")]
+            Self::NdsGroup(s) => Self::NdsGroup(Box::new(s.trailing_checks(frames))),
         }
     }
 
@@ -253,6 +396,15 @@ impl Linked {
             _ => None,
         }
     }
+
+    #[cfg(feature = "nds")]
+    fn nds_mut(&mut self, player: Player) -> Option<&mut Nds> {
+        match self {
+            Linked::Nds(s) if s.present(player) => Some(s.console_mut(player)),
+            Linked::NdsGroup(s) if s.present(player) => Some(s.console_mut(player)),
+            _ => None,
+        }
+    }
 }
 
 pub struct Rollback {
@@ -265,6 +417,13 @@ pub struct Rollback {
     watched_only: bool,
     hidden: bool,
     delay: u32,
+    least_delay: u32,
+    delay_room: u32,
+    calm_since: u32,
+    least_slack: u32,
+    ticks: u32,
+    waits: VecDeque<u32>,
+    paces: VecDeque<(u32, u32)>,
     filled: u32,
     unsent_from: u32,
     unsent: Vec<Pad>,
@@ -274,15 +433,97 @@ pub struct Rollback {
     ahead: f64,
     skips: u32,
     stalled_since: Option<Instant>,
+    owed: u32,
+    since_repay: u32,
+    counts: Counts,
     answered: Option<u32>,
     resyncs: u32,
     outgoing: Vec<PlayMsg>,
     save: Option<SramDump>,
+    ticked: Ticked,
+    frame_timer: AvgTimer,
     #[cfg(test)]
     pub log: Log,
 }
 
+impl Lendable for Rollback {
+    type Plan = Ticks;
+
+    fn work(&mut self, plan: Ticks, split: &mut Split<'_>) {
+        let due = u32::try_from(plan.pads.len()).unwrap_or(u32::MAX);
+        self.ticks = self.ticks.saturating_add(due);
+        let mut ran = false;
+        for &buttons in &plan.pads {
+            ran = self.run_tick(buttons, &plan, false, split);
+        }
+        self.since_repay = self.since_repay.saturating_add(due);
+        if ran
+            && self.owed > 0
+            && self.since_repay >= REPAY_GAP
+            && self.ahead < AHEAD_LIMIT - REPAY_ROOM
+            && self.session.remote_frame() > self.session.frame() + REPAY_SPARE
+            && let Some(&buttons) = plan.pads.last()
+            && self.run_tick(buttons, &plan, true, split)
+        {
+            self.owed -= 1;
+            self.since_repay = 0;
+        }
+        self.ease_delay();
+    }
+}
+
+impl Rollback {
+    fn run_tick(
+        &mut self,
+        buttons: Keys,
+        plan: &Ticks,
+        repay: bool,
+        split: &mut Split<'_>,
+    ) -> bool {
+        if let Some(plugged) = plan.cable
+            && !self.cable_settling()
+            && self.cable_plugged() != plugged
+        {
+            self.request_cable(plugged);
+        }
+        let mut outbox = std::mem::take(&mut self.ticked.outbox);
+        self.frame_timer.start();
+        let ran = if repay {
+            self.step(buttons, plan.touch, plan.now, &mut outbox, split)
+        } else {
+            self.tick(
+                buttons,
+                plan.touch,
+                plan.round_trip_ms,
+                plan.now,
+                &mut outbox,
+                split,
+            )
+        };
+        self.ticked.ran |= ran;
+        if ran && repay {
+            self.counts.repaid += 1;
+        } else if ran {
+            self.counts.ran += 1;
+        }
+        self.frame_timer.stop();
+        self.ticked.outbox = outbox;
+        if plan.saves
+            && let Some(save) = self.take_save()
+        {
+            self.ticked.saves.push(save);
+        }
+        ran
+    }
+}
+
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Rollback>();
+};
+
 const KEPT_GROUP_CHECKS: usize = 8;
+const RESYNC_WINDOW: u32 = KEPT_GROUP_CHECKS as u32 * DEFAULT_CHECK_INTERVAL;
 const KEPT_PADS: usize = 180;
 
 #[derive(Default)]
@@ -293,6 +534,7 @@ struct GroupWire {
     addressed: Vec<(Option<u8>, PlayMsg)>,
     mine: VecDeque<(u32, Vec<u64>)>,
     theirs: Vec<(u8, u32, Vec<u64>)>,
+    answered: Vec<(u8, usize, u32)>,
 }
 
 #[cfg(test)]
@@ -305,6 +547,8 @@ pub struct Log {
     pub group_checks: Vec<(u32, Vec<u64>)>,
     pub resynced: Vec<u32>,
     pub started: Vec<Option<Vec<u8>>>,
+    #[cfg(feature = "nds")]
+    pub asks: u32,
 }
 
 #[cfg(test)]
@@ -332,6 +576,22 @@ fn encoded_states<C: citrine_gb::console::Rollback + LinkPort>(
         .collect()
 }
 
+fn roms_of<const N: usize>(games: &[Option<Setup>; N]) -> [Option<Rom>; N] {
+    let mut made: Vec<Rom> = Vec::new();
+    games.each_ref().map(|game| {
+        let (data, kind, _) = game.as_ref()?;
+        if let Some(rom) = made.iter().find(|rom| rom.data == *data) {
+            if matches!(kind, ConsoleKind::Gba | ConsoleKind::Nds) {
+                rom.ids();
+            }
+            return Some(rom.clone());
+        }
+        let rom = Rom::from(data.clone());
+        made.push(rom.clone());
+        Some(rom)
+    })
+}
+
 fn setups_of<'a, const N: usize>(
     roms: &'a [Option<Rom>; N],
     games: &'a [Option<Setup>; N],
@@ -343,6 +603,7 @@ fn setups_of<'a, const N: usize>(
         let (save, state) = match origin {
             Origin::Boot(save) => (save.as_deref().map(SramDump::from_slice), None),
             Origin::Resume(state) => (None, Some(state.as_slice())),
+            Origin::Download => (None, None),
         };
         Some(ConsoleSetup {
             rom,
@@ -351,6 +612,83 @@ fn setups_of<'a, const N: usize>(
             state,
         })
     })
+}
+
+fn ds_session(setups: &[Option<ConsoleSetup>]) -> GbResult<bool> {
+    let ds = setups
+        .iter()
+        .flatten()
+        .filter(|setup| setup.kind == ConsoleKind::Nds)
+        .count();
+    match ds {
+        0 => Ok(false),
+        _ if ds < setups.iter().flatten().count() || cfg!(not(feature = "nds")) => {
+            Err(GbError::NdsLink)
+        }
+        _ => Ok(true),
+    }
+}
+
+#[cfg(feature = "nds")]
+fn nds_setups<'a, const N: usize>(
+    setups: [Option<ConsoleSetup<'a>>; N],
+    users: &[Option<DsUser>; N],
+    downloads: [bool; N],
+) -> [Option<citrine_gb::netplay::NdsSetup<'a>>; N] {
+    use citrine_gb::netplay::{NdsBoot, NdsSetup};
+    let mut users = users.iter();
+    let mut downloads = downloads.into_iter();
+    setups.map(|setup| {
+        let firmware = ds_firmware(users.next().and_then(Option::as_ref));
+        let download = downloads.next().unwrap_or(false);
+        let setup = setup?;
+        let boot = match download {
+            true => NdsBoot::DownloadPlay,
+            false => NdsBoot::Card(setup),
+        };
+        Some(NdsSetup { boot, firmware })
+    })
+}
+
+fn downloads<const N: usize>(games: &[Option<Setup>; N]) -> [bool; N] {
+    games
+        .each_ref()
+        .map(|game| matches!(game, Some((_, _, Origin::Download))))
+}
+
+#[cfg(feature = "nds")]
+pub fn ds_firmware(user: Option<&DsUser>) -> NdsFirmware {
+    use citrine_gb::nds::spi::firmware::online::Online;
+    use citrine_gb::nds::spi::firmware::{Language, UserSettings};
+    let Some(user) = user else {
+        return NdsFirmware::default();
+    };
+    let defaults = UserSettings::default();
+    NdsFirmware {
+        user_settings: Some(UserSettings {
+            nickname: user.nickname.clone(),
+            message: user.message.clone(),
+            favorite_color: user.color & 0x0F,
+            birthday: user.birthday,
+            language: [
+                Language::Japanese,
+                Language::English,
+                Language::French,
+                Language::German,
+                Language::Italian,
+                Language::Spanish,
+            ]
+            .get(usize::from(user.language))
+            .copied()
+            .unwrap_or(defaults.language),
+            ..defaults
+        }),
+        online: Online {
+            mac: Some(user.mac),
+            ..Online::default()
+        },
+        ..NdsFirmware::default()
+    }
 }
 
 fn unplugged<C: citrine_gb::console::Rollback + LinkPort, const N: usize>(
@@ -371,13 +709,12 @@ impl Rollback {
         local: Player,
         start: Start,
         games: [Option<Setup>; 2],
+        users: [Option<DsUser>; 2],
         sample_rate: u32,
         sync: Sync,
         now: Instant,
     ) -> GbResult<Self> {
-        let roms = games
-            .each_ref()
-            .map(|game| game.as_ref().map(|(rom, _, _)| Rom::new(rom)));
+        let roms = roms_of(&games);
         let setups = setups_of(&roms, &games);
         let present = [setups[0].is_some(), setups[1].is_some()];
         let config = SessionConfig {
@@ -386,7 +723,8 @@ impl Rollback {
             sync: sync.with_delay(u32::from(start.delay)),
             ..SessionConfig::new(local, start.seed, start.start_time)
         };
-        let session = Linked::new(config, setups)?.keeping_confirmed(KEPT_FRAMES);
+        let session =
+            Linked::new(config, setups, &users, downloads(&games))?.keeping_confirmed(KEPT_FRAMES);
         let _ = now;
         let me = present[local.index()];
         let friend = present[local.other().index()];
@@ -402,13 +740,12 @@ impl Rollback {
         local: Player,
         start: Start,
         games: [Option<Setup>; GROUP_UNITS],
+        users: [Option<DsUser>; GROUP_UNITS],
         sample_rate: u32,
         sync: Sync,
         authority: u8,
     ) -> GbResult<Self> {
-        let roms = games
-            .each_ref()
-            .map(|game| game.as_ref().map(|(rom, _, _)| Rom::new(rom)));
+        let roms = roms_of(&games);
         let setups = setups_of(&roms, &games);
         let mut power_on = [NEVER; GROUP_UNITS];
         for (at, from) in power_on.iter_mut().zip(&start.power_on) {
@@ -421,7 +758,8 @@ impl Rollback {
             sync: sync.with_delay(u32::from(start.delay)),
             ..SessionConfig::new(local, start.seed, start.start_time)
         };
-        let session = Linked::group(config, setups)?;
+        let session =
+            Linked::group(config, setups, &users, downloads(&games))?.trailing_checks(KEPT_FRAMES);
         let wire = GroupWire {
             authority,
             ..GroupWire::default()
@@ -456,6 +794,13 @@ impl Rollback {
             watched_only,
             hidden: false,
             delay: start.delay as u32,
+            least_delay: start.delay as u32,
+            delay_room: 0,
+            calm_since: 0,
+            least_slack: u32::MAX,
+            ticks: 0,
+            waits: VecDeque::new(),
+            paces: VecDeque::new(),
             filled: 0,
             unsent_from: 0,
             unsent: Vec::new(),
@@ -465,10 +810,15 @@ impl Rollback {
             ahead: 0.0,
             skips: 0,
             stalled_since: None,
+            owed: 0,
+            since_repay: 0,
+            counts: Counts::default(),
             answered: None,
             resyncs: 0,
             outgoing: Vec::new(),
             save: None,
+            ticked: Ticked::default(),
+            frame_timer: AvgTimer::default(),
             #[cfg(test)]
             log: Log {
                 started,
@@ -536,16 +886,47 @@ impl Rollback {
         self.filled.max(self.session.frame())
     }
 
-    pub fn leave_unit(&mut self, unit: u8, at: u32) -> bool {
+    pub fn leave_unit(&mut self, unit: u8, at: u32) -> Option<u32> {
         let player = Player::ALL[usize::from(unit) % GROUP_UNITS];
         if player == self.session.local() || !self.session.present(player) {
-            return false;
+            return None;
         }
         self.session.leave(player, at)
     }
 
+    pub fn follow_leave(&mut self, unit: u8, at: u32) -> Option<u32> {
+        let player = Player::ALL[usize::from(unit) % GROUP_UNITS];
+        if player == self.session.local() || !self.session.present(player) {
+            return None;
+        }
+        self.session.leave_from(player, at)
+    }
+
     pub fn confirmed_frame(&self) -> u32 {
         self.session.confirmed_frame()
+    }
+
+    pub fn pads_before(&self, unit: u8, upto: u32) -> Option<PlayMsg> {
+        let player = Player::ALL[usize::from(unit) % GROUP_UNITS];
+        let mut pads = Vec::new();
+        let mut first = upto;
+        while first > 0 && pads.len() < KEPT_PADS {
+            let Some(input) = self.session.input(player, first - 1) else {
+                break;
+            };
+            pads.push(pad_of(input));
+            first -= 1;
+        }
+        if pads.is_empty() {
+            return None;
+        }
+        pads.reverse();
+        Some(PlayMsg::Pads {
+            round: self.round,
+            unit: Some(unit),
+            first,
+            pads,
+        })
     }
 
     pub fn recent_pads(&self) -> Option<PlayMsg> {
@@ -600,6 +981,22 @@ impl Rollback {
         self.resyncs
     }
 
+    #[cfg(test)]
+    pub fn send_resync(&mut self, padding: &[u8]) -> Option<usize> {
+        let frame = self.session.latest_checkpoint()?;
+        let mut data = self.session.checkpoint(frame, Player::Two)?;
+        data.extend_from_slice(padding);
+        let len = data.len();
+        self.outgoing.push(PlayMsg::Resync {
+            round: self.round,
+            frame,
+            unit: 1,
+            data,
+            cable: None,
+        });
+        Some(len)
+    }
+
     pub fn cable_plugged(&self) -> bool {
         match self.cable {
             Some(CableEvent::Plug) => true,
@@ -608,19 +1005,42 @@ impl Rollback {
         }
     }
 
+    pub fn timing(&self) -> Timing {
+        self.console(true)
+            .or(self.console(false))
+            .map_or(ConsoleKind::Gb.timing(), |console| console.timing())
+    }
+
+    pub fn fetch(&self) -> Option<super::fetch::Fetch> {
+        self.session.fetch(self.session.local())
+    }
+
     pub fn console(&self, local: bool) -> Option<&dyn Console> {
+        self.session.console(self.shown_player(local))
+    }
+
+    fn shown_player(&self, local: bool) -> Player {
         let me = self.session.local();
-        let player = match (local, self.watched_unit()) {
+        match (local, self.watched_unit()) {
             (true, _) => me,
             (false, Some(unit)) => Player::ALL[usize::from(unit)],
             (false, None) => me.other(),
-        };
-        self.session.console(player)
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    pub fn nds_mut(&mut self, local: bool) -> Option<&mut Nds> {
+        let player = self.shown_player(local);
+        self.session.nds_mut(player)
     }
 
     pub fn stalled_for(&self, now: Instant) -> Duration {
         self.stalled_since
             .map_or(Duration::ZERO, |at| now.duration_since(at))
+    }
+
+    pub fn stalled_since(&self) -> Option<Instant> {
+        self.stalled_since
     }
 
     pub fn watch(&mut self, on: bool) {
@@ -629,6 +1049,14 @@ impl Rollback {
 
     pub fn watches(&self) -> bool {
         self.session.watching()
+    }
+
+    pub fn counts(&self) -> Counts {
+        self.counts
+    }
+
+    pub fn ahead(&self) -> f64 {
+        self.ahead
     }
 
     pub fn show(&mut self, on: bool) {
@@ -658,6 +1086,14 @@ impl Rollback {
     pub fn drain_audio(&mut self, mine: &mut Vec<f32>, friend: &mut Vec<f32>) {
         self.session.drain_audio(mine);
         self.session.drain_remote_audio(friend);
+    }
+
+    pub fn take_ticked(&mut self) -> Ticked {
+        std::mem::take(&mut self.ticked)
+    }
+
+    pub fn frame_timer(&self) -> &AvgTimer {
+        &self.frame_timer
     }
 
     pub fn take_save(&mut self) -> Option<SramDump> {
@@ -697,32 +1133,48 @@ impl Rollback {
     pub fn tick(
         &mut self,
         buttons: Keys,
+        touch: Option<Touch>,
         round_trip_ms: u32,
         now: Instant,
         outbox: &mut Vec<PlayMsg>,
+        split: &mut Split<'_>,
     ) -> bool {
         if self.watching_only {
-            return self.follow(now);
+            return self.follow(now, split);
         }
         let frame = self.session.frame();
         let heard = self.session.remote_frame();
+        self.note_pace(heard);
         if heard > 0 {
-            let remote_now =
-                heard as f64 - self.delay as f64 - 1.0 + round_trip_ms as f64 / FRAME_MS / 2.0;
+            let remote_now = heard as f64 - self.delay as f64 - 1.0
+                + round_trip_ms as f64 / pace::frame_ms(self.timing()) / 2.0;
             self.ahead = self.ahead * 0.9 + (frame as f64 - remote_now) * 0.1;
             if self.ahead > AHEAD_LIMIT {
                 self.skips += 1;
                 if self.skips.is_multiple_of(SKIP_EVERY) {
+                    self.counts.skipped += 1;
                     return false;
                 }
             }
         }
+        self.step(buttons, touch, now, outbox, split)
+    }
+
+    fn step(
+        &mut self,
+        buttons: Keys,
+        touch: Option<Touch>,
+        now: Instant,
+        outbox: &mut Vec<PlayMsg>,
+        split: &mut Split<'_>,
+    ) -> bool {
+        let frame = self.session.frame();
         while self.filled <= frame + self.delay {
             let at = self.filled;
             let mut input = if at < self.delay {
                 Input::default()
             } else {
-                Input::new(buttons)
+                Input::new(buttons).with_touch(touch)
             };
             if at == 0 && self.host && self.plug_at_start {
                 input = input.with_cable(CableEvent::Plug);
@@ -731,6 +1183,11 @@ impl Rollback {
             {
                 input = input.with_cable(event);
                 self.cable_at = Some(at);
+            }
+            if at >= self.delay
+                && let Some(pace) = self.session.cable_pace()
+            {
+                input = input.with_pace(pace);
             }
             if self.session.add_local_input(at, input).is_err() {
                 break;
@@ -753,7 +1210,12 @@ impl Rollback {
             }
             self.filled += 1;
         }
-        let ran = self.session.advance() == Advance::Ran;
+        if self.ahead <= AHEAD_LIMIT && !self.partner_slow() {
+            let slack = (self.session.remote_frame() + self.session.sync().budget())
+                .saturating_sub(self.session.frame());
+            self.least_slack = self.least_slack.min(slack);
+        }
+        let ran = self.session.advance(split) == Advance::Ran;
         if ran {
             self.stalled_since = None;
             if self.session.frame().is_multiple_of(SAVE_EVERY)
@@ -763,13 +1225,144 @@ impl Rollback {
             }
         } else {
             self.stalled_since.get_or_insert(now);
+            self.counts.waited += 1;
+            self.owed = (self.owed + 1).min(MAX_OWED);
+            if self.ahead <= AHEAD_LIMIT && !self.partner_slow() {
+                self.note_wait();
+            }
         }
         self.collect();
         self.flush(outbox);
         ran
     }
 
-    fn follow(&mut self, now: Instant) -> bool {
+    fn note_pace(&mut self, heard: u32) {
+        if self
+            .paces
+            .back()
+            .is_some_and(|&(at, _)| self.ticks < at + PACE_STEP)
+        {
+            return;
+        }
+        self.paces.push_back((self.ticks, heard));
+        if self.paces.len() > PACE_SAMPLES {
+            self.paces.pop_front();
+        }
+    }
+
+    fn partner_slow(&self) -> bool {
+        let (Some(&(from, _)), Some(&(to, _))) = (self.paces.front(), self.paces.back()) else {
+            return false;
+        };
+        if to - from < PACE_STEP * (PACE_SAMPLES as u32 - 1) {
+            return false;
+        }
+        let count = self.paces.len() as f64;
+        let (sum_at, sum_heard) = self.paces.iter().fold((0.0, 0.0), |(a, h), &(at, heard)| {
+            (a + f64::from(at), h + f64::from(heard))
+        });
+        let (mean_at, mean_heard) = (sum_at / count, sum_heard / count);
+        let (mut across, mut spread) = (0.0, 0.0);
+        for &(at, heard) in &self.paces {
+            let dx = f64::from(at) - mean_at;
+            across += dx * (f64::from(heard) - mean_heard);
+            spread += dx * dx;
+        }
+        spread > 0.0 && across / spread < SLOW_PACE
+    }
+
+    fn note_wait(&mut self) {
+        self.calm();
+        if self.delay_room == 0 || self.group.is_some() || self.ticks <= WAIT_WINDOW {
+            return;
+        }
+        let now = self.ticks;
+        self.waits.push_back(now);
+        while self
+            .waits
+            .front()
+            .is_some_and(|&at| now - at >= WAIT_WINDOW)
+        {
+            self.waits.pop_front();
+        }
+        if self.waits.len() > WAIT_LIMIT {
+            self.waits.clear();
+            if self.host {
+                self.step_up();
+            } else {
+                #[cfg(all(test, feature = "nds"))]
+                {
+                    self.log.asks += 1;
+                }
+                self.outgoing.push(PlayMsg::Delay {
+                    round: self.round,
+                    delay: (self.delay + 1) as u8,
+                });
+            }
+        }
+    }
+
+    fn step_up(&mut self) {
+        if self.delay_room == 0 {
+            return;
+        }
+        self.delay_room -= 1;
+        self.delay += 1;
+        self.calm();
+        self.outgoing.push(PlayMsg::Delay {
+            round: self.round,
+            delay: self.delay as u8,
+        });
+    }
+
+    fn calm(&mut self) {
+        self.calm_since = self.ticks;
+        self.least_slack = u32::MAX;
+    }
+
+    fn ease_delay(&mut self) {
+        if !self.host
+            || self.group.is_some()
+            || self.delay <= self.least_delay
+            || self.ticks.saturating_sub(self.calm_since) < CALM_FRAMES
+        {
+            return;
+        }
+        if self.least_slack < EASE_SLACK && !self.partner_slow() {
+            self.calm();
+            return;
+        }
+        self.delay -= 1;
+        self.delay_room += 1;
+        self.calm();
+        self.outgoing.push(PlayMsg::Delay {
+            round: self.round,
+            delay: self.delay as u8,
+        });
+    }
+
+    pub fn set_delay_room(&mut self, room: u32) {
+        self.delay_room = room;
+    }
+
+    #[cfg(all(test, feature = "nds"))]
+    pub fn delay_room(&self) -> u32 {
+        self.delay_room
+    }
+
+    #[cfg(all(test, feature = "nds"))]
+    pub fn wait_past_the_limit(&mut self) {
+        self.ticks = self.ticks.max(WAIT_WINDOW + 1);
+        for _ in 0..=WAIT_LIMIT {
+            self.note_wait();
+        }
+    }
+
+    pub fn delay(&self) -> u32 {
+        self.delay
+    }
+
+    fn follow(&mut self, now: Instant, split: &mut Split<'_>) -> bool {
         let behind = self
             .session
             .remote_frame()
@@ -777,7 +1370,7 @@ impl Rollback {
         let runs = if behind > WATCH_BEHIND { 2 } else { 1 };
         let mut ran = false;
         for _ in 0..runs {
-            if self.session.advance() != Advance::Ran {
+            if self.session.advance(split) != Advance::Ran {
                 break;
             }
             ran = true;
@@ -840,6 +1433,7 @@ impl Rollback {
                     frame,
                     unit: player.index() as u8,
                     data,
+                    cable: None,
                 });
             }
         }
@@ -863,17 +1457,34 @@ impl Rollback {
             false
         });
         for (to, frame, unit) in answers {
-            if let Some(data) = self.session.checkpoint(frame, Player::ALL[unit]) {
-                let msg = PlayMsg::Resync {
+            let Some(g) = &mut self.group else {
+                return;
+            };
+            let last = g
+                .answered
+                .iter()
+                .position(|(t, u, _)| *t == to && *u == unit);
+            if last.is_some_and(|i| frame < g.answered[i].2.saturating_add(RESYNC_WINDOW)) {
+                continue;
+            }
+            let Some(data) = self.session.checkpoint(frame, Player::ALL[unit]) else {
+                continue;
+            };
+            let cable = self.session.checkpoint_cable(frame);
+            match last {
+                Some(i) => g.answered[i].2 = frame,
+                None => g.answered.push((to, unit, frame)),
+            }
+            g.addressed.push((
+                Some(to),
+                PlayMsg::Resync {
                     round: self.round,
                     frame,
                     unit: unit as u8,
                     data,
-                };
-                if let Some(g) = &mut self.group {
-                    g.addressed.push((Some(to), msg));
-                }
-            }
+                    cable,
+                },
+            ));
         }
     }
 
@@ -952,9 +1563,14 @@ impl Rollback {
                 frame,
                 unit,
                 data,
+                cable,
             } if round == self.round && !self.authority && from == g.authority => {
                 let player = Player::ALL[usize::from(unit) % GROUP_UNITS];
-                if self.session.resync(frame, player, &data).is_ok() {
+                if self
+                    .session
+                    .resync(frame, player, &data, cable.as_deref())
+                    .is_ok()
+                {
                     self.resyncs += 1;
                     #[cfg(test)]
                     self.log.resynced.push(frame);
@@ -996,12 +1612,37 @@ impl Rollback {
                 frame,
                 unit,
                 data,
+                ..
             } if round == self.round && !self.authority => {
                 let player = if unit == 0 { Player::One } else { Player::Two };
-                if self.session.resync(frame, player, &data).is_ok() {
+                if self.session.resync(frame, player, &data, None).is_ok() {
                     self.resyncs += 1;
                     #[cfg(test)]
                     self.log.resynced.push(frame);
+                }
+            }
+            PlayMsg::Delay { round, delay } if round == self.round => {
+                let delay = u32::from(delay);
+                if self.host {
+                    if delay > self.delay {
+                        self.calm();
+                    }
+                    if delay > self.delay && self.delay_room == 0 {
+                        self.outgoing.push(PlayMsg::Delay {
+                            round: self.round,
+                            delay: self.delay as u8,
+                        });
+                    } else if delay > self.delay {
+                        self.step_up();
+                    }
+                } else if delay > self.delay {
+                    self.delay_room = self.delay_room.saturating_sub(delay - self.delay);
+                    self.delay = delay;
+                } else if delay < self.delay {
+                    self.delay_room += self.delay - delay;
+                    self.delay = delay;
+                } else {
+                    self.delay_room = 0;
                 }
             }
             _ => {}
@@ -1010,18 +1651,30 @@ impl Rollback {
 }
 
 fn pad_of(input: Input) -> Pad {
+    let pace = match input.pace {
+        Some(CablePace::Exact) => Pad::PACED | Pad::EXACT,
+        Some(CablePace::Windows) => Pad::PACED,
+        None => 0,
+    };
     Pad {
-        buttons: input.buttons.bits(),
+        buttons: (input.buttons.bits() & Pad::BUTTONS) | pace,
         cable: input.cable.map(|event| event == CableEvent::Plug),
+        touch: input.touch.map(|touch| [touch.x, touch.y]),
     }
 }
 
 fn input_of(pad: Pad) -> Input {
-    let input = Input::new(Keys::from_bits_retain(pad.buttons));
-    match pad.cable {
+    let input = Input::new(Keys::from_bits_retain(pad.buttons & Pad::BUTTONS))
+        .with_touch(pad.touch.map(|[x, y]| Touch { x, y }));
+    let input = match pad.cable {
         Some(true) => input.with_cable(CableEvent::Plug),
         Some(false) => input.with_cable(CableEvent::Pull),
         None => input,
+    };
+    match (pad.buttons & Pad::PACED != 0, pad.buttons & Pad::EXACT != 0) {
+        (true, true) => input.with_pace(CablePace::Exact),
+        (true, false) => input.with_pace(CablePace::Windows),
+        (false, _) => input,
     }
 }
 
@@ -1030,13 +1683,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pads_carry_buttons_and_cable_events_both_ways() {
+    fn players_of_one_game_share_its_rom() {
+        let game = |data: &[u8], kind| Some((Arc::from(data), kind, Origin::Boot(None)));
+        let roms = roms_of(&[
+            game(&[1; 64], ConsoleKind::Gba),
+            game(&[1; 64], ConsoleKind::Gba),
+        ]);
+        let [Some(one), Some(two)] = &roms else {
+            panic!("both players have a game");
+        };
+        assert!(Arc::ptr_eq(&one.data, &two.data));
+        let roms = roms_of(&[
+            game(&[1; 64], ConsoleKind::Gb),
+            None,
+            game(&[2; 64], ConsoleKind::Gb),
+        ]);
+        assert!(roms[1].is_none());
+        assert_ne!(
+            roms[0].as_ref().unwrap().data,
+            roms[2].as_ref().unwrap().data
+        );
+    }
+
+    #[test]
+    fn pads_carry_buttons_cable_events_and_paces_both_ways() {
         for input in [
             Input::default(),
             Input::new(Keys::A | Keys::LEFT),
             Input::new(Keys::all()).with_cable(CableEvent::Plug),
             Input::new(Keys::L | Keys::R),
             Input::new(Keys::DOWN).with_cable(CableEvent::Pull),
+            Input::new(Keys::all()).with_pace(CablePace::Exact),
+            Input::new(Keys::B)
+                .with_cable(CableEvent::Plug)
+                .with_pace(CablePace::Windows),
+            Input::new(Keys::Y).with_touch(Some(Touch { x: 255, y: 191 })),
         ] {
             assert_eq!(input_of(pad_of(input)), input);
         }
@@ -1065,7 +1746,7 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                6, 3, 210, 9, 5, 0, 0, 33, 0, 255, 7, 1, 1, 136, 1, 1, 0, 128, 6, 0
+                6, 3, 210, 9, 5, 0, 0, 33, 0, 255, 63, 1, 1, 136, 1, 1, 0, 128, 6, 0
             ]
         );
     }

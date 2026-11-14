@@ -143,3 +143,74 @@ pub fn sum_for(sums: &str, name: &str) -> Option<String> {
             .then(|| hash.to_ascii_lowercase())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{SIGNED, Server};
+    use super::{Platform, Version, sum_for};
+
+    #[test]
+    fn versions_compare_by_number_and_a_prerelease_comes_first() {
+        let v = |text| Version::parse(text).unwrap();
+        assert!(v("v0.10.0") > v("0.9.9"));
+        assert!(v("0.10.1") > v("0.10.0"));
+        assert!(v("1.0.0") > v("0.99.99"));
+        assert!(v("0.11.0") > v("0.11.0-rc.1"));
+        assert_eq!(v("v0.10.0"), v("0.10.0+build"));
+        assert_eq!(Version::parse("0.10"), None);
+        assert_eq!(Version::parse("0.10.0.1"), None);
+        assert_eq!(Version::parse("latest"), None);
+    }
+
+    #[test]
+    fn only_a_newer_published_release_counts() {
+        let mut release = Server::release(Platform::Macos, &[]);
+        assert!(release.newer_than("0.10.0"));
+        assert!(!release.newer_than("0.11.0"));
+        assert!(!release.newer_than("0.12.0"));
+        release.prerelease = true;
+        assert!(!release.newer_than("0.10.0"));
+    }
+
+    #[test]
+    fn each_platform_picks_its_own_asset() {
+        let names = [
+            ("android", "aarch64", "citrine-v0.11.0-android.apk"),
+            ("linux", "x86_64", "citrine-v0.11.0-linux-x86_64.tar.gz"),
+            ("linux", "aarch64", "citrine-v0.11.0-linux-aarch64.tar.gz"),
+            ("macos", "aarch64", "citrine-v0.11.0-macos.dmg"),
+            ("macos", "x86_64", "citrine-v0.11.0-macos.dmg"),
+            ("windows", "x86_64", "citrine-v0.11.0-windows-x86_64.zip"),
+        ];
+        let all: Vec<&str> = names.iter().map(|(_, _, name)| *name).collect();
+        for (os, arch, name) in names {
+            let platform = Platform::of(os, arch).unwrap();
+            let release = Server::release(platform, &all);
+            assert_eq!(release.download_for(platform).unwrap().name, name);
+            assert!(release.signed_download_for(platform).is_none(), "{name}");
+            let release = Server::release(platform, &[all.as_slice(), SIGNED].concat());
+            assert_eq!(release.signed_download_for(platform).unwrap().name, name);
+        }
+        assert_eq!(Platform::of("windows", "aarch64"), None);
+        assert_eq!(Platform::of("freebsd", "x86_64"), None);
+    }
+
+    #[test]
+    fn a_checksum_line_matches_only_its_own_file() {
+        let sums = format!(
+            "{}  citrine-v0.11.0-linux-x86_64.tar.gz\n{} *citrine-v0.11.0-windows-x86_64.zip\nnot a line\n",
+            "a".repeat(64),
+            "B".repeat(64)
+        );
+        assert_eq!(
+            sum_for(&sums, "citrine-v0.11.0-linux-x86_64.tar.gz"),
+            Some("a".repeat(64))
+        );
+        assert_eq!(
+            sum_for(&sums, "citrine-v0.11.0-windows-x86_64.zip"),
+            Some("b".repeat(64))
+        );
+        assert_eq!(sum_for(&sums, "citrine-v0.11.0-linux"), None);
+        assert_eq!(sum_for("abc  citrine.apk\n", "citrine.apk"), None);
+    }
+}

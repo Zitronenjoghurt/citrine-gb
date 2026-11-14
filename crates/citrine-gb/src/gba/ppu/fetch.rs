@@ -369,6 +369,7 @@ impl Ppu {
     }
 
     pub fn oam_written(&mut self, oam: &[u8], ahead: u32, offset: usize, bytes: usize) {
+        self.sprites.oam_written();
         self.obj_fetch.forget();
         let Some(window) = self.obj_window(ahead) else {
             return;

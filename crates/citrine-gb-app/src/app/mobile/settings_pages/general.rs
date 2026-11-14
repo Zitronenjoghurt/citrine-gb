@@ -1,9 +1,13 @@
 use super::{Sheet, pick, pick_from, settled, slide};
-use crate::app::Citrine;
+use crate::app::big_screen;
 use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::mobile::sheet::Amount;
 use crate::app::ui_state::settings::{self, ConsoleChoice, LayoutMode, plays_on_both};
+use crate::app::widgets::settings::page::{Heading, Page};
+use crate::app::{Citrine, report};
 use crate::autosave::{DEFAULT_KEEP, MAX_KEEP};
+use crate::emulator::rewind::REWIND_NOTE;
+use crate::icons;
 use crate::media::recording::MAX_SCALE;
 use citrine_gb::console::VideoSpec;
 use citrine_gb::gb::GbModel;
@@ -48,126 +52,227 @@ impl Citrine {
         #[cfg(feature = "gba")]
         let gba_bios = self.emulator.gba_bios_name().map(str::to_owned);
         let narrow = LayoutMode::too_narrow_for_desktop(ui.ctx());
+        let has_game = self.emulator.has_game();
+        let mut save_report = false;
+        #[cfg(feature = "nds")]
+        let mut clear_jit = false;
         let s = &mut self.ui.settings;
         let mut open = None;
         let mut dirty = false;
-        ui.add_space(8.0);
-        kit::list(ui, |list| {
-            let later = game
-                .as_ref()
-                .filter(|game| !game.both)
-                .filter(|game| s.console_for(&game.rom_key, game.mode) != game.model)
-                .map(|_| "Changes when the next game loads");
-            if list
-                .row(
-                    Row::new("Console")
-                        .value(s.console.to_string())
-                        .detail(later.unwrap_or_default()),
-                )
-                .clicked()
-            {
-                open = Some(Sheet::Console);
-            }
-            if let Some(game) = game.as_ref().filter(|game| game.both) {
-                let next = s.console_for(&game.rom_key, game.mode);
-                let detail = if next != game.model {
-                    format!("Starts on {} next time", settings::console_name(next))
-                } else {
-                    String::new()
-                };
+        let mut big = None;
+        let mut page = Page::begin(ui);
+        page.plain(|ui| {
+            kit::list(ui, |list| {
+                let later = game
+                    .as_ref()
+                    .filter(|game| !game.both)
+                    .filter(|game| s.console_for(&game.rom_key, game.mode) != game.model)
+                    .map(|_| "Changes when the next game loads");
                 if list
                     .row(
-                        Row::new("This game's console")
-                            .value(ConsoleChoice::of(game.model).to_string())
-                            .detail(&detail),
+                        Row::new("Console")
+                            .value(s.console.to_string())
+                            .detail(later.unwrap_or_default()),
                     )
                     .clicked()
                 {
-                    open = Some(Sheet::GameConsole);
+                    open = Some(Sheet::Console);
                 }
-            }
-            #[cfg(feature = "gba")]
-            if list
-                .row(Row::new("GBA BIOS").value(
-                    crate::app::gba_bios::BiosChoice::current(gba_bios.as_deref()).to_string(),
-                ))
-                .clicked()
-            {
-                open = Some(Sheet::GbaBios);
-            }
-            let too_narrow = if s.layout == LayoutMode::Desktop && narrow {
-                "Too narrow here, so it uses touch"
-            } else {
-                ""
-            };
-            if list
-                .row(
+                if let Some(game) = game.as_ref().filter(|game| game.both) {
+                    let next = s.console_for(&game.rom_key, game.mode);
+                    let detail = if next != game.model {
+                        format!("Starts on {} next time", settings::console_name(next))
+                    } else {
+                        String::new()
+                    };
+                    if list
+                        .row(
+                            Row::new("This game's console")
+                                .value(ConsoleChoice::of(game.model).to_string())
+                                .detail(&detail),
+                        )
+                        .clicked()
+                    {
+                        open = Some(Sheet::GameConsole);
+                    }
+                }
+                #[cfg(feature = "gba")]
+                if list
+                    .row(Row::new("GBA BIOS").value(
+                        crate::app::gba_bios::BiosChoice::current(gba_bios.as_deref()).to_string(),
+                    ))
+                    .clicked()
+                {
+                    open = Some(Sheet::GbaBios);
+                }
+                let too_narrow = if s.layout == LayoutMode::Desktop && narrow {
+                    "Too narrow here, so it uses touch"
+                } else {
+                    ""
+                };
+                let layout = list.row(
                     Row::new("Layout")
                         .value(s.layout.to_string())
-                        .detail(too_narrow),
-                )
-                .clicked()
-            {
-                open = Some(Sheet::Layout);
-            }
-            if list
-                .row(Row::new("Theme").value(s.ui_theme.to_string()))
-                .clicked()
-            {
-                open = Some(Sheet::Theme);
-            }
-            let ui_size = crate::app::mobile::sheet::percent(s.touch.ui_scale.into());
-            if list.row(Row::new("UI size").value(ui_size)).clicked() {
-                open = Some(Sheet::UiSize);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                dirty |= list.switch(
-                    SwitchRow::new("Check for updates", &mut s.check_updates)
-                        .detail(Some("Asks GitHub when Citrine starts and once a day")),
+                        .detail(too_narrow)
+                        .stepper(),
                 );
-            }
-            dirty |= list.switch(SwitchRow::new("Dev tools", &mut s.dev_mode));
+                if layout.clicked() {
+                    open = Some(Sheet::Layout);
+                }
+                if let Some(step) = big_screen::take_step(&layout) {
+                    s.layout = big_screen::cycle(s.layout, step);
+                    dirty = true;
+                }
+                if !crate::platform::is_tv() {
+                    let mut on = s.big_screen.on;
+                    if list.switch(SwitchRow::new("Big screen", &mut on)) {
+                        big = Some(on);
+                    }
+                }
+                let theme = list.row(Row::new("Theme").value(s.ui_theme.to_string()).stepper());
+                if theme.clicked() {
+                    open = Some(Sheet::Theme);
+                }
+                if let Some(step) = big_screen::take_step(&theme) {
+                    s.ui_theme = big_screen::cycle(s.ui_theme, step);
+                    dirty = true;
+                }
+                let ui_size = crate::app::mobile::sheet::percent(s.touch.ui_scale.into());
+                if list.row(Row::new("UI size").value(ui_size)).clicked() {
+                    open = Some(Sheet::UiSize);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    dirty |= list.switch(
+                        SwitchRow::new("Check for updates", &mut s.check_updates)
+                            .detail(Some("Asks GitHub when Citrine starts and once a day")),
+                    );
+                }
+                dirty |= list.switch(
+                    SwitchRow::new("Game covers", &mut s.covers)
+                        .detail(Some("Box art from libretro's collection on GitHub")),
+                );
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    dirty |= list.switch(
+                        SwitchRow::new("Achievement progress", &mut s.achievements.in_library)
+                            .detail(Some("RetroAchievements earned, under each game")),
+                    );
+                }
+                #[cfg(feature = "nds")]
+                if citrine_gb::nds::machine::JIT_AVAILABLE {
+                    dirty |= list.switch(
+                        SwitchRow::new(settings::JIT_LABEL, &mut s.ds_jit).info(settings::JIT_HINT),
+                    );
+                    clear_jit = list
+                        .row(
+                            Row::new(settings::CLEAR_JIT_LABEL)
+                                .icon(icons::TRASH)
+                                .no_chevron(),
+                        )
+                        .clicked();
+                }
+                dirty |= list.switch(SwitchRow::new("Dev tools", &mut s.dev_mode));
+            })
         });
-        if let Some(sheet) = self.cartridge_rows(ui) {
+        if let Some(sheet) = self.cartridge_rows(&mut page) {
+            open = Some(sheet);
+        }
+        #[cfg(feature = "nds")]
+        if let Some(sheet) = self.ds_rows(&mut page) {
             open = Some(sheet);
         }
         let s = &mut self.ui.settings;
-        kit::section_label(ui, "Autosave");
-        kit::list(ui, |list| {
-            if list
-                .row(Row::new("Every").value(s.autosave_interval.to_string()))
-                .clicked()
-            {
-                open = Some(Sheet::AutosaveEvery);
-            }
-            if list
-                .row(Row::new("Keep").value(match s.autosave_keep {
-                    1 => "1 save".to_owned(),
-                    n => format!("{n} saves"),
-                }))
-                .clicked()
-            {
-                open = Some(Sheet::AutosaveKeep);
-            }
+        page.section(
+            Heading::new(icons::CLOCK_COUNTER_CLOCKWISE, "Autosave"),
+            |ui| {
+                kit::list(ui, |list| {
+                    if list
+                        .row(Row::new("Every").value(s.autosave_interval.to_string()))
+                        .clicked()
+                    {
+                        open = Some(Sheet::AutosaveEvery);
+                    }
+                    if list
+                        .row(Row::new("Keep").value(match s.autosave_keep {
+                            1 => "1 save".to_owned(),
+                            n => format!("{n} saves"),
+                        }))
+                        .clicked()
+                    {
+                        open = Some(Sheet::AutosaveKeep);
+                    }
+                })
+            },
+        );
+        page.section(Heading::new(icons::FAST_FORWARD, "Fast forward"), |ui| {
+            kit::list(ui, |list| {
+                if list
+                    .row(Row::new("Speed").value(s.fast_forward_speed.to_string()))
+                    .clicked()
+                {
+                    open = Some(Sheet::FastForward);
+                }
+            })
         });
-        kit::section_label(ui, "Capture");
-        kit::list(ui, |list| {
-            if list
-                .row(Row::new("Screenshot size").value(format!("{}x", s.screenshot_scale)))
-                .clicked()
-            {
-                open = Some(Sheet::ScreenshotScale);
-            }
-            if list
-                .row(Row::new("Recording size").value(format!("{}x", s.recording_scale)))
-                .clicked()
-            {
-                open = Some(Sheet::RecordingScale);
-            }
+        page.section(
+            Heading::new(icons::REWIND, "Rewind").hint(REWIND_NOTE),
+            |ui| {
+                kit::list(ui, |list| {
+                    if list
+                        .row(Row::new("How far back").value(s.rewind.to_string()))
+                        .clicked()
+                    {
+                        open = Some(Sheet::Rewind);
+                    }
+                })
+            },
+        );
+        page.section(Heading::new(icons::CAMERA, "Capture"), |ui| {
+            kit::list(ui, |list| {
+                if list
+                    .row(Row::new("Screenshot size").value(format!("{}x", s.screenshot_scale)))
+                    .clicked()
+                {
+                    open = Some(Sheet::ScreenshotScale);
+                }
+                if list
+                    .row(Row::new("Recording size").value(format!("{}x", s.recording_scale)))
+                    .clicked()
+                {
+                    open = Some(Sheet::RecordingScale);
+                }
+            })
         });
+        if has_game {
+            page.section(
+                Heading::new(icons::BUG, "Game report").hint(report::GAME_REPORT_NOTE),
+                |ui| {
+                    kit::list(ui, |list| {
+                        save_report = list
+                            .row(
+                                Row::new(report::SAVE_GAME_REPORT)
+                                    .icon(report::SAVE_GAME_REPORT_ICON)
+                                    .no_chevron(),
+                            )
+                            .clicked();
+                    })
+                },
+            );
+        }
+        page.end();
         s.dirty |= dirty;
         self.open_sheet(open);
+        if let Some(on) = big {
+            self.set_big_screen(on);
+        }
+        #[cfg(feature = "nds")]
+        if clear_jit {
+            self.clear_jit_cache();
+        }
+        if save_report {
+            self.save_game_report();
+        }
     }
 
     pub(super) fn general_sheet(&mut self, ctx: &Context, open: Sheet) -> bool {
@@ -241,6 +346,8 @@ impl Citrine {
                 );
                 (settled(&shown.inner), shown.closed)
             }
+            Sheet::FastForward => pick(ctx, "Fast forward speed", None, &mut s.fast_forward_speed),
+            Sheet::Rewind => pick(ctx, "Rewind", Some(REWIND_NOTE), &mut s.rewind),
             Sheet::ScreenshotScale => pick_from(
                 ctx,
                 "Screenshot size",

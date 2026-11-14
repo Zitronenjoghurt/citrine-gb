@@ -64,21 +64,77 @@ pub fn rail(ui: &mut Ui, entries: &[Entry]) -> Option<Place> {
     picked
 }
 
+pub struct TaskEntry {
+    pub icon: &'static str,
+    pub label: &'static str,
+    pub selected: bool,
+}
+
+pub fn task_bar(ui: &mut Ui, entries: &[TaskEntry]) -> Option<usize> {
+    let area = ui.available_rect_before_wrap();
+    let height = bar_height(ui.style());
+    let rect = Rect::from_min_size(area.min, vec2(area.width(), height));
+    ui.allocate_rect(rect, Sense::hover());
+    let width = rect.width() / entries.len().max(1) as f32;
+    let mut picked = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            pos2(rect.left() + width * index as f32, rect.top()),
+            vec2(width, height),
+        );
+        let item = Item {
+            id: ui.id().with(("task", index)),
+            icon: entry.icon,
+            label: entry.label,
+            selected: entry.selected,
+            dot: None,
+            face: None,
+        };
+        if show_item(ui, cell, &item) {
+            picked = Some(index);
+        }
+    }
+    picked
+}
+
+struct Item<'a> {
+    id: egui::Id,
+    icon: &'a str,
+    label: &'a str,
+    selected: bool,
+    dot: Option<egui::Color32>,
+    face: Option<&'a (String, u64)>,
+}
+
 fn show(ui: &mut Ui, cell: Rect, entry: &Entry) -> bool {
-    let response = ui.interact(cell, ui.id().with(("place", entry.place)), Sense::click());
+    let item = Item {
+        id: ui.id().with(("place", entry.place)),
+        icon: entry.place.icon(),
+        label: entry.place.label(),
+        selected: entry.selected,
+        dot: entry.dot,
+        face: entry.face.as_ref(),
+    };
+    show_item(ui, cell, &item)
+}
+
+fn show_item(ui: &mut Ui, cell: Rect, entry: &Item<'_>) -> bool {
+    let response = ui.interact(cell, entry.id, Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Button,
-            true,
-            entry.selected,
-            entry.place.label(),
-        )
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, entry.selected, entry.label)
     });
     if !ui.is_rect_visible(cell) {
         return response.clicked();
     }
     let visuals = ui.visuals();
     let pill = Rect::from_center_size(pos2(cell.center().x, cell.top() + 22.0), PILL);
+    crate::app::big_screen::ring::mark(
+        &response,
+        crate::app::big_screen::ring::Mark::Ring {
+            rect: pill,
+            radius: PILL.y / 2.0,
+        },
+    );
     let t = ui
         .ctx()
         .animate_bool_responsive(response.id, entry.selected);
@@ -93,7 +149,7 @@ fn show(ui: &mut Ui, cell: Rect, entry: &Entry) -> bool {
     } else {
         visuals.text_color()
     };
-    match &entry.face {
+    match entry.face {
         Some((name, seed)) => {
             let face = Rect::from_center_size(pill.center(), vec2(24.0, 24.0));
             avatar::paint(ui, face, name, *seed, None);
@@ -102,7 +158,7 @@ fn show(ui: &mut Ui, cell: Rect, entry: &Entry) -> bool {
             ui.painter().text(
                 pill.center(),
                 Align2::CENTER_CENTER,
-                entry.place.icon(),
+                entry.icon,
                 FontId::proportional(21.0),
                 ink,
             );
@@ -123,7 +179,7 @@ fn show(ui: &mut Ui, cell: Rect, entry: &Entry) -> bool {
     ui.painter().text(
         pos2(cell.center().x, pill.bottom() + 4.0),
         Align2::CENTER_TOP,
-        entry.place.label(),
+        entry.label,
         FontId::proportional(12.0),
         label,
     );

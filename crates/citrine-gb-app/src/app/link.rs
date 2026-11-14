@@ -5,6 +5,7 @@ use crate::local_link::Game;
 use crate::partner_link::PartnerLink;
 use crate::utils::file_loader::PickedFile;
 use citrine_gb::console::ConsoleKind;
+use citrine_gb::error::GbError;
 use citrine_gb::rom::Rom;
 
 const ONLY_EACH_OTHER: &str = "Game Boy Advance games link only with each other";
@@ -18,7 +19,7 @@ pub enum LinkEntry {
 
 impl Citrine {
     pub(super) fn link_entry(&self) -> LinkEntry {
-        if self.emulator.link.is_some() || self.emulator.partner.is_some() {
+        if self.emulator.linked() || self.emulator.partnered() {
             LinkEntry::Open
         } else if self.play.is_live() {
             LinkEntry::Blocked("Not while you play together")
@@ -49,13 +50,26 @@ impl Citrine {
         #[cfg(not(target_arch = "wasm32"))]
         if linked
             && let Some(path) = path
-            && let Some(link) = &self.emulator.link
+            && let Some(link) = self.emulator.link()
         {
             let (title, kind) = (link.title().to_owned(), link.kind());
             let dropped = self.ui.recent.record_on(&path, &title, None, Some(kind));
-            self.files
-                .rom_copies
-                .drop_copies(dropped.iter().map(|entry| entry.path.as_path()));
+            self.ui.library.record_opened(
+                crate::app::ui_state::library::Opened {
+                    path: path.to_string_lossy().into_owned(),
+                    name: title,
+                    console: Some(kind),
+                    ..Default::default()
+                },
+                crate::storage::now_unix(),
+            );
+            let library = &self.ui.library;
+            self.files.rom_copies.drop_copies(
+                dropped
+                    .iter()
+                    .map(|entry| entry.path.as_path())
+                    .filter(|path| library.find(&path.to_string_lossy()).is_none()),
+            );
         }
         #[cfg(target_arch = "wasm32")]
         let _ = linked;
@@ -96,9 +110,13 @@ impl Citrine {
         }
     }
 
-    pub(super) fn link_game(&mut self, data: Vec<u8>, name: Option<String>) -> bool {
-        let rom = Rom::new(&data);
+    pub(super) fn link_game(&mut self, data: std::sync::Arc<[u8]>, name: Option<String>) -> bool {
+        let rom = Rom::from(data);
         let kind = self.opened_as(&rom, name.as_deref());
+        if kind == ConsoleKind::Nds || self.emulator.kind() == ConsoleKind::Nds {
+            self.toasts.error(GbError::NdsLink.to_string());
+            return false;
+        }
         if (kind == ConsoleKind::Gba) != (self.emulator.kind() == ConsoleKind::Gba) {
             self.toasts.error(ONLY_EACH_OTHER);
             return false;
@@ -115,7 +133,7 @@ impl Citrine {
         }
         self.ui.linked.picking = false;
         self.ui.settings.dirty = true;
-        if let Some(link) = &mut self.emulator.link {
+        if let Some(link) = self.emulator.link_mut() {
             link.set_settings(&self.ui.settings.local_link);
         }
         if self.mobile.phone {
@@ -155,14 +173,14 @@ impl Citrine {
     }
 
     pub(super) fn keeps_link_tab(&self) -> bool {
-        self.emulator.link.is_some()
-            || self.emulator.partner.is_some()
+        self.emulator.linked()
+            || self.emulator.partnered()
             || self.ui.linked.picking
             || self.ui.linked.listing
     }
 
     pub(super) fn switch_game(&mut self) {
-        let Some(link) = &self.emulator.link else {
+        let Some(link) = self.emulator.link() else {
             self.toasts.error("No second game is linked");
             return;
         };
@@ -171,6 +189,6 @@ impl Citrine {
     }
 
     pub(super) fn link_control(&self) -> Option<Game> {
-        self.emulator.link.as_ref().map(|link| link.control())
+        self.emulator.link().map(|link| link.control())
     }
 }

@@ -1,0 +1,32 @@
+species_names.tsv
+
+English names come from our own extraction of Pokemon Platinum (English, CPUE).
+
+Japanese, French, Italian, German, Spanish and Korean names come from PokeAPI,
+data/v2/csv/pokemon_species_names.csv at commit
+6ea97b5641faa12e090866e8144ae8f57764fc64 (https://github.com/PokeAPI/pokeapi),
+fetched 2026-11-08. They are stored the way Gen 4 games store them: uppercase,
+except Japanese and Korean. Every name was checked against PKHeX's Gen 4 names,
+and the German names also against German HeartGold (IPKD). Where they differ,
+the table holds the Gen 4 name:
+
+- French: Gen 4 uppercase names have no accents, so 75 names lose them
+  (PokeAPI "Salamèche", Gen 4 "SALAMECHE"). Species: 4, 35, 36, 49, 56, 61, 69, 81, 82, 101, 112, 117, 118, 123, 125, 130, 132, 133, 142, 145, 154, 155, 173, 192, 198, 200, 202, 223, 226, 229, 239, 241, 257, 261, 262, 264, 270, 277, 278, 289, 302, 307, 310, 312, 315, 323, 330, 336, 337, 341, 351, 355, 356, 358, 360, 375, 376, 395, 396, 397, 398, 402, 418, 419, 429, 436, 437, 438, 456, 457, 462, 466, 480, 481, 482.
+- Italian 83: PokeAPI "Farfetch’d" with a curly apostrophe, Gen 4 "FARFETCH'D".
+- Spanish 83: PokeAPI "Farfetch’d" with a curly apostrophe, Gen 4 "FARFETCH'D".
+
+PokeAPI license (BSD-3-Clause):
+
+Copyright (c) © 2013–2023 Paul Hallett and PokéAPI contributors (https://github.com/PokeAPI/pokeapi#contributing). Pokémon and Pokémon character names are trademarks of Nintendo.
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+* Neither the name of PokéAPI nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

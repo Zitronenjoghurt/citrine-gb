@@ -1,12 +1,16 @@
-use crate::app::ui_state::hotkeys::Hotkeys;
-use crate::app::ui_state::keybinds::KeyBindings;
+use crate::app::ui_state::hotkeys::{FAST_FORWARD_KEY, HotkeyAction, Hotkeys};
+use crate::app::ui_state::keybinds::{GbButton, KeyBindings};
 use crate::app::ui_state::palette::{PaletteChoice, PaletteLibrary};
 use crate::app::ui_state::touch::TouchSettings;
 use crate::app::ui_state::ui_theme::UiTheme;
 use crate::audio::mix::{SoundLevels, level};
+use crate::audio::pacer::SlowSound;
 use crate::audio::{Audio, DEFAULT_LATENCY_MS};
 use crate::autosave::{self, AutosaveInterval};
 use crate::emulator::Emulator;
+use crate::emulator::fast_forward::FastForwardSpeed;
+use crate::emulator::load::ScreenMatch;
+use crate::emulator::rewind::RewindLength;
 use crate::icons;
 use crate::media::recording;
 use crate::online::OnlineSettings;
@@ -157,6 +161,48 @@ impl Display for ScalingMode {
     }
 }
 
+pub const SAME_SIZE_PIXELS_NOTE: &str =
+    "Stops some rows and columns of pixels looking bigger than others. Edges get a little blurry.";
+
+pub const GRID_LABEL: &str = "LCD grid";
+
+pub const SLOWDOWN_LABEL: &str = "Slowdown";
+
+pub const GRID_NOTE: &str = "Draws thin lines between the pixels, like the original screen.";
+
+pub const MATCH_SCREEN_LABEL: &str = "Match refresh rate";
+
+pub const MATCH_SCREEN_NOTE: &str = "Runs the game at exactly 60 frames a second, a touch faster than the console's 59.7 (59.8 on DS), so every frame stays on screen equally long on 60, 120, 180 and 240 Hz screens. Sound plays under a tenth of a semitone higher. With it off, the picture hitches every few seconds as one frame shows twice. It does nothing on other screens, like 144 Hz, or when you play with others online or by link cable.";
+
+const DISPLAY_SETTINGS: &str = if cfg!(target_os = "macos") {
+    "System Settings, Displays"
+} else if cfg!(target_os = "windows") {
+    "Settings, System, Display, Advanced display"
+} else if cfg!(target_os = "android") {
+    "your phone's display settings"
+} else {
+    "your display settings"
+};
+
+const MATCH_RATES: &str = if cfg!(target_os = "macos") {
+    "ProMotion, 120 or 60 Hz"
+} else {
+    "60 or 120 Hz"
+};
+
+pub fn match_screen_line(status: Option<ScreenMatch>) -> Option<String> {
+    match status? {
+        ScreenMatch::Unmatched(hz) => Some(format!(
+            "Your screen runs at {hz:.0} Hz, which games can't match. Set it to {MATCH_RATES} in {DISPLAY_SETTINGS}."
+        )),
+        _ => None,
+    }
+}
+
+pub const OWN_COLORS_NOTE: &str = "Uses its own colours, not a palette";
+
+pub const GHOSTING_NOTE: &str = "Smears frames together, the way the original LCD did.";
+
 pub const GBC_SCREEN_NOTE: &str =
     "How Game Boy Color colours look. Like a GBC softens them the way its screen did.";
 
@@ -179,6 +225,20 @@ impl std::fmt::Display for GbaScreen {
     }
 }
 
+#[cfg(feature = "nds")]
+pub const JIT_LABEL: &str = "JIT recompiler";
+#[cfg(feature = "nds")]
+pub const JIT_HINT: &str = "Translates DS game code for this device's processor, so DS games run faster. Turn it off if a DS game misbehaves.";
+#[cfg(feature = "nds")]
+pub const CLEAR_JIT_LABEL: &str = "Clear JIT cache";
+#[cfg(feature = "nds")]
+pub const JIT_CLEARED: &str = "JIT cache cleared";
+#[cfg(feature = "nds")]
+pub const JIT_CLEAR_FAILED: &str = "Couldn't clear the JIT cache";
+pub const DS_JIT_DEFAULT: bool = !cfg!(windows);
+#[cfg(feature = "nds")]
+pub const GBA_USES_JIT: bool = false;
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -190,6 +250,7 @@ pub struct Settings {
     pub console: ConsoleChoice,
     pub game_consoles: BTreeMap<String, GbModel>,
     pub game_names: crate::game_name::GameNames,
+    pub cheats: crate::cheats::CheatBook,
 
     pub dmg_theme: DmgTheme,
     pub custom_palette: Option<String>,
@@ -198,8 +259,13 @@ pub struct Settings {
     pub game_palettes: BTreeMap<String, PaletteChoice>,
     pub color_correction: ColorCorrection,
     pub scaling: ScalingMode,
+    pub same_size_pixels: bool,
+    pub ds_screens: crate::app::ui_state::ds_screens::DsScreens,
+    pub ds_3d: crate::app::ui_state::ds_3d::Ds3d,
+    pub ds_jit: bool,
     pub matrix: bool,
     pub ghosting: bool,
+    pub match_screen: bool,
     pub matrix_edge_darkness: f32,
     pub matrix_corner_darkness: f32,
     pub ghosting_strength: f32,
@@ -208,6 +274,7 @@ pub struct Settings {
     pub muted: bool,
     pub audio_queue_ms: u32,
     pub audio_device: Option<String>,
+    pub slow_sound: SlowSound,
     pub channels: [bool; 4],
     pub gba_channels: [bool; 6],
 
@@ -218,19 +285,27 @@ pub struct Settings {
     pub local_link: crate::local_link::LinkSettings,
     pub gimmicks: crate::emulator::gimmicks::GimmickSettings,
     pub discord: crate::discord::DiscordSettings,
+    pub achievements: crate::achievements::AchievementSettings,
     pub stats_range: crate::app::tabs::stats::Range,
 
     pub current_tab: SettingsTab,
     pub quick_slot: usize,
     pub autosave_interval: AutosaveInterval,
     pub autosave_keep: usize,
+    pub rewind: RewindLength,
+    pub fast_forward_speed: FastForwardSpeed,
     pub screenshot_scale: usize,
     pub recording_scale: usize,
     pub randomized_ram: bool,
     pub dev_mode: bool,
     pub check_updates: bool,
-    pub focus_mode: bool,
+    pub covers: bool,
     pub focus_place: crate::app::focus::ScreenPlace,
+    pub hud: crate::app::hud::HudSettings,
+    pub big_screen: crate::app::big_screen::BigScreenSettings,
+    pub ds_user: crate::app::ui_state::ds_user::DsUser,
+    pub ds_online: crate::app::ui_state::ds_online::DsOnline,
+    pub walker: crate::app::ui_state::walker_steps::WalkerSteps,
     pub track_pc: bool,
     pub synced: crate::online::synced::SyncDoc,
     #[serde(skip, default = "default_dirty")]
@@ -241,6 +316,12 @@ pub struct Settings {
     pub scale_drag: bool,
     #[serde(skip, default)]
     pub themed_for_phone: Option<bool>,
+    #[serde(skip, default)]
+    pub find_ds_bios: bool,
+    #[serde(skip, default)]
+    pub find_ds_direct: bool,
+    #[serde(skip, default)]
+    pub walker_asked: bool,
 }
 
 impl Default for Settings {
@@ -261,8 +342,13 @@ impl Default for Settings {
             game_palettes: BTreeMap::new(),
             color_correction: ColorCorrection::Screen,
             scaling: ScalingMode::default(),
+            same_size_pixels: false,
+            ds_screens: Default::default(),
+            ds_3d: Default::default(),
+            ds_jit: DS_JIT_DEFAULT,
             matrix: false,
             ghosting: false,
+            match_screen: true,
             matrix_edge_darkness: Self::DEFAULT_MATRIX_EDGE_DARKNESS,
             matrix_corner_darkness: Self::DEFAULT_MATRIX_CORNER_DARKNESS,
             ghosting_strength: Self::DEFAULT_GHOSTING_STRENGTH,
@@ -271,6 +357,7 @@ impl Default for Settings {
             muted: false,
             audio_queue_ms: DEFAULT_LATENCY_MS,
             audio_device: None,
+            slow_sound: SlowSound::default(),
             channels: [true; 4],
             gba_channels: [true; 6],
 
@@ -279,26 +366,38 @@ impl Default for Settings {
             touch: TouchSettings::default(),
             online: OnlineSettings::default(),
 
+            cheats: Default::default(),
             current_tab: SettingsTab::default(),
             quick_slot: 0,
             autosave_interval: AutosaveInterval::default(),
             autosave_keep: autosave::DEFAULT_KEEP,
+            rewind: RewindLength::default(),
+            fast_forward_speed: FastForwardSpeed::default(),
             screenshot_scale: recording::DEFAULT_SCALE,
             recording_scale: recording::DEFAULT_SCALE,
             randomized_ram: false,
             dev_mode: false,
             check_updates: true,
-            focus_mode: false,
+            covers: true,
+            big_screen: Default::default(),
             focus_place: Default::default(),
+            hud: Default::default(),
+            ds_user: Default::default(),
+            ds_online: Default::default(),
+            walker: Default::default(),
             track_pc: false,
             synced: Default::default(),
             dirty: default_dirty(),
             unsaved: false,
             scale_drag: false,
             themed_for_phone: None,
+            find_ds_bios: false,
+            find_ds_direct: false,
+            walker_asked: false,
             local_link: crate::local_link::LinkSettings::default(),
             gimmicks: crate::emulator::gimmicks::GimmickSettings::default(),
             discord: crate::discord::DiscordSettings::default(),
+            achievements: crate::achievements::AchievementSettings::default(),
             stats_range: Default::default(),
         }
     }
@@ -348,16 +447,20 @@ pub fn console_short(model: GbModel) -> &'static str {
 }
 
 pub fn kind_name(kind: ConsoleKind) -> &'static str {
-    match GbModel::try_from(kind) {
-        Ok(model) => console_name(model),
-        Err(_) => "Game Boy Advance",
+    match kind {
+        ConsoleKind::Gba => "Game Boy Advance",
+        ConsoleKind::Nds => "Nintendo DS",
+        ConsoleKind::Gb => console_name(GbModel::Dmg),
+        ConsoleKind::Gbc => console_name(GbModel::Cgb),
     }
 }
 
 pub fn kind_short(kind: ConsoleKind) -> &'static str {
-    match GbModel::try_from(kind) {
-        Ok(model) => console_short(model),
-        Err(_) => "GBA",
+    match kind {
+        ConsoleKind::Gba => "GBA",
+        ConsoleKind::Nds => "DS",
+        ConsoleKind::Gb => console_short(GbModel::Dmg),
+        ConsoleKind::Gbc => console_short(GbModel::Cgb),
     }
 }
 
@@ -510,6 +613,7 @@ impl Settings {
     }
 
     pub fn sanitize(&mut self) {
+        self.make_room_for_fast_forward();
         self.hotkeys.bind_new_defaults();
         if self
             .custom_palette
@@ -530,6 +634,18 @@ impl Settings {
         self.screenshot_scale = self.screenshot_scale.clamp(1, recording::MAX_SCALE);
         self.recording_scale = recording::even_scale(self.recording_scale);
         self.dirty = true;
+    }
+
+    fn make_room_for_fast_forward(&mut self) {
+        let action = HotkeyAction::FastForward;
+        if self.hotkeys.offers(action) {
+            return;
+        }
+        self.bindings
+            .drop_old_default(FAST_FORWARD_KEY, GbButton::Start);
+        if self.bindings.binds_key(FAST_FORWARD_KEY) {
+            self.hotkeys.offer_unbound(action);
+        }
     }
 
     pub fn note_scale_drag(&mut self, response: &egui::Response) {
@@ -569,13 +685,19 @@ impl Settings {
         }
 
         let scale = self.touch.clamped_ui_scale();
-        (short_edge * scale / MOBILE_DESIGN_POINTS).clamp(0.5, 6.0)
+        let design = if self.big_screen.on || crate::platform::is_tv() {
+            crate::app::big_screen::DESIGN_POINTS
+        } else {
+            MOBILE_DESIGN_POINTS
+        };
+        (short_edge * scale / design).clamp(0.5, 6.0)
     }
 
     pub fn sound_levels(&self) -> SoundLevels {
         SoundLevels {
             mine: level(self.volume, self.muted),
             friend: level(self.online.friend_volume, self.online.friend_muted),
+            slow: self.slow_sound,
         }
     }
 
@@ -598,6 +720,9 @@ impl Settings {
         if self.bindings.adopt_triggers() {
             self.dirty = true;
         }
+        if self.bindings.adopt_ds() {
+            self.dirty = true;
+        }
         if !std::mem::take(&mut self.scale_drag) {
             let wanted_ppp = self.pixels_per_point(ctx, mobile);
             if (ctx.pixels_per_point() - wanted_ppp).abs() > f32::EPSILON {
@@ -609,6 +734,12 @@ impl Settings {
         } else {
             self.scaling
         };
+        emulator.ds_screens = self.ds_screens;
+        emulator.ds_3d = self.ds_3d;
+        emulator.ds_jit = self.ds_jit;
+        if !mobile {
+            emulator.screen_context = crate::app::ui_state::ds_screens::ScreenContext::Desktop;
+        }
 
         if self.themed_for_phone != Some(mobile) {
             self.themed_for_phone = Some(mobile);
@@ -628,7 +759,7 @@ impl Settings {
         }
         #[cfg(feature = "gba")]
         emulator.set_gba_color_correction(self.color_correction);
-        if let Some(link) = &mut emulator.link {
+        if let Some(link) = emulator.link_mut() {
             let key = link.rom_key().to_owned();
             if let Some(gb) = link.machine.as_gb_mut() {
                 self.apply_colors(gb, Some(&key));
@@ -643,13 +774,18 @@ impl Settings {
             };
         }
         emulator.enable_matrix = self.matrix;
+        emulator.same_size_pixels = self.same_size_pixels;
         emulator.enable_ghosting = self.ghosting;
         emulator.matrix_edge_brightness = 1.0 - self.matrix_edge_darkness;
         emulator.matrix_corner_brightness = 1.0 - self.matrix_corner_darkness;
         emulator.ghosting_blend = 1.0 - self.ghosting_strength;
         emulator.autosave_interval = self.autosave_interval;
         emulator.autosave_keep = self.autosave_keep;
+        emulator.rewind_length = self.rewind;
+        emulator.fast_forward_speed = self.fast_forward_speed;
+        emulator.match_screen = self.match_screen;
         emulator.set_gimmick_settings(&self.gimmicks);
+        emulator.follow_cheats(&self.cheats);
 
         let count = emulator.channel_count();
         for (index, enabled) in self.channels_for(count).to_vec().into_iter().enumerate() {
@@ -705,6 +841,7 @@ impl SettingsTab {
     pub fn title_for(&self, console: ConsoleKind) -> &'static str {
         match (self, console) {
             (Self::Style, ConsoleKind::Gba) => "GBA style",
+            (Self::Style, ConsoleKind::Nds) => "DS style",
             _ => self.title(),
         }
     }
@@ -727,4 +864,542 @@ impl SettingsTab {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::app::ui_state::keybinds::GbButton;
+    use crate::app::ui_state::palette::CustomPalette;
+
+    #[test]
+    fn the_friends_volume_is_kept_and_starts_at_half() {
+        let fresh = Settings::default();
+        assert_eq!(fresh.online.friend_volume, 0.5);
+        assert!(!fresh.online.friend_muted);
+        let mut settings = Settings::default();
+        settings.online.friend_volume = 0.3;
+        settings.online.friend_muted = true;
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.online.friend_volume, 0.3);
+        assert!(back.online.friend_muted);
+        let older: Settings =
+            serde_json::from_str(r#"{ "online": { "show_playing": false } }"#).unwrap();
+        assert_eq!(older.online.friend_volume, 0.5);
+    }
+
+    #[test]
+    fn my_mute_and_the_friends_mute_are_separate() {
+        let settings = Settings {
+            volume: 0.8,
+            muted: true,
+            ..Default::default()
+        };
+        assert_eq!(settings.sound_levels().mine, 0.0);
+        assert_eq!(settings.sound_levels().friend, 0.25);
+        let mut settings = Settings {
+            volume: 0.5,
+            ..Default::default()
+        };
+        settings.online.friend_muted = true;
+        assert_eq!(settings.sound_levels().mine, 0.25);
+        assert_eq!(settings.sound_levels().friend, 0.0);
+    }
+
+    #[test]
+    fn a_custom_palette_wins_over_the_builtin_choice() {
+        let mut settings = Settings::default();
+        let mine = CustomPalette {
+            name: "Mine".into(),
+            colors: [[9, 9, 9], [8, 8, 8], [7, 7, 7], [6, 6, 6]],
+        };
+        settings.palettes.upsert(mine.clone());
+        settings.custom_palette = Some("Mine".into());
+
+        assert_eq!(settings.effective_theme(), mine.to_theme());
+    }
+
+    #[test]
+    fn a_deleted_palette_falls_back_to_the_builtin() {
+        let mut settings = Settings {
+            dmg_theme: DmgTheme::Pocket,
+            custom_palette: Some("Gone".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            settings.effective_theme(),
+            DmgTheme::Pocket,
+            "a name with nothing behind it must not blank the screen"
+        );
+
+        settings.sanitize();
+        assert_eq!(
+            settings.custom_palette, None,
+            "the dangling name is dropped"
+        );
+    }
+
+    #[test]
+    fn the_desktop_ui_keeps_its_css_size_at_every_pixel_ratio_and_zoom() {
+        let settings = Settings::default();
+        let one_x = settings.desktop_pixels_per_point(1.0);
+        assert_eq!(one_x, Settings::DEFAULT_UI_SCALE);
+        for ratio in [1.0, 2.0, 1.25, 2.5, 3.0] {
+            let ppp = settings.desktop_pixels_per_point(ratio);
+            assert!(
+                (ppp / ratio - one_x).abs() < 1e-5,
+                "ratio {ratio}: {ppp} points per pixel"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ui_scale_from_an_older_build_keeps_its_size_on_the_same_screen() {
+        let load = |json: &str| -> Settings { serde_json::from_str(json).expect("loads") };
+
+        let mut chosen = load(r#"{ "ui_scale": 3.0 }"#);
+        assert!(!chosen.ui_scale_per_ratio);
+        let old_ppp = chosen.ui_scale;
+        chosen.adopt_pixel_ratio(2.0);
+        assert_eq!(chosen.ui_scale, 1.5);
+        assert_eq!(chosen.desktop_pixels_per_point(2.0), old_ppp);
+        assert!(chosen.ui_scale_per_ratio);
+        chosen.adopt_pixel_ratio(2.0);
+        assert_eq!(chosen.ui_scale, 1.5, "adopted once");
+
+        let mut untouched = load(&format!(
+            r#"{{ "ui_scale": {} }}"#,
+            Settings::DEFAULT_UI_SCALE
+        ));
+        untouched.adopt_pixel_ratio(2.0);
+        assert_eq!(untouched.ui_scale, Settings::DEFAULT_UI_SCALE);
+
+        let mut one_x = load(r#"{ "ui_scale": 3.0 }"#);
+        one_x.adopt_pixel_ratio(1.0);
+        assert_eq!(one_x.ui_scale, 3.0);
+
+        let mut fresh = Settings {
+            ui_scale: 3.0,
+            ..Settings::default()
+        };
+        fresh.adopt_pixel_ratio(2.0);
+        assert_eq!(fresh.ui_scale, 3.0);
+    }
+
+    #[test]
+    fn sanitize_clears_the_unusable_custom_theme_from_older_builds() {
+        let mut settings = Settings {
+            dmg_theme: DmgTheme::Custom(Default::default()),
+            ..Default::default()
+        };
+
+        settings.sanitize();
+
+        assert_eq!(settings.dmg_theme, DmgTheme::default());
+        assert_eq!(settings.effective_theme(), DmgTheme::default());
+    }
+
+    #[test]
+    fn sanitize_pulls_out_of_range_values_back_in() {
+        let mut settings = Settings {
+            ui_scale: 99.0,
+            volume: -3.0,
+            audio_queue_ms: 5000,
+            autosave_keep: 0,
+            ..Default::default()
+        };
+
+        settings.sanitize();
+        assert_eq!(settings.autosave_keep, 1);
+        settings.autosave_keep = 900;
+        settings.sanitize();
+        assert_eq!(settings.autosave_keep, autosave::MAX_KEEP);
+
+        assert_eq!(settings.ui_scale, 5.0);
+        assert_eq!(settings.volume, 0.0);
+        assert_eq!(settings.audio_queue_ms, crate::audio::MAX_LATENCY_MS);
+    }
+
+    #[test]
+    fn renaming_a_palette_keeps_everything_that_points_at_it() {
+        let mine = CustomPalette {
+            name: "Mine".into(),
+            colors: [[9, 9, 9], [8, 8, 8], [7, 7, 7], [6, 6, 6]],
+        };
+        let mut settings = Settings {
+            dmg_theme: DmgTheme::Pocket,
+            custom_palette: Some("Mine".into()),
+            ..Default::default()
+        };
+        settings.palettes.upsert(mine.clone());
+        settings.set_game_palette("game", Some(PaletteChoice::Custom("Mine".into())));
+        settings.set_game_palette("other", Some(PaletteChoice::Builtin(DmgTheme::Aqua)));
+
+        assert!(settings.rename_palette("Mine", "  Ours  "));
+
+        assert_eq!(settings.custom_palette.as_deref(), Some("Ours"));
+        assert_eq!(
+            settings.game_palette(Some("game")),
+            Some(&PaletteChoice::Custom("Ours".into())),
+            "the game follows the palette to its new name"
+        );
+        assert_eq!(settings.theme_for(Some("game")), mine.to_theme());
+        assert_eq!(
+            settings.game_palette(Some("other")),
+            Some(&PaletteChoice::Builtin(DmgTheme::Aqua)),
+            "games on other palettes are untouched"
+        );
+    }
+
+    #[test]
+    fn a_refused_rename_leaves_the_games_alone() {
+        let mut settings = Settings::default();
+        for name in ["Mine", "Taken"] {
+            settings.palettes.upsert(CustomPalette {
+                name: name.into(),
+                colors: [[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]],
+            });
+        }
+        settings.set_game_palette("game", Some(PaletteChoice::Custom("Mine".into())));
+
+        assert!(!settings.rename_palette("Mine", "Taken"));
+
+        assert_eq!(
+            settings.game_palette(Some("game")),
+            Some(&PaletteChoice::Custom("Mine".into()))
+        );
+    }
+
+    #[test]
+    fn settings_saved_by_an_older_build_still_load() {
+        let stored = r#"{
+        "ui_scale": 2.5,
+        "ui_theme": "CatppuccinFrappe",
+        "dmg_theme": "Pocket",
+        "matrix": true,
+        "ghosting": true,
+        "matrix_edge_darkness": 0.2,
+        "matrix_corner_darkness": 0.3,
+        "ghosting_strength": 0.4,
+        "volume": 0.8,
+        "current_tab": "Sound",
+        "quick_slot": 3,
+        "randomized_ram": true,
+        "dev_mode": true,
+        "focus_mode": true,
+        "track_pc": true
+    }"#;
+
+        let settings: Settings = serde_json::from_str(stored).expect("old settings still load");
+
+        assert_eq!(settings.ui_scale, 2.5);
+        assert_eq!(settings.dmg_theme, DmgTheme::Pocket);
+        assert_eq!(settings.quick_slot, 3);
+        assert!(settings.dev_mode);
+        assert_eq!(settings.audio_queue_ms, DEFAULT_LATENCY_MS);
+        assert_eq!(settings.channels, [true; 4]);
+        assert_eq!(settings.layout, LayoutMode::Auto);
+        assert!(settings.bindings.is_default());
+        assert_eq!(settings.autosave_interval, AutosaveInterval::FiveMinutes);
+        assert_eq!(settings.autosave_keep, autosave::DEFAULT_KEEP);
+    }
+
+    #[test]
+    fn a_saved_settings_file_never_brings_focus_mode_back() {
+        let settings: Settings =
+            serde_json::from_str(r#"{ "focus_mode": true }"#).expect("old settings still load");
+        let saved = serde_json::to_value(&settings).expect("settings save");
+        assert!(saved.get("focus_mode").is_none());
+
+        let mut ui = crate::app::ui_state::UiState {
+            settings,
+            ..Default::default()
+        };
+        ui.focus_mode = true;
+        let stored = serde_json::to_string(&ui).expect("the ui state saves");
+        let back: crate::app::ui_state::UiState =
+            serde_json::from_str(&stored).expect("the ui state loads");
+        assert!(!back.focus_mode);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn autosave_choices_persist() {
+        let root =
+            std::env::temp_dir().join(format!("citrine-autosave-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = crate::storage::SettingsStore::at(root.clone());
+        let settings = Settings {
+            autosave_interval: AutosaveInterval::FifteenMinutes,
+            autosave_keep: 25,
+            ..Default::default()
+        };
+        store.store(&settings).expect("store");
+
+        let back: Settings = store.load().expect("load");
+        assert_eq!(back.autosave_interval, AutosaveInterval::FifteenMinutes);
+        assert_eq!(back.autosave_keep, 25);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    const BOTH: &str = "BOTH";
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_ds_3d_choices_persist() {
+        use crate::app::ui_state::ds_3d::{Resolution, SmoothEdges};
+        let root = std::env::temp_dir().join(format!("citrine-ds-3d-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = crate::storage::SettingsStore::at(root.clone());
+        let mut settings = Settings::default();
+        assert_eq!(settings.ds_3d.resolution, Resolution::Native);
+        settings.ds_3d.resolution = Resolution::Quadruple;
+        settings.ds_3d.smooth_edges = SmoothEdges::On;
+        store.store(&settings).expect("store");
+
+        let back: Settings = store.load().expect("load");
+        assert_eq!(back.ds_3d, settings.ds_3d);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_game_console_persists() {
+        let root =
+            std::env::temp_dir().join(format!("citrine-game-console-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = crate::storage::SettingsStore::at(root.clone());
+        let mut settings = Settings::default();
+        settings.set_game_console(BOTH, GbModel::Dmg);
+        store.store(&settings).expect("store");
+
+        let back: Settings = store.load().expect("load");
+        assert_eq!(back.console_for(BOTH, RomCgbMode::CgbAndGb), GbModel::Dmg);
+        assert_eq!(
+            back.console_for("OTHER", RomCgbMode::CgbAndGb),
+            GbModel::Cgb,
+            "another game keeps the default"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_from_before_game_consoles_still_load() {
+        let old = r#"{"console":"GameBoy","volume":0.5}"#;
+        let settings: Settings = serde_json::from_str(old).expect("old settings load");
+        assert_eq!(settings.console, ConsoleChoice::GameBoy);
+        assert!(settings.game_consoles.is_empty());
+    }
+
+    #[test]
+    fn the_default_applies_without_a_game_choice() {
+        let mut settings = Settings::default();
+        assert_eq!(
+            settings.console_for(BOTH, RomCgbMode::CgbAndGb),
+            GbModel::Cgb
+        );
+        assert_eq!(
+            settings.console_for(BOTH, RomCgbMode::CgbOnly),
+            GbModel::Cgb
+        );
+        assert_eq!(settings.console_for(BOTH, RomCgbMode::None), GbModel::Dmg);
+
+        settings.console = ConsoleChoice::GameBoy;
+        assert_eq!(
+            settings.console_for(BOTH, RomCgbMode::CgbAndGb),
+            GbModel::Dmg
+        );
+        assert_eq!(
+            settings.console_for(BOTH, RomCgbMode::CgbOnly),
+            GbModel::Dmg,
+            "only the default puts a Color-only game on a Game Boy"
+        );
+    }
+
+    #[test]
+    fn a_game_choice_only_counts_for_games_that_run_on_both() {
+        let mut settings = Settings::default();
+        settings.game_consoles.insert(BOTH.into(), GbModel::Dmg);
+        assert_eq!(
+            settings.console_for(BOTH, RomCgbMode::CgbAndGb),
+            GbModel::Dmg
+        );
+        assert_eq!(
+            settings.console_for(BOTH, RomCgbMode::CgbOnly),
+            GbModel::Cgb
+        );
+        settings.game_consoles.insert(BOTH.into(), GbModel::Cgb);
+        assert_eq!(settings.console_for(BOTH, RomCgbMode::None), GbModel::Dmg);
+    }
+
+    #[test]
+    fn only_games_that_run_on_both_offer_the_choice() {
+        assert!(plays_on_both(RomCgbMode::CgbAndGb));
+        assert!(!plays_on_both(RomCgbMode::CgbOnly));
+        assert!(!plays_on_both(RomCgbMode::None));
+        let shelf: Vec<&str> = crate::homebrew::HOMEBREW_GAMES
+            .iter()
+            .filter(|game| plays_on_both(game.cgb_mode))
+            .map(|game| game.id)
+            .collect();
+        assert_eq!(shelf, ["libbet", "tobu_deluxe"]);
+    }
+
+    #[test]
+    fn picking_what_the_default_gives_forgets_the_game_choice() {
+        let mut settings = Settings::default();
+        settings.set_game_console(BOTH, GbModel::Dmg);
+        assert_eq!(settings.game_consoles.len(), 1);
+        settings.set_game_console(BOTH, GbModel::Cgb);
+        assert!(settings.game_consoles.is_empty());
+        assert_eq!(
+            settings.console_for(BOTH, RomCgbMode::CgbAndGb),
+            GbModel::Cgb
+        );
+    }
+
+    #[test]
+    fn a_rom_resolves_its_console_from_its_header() {
+        let mut data = vec![0u8; 0x8000];
+        data[0x143] = 0x80;
+        let rom = Rom::new(&data);
+        let key = rom.header().unwrap().sha256_hex_string();
+        let mut settings = Settings::default();
+        assert_eq!(settings.console_for_rom(&rom), GbModel::Cgb);
+        settings.set_game_console(&key, GbModel::Dmg);
+        assert_eq!(settings.console_for_rom(&rom), GbModel::Dmg);
+    }
+
+    #[test]
+    fn the_ds_jit_starts_off_on_windows_and_on_elsewhere() {
+        assert_eq!(Settings::default().ds_jit, !cfg!(windows));
+        let stored: Settings = serde_json::from_str("{}").expect("empty settings load");
+        assert_eq!(stored.ds_jit, DS_JIT_DEFAULT);
+    }
+
+    #[test]
+    fn match_refresh_rate_starts_on_and_keeps_a_choice() {
+        assert!(Settings::default().match_screen);
+        let older: Settings =
+            serde_json::from_str(r#"{ "matrix": true }"#).expect("old settings load");
+        assert!(older.match_screen);
+        let settings = Settings {
+            match_screen: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(!back.match_screen);
+    }
+
+    #[test]
+    fn slowdown_keeps_the_pitch_until_changed_and_reaches_the_sound() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.slow_sound, SlowSound::Tempo);
+        assert_eq!(settings.sound_levels().slow, SlowSound::Tempo);
+        settings.slow_sound = SlowSound::Pitch;
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sound_levels().slow, SlowSound::Pitch);
+    }
+
+    fn from_before_fast_forward(bindings: KeyBindings) -> Settings {
+        let mut json = serde_json::to_value(Settings {
+            bindings,
+            ..Default::default()
+        })
+        .unwrap();
+        let hotkeys = json["hotkeys"].as_object_mut().unwrap();
+        hotkeys.remove("fast_forward");
+        hotkeys["offered"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|action| action != "FastForward");
+        let mut settings: Settings = serde_json::from_value(json).unwrap();
+        settings.sanitize();
+        settings
+    }
+
+    fn with_space_on_start() -> KeyBindings {
+        let mut bindings = KeyBindings::default();
+        bindings.bind_key(egui::Key::Space, GbButton::Start);
+        bindings
+    }
+
+    #[test]
+    fn space_leaves_start_and_fast_forwards_once_the_update_lands() {
+        use crate::app::ui_state::hotkeys::HotkeyAction;
+        let settings = from_before_fast_forward(with_space_on_start());
+        assert_eq!(settings.bindings.button_for_key(egui::Key::Space), None);
+        assert_eq!(
+            settings.bindings.button_for_key(egui::Key::Enter),
+            Some(GbButton::Start)
+        );
+        assert_eq!(
+            settings
+                .hotkeys
+                .action_for(egui::Key::Space, egui::Modifiers::NONE),
+            Some(HotkeyAction::FastForward)
+        );
+        assert_eq!(settings.bindings, KeyBindings::default());
+    }
+
+    #[test]
+    fn space_bound_to_another_button_stays_and_fast_forward_gets_no_key() {
+        use crate::app::ui_state::hotkeys::HotkeyAction;
+        let mut bindings = KeyBindings::default();
+        bindings.bind_key(egui::Key::Space, GbButton::A);
+        let mut settings = from_before_fast_forward(bindings);
+        assert_eq!(
+            settings.bindings.button_for_key(egui::Key::Space),
+            Some(GbButton::A)
+        );
+        assert!(
+            settings
+                .hotkeys
+                .keys_for(HotkeyAction::FastForward)
+                .is_empty()
+        );
+        settings.sanitize();
+        assert!(
+            settings
+                .hotkeys
+                .keys_for(HotkeyAction::FastForward)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn space_given_back_to_start_after_the_update_stays_on_start() {
+        let mut settings = from_before_fast_forward(with_space_on_start());
+        settings
+            .bindings
+            .bind_key(egui::Key::Space, GbButton::Start);
+        settings.sanitize();
+        assert_eq!(
+            settings.bindings.button_for_key(egui::Key::Space),
+            Some(GbButton::Start)
+        );
+    }
+
+    #[test]
+    fn the_match_line_names_the_screen_rate_only_when_it_cannot_match() {
+        let line = match_screen_line(Some(ScreenMatch::Unmatched(139.2))).unwrap();
+        let expected = if cfg!(target_os = "macos") {
+            "Your screen runs at 139 Hz, which games can't match. Set it to ProMotion, 120 or 60 Hz in System Settings, Displays.".to_string()
+        } else {
+            format!(
+                "Your screen runs at 139 Hz, which games can't match. Set it to 60 or 120 Hz in {DISPLAY_SETTINGS}."
+            )
+        };
+        assert_eq!(line, expected);
+        for status in [
+            ScreenMatch::Off,
+            ScreenMatch::Shared,
+            ScreenMatch::Measuring,
+            ScreenMatch::Matched,
+        ] {
+            assert_eq!(match_screen_line(Some(status)), None, "{status:?}");
+        }
+        assert_eq!(match_screen_line(None), None);
+    }
+}

@@ -1,6 +1,13 @@
+#![expect(
+    clippy::disallowed_types,
+    reason = "the lab runs SameBoy outside the app, and its reset must not run on two threads at once"
+)]
+
 use crate::emulator::{Button, FrameEmulator};
 use citrine_gb::console::{ConsoleKind, VideoSpec};
 use citrine_gb::gb::GbModel;
+use citrine_gb::gb::ppu::compat::CompatPalette;
+use citrine_gb::gb::ppu::types::color::RGBA;
 use sameboy_sys as sys;
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -36,6 +43,15 @@ extern "C" fn vblank(gb: *mut sys::GB_gameboy_t, _ty: sys::GB_vblank_type_t) {
 }
 
 const RAM_SEED: u64 = 0x0C17_A17E;
+const IDLE_BOOT_ROM: [u8; 0x900] = [0; 0x900];
+const IDLE_BOOT_PC_LIMIT: u16 = 0xF0;
+const BOOT_LCD_ON_DMG: u64 = 267_576;
+const BOOT_LCD_ON_CGB: u64 = 659_556;
+const BOOT_HANDOFF_DMG: u64 = 5_881_108;
+const BOOT_HANDOFF_CGB: u64 = 13_085_724;
+const BOOT_HANDOFF_COMPAT: u64 = 13_156_368;
+const BOOT_TRADEMARK: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+
 static RESET_LOCK: Mutex<()> = Mutex::new(());
 
 fn sys_model(model: GbModel) -> sys::GB_model_t {
@@ -102,17 +118,75 @@ impl SameBoyEmulator {
         }
     }
 
-    /// Mirrors Citrine's `Cpu::new_dmg`/`new_cgb` so both start byte-identical without a boot ROM.
-    fn set_post_boot_registers(&mut self, rom: &[u8]) {
-        let header_checksum = rom.get(0x014D).copied().unwrap_or(0);
+    fn skip_boot(&mut self, rom: &[u8]) {
+        let byte = |addr: usize| rom.get(addr).copied().unwrap_or(0);
+        let cgb_game = byte(0x143) & 0x80 != 0;
+        let compat = self.model == GbModel::Cgb && !cgb_game;
+        self.write_boot_logo(rom, self.model == GbModel::Dmg);
+        if self.model == GbModel::Cgb {
+            self.poke(0xFF00, 0x30);
+            for addr in (0xFF31..0xFF40).step_by(2) {
+                self.poke(addr, 0xFF);
+            }
+            self.poke(0xFF70, 0x00);
+            if compat {
+                self.write_compat_palettes(rom);
+            } else {
+                self.poke(0xFF68, 0x80);
+                for _ in 0..8 {
+                    for byte in [0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F] {
+                        self.poke(0xFF69, byte);
+                    }
+                }
+            }
+        }
+        let (lcd_on, handoff) = match self.model {
+            GbModel::Dmg => (BOOT_LCD_ON_DMG, BOOT_HANDOFF_DMG),
+            GbModel::Cgb if compat => (BOOT_LCD_ON_CGB, BOOT_HANDOFF_COMPAT),
+            GbModel::Cgb => (BOOT_LCD_ON_CGB, BOOT_HANDOFF_CGB),
+        };
+        self.idle_until(lcd_on);
+        self.poke(0xFF40, 0x91);
+        self.idle_until(handoff);
+        for (addr, value) in [
+            (0xFF26, 0x80),
+            (0xFF11, 0x80),
+            (0xFF12, 0x08),
+            (0xFF13, 0xC1),
+            (0xFF14, 0x87),
+            (0xFF12, 0xF3),
+            (0xFF24, 0x77),
+            (0xFF25, 0xF3),
+            (0xFF47, 0xFC),
+        ] {
+            self.poke(addr, value);
+        }
+
         let regs = unsafe { &mut *sys::GB_get_registers(self.gb) };
         match self.model {
             GbModel::Dmg => {
-                let f: u16 = if header_checksum == 0 { 0xB0 } else { 0x80 };
+                let f: u16 = if byte(0x14D) == 0 { 0x80 } else { 0xB0 };
                 regs.af = 0x0100 | f;
                 regs.bc = 0x0013;
                 regs.de = 0x00D8;
                 regs.hl = 0x014D;
+            }
+            GbModel::Cgb if compat => {
+                let nintendo = byte(0x14B) == 0x01
+                    || (byte(0x14B) == 0x33 && byte(0x144) == b'0' && byte(0x145) == b'1');
+                let b = if nintendo {
+                    (0x134..=0x143).fold(0u8, |sum, addr| sum.wrapping_add(byte(addr)))
+                } else {
+                    0x00
+                };
+                regs.af = 0x1180;
+                regs.bc = u16::from(b) << 8;
+                regs.de = 0x0008;
+                regs.hl = if b == 0x43 || b == 0x58 {
+                    0x991A
+                } else {
+                    0x007C
+                };
             }
             GbModel::Cgb => {
                 regs.af = 0x1180;
@@ -123,10 +197,84 @@ impl SameBoyEmulator {
         }
         regs.sp = 0xFFFE;
         regs.pc = 0x0100;
+        if compat {
+            self.poke(0xFF4C, 0x04);
+            self.poke(0xFF6C, 0x01);
+        }
+        self.poke(0xFF50, 0x01);
+    }
+
+    fn idle_until(&mut self, cycle: u64) {
+        while self.total_cycles() < cycle {
+            let regs = unsafe { &mut *sys::GB_get_registers(self.gb) };
+            if regs.pc >= IDLE_BOOT_PC_LIMIT {
+                regs.pc = 0;
+            }
+            let ticks = unsafe { sys::GB_run(self.gb) } as u64;
+            self.total_ticks += ticks;
+        }
+    }
+
+    fn write_boot_logo(&mut self, rom: &[u8], tilemap: bool) {
+        let doubled = |nibble: u8| {
+            (0..4).fold(0u8, |acc, bit| {
+                let set = (nibble >> (3 - bit)) & 1;
+                acc << 2 | set << 1 | set
+            })
+        };
+        let rows: Vec<u8> = (0x104..0x134)
+            .map(|addr| rom.get(addr).copied().unwrap_or(0))
+            .flat_map(|byte| {
+                let high = doubled(byte >> 4);
+                let low = doubled(byte & 0x0F);
+                [high, high, low, low]
+            })
+            .chain(BOOT_TRADEMARK)
+            .collect();
+        for (i, row) in rows.into_iter().enumerate() {
+            self.poke(0x8010 + i as u16 * 2, row);
+        }
+        if tilemap {
+            self.poke(0x9910, 0x19);
+            for tile in 1..=12u8 {
+                self.poke(0x9903 + u16::from(tile), tile);
+                self.poke(0x9923 + u16::from(tile), tile + 12);
+            }
+        }
+    }
+
+    fn write_compat_palettes(&mut self, rom: &[u8]) {
+        let [bg, obj0, obj1] = CompatPalette::Auto.colors(rom);
+        let rgb555 = |c: RGBA| {
+            u16::from(c.r() >> 3) | u16::from(c.g() >> 3) << 5 | u16::from(c.b() >> 3) << 10
+        };
+        for (index, data, palettes) in [
+            (0xFF68, 0xFF69, vec![bg]),
+            (0xFF6A, 0xFF6B, vec![obj0, obj1]),
+        ] {
+            self.poke(index, 0x80);
+            for color in palettes.into_iter().flatten() {
+                for byte in rgb555(color).to_le_bytes() {
+                    self.poke(data, byte);
+                }
+            }
+        }
+    }
+
+    fn poke(&mut self, addr: u16, value: u8) {
+        unsafe { sys::GB_write_memory(self.gb, addr, value) };
     }
 }
 
 impl SameBoyEmulator {
+    pub fn peek(&self, addr: u16) -> u8 {
+        unsafe { sys::GB_safe_read_memory(self.gb, addr) }
+    }
+
+    pub fn registers(&self) -> sys::GB_registers_t {
+        unsafe { *sys::GB_get_registers(self.gb) }
+    }
+
     pub fn save_battery(&mut self) -> Vec<u8> {
         unsafe {
             let size = sys::GB_save_battery_size(self.gb).max(0) as usize;
@@ -177,17 +325,17 @@ impl FrameEmulator for SameBoyEmulator {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             unsafe {
-                if let Some(boot) = boot_rom {
-                    sys::GB_load_boot_rom_from_buffer(self.gb, boot.as_ptr(), boot.len());
-                }
+                let boot = boot_rom.unwrap_or(&IDLE_BOOT_ROM);
+                sys::GB_load_boot_rom_from_buffer(self.gb, boot.as_ptr(), boot.len());
                 sys::GB_load_rom_from_buffer(self.gb, rom.as_ptr(), rom.len());
                 sys::GB_random_seed(RAM_SEED);
                 sys::GB_reset(self.gb);
                 self.resize_pixel_buffer();
             }
         }
+        self.total_ticks = 0;
         if boot_rom.is_none() {
-            self.set_post_boot_registers(rom);
+            self.skip_boot(rom);
         }
 
         self.ctx.frame_ready = false;
@@ -215,7 +363,7 @@ impl FrameEmulator for SameBoyEmulator {
 
     fn render_into(&self, out: &mut Vec<u8>) {
         out.clear();
-        let VideoSpec { width, height } = self.video;
+        let VideoSpec { width, height, .. } = self.video;
         out.reserve(width * height * 4);
         if self.width == width && self.height == height {
             let bytes = bytemuck_cast(&self.pixels);

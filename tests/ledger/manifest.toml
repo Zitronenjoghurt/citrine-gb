@@ -28,6 +28,34 @@ url = "https://github.com/nba-emu/hw-test/archive/3932a0e54dbb5d94b84798d2d5e462
 sha256 = "6805fd2ec0b32b0703e1a3b83bd8b33ea9815f7ef8004287da0b498e7b53a45b"
 license = "BSD-3-Clause"
 
+[sources.arm7wrestler]
+url = "https://github.com/Arisotura/arm7wrestler/archive/05137604887ee1d184ec5c26899782151dca270f.zip"
+sha256 = "733befb77819ab3cf5bbf05b72ae43ca74ce2fabd8340ddf3e767360a3643f9c"
+license = "no licence stated"
+built = true
+
+[sources.blocksds]
+url = "https://github.com/blocksds/sdk/archive/fb7009f6e345e5521a6501cdf8590e9de3a08bf8.zip"
+sha256 = "ff4ad3fab33b6b5a8924997b4e0b5da0f68de27da24cceb614e7dfddd380b0bc"
+license = "CC0-1.0 examples, zlib and MIT libraries"
+built = true
+
+[sources."nds-interp"]
+url = "https://github.com/StrikerX3/nds-interp/archive/e3acde4c35ac53e628a2548238870a287409733e.zip"
+sha256 = "0428ce63a41564755c953f62568d1c215b8769e0c4ca6f85a427409f8ef9e031"
+license = "MIT"
+built = true
+
+[sources."armwrestler-fixed"]
+url = "https://github.com/Atem2069/armwrestler-fixed/archive/de92073daac1838c0f01339f285e312b4865a4c6.zip"
+sha256 = "0c7876cf4e7acc20203eda3d63ff3a4819c3a70f7f7d7fec800cb460bcf7e5af"
+license = "no licence stated"
+
+[sources.rockwrestler]
+url = "https://github.com/RockPolish/rockwrestler/archive/b0067a06cddb9bbc9c46ecf0c60a2d572594e581.zip"
+sha256 = "07ac5fa77a6b6fff50f0febbf69bac73bf7311555e8dbdf114be09e3c8e0af7a"
+license = "no licence stated"
+
 [suites.mooneye]
 source = "mooneye"
 root = "mts-20240926-1737-443f6e1"
@@ -543,6 +571,96 @@ roms = [
     { path = "ppu/status-irq-dma/status-irq-dma.gba", sha256 = "c441a13a5ffe5eabcfa9b392a53e5ead1e1c7d731c4f0b3a3334ee3650f59ed4", consoles = ["gba"], name = "ppu/status-irq-dma/irq", cycles = 2_000_000_000, press = ["down", "down", "a"] },
     { path = "ppu/status-irq-dma/status-irq-dma.gba", sha256 = "c441a13a5ffe5eabcfa9b392a53e5ead1e1c7d731c4f0b3a3334ee3650f59ed4", consoles = ["gba"], name = "ppu/status-irq-dma/dma", cycles = 2_000_000_000, press = ["down", "down", "down", "a"], finish = "VIDEO DMA:" },
     { path = "ppu/vram-mirror/vram-mirror.gba", sha256 = "f8eedd949da40ed544ceeb5d9f3ab0812d45c2f4fe4e9a3613ca6e4356d9642b", consoles = ["gba"] },
+]
+
+[suites.armwrestler]
+source = "armwrestler-fixed"
+root = "armwrestler-fixed-de92073daac1838c0f01339f285e312b4865a4c6"
+rule = "text"
+cycles = 134_000_000
+font = { offset = 0x6B88, glyphs = 84, first = 37 }
+roms = [
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "arm-alu-1", press = ["start"] },
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "arm-alu-2", press = ["start", "start"] },
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "arm-ldr-str-1", press = ["start", "start", "start"] },
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "arm-ldr-str-2", press = ["start", "start", "start", "start"] },
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "arm-ldm-stm", press = ["start", "start", "start", "start", "start"] },
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "thumb-alu", press = ["down", "down", "down", "start"] },
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "thumb-ldr-str", press = ["down", "down", "down", "down", "start"] },
+    { path = "armwrestler.nds", sha256 = "1512de7953f9e4eb8376f54e3476b2e01f0639465efb8fbf9b709a394e212531", consoles = ["nds"], name = "arm-v5te", press = ["down", "down", "down", "down", "down", "down", "start"] },
+]
+
+[suites.arm7wrestler]
+source = "arm7wrestler"
+root = "arm7wrestler-05137604887ee1d184ec5c26899782151dca270f"
+rule = "text"
+cycles = 134_000_000
+font = { offset = 0xA488, glyphs = 84, first = 37 }
+roms = [
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "arm-alu-1", press = ["start"] },
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "arm-alu-2", press = ["start", "start"] },
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "arm-ldr-str-1", press = ["start", "start", "start"] },
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "arm-ldr-str-2", press = ["start", "start", "start", "start"] },
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "arm-ldm-stm", press = ["start", "start", "start", "start", "start"] },
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "thumb-alu", press = ["down", "down", "down", "start"] },
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "thumb-ldr-str", press = ["down", "down", "down", "down", "start"] },
+    { path = "arm7wrestler.nds", sha256 = "f65b67651ad8901710ef36c01acfc17d4412278c07b390a7a1f91ea978bc4ef6", consoles = ["nds"], name = "thumb-ldm-stm", press = ["down", "down", "down", "down", "down", "start"] },
+]
+
+[suites.rockwrestler]
+source = "rockwrestler"
+root = "rockwrestler-b0067a06cddb9bbc9c46ecf0c60a2d572594e581"
+rule = "text"
+cycles = 200_000_000
+font = { offset = 0xDCC, glyphs = 128, first = 0 }
+roms = [
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv4/condition-codes", press = ["a", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/clz", press = ["down", "a", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/qadd-qsub", press = ["down", "a", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/qdadd-qdsub", press = ["down", "a", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/smulxy", press = ["down", "a", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/smlaxy", press = ["down", "a", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/smulwy", press = ["down", "a", "down", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/smlawy", press = ["down", "a", "down", "down", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/smlalxy", press = ["down", "a", "down", "down", "down", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/blx", press = ["down", "a", "down", "down", "down", "down", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/ldr-pop-ldm-r15", press = ["down", "a", "down", "down", "down", "down", "down", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "armv5/ldm-stm", press = ["down", "a", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ipc/ipcsync", press = ["down", "down", "a", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ipc/ipcfifo", press = ["down", "down", "a", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ipc/ipcfifo-irq", press = ["down", "down", "a", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ds-math/sqrt-32", press = ["down", "down", "down", "a", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ds-math/sqrt-64", press = ["down", "down", "down", "a", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ds-math/div-32-32", press = ["down", "down", "down", "a", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ds-math/div-64-32", press = ["down", "down", "down", "a", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "ds-math/div-64-64", press = ["down", "down", "down", "a", "down", "down", "down", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "memory/wramcnt", press = ["down", "down", "down", "down", "a", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "memory/vramcnt", press = ["down", "down", "down", "down", "a", "down", "a"] },
+    { path = "rockwrestler.nds", sha256 = "f905e16510b00500d432b62dbfafc33e9a7179187475981fe74d9e691a96069a", consoles = ["nds"], name = "memory/tcm", press = ["down", "down", "down", "down", "a", "down", "down", "a"] },
+]
+
+[suites."nds-interp"]
+source = "nds-interp"
+root = "nds-interp-e3acde4c35ac53e628a2548238870a287409733e"
+rule = "timed"
+cycles = 134_000_000
+roms = [
+    { path = "nds-interp-tl.nds", sha256 = "5a656b9ae1c7142ad41b564e3b8f6c0b58d890664c47898928cc920010246952", consoles = ["nds"] },
+    { path = "nds-interp-tr.nds", sha256 = "1e9de5542f445e571b94327f030fa7d16c9e47e3add477d921a54534b6cac23e", consoles = ["nds"] },
+    { path = "nds-interp-bl.nds", sha256 = "ce5aaa578de7c42258bb9fea55423867c4018a2e5a073c98dc7877cde74ab2c2", consoles = ["nds"] },
+    { path = "nds-interp-br.nds", sha256 = "c4181c74982a7cf1700ee0b1db62679a89dea36ef4d041f65b162de90c86146c", consoles = ["nds"] },
+]
+
+[suites.blocksds]
+source = "blocksds"
+root = "sdk-fb7009f6e345e5521a6501cdf8590e9de3a08bf8"
+rule = "timed"
+cycles = 134_000_000
+roms = [
+    { path = "examples/console/both_screens/console_both_screens.nds", sha256 = "dc7b923aefed358c0a39dcbd8c6aad2e00ff01b26dc549386b505db540ee7338", consoles = ["nds"] },
+    { path = "examples/graphics_2d/video_mode_vram/video_mode_vram.nds", sha256 = "53e5aade8e11926a63ba3dfbf9afdfd4edba4e1a8743abeeacc15332d62aac4f", consoles = ["nds"] },
+    { path = "examples/input/touch_input/input_touch.nds", sha256 = "c785f88f31fdbb556bc3176cc59f331bef165952b81feb992a4cff8fc2c40e35", consoles = ["nds"] },
+    { path = "examples/graphics_3d/basic_cube/3d_basic_cube.nds", sha256 = "ac149c00f40a5ed3a3d413c547ecb8429351f0198ba1ddeeead472720392b305", consoles = ["nds"] },
 ]
 
 [cpu.arm7tdmi]

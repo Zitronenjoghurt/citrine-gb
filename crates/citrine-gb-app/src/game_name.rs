@@ -2,8 +2,12 @@ use crate::homebrew::HOMEBREW_GAMES;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+#[cfg(feature = "nds")]
+mod ds;
 mod tags;
 
+#[cfg(feature = "nds")]
+pub use ds::{ds_game_name, known_ds_name};
 use tags::without_tags;
 
 static TABLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/game_names.br"));

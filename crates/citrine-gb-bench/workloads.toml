@@ -1,0 +1,282 @@
+[[workload]]
+id = "gb-tobu"
+console = "gb"
+kind = "solo"
+rom = { homebrew = "tobu.gb" }
+frames = 600
+seed = 3
+
+[[workload]]
+id = "gb-libbet"
+console = "gb"
+kind = "solo"
+rom = { homebrew = "libbet.gb" }
+frames = 600
+seed = 5
+
+[[workload]]
+id = "gb-shock-lobster"
+console = "gb"
+kind = "solo"
+rom = { homebrew = "shock_lobster.gb" }
+frames = 600
+seed = 7
+
+[[workload]]
+id = "gb-cpu-instrs"
+console = "gb"
+kind = "solo"
+rom = { ledger = "blargg", path = "cpu_instrs/individual/09-op r,r.gb" }
+frames = 600
+seed = 1
+
+[[workload]]
+id = "gb-dmg-acid2"
+console = "gb"
+kind = "solo"
+rom = { ledger = "dmg-acid2", path = "dmg-acid2.gb" }
+frames = 300
+seed = 1
+
+[[workload]]
+id = "gb-pair-tobu"
+console = "gb"
+kind = "pair"
+rom = { homebrew = "tobu.gb" }
+frames = 400
+seed = 11
+
+[[workload]]
+id = "gb-link-snake"
+console = "gb"
+kind = "link"
+rom = { homebrew = "snake.gb" }
+frames = 400
+seed = 13
+
+[[workload]]
+id = "gb-state-tobu"
+console = "gb"
+kind = "state"
+rom = { homebrew = "tobu.gb" }
+frames = 300
+seed = 17
+
+[[workload]]
+id = "gbc-ucity"
+console = "gbc"
+kind = "solo"
+rom = { homebrew = "ucity.gbc" }
+frames = 600
+seed = 3
+
+[[workload]]
+id = "gbc-tobu-deluxe"
+console = "gbc"
+kind = "solo"
+rom = { homebrew = "tobu_deluxe.gb" }
+frames = 600
+seed = 5
+
+[[workload]]
+id = "gbc-postie"
+console = "gbc"
+kind = "solo"
+rom = { homebrew = "postie.gbc" }
+frames = 600
+seed = 7
+
+[[workload]]
+id = "gbc-cgb-acid2"
+console = "gbc"
+kind = "solo"
+rom = { ledger = "cgb-acid2", path = "cgb-acid2.gbc" }
+frames = 300
+seed = 1
+
+[[workload]]
+id = "gbc-hdma"
+console = "gbc"
+kind = "solo"
+rom = { ledger = "same-suite", path = "dma/hdma_mode0.gb" }
+frames = 300
+seed = 1
+
+[[workload]]
+id = "gbc-link-petris"
+console = "gbc"
+kind = "link"
+rom = { homebrew = "petris.gbc" }
+frames = 1000
+seed = 9
+script = "petris-link"
+
+[[workload]]
+id = "gbc-rollback-ucity"
+console = "gbc"
+kind = "rollback"
+rom = { homebrew = "ucity.gbc" }
+frames = 300
+seed = 19
+depth = 4
+
+[[workload]]
+id = "gbc-state-ucity"
+console = "gbc"
+kind = "state"
+rom = { homebrew = "ucity.gbc" }
+frames = 300
+seed = 23
+
+[[workload]]
+id = "gba-cascade7"
+console = "gba"
+kind = "solo"
+rom = { homebrew = "gba/cascade7.gba.br" }
+frames = 300
+seed = 3
+
+[[workload]]
+id = "gba-pentris"
+console = "gba"
+kind = "solo"
+rom = { homebrew = "gba/pentris.gba.br" }
+frames = 300
+seed = 5
+
+[[workload]]
+id = "gba-gbarcade"
+console = "gba"
+kind = "solo"
+rom = { homebrew = "gba/gbarcade.gba.br" }
+frames = 300
+seed = 7
+
+[[workload]]
+id = "gba-hyperspace-roll"
+console = "gba"
+kind = "solo"
+rom = { homebrew = "gba/hyperspace_roll.gba.br" }
+frames = 300
+seed = 11
+
+[[workload]]
+id = "gba-the-hat"
+console = "gba"
+kind = "solo"
+rom = { homebrew = "gba/the_hat_chooses_the_wizard.gba.br" }
+frames = 300
+seed = 13
+
+[[workload]]
+id = "gba-jsmolka-arm"
+console = "gba"
+kind = "solo"
+rom = { ledger = "jsmolka", path = "arm/arm.gba" }
+frames = 240
+seed = 1
+
+[[workload]]
+id = "gba-jsmolka-thumb"
+console = "gba"
+kind = "solo"
+rom = { ledger = "jsmolka", path = "thumb/thumb.gba" }
+frames = 240
+seed = 1
+
+[[workload]]
+id = "gba-jsmolka-memory"
+console = "gba"
+kind = "solo"
+rom = { ledger = "jsmolka", path = "memory/memory.gba" }
+frames = 240
+seed = 1
+
+[[workload]]
+id = "gba-status-irq-dma"
+console = "gba"
+kind = "solo"
+rom = { ledger = "nba-emu", path = "ppu/status-irq-dma/status-irq-dma.gba" }
+frames = 240
+seed = 1
+
+[[workload]]
+id = "gba-pair-pentris"
+console = "gba"
+kind = "pair"
+rom = { homebrew = "gba/pentris.gba.br" }
+frames = 200
+seed = 17
+
+[[workload]]
+id = "gba-rollback-cascade7"
+console = "gba"
+kind = "rollback"
+rom = { homebrew = "gba/cascade7.gba.br" }
+frames = 150
+seed = 19
+depth = 4
+
+[[workload]]
+id = "gba-state-pentris"
+console = "gba"
+kind = "state"
+rom = { homebrew = "gba/pentris.gba.br" }
+frames = 200
+seed = 23
+
+[[workload]]
+id = "ds-3d-cubes"
+console = "ds"
+kind = "ds3d"
+frames = 30
+seed = 3
+scene = "cubes"
+
+[[workload]]
+id = "ds-3d-panes"
+console = "ds"
+kind = "ds3d"
+frames = 30
+seed = 5
+scene = "panes"
+
+[[workload]]
+id = "ds-3d-terrain"
+console = "ds"
+kind = "ds3d"
+frames = 30
+seed = 7
+scene = "terrain"
+
+[[workload]]
+id = "ds-2d-layers"
+console = "ds"
+kind = "ds2d"
+frames = 60
+seed = 11
+
+[[workload]]
+id = "ds-both-screens"
+console = "ds"
+kind = "solo"
+rom = { ledger = "blocksds", path = "examples/console/both_screens/console_both_screens.nds" }
+frames = 120
+seed = 13
+
+[[workload]]
+id = "ds-video-mode-vram"
+console = "ds"
+kind = "solo"
+rom = { ledger = "blocksds", path = "examples/graphics_2d/video_mode_vram/video_mode_vram.nds" }
+frames = 120
+seed = 17
+
+[[workload]]
+id = "ds-touch-input"
+console = "ds"
+kind = "solo"
+rom = { ledger = "blocksds", path = "examples/input/touch_input/input_touch.nds" }
+frames = 120
+seed = 19
+script = "touch"

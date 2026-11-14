@@ -32,6 +32,19 @@ impl Citrine {
                 bios: &mut self.emulator.firmware.gba_bios,
                 name: &mut self.emulator.gba_bios_name,
             },
+            #[cfg(feature = "nds")]
+            ds_files: your_data::ds_files::DsFiles {
+                store: &self.settings_store,
+                slots: &mut self.emulator.firmware.nds,
+                names: &mut self.emulator.ds_file_names,
+            },
+            #[cfg(feature = "nds")]
+            walker: &mut self.emulator.pokewalker,
+            #[cfg(ds_wifi)]
+            ds_wifi: your_data::ds_wifi::DsWifiPart {
+                store: &self.settings_store,
+                identity: &mut self.emulator.ds_wifi.identity,
+            },
         }
     }
 
@@ -74,7 +87,7 @@ impl Citrine {
                 FileLoader::new()
                     .title("Import your data")
                     .add_filter(FILTER, &[your_data::FILE_EXTENSION])
-                    .dispatch(self.ui.your_data.picked_tx.clone());
+                    .dispatch(&self.files.spawner, self.ui.your_data.picked_tx.clone());
             }
             Some(Request::Delete) => {
                 self.ui.your_data.deleting = true;
@@ -116,7 +129,7 @@ impl Citrine {
         let tx = self.ui.your_data.packed_tx.clone();
         let mut files = Some(files);
         let mut packer = Some(Packer::new(counter));
-        self.media.read_files(move |media| {
+        self.media.read_files(&self.files.spawner, move |media| {
             let Some(packing) = packer.as_mut() else {
                 return;
             };
@@ -134,19 +147,19 @@ impl Citrine {
         });
     }
 
-    fn unpack_data_file(&mut self, name: String, bytes: Vec<u8>) {
+    fn unpack_data_file(&mut self, name: String, bytes: std::sync::Arc<[u8]>) {
         let counter = Counter::default();
         counter.set_total(bytes.len() as u64);
         self.ui.your_data.progress = counter.clone();
         self.ui.your_data.importing = Some(name.clone());
         let tx = self.ui.your_data.unpacked_tx.clone();
         #[cfg(not(target_arch = "wasm32"))]
-        std::thread::spawn(move || {
+        self.files.spawner.run("import", move || {
             let files = your_data::unpack_counted(bytes, &counter);
             let _ = tx.send((name, files));
         });
         #[cfg(target_arch = "wasm32")]
-        wasm_bindgen_futures::spawn_local(async move {
+        self.files.spawner.run_future("import", async move {
             let files = async {
                 let mut unpacker = your_data::Unpacker::new(bytes, counter)?;
                 while unpacker.step_for(your_data::STEP_BUDGET)? {
@@ -165,7 +178,11 @@ impl Citrine {
                 Ok(bytes) => {
                     FileSaver::new(&your_data::file_name(crate::storage::now_unix()))
                         .add_filter(FILTER, &[your_data::FILE_EXTENSION])
-                        .dispatch(bytes, self.ui.your_data.saved_tx.clone());
+                        .dispatch(
+                            &self.files.spawner,
+                            bytes,
+                            self.ui.your_data.saved_tx.clone(),
+                        );
                 }
                 Err(err) => {
                     self.ui.your_data.exporting = Exporting::Idle;
@@ -256,7 +273,11 @@ impl Citrine {
         if !self.ui.your_data.deleting {
             return;
         }
-        let notes = delete_notes(&self.ui.your_data.rows);
+        #[cfg(target_arch = "wasm32")]
+        let games = self.files.rom_copies.count();
+        #[cfg(not(target_arch = "wasm32"))]
+        let games = 0;
+        let notes = delete_notes(&self.ui.your_data.rows, games);
         let exporting = self.ui.your_data.exporting;
         let extra = match exporting {
             Exporting::Idle | Exporting::Busy => "Export first",
@@ -293,7 +314,9 @@ impl Citrine {
             self.play.leave(&mut self.online);
         }
         self.emulator.unload();
-        let result = self.data_parts().delete_all();
+        self.emulator.writes.settle();
+        let deleted = self.data_parts().delete_all();
+        let result = deleted.and(self.clear_cache());
         self.files.rom_copies.clear();
         self.ui.recent.clear();
         self.online.cloud_forget_local();
@@ -304,6 +327,12 @@ impl Citrine {
                 .toasts
                 .error(format!("Could not delete everything: {err}")),
         };
+    }
+
+    fn clear_cache(&self) -> std::io::Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::media::recording::codec::shared().remove()?;
+        self.emulator.store.clear_cache()
     }
 
     fn first_launch(&mut self) {
@@ -391,13 +420,18 @@ fn import_notes(plan: &[(Kind, Change)]) -> Vec<String> {
     notes
 }
 
-fn delete_notes(rows: &[(Kind, Tally)]) -> Vec<String> {
+fn delete_notes(rows: &[(Kind, Tally)], games: usize) -> Vec<String> {
     let made = |(kind, tally): &&(Kind, Tally)| tally.count > 0 && kind.name != "Settings";
-    let goes: Vec<String> = rows
+    let mut goes: Vec<String> = rows
         .iter()
         .filter(made)
         .map(|(kind, tally)| kind.noun(tally.count))
         .collect();
+    match games {
+        0 => {}
+        1 => goes.push("1 game".to_owned()),
+        n => goes.push(format!("{n} games")),
+    }
     let changed = rows
         .iter()
         .find(|(kind, tally)| kind.name == "Settings" && tally.count > 0)
@@ -486,19 +520,218 @@ mod tests {
             (kind("Game names", ("game name", "game names")), tally(1)),
         ];
         assert_eq!(
-            delete_notes(&rows),
+            delete_notes(&rows, 0),
             [
                 "This deletes 4 saves and 1 game name, and resets 2 settings to default.",
                 "Your online account and your copies in the cloud stay.",
             ]
         );
         assert_eq!(
-            delete_notes(&rows[..3])[0],
+            delete_notes(&rows[..3], 0)[0],
             "This deletes 4 saves and resets 2 settings to default."
         );
         assert_eq!(
-            delete_notes(&rows[1..2])[0],
+            delete_notes(&rows[1..2], 0)[0],
             "Nothing you made is stored here yet."
+        );
+        assert_eq!(
+            delete_notes(&rows[..1], 2)[0],
+            "This deletes 4 saves and 2 games."
+        );
+        assert_eq!(delete_notes(&rows[1..2], 1)[0], "This deletes 1 game.");
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn delete_everything_lists_and_removes_the_ds_files() {
+        use crate::app::ds_firmware::DsFile;
+        let mut opened = crate::app::files::nds_tests::Opened::new("ds-delete");
+        let app = &mut opened.app;
+        for (file, size) in [
+            (DsFile::Arm9Bios, 0x1000),
+            (DsFile::Arm7Bios, 0x4000),
+            (DsFile::Firmware, 0x4_0000),
+        ] {
+            let picked = crate::utils::file_loader::PickedFile {
+                name: format!("{}.bin", file.label()),
+                data: vec![1; size].into(),
+                path: None,
+                seen: None,
+            };
+            app.handle_load_ds_file(file, picked);
+        }
+        let rows = app.data_parts().tallies();
+        assert!(
+            delete_notes(&rows, 0)[0].contains("1 DS ARM9 BIOS, 1 DS ARM7 BIOS and 1 DS firmware"),
+            "{:?}",
+            delete_notes(&rows, 0)
+        );
+
+        app.delete_everything();
+        for file in <DsFile as strum::IntoEnumIterator>::iter() {
+            assert_eq!(app.emulator.ds_file_name(file), None, "{file:?}");
+            assert_eq!(app.settings_store.ds_file(file), None, "{file:?}");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn files_in(dir: &std::path::Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut open = vec![dir.to_path_buf()];
+        while let Some(next) = open.pop() {
+            for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    open.push(path);
+                } else if let Ok(relative) = path.strip_prefix(dir) {
+                    found.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn folders(dir: &std::path::Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_folder_the_app_writes_is_your_data_or_cache_and_delete_everything_empties_both() {
+        use crate::media::{Frame, MediaKind, NewMedia};
+        use crate::storage::{CODECS, EXPORT, REPORTS, UPDATES, cache_dir};
+        const GAME: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let dirs = crate::storage::TestDirs::new("sweep");
+        let mut app = Citrine::default();
+        app.online.persist_chats();
+        app.stats = crate::stats::Stats::open(crate::stats::StatsStore::default());
+
+        let store = app.emulator.store.clone();
+        store.put_file(GAME, "battery.sav", b"save").unwrap();
+        store
+            .put_file(
+                "borrowed-00112233445566778899aabbccddeeff00112233",
+                "battery.sav",
+                b"save",
+            )
+            .unwrap();
+        store.write_ledger("1234", b"cloud list").unwrap();
+        store.covers().put_art(GAME, b"art").unwrap();
+        let frame = Frame {
+            width: 160,
+            height: 144,
+            rgba: vec![9; 160 * 144 * 4],
+        };
+        let png = crate::utils::screenshot::encode_png(160, 144, &frame.rgba).unwrap();
+        let shot = NewMedia {
+            kind: MediaKind::Screenshot,
+            game: "Tobu Tobu Girl".into(),
+            rom_key: Some(GAME.into()),
+            model: None,
+            created_at: 100,
+            width: 160,
+            height: 144,
+            length_ms: None,
+            frame,
+        };
+        app.media.add_screenshot(shot, &png).unwrap();
+        std::fs::write(app.media.temp_path().unwrap(), b"half a recording").unwrap();
+        app.online
+            .chat_restore("1234_relay_example.bin", b"chat")
+            .unwrap();
+        app.stats.recorder().play(
+            GAME,
+            "Tobu Tobu Girl",
+            std::time::Duration::from_secs(60),
+            crate::stats::Activity::default(),
+            1_000,
+            "2026-11-07",
+        );
+        app.stats.flush();
+        app.files.rom_copies.keep(GAME, "tobu.gb", b"rom").unwrap();
+        app.ui.settings.volume = 0.25;
+        app.settings_store.store(&app.ui.settings).unwrap();
+        #[cfg(feature = "gba")]
+        app.settings_store
+            .store_gba_bios(Some((&[0; 0x4000], "gba_bios.bin")))
+            .unwrap();
+        #[cfg(feature = "nds")]
+        app.emulator
+            .pokewalker
+            .press(citrine_gb_walker::Button::Middle);
+        #[cfg(ds_wifi)]
+        {
+            let mut identity = crate::ds_wifi::Identity::random();
+            identity.connections = Some(vec![
+                1;
+                citrine_gb::nds::spi::firmware::online::CONNECTIONS_BYTES
+            ]);
+            app.settings_store.store_ds_wifi(&identity).unwrap();
+            app.emulator.ds_wifi.identity = Some(identity);
+        }
+        for folder in [CODECS, EXPORT, UPDATES, REPORTS] {
+            let dir = cache_dir().join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("file"), b"cache").unwrap();
+        }
+
+        let data = [
+            "chats",
+            "media",
+            "roms",
+            "saves",
+            "settings",
+            "stats",
+            #[cfg(feature = "nds")]
+            "walker",
+        ];
+        assert_eq!(folders(&dirs.data), data);
+        assert_eq!(
+            folders(&dirs.cache),
+            [
+                "codecs",
+                "covers",
+                "export",
+                "media-temp",
+                "reports",
+                "updates"
+            ]
+        );
+        app.ui.your_data.rows = app.data_parts().tallies();
+        assert!(
+            delete_notes(&app.ui.your_data.rows, 0)[0]
+                .starts_with("This deletes 2 saves, 1 media file"),
+            "{:?}",
+            delete_notes(&app.ui.your_data.rows, 0)
+        );
+
+        app.delete_everything();
+        let mut kept = vec![
+            "saves/cloud/1234".to_owned(),
+            "settings/settings.json".to_owned(),
+        ];
+        #[cfg(ds_wifi)]
+        kept.push("settings/nds-wifi.bin".to_owned());
+        kept.sort();
+        assert_eq!(files_in(&dirs.data), kept);
+        assert_eq!(files_in(&dirs.cache), Vec::<String>::new());
+        #[cfg(ds_wifi)]
+        assert_eq!(
+            app.emulator
+                .ds_wifi
+                .identity
+                .as_ref()
+                .map(|identity| identity.connections.is_some()),
+            Some(false)
         );
     }
 }

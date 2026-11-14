@@ -9,8 +9,10 @@ use crate::persistence::state::StateBody;
 use crate::rom::header::RomHeader;
 #[cfg(feature = "rom-id")]
 use crate::rom::id::RomId;
+use crate::rom::nds::NdsHeader;
 use bitflags::bitflags;
 use std::path::Path;
+use std::sync::Arc;
 
 const GB_CLOCK_HZ: u32 = 4_194_304;
 const GB_DOTS_PER_FRAME: u32 = 70_224;
@@ -18,6 +20,10 @@ const GBA_WIDTH: usize = 240;
 const GBA_HEIGHT: usize = 160;
 const GBA_CLOCK_HZ: u32 = 16_777_216;
 const GBA_CYCLES_PER_FRAME: u32 = 280_896;
+const NDS_WIDTH: usize = 256;
+const NDS_HEIGHT: usize = 192;
+const NDS_CLOCK_HZ: u32 = 33_513_982;
+const NDS_CYCLES_PER_FRAME: u32 = 560_190;
 
 bitflags! {
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,7 +39,17 @@ bitflags! {
         const DOWN = 1 << 7;
         const R = 1 << 8;
         const L = 1 << 9;
+        const X = 1 << 10;
+        const Y = 1 << 11;
+        const LID = 1 << 12;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Touch {
+    pub x: u8,
+    pub y: u8,
 }
 
 impl From<JoypadState> for Keys {
@@ -55,13 +71,37 @@ pub enum ConsoleKind {
     Gb,
     Gbc,
     Gba,
+    Nds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Screen {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub touch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoSpec {
     pub width: usize,
     pub height: usize,
+    pub screens: &'static [Screen],
 }
+
+const GB_SCREENS: [Screen; 1] = [Screen::whole(SCREEN_WIDTH, SCREEN_HEIGHT)];
+const GBA_SCREENS: [Screen; 1] = [Screen::whole(GBA_WIDTH, GBA_HEIGHT)];
+const NDS_SCREENS: [Screen; 2] = [
+    Screen::whole(NDS_WIDTH, NDS_HEIGHT),
+    Screen {
+        x: 0,
+        y: NDS_HEIGHT,
+        width: NDS_WIDTH,
+        height: NDS_HEIGHT,
+        touch: true,
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
@@ -69,7 +109,38 @@ pub struct Timing {
     pub cycles_per_frame: u32,
 }
 
+impl Screen {
+    pub const fn whole(width: usize, height: usize) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            touch: false,
+        }
+    }
+}
+
 impl VideoSpec {
+    pub const fn of(screens: &'static [Screen]) -> Self {
+        let (mut width, mut height, mut at) = (0, 0, 0);
+        while at < screens.len() {
+            let screen = screens[at];
+            if screen.x + screen.width > width {
+                width = screen.x + screen.width;
+            }
+            if screen.y + screen.height > height {
+                height = screen.y + screen.height;
+            }
+            at += 1;
+        }
+        Self {
+            width,
+            height,
+            screens,
+        }
+    }
+
     pub fn aspect(self) -> f32 {
         self.height as f32 / self.width as f32
     }
@@ -82,16 +153,18 @@ impl Timing {
 }
 
 impl ConsoleKind {
+    pub const ALL: [ConsoleKind; 4] = [
+        ConsoleKind::Gb,
+        ConsoleKind::Gbc,
+        ConsoleKind::Gba,
+        ConsoleKind::Nds,
+    ];
+
     pub fn video(self) -> VideoSpec {
         match self {
-            ConsoleKind::Gb | ConsoleKind::Gbc => VideoSpec {
-                width: SCREEN_WIDTH,
-                height: SCREEN_HEIGHT,
-            },
-            ConsoleKind::Gba => VideoSpec {
-                width: GBA_WIDTH,
-                height: GBA_HEIGHT,
-            },
+            ConsoleKind::Gb | ConsoleKind::Gbc => VideoSpec::of(&GB_SCREENS),
+            ConsoleKind::Gba => VideoSpec::of(&GBA_SCREENS),
+            ConsoleKind::Nds => VideoSpec::of(&NDS_SCREENS),
         }
     }
 
@@ -104,6 +177,10 @@ impl ConsoleKind {
             ConsoleKind::Gba => Timing {
                 clock_hz: GBA_CLOCK_HZ,
                 cycles_per_frame: GBA_CYCLES_PER_FRAME,
+            },
+            ConsoleKind::Nds => Timing {
+                clock_hz: NDS_CLOCK_HZ,
+                cycles_per_frame: NDS_CYCLES_PER_FRAME,
             },
         }
     }
@@ -120,10 +197,11 @@ pub trait Console {
     fn set_sample_rate(&mut self, rate: u32);
     fn keys(&self) -> Keys;
     fn set_keys(&mut self, keys: Keys);
+    fn set_touch(&mut self, _touch: Option<Touch>) {}
     fn soft_reset(&mut self);
     fn audio_channels(&self) -> &'static [&'static str];
     fn set_channel_enabled(&mut self, index: usize, enabled: bool);
-    fn rom_bytes(&self) -> Vec<u8>;
+    fn rom_bytes(&self) -> Arc<[u8]>;
     fn title(&self) -> String;
     fn has_battery(&self) -> bool;
     fn has_clock(&self) -> bool;
@@ -139,14 +217,33 @@ pub trait Console {
     fn state_body(&mut self, now: u64) -> GbResult<StateBody>;
     #[cfg(feature = "rom-id")]
     fn rom_id(&self) -> RomId;
+    #[cfg(feature = "rom-id")]
+    fn game_sha1(&self) -> [u8; 20] {
+        self.rom_id().sha1
+    }
 }
 
 #[cfg(feature = "persistence")]
-pub trait Rollback: Console + Sized {
+pub trait Rollback: Console + Sized + Send {
     fn clone_state(&self) -> Self;
     fn copy_state_from(&mut self, other: &Self);
+    fn snapshot_into(&mut self, slot: &mut Self) {
+        slot.copy_state_from(self);
+    }
+    fn snapshot(&mut self) -> Self {
+        let mut slot = self.clone_state();
+        self.snapshot_into(&mut slot);
+        slot
+    }
+    fn scratch(&self) -> Self {
+        self.clone_state()
+    }
     fn state_hash(&self, scratch: &mut Self) -> u64;
     fn encode_state(&self) -> GbResult<Vec<u8>>;
+    fn encode_state_into(&self, out: &mut Vec<u8>) -> GbResult<()> {
+        out.extend_from_slice(&self.encode_state()?);
+        Ok(())
+    }
     fn decode_state(&self, data: &[u8]) -> GbResult<Self>;
     fn set_blind(&mut self, blind: bool);
     fn set_muted(&mut self, muted: bool);
@@ -157,6 +254,7 @@ pub fn detect(data: &[u8], file_name: Option<&str>) -> Option<ConsoleKind> {
         .and_then(|name| Path::new(name).extension())
         .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
     match extension.as_deref() {
+        Some("nds") => Some(ConsoleKind::Nds),
         Some("gba") => Some(ConsoleKind::Gba),
         Some("gb" | "gbc") => Some(game_boy_kind(data)),
         _ => detect_content(data),
@@ -164,7 +262,9 @@ pub fn detect(data: &[u8], file_name: Option<&str>) -> Option<ConsoleKind> {
 }
 
 fn detect_content(data: &[u8]) -> Option<ConsoleKind> {
-    if is_gba(data) {
+    if NdsHeader::is_nds(data) {
+        Some(ConsoleKind::Nds)
+    } else if is_gba(data) {
         Some(ConsoleKind::Gba)
     } else if RomHeader::parse_valid_nintendo_logo(data).unwrap_or(false) {
         Some(game_boy_kind(data))
@@ -235,6 +335,23 @@ mod tests {
     }
 
     #[test]
+    fn a_ds_header_is_a_ds_game_before_the_gba_check() {
+        let mut data = crate::rom::nds::tests::nds_rom(&[]);
+        assert_eq!(detect(&data, None), Some(ConsoleKind::Nds));
+        assert_eq!(detect(&data, Some("game.bin")), Some(ConsoleKind::Nds));
+        data[0x15E] ^= 1;
+        assert_eq!(detect(&data, None), None);
+        assert_eq!(detect(&data, Some("Game.NDS")), Some(ConsoleKind::Nds));
+    }
+
+    #[test]
+    fn a_ds_frame_holds_both_screens() {
+        let video = ConsoleKind::Nds.video();
+        assert_eq!((video.width, video.height), (256, 384));
+        assert!(video.screens[1].touch);
+    }
+
+    #[test]
     fn a_game_boy_header_reads_the_color_flag() {
         assert_eq!(detect(&gb_header(0x00), None), Some(ConsoleKind::Gb));
         assert_eq!(detect(&gb_header(0x80), None), Some(ConsoleKind::Gbc));
@@ -247,12 +364,17 @@ mod tests {
     #[test]
     fn a_game_boy_screen_is_160_by_144_at_70224_cycles_a_frame() {
         for kind in [ConsoleKind::Gb, ConsoleKind::Gbc] {
+            let video = kind.video();
+            assert_eq!((video.width, video.height), (160, 144));
             assert_eq!(
-                kind.video(),
-                VideoSpec {
+                video.screens,
+                [Screen {
+                    x: 0,
+                    y: 0,
                     width: 160,
-                    height: 144
-                }
+                    height: 144,
+                    touch: false
+                }]
             );
             assert_eq!(
                 kind.timing(),
@@ -266,13 +388,9 @@ mod tests {
 
     #[test]
     fn a_gba_screen_is_240_by_160_at_280896_cycles_a_frame() {
-        assert_eq!(
-            ConsoleKind::Gba.video(),
-            VideoSpec {
-                width: 240,
-                height: 160
-            }
-        );
+        let video = ConsoleKind::Gba.video();
+        assert_eq!((video.width, video.height), (240, 160));
+        assert_eq!(video.screens, [Screen::whole(240, 160)]);
         assert_eq!(
             ConsoleKind::Gba.timing(),
             Timing {
@@ -280,6 +398,30 @@ mod tests {
                 cycles_per_frame: 280_896
             }
         );
+    }
+
+    #[test]
+    fn a_frame_spans_every_screen_it_holds() {
+        const TWO: [Screen; 2] = [
+            Screen::whole(256, 192),
+            Screen {
+                x: 0,
+                y: 192,
+                width: 256,
+                height: 192,
+                touch: true,
+            },
+        ];
+        let video = VideoSpec::of(&TWO);
+        assert_eq!((video.width, video.height), (256, 384));
+        assert_eq!(VideoSpec::of(&[]).width, 0);
+    }
+
+    #[test]
+    fn the_ds_keys_press_no_game_boy_button() {
+        let ds = Keys::X | Keys::Y | Keys::LID;
+        assert_eq!(JoypadState::from(ds), JoypadState::empty());
+        assert_eq!(JoypadState::from(ds | Keys::A), JoypadState::A);
     }
 
     #[test]

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE gts_sims SET days = ?2, seed = ?3, next_at = ?4 WHERE pid = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b1037207f440d7f911f960b638768020f8af216b15b09579a252cf6c9f7453f1"
+}

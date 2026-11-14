@@ -321,7 +321,7 @@ mod tests {
         let actions = |events: Vec<PadEvent>| -> Vec<PadAction> {
             events
                 .into_iter()
-                .map(|e| route(e.input, &bindings, &capture, None))
+                .map(|e| route(e.input, &bindings, &capture, None, false))
                 .collect()
         };
         assert_eq!(

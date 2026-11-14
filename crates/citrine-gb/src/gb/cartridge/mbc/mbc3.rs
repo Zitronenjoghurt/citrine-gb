@@ -123,6 +123,28 @@ impl Rtc {
         }
     }
 
+    pub fn advance_cycles(&mut self, cycles: u32) {
+        if self.real.halted() {
+            return;
+        }
+        let mut total = self.sub_second_cycles + cycles;
+        while total >= RTC_CYCLES_PER_SECOND {
+            total -= RTC_CYCLES_PER_SECOND;
+            self.real.tick();
+        }
+        self.sub_second_cycles = total;
+    }
+
+    pub fn hold(&mut self, secs: f64) -> f64 {
+        if self.real.halted() {
+            return secs;
+        }
+        let want = (secs.max(0.0) * f64::from(RTC_CYCLES_PER_SECOND)) as u32;
+        let take = want.min(self.sub_second_cycles);
+        self.sub_second_cycles -= take;
+        f64::from(take) / f64::from(RTC_CYCLES_PER_SECOND)
+    }
+
     pub fn advance_seconds(&mut self, seconds: u64) {
         if self.real.halted() {
             return;
@@ -201,6 +223,12 @@ impl Mbc3 {
     pub fn cycle(&mut self) {
         if self.has_rtc {
             self.rtc.cycle();
+        }
+    }
+
+    pub fn advance(&mut self, cycles: u32) {
+        if self.has_rtc {
+            self.rtc.advance_cycles(cycles);
         }
     }
 
@@ -548,5 +576,23 @@ mod tests {
         mbc.soft_reset();
         assert_eq!(mbc.rtc.real.to_bytes(), [1, 2, 3, 4, 0]);
         assert!(!mbc.ram_rtc_enabled);
+    }
+
+    #[test]
+    fn advancing_cycles_matches_cycling_one_by_one() {
+        for start in [0, 1, RTC_CYCLES_PER_SECOND - 3, RTC_CYCLES_PER_SECOND - 1] {
+            for cycles in [0, 1, 2, 3, 17_556, RTC_CYCLES_PER_SECOND + 5] {
+                let mut stepped = rtc_cart();
+                write_register(&mut stepped, 0x08, 59);
+                write_register(&mut stepped, 0x09, 59);
+                stepped.rtc.sub_second_cycles = start;
+                let mut advanced = stepped.clone();
+                for _ in 0..cycles {
+                    stepped.cycle();
+                }
+                advanced.advance(cycles);
+                assert_eq!(advanced.rtc, stepped.rtc, "{start} {cycles}");
+            }
+        }
     }
 }

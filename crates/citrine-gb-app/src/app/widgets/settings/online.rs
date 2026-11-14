@@ -5,8 +5,8 @@ use crate::app::widgets::avatar;
 use crate::app::widgets::confirm;
 use crate::app::widgets::field::row_field;
 use crate::app::widgets::generic_select::GenericSelect;
-use crate::app::widgets::info_mark::info_mark;
 use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::settings::page::{Heading, Page};
 use crate::icons;
 use crate::online::cloud::SyncState;
 use crate::online::settings::InputDelay;
@@ -16,7 +16,6 @@ use egui::{RichText, Ui, Widget};
 use join::{account_step, address_step, name_step};
 pub use phone_join::{JoinSheet, join_dialogs, join_sheet, open_sheet, signed_out_rows};
 use std::time::Duration;
-use storage::storage;
 use web_time::Instant;
 
 pub mod accounts;
@@ -30,7 +29,16 @@ const KEY_ABOUT: &str = "Citrine remembers this key and warns you if the relay s
 pub const SHOW_PLAYING: &str = "Show friends what I'm playing";
 pub const TYPING: &str = "Typing indicators";
 pub const TYPING_HINT: &str = "Friends see when you're writing to them, and you see when they write to you. Off means neither.";
+pub const FOCUS_POPUPS: &str = "Messages and invites in focus mode";
+pub const ALLOW: &str = "Allow notifications";
+pub const FRIEND_REQUESTS: &str = "Friend requests";
+pub const INVITES: &str = "Play invites";
+pub const MESSAGES: &str = "Messages";
+pub const ANDROID_SETTINGS: &str = "Android notification settings";
 const CODE_HINT: &str = "From your app, or a recovery code";
+const RELAY_ID_WHERE: &str =
+    "Find it on a signed-in device: Settings > Online on a computer, or the You page on a phone.";
+const RELAY_ID_PLACEHOLDER: &str = "cgb1-…";
 
 #[derive(Default)]
 pub struct JoinForm {
@@ -70,9 +78,14 @@ pub struct JoinForm {
     signed_out: Option<String>,
     signing_out: Option<(citrine_gb_net::DeviceId, String)>,
     phone_connect: bool,
+    codes_to_save: Option<String>,
 }
 
 impl JoinForm {
+    pub(crate) fn save_asked_codes(&mut self, spawner: &citrine_gb_threads::Spawner) {
+        two_factor::save_asked_codes(self, spawner);
+    }
+
     pub fn signed_out_of(host: String) -> Self {
         Self {
             signed_out: Some(host),
@@ -98,19 +111,7 @@ enum Choice {
 
 const LIST_AGAIN: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Part {
-    All,
-    Relay,
-}
-
-pub fn show_part(
-    ui: &mut Ui,
-    s: &mut Settings,
-    online: Option<&mut Online>,
-    form: &mut JoinForm,
-    part: Part,
-) {
+pub fn show(ui: &mut Ui, s: &mut Settings, online: Option<&mut Online>, form: &mut JoinForm) {
     let mut idle = Online::offline();
     let online = match online {
         Some(online) => online,
@@ -119,10 +120,7 @@ pub fn show_part(
     let now = Instant::now();
     track(s, online, form, now);
     if s.online.is_joined() {
-        match part {
-            Part::All => joined(ui, s, online, form, now),
-            Part::Relay => relay(ui, s, online, form, now),
-        }
+        joined(ui, s, online, form, now);
     } else {
         match form.step {
             Step::Address => address_step(ui, s, online, form, now),
@@ -392,53 +390,106 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
     let Some(facts) = joined_facts(s, online) else {
         return;
     };
-    ui.horizontal(|ui| {
-        avatar::avatar(
-            ui,
-            &facts.account_name,
-            facts.seed,
-            44.0,
-            Some(my_seen(online)),
+    Page::show(ui, |page| {
+        page.plain(|ui| {
+            Form::show(ui, "online_who", |f| {
+                f.custom(|ui| {
+                    ui.horizontal(|ui| {
+                        avatar::avatar(
+                            ui,
+                            &facts.account_name,
+                            facts.seed,
+                            44.0,
+                            Some(my_seen(online)),
+                        );
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&facts.account_name).strong().size(16.0),
+                                )
+                                .truncate(),
+                            );
+                            ui.add(
+                                egui::Label::new(RichText::new(facts.relay.address.key()).weak())
+                                    .truncate(),
+                            );
+                            connection_line(ui, online, now);
+                        });
+                    });
+                });
+                f.custom(|ui| {
+                    switcher(ui, s, online, form, &facts, now);
+                    problems(ui, s, online, form, now);
+                });
+            });
+        });
+        page.section(Heading::new(icons::IDENTIFICATION_CARD, "Account"), |ui| {
+            Form::show(ui, "online_joined", |f| {
+                relay_id_row(f, form, &facts, now);
+                online_id_row(f, form, &facts, now);
+                relay_key_row(f, online, &facts);
+                display_name_row(f, online, form, &facts);
+            });
+        });
+        page.section(Heading::new(icons::USERS, "Friends"), |ui| {
+            Form::show(ui, "online_play", |f| {
+                s.dirty |= f.toggle(SHOW_PLAYING, &mut s.online.show_playing);
+                s.dirty |= f.toggle_with_hint(TYPING, TYPING_HINT, &mut s.online.typing_indicators);
+                s.dirty |= f.toggle(FOCUS_POPUPS, &mut s.online.focus_popups);
+            });
+        });
+        if crate::platform::push::available() {
+            page.section(Heading::new(icons::BELL, "Notifications"), |ui| {
+                Form::show(ui, "online_push", |f| notifications(f, s));
+            });
+        }
+        page.section(
+            Heading::new(icons::GAME_CONTROLLER, "Play together"),
+            |ui| {
+                Form::show(ui, "online_delay", |f| input_delay(f, s));
+            },
         );
-        ui.vertical(|ui| {
-            ui.add(
-                egui::Label::new(RichText::new(&facts.account_name).strong().size(16.0)).truncate(),
+        page.section(Heading::new(icons::CLOUD, "Cloud"), |ui| {
+            Form::show(ui, "online_cloud", |f| cloud(f, s, online));
+        });
+        if online.account().is_some() {
+            page.section(
+                Heading::new(icons::SHIELD_CHECK, "Two-factor sign-in").hint(two_factor::ABOUT),
+                |ui| {
+                    two_factor::two_factor(
+                        ui,
+                        online,
+                        form,
+                        &facts.account_name,
+                        &facts.relay.address.key(),
+                        now,
+                    );
+                },
             );
-            ui.add(egui::Label::new(RichText::new(facts.relay.address.key()).weak()).truncate());
-            connection_line(ui, online, now);
+        }
+        if devices::any(online) {
+            page.section(
+                Heading::new(icons::DEVICES, "Devices").hint(devices::ABOUT),
+                |ui| {
+                    Form::show(ui, "online_devices", |f| {
+                        f.custom(|ui| devices::devices(ui, online, form))
+                    })
+                },
+            );
+        }
+        if storage::has_storage(online) {
+            page.section(Heading::new(icons::HARD_DRIVES, "Storage"), |ui| {
+                Form::show(ui, "online_storage_page", |f| {
+                    f.custom(|ui| storage::storage_body(ui, online, form, now))
+                })
+            });
+        }
+        page.plain(|ui| {
+            Form::show(ui, "online_leave", |f| {
+                f.buttons(|ui| leave_and_delete(ui, s, online, form, &facts, false));
+            });
         });
     });
-    switcher(ui, s, online, form, &facts, now);
-    problems(ui, s, online, form, now);
-    ui.add_space(10.0);
-    Form::show(ui, "online_joined", |f| {
-        relay_id_row(f, form, &facts, now, true);
-        online_id_row(f, form, &facts, now);
-        relay_key_row(f, online, &facts);
-        display_name_row(f, online, form, &facts);
-    });
-    ui.add_space(4.0);
-    show_playing(ui, s);
-    typing(ui, s);
-    cloud(ui, s, online);
-    ui.add_space(6.0);
-    input_delay(ui, s);
-    ui.add_space(ui.spacing().interact_size.y.max(20.0));
-    two_factor::two_factor(
-        ui,
-        online,
-        form,
-        &facts.account_name,
-        &facts.relay.address.key(),
-        now,
-    );
-    if devices::any(online) {
-        ui.add_space(ui.spacing().interact_size.y.max(20.0));
-        devices::devices(ui, online, form);
-    }
-    storage(ui, online, form, now);
-    ui.add_space(ui.spacing().interact_size.y.max(20.0));
-    leave_and_delete(ui, s, online, form, &facts, false);
 }
 
 fn switcher(
@@ -491,35 +542,6 @@ fn switcher(
     accounts::remove_dialog(ui, s, online, form);
 }
 
-pub fn relay(
-    ui: &mut Ui,
-    s: &mut Settings,
-    online: &mut Online,
-    form: &mut JoinForm,
-    now: Instant,
-) {
-    let Some(facts) = joined_facts(s, online) else {
-        return;
-    };
-    if s.dev_mode {
-        Form::show(ui, "online_relay", |f| {
-            f.row("Server", |ui| {
-                ui.add(egui::Label::new(facts.relay.address.key()).truncate());
-            });
-            relay_key_row(f, online, &facts);
-        });
-        connection_line(ui, online, now);
-    } else if online.is_connected() {
-        ui.label("Connected");
-    } else {
-        connection_line(ui, online, now);
-    }
-    retry_row(ui, online, now);
-    ui.add_space(4.0);
-    cloud(ui, s, online);
-    storage(ui, online, form, now);
-}
-
 pub fn problems(
     ui: &mut Ui,
     s: &mut Settings,
@@ -553,25 +575,38 @@ pub fn problems(
     }
 }
 
-fn relay_id_row(f: &mut Form, form: &mut JoinForm, facts: &Joined, now: Instant, shown: bool) {
+fn relay_id_row(f: &mut Form, form: &mut JoinForm, facts: &Joined, now: Instant) {
     let relay_text = facts.relay.relay_id.to_string();
-    let label = if shown { "Relay ID" } else { "Sign-in key" };
     f.row_with_hint(
-        label,
+        "Relay ID",
         "Don't share it. Anyone with it can sign in as you.",
         |ui| {
             copy_button(ui, form, "relay", &relay_text, now);
-            if shown {
-                ui.add(egui::Label::new(RichText::new(&relay_text).monospace().weak()).truncate());
-            }
+            ui.add(egui::Label::new(RichText::new(&relay_text).monospace().weak()).truncate());
         },
     );
+}
+
+fn need_whole(ui: &Ui, text: &RichText) {
+    let width = egui::WidgetText::from(text.clone())
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x;
+    let used = ui.cursor().left() - ui.max_rect().left();
+    super::form::need(ui, used + width);
 }
 
 fn online_id_row(f: &mut Form, form: &mut JoinForm, facts: &Joined, now: Instant) {
     f.row_with_hint("Online ID", "Friends add you with this", |ui| {
         copy_button(ui, form, "online", &facts.online_id, now);
-        ui.add(egui::Label::new(RichText::new(&facts.online_id).monospace()).truncate());
+        let text = RichText::new(&facts.online_id).monospace();
+        need_whole(ui, &text);
+        ui.add(egui::Label::new(text).truncate());
     });
 }
 
@@ -584,8 +619,9 @@ fn relay_key_row(f: &mut Form, online: &Online, facts: &Joined) {
         .filter(|_| online.offered_key().is_none())
     {
         f.row_with_hint("Relay key", KEY_ABOUT, |ui| {
-            let text = key.fingerprint().to_string();
-            ui.add(egui::Label::new(RichText::new(text).monospace()).truncate());
+            let text = RichText::new(key.fingerprint().to_string()).monospace();
+            need_whole(ui, &text);
+            ui.add(egui::Label::new(text).truncate());
         });
     }
 }
@@ -618,65 +654,28 @@ fn display_name_row(f: &mut Form, online: &mut Online, form: &mut JoinForm, fact
     }
 }
 
-fn input_delay(ui: &mut Ui, s: &mut Settings) {
-    Form::show(ui, "online_play", |f| {
-        f.row_with_hint("Input delay", DELAY_HINT, |ui| {
-            s.dirty |=
-                GenericSelect::from_enum(&mut s.online.input_delay, "enum_select_input_delay")
-                    .default_value(InputDelay::Auto)
-                    .ui(ui)
-                    .changed();
-        });
-    });
-}
-
-fn show_playing(ui: &mut Ui, s: &mut Settings) {
-    s.dirty |= ui
-        .checkbox(&mut s.online.show_playing, SHOW_PLAYING)
-        .changed();
-}
-
-fn typing(ui: &mut Ui, s: &mut Settings) {
-    ui.horizontal(|ui| {
-        s.dirty |= ui
-            .checkbox(&mut s.online.typing_indicators, TYPING)
+fn input_delay(f: &mut Form, s: &mut Settings) {
+    f.row_with_hint("Input delay", DELAY_HINT, |ui| {
+        s.dirty |= GenericSelect::from_enum(&mut s.online.input_delay, "enum_select_input_delay")
+            .default_value(InputDelay::Auto)
+            .ui(ui)
             .changed();
-        info_mark(ui, TYPING_HINT);
     });
 }
 
-fn cloud(ui: &mut Ui, s: &mut Settings, online: &mut Online) {
-    let note = |ui: &mut Ui, indent: f32, text: &str| {
-        let left = indent + ui.spacing().icon_width + ui.spacing().icon_spacing;
-        egui::Frame::NONE
-            .inner_margin(egui::Margin {
-                left: left.round() as i8,
-                ..egui::Margin::ZERO
-            })
-            .show(ui, |ui| ui.label(RichText::new(text).weak()));
-    };
-    ui.horizontal(|ui| {
-        s.dirty |= ui
-            .checkbox(&mut s.online.cloud_saves, "Cloud saves")
-            .changed();
-        info_mark(ui, CLOUD_HINT);
-    });
-    if let Some(text) = no_storage(s, online) {
-        note(ui, 0.0, text);
+fn cloud(f: &mut Form, s: &mut Settings, online: &mut Online) {
+    s.dirty |= f.toggle_with_hint("Cloud saves", CLOUD_HINT, &mut s.online.cloud_saves);
+    let cloud = s.online.cloud_saves;
+    let mut on = cloud && s.online.sync_settings;
+    if f.toggle_when("Sync settings", Some(SYNC_HINT), cloud, &mut on) {
+        s.online.sync_settings = on;
+        s.dirty = true;
     }
-    let indent = ui.spacing().indent;
-    ui.horizontal(|ui| {
-        ui.add_space(indent);
-        let mut on = s.online.cloud_saves && s.online.sync_settings;
-        let check = crate::app::widgets::check::Check::new(&mut on, "Sync settings");
-        if ui.add_enabled(s.online.cloud_saves, check).changed() {
-            s.online.sync_settings = on;
-            s.dirty = true;
-        }
-        info_mark(ui, SYNC_HINT);
-    });
-    for problem in cloud_problems(s, online) {
-        note(ui, indent, problem);
+    for text in no_storage(s, online)
+        .into_iter()
+        .chain(cloud_problems(s, online))
+    {
+        f.hint(text);
     }
 }
 
@@ -746,7 +745,7 @@ fn leave_dialogs(
     if form.leaving {
         let (question, button) = if sign_out {
             (
-                "Sign out on this device? Citrine keeps your sign-in key, so you can sign in again."
+                "Sign out on this device? Citrine keeps your relay ID here, so you can sign in again."
                     .to_owned(),
                 "Sign out",
             )
@@ -776,7 +775,7 @@ fn leave_dialogs(
 pub struct Account {
     pub name: String,
     pub online_id: String,
-    pub sign_in_key: String,
+    pub relay_id: String,
     pub two_factor: Option<bool>,
     pub devices: usize,
 }
@@ -784,7 +783,7 @@ pub struct Account {
 pub fn joined_account(s: &Settings, online: &Online) -> Option<Account> {
     let facts = joined_facts(s, online)?;
     Some(Account {
-        sign_in_key: facts.relay.relay_id.to_string(),
+        relay_id: facts.relay.relay_id.to_string(),
         two_factor: online.account().map(|a| a.two_factor),
         devices: online.devices().0.len(),
         name: facts.account_name,
@@ -993,5 +992,33 @@ fn sync_problems(settings: Option<SyncState>, stats: Option<SyncState>) -> Vec<&
     problems
 }
 
-#[cfg(test)]
-mod tests;
+fn notifications(f: &mut Form, s: &mut Settings) {
+    let allowed = crate::platform::push::allowed();
+    f.text_row("Status", |ui| {
+        if allowed {
+            ui.label("On");
+        } else {
+            ui.label(RichText::new("Off").weak());
+        }
+    });
+    f.buttons(|ui| {
+        if allowed {
+            if ui.button("Android settings").clicked() {
+                crate::platform::push::open_settings();
+            }
+        } else if ui.button("Turn on").clicked() {
+            crate::platform::push::ask();
+        }
+    });
+    for (label, on) in [
+        (FRIEND_REQUESTS, &mut s.online.notify_friend_requests),
+        (INVITES, &mut s.online.notify_invites),
+        (MESSAGES, &mut s.online.notify_chats),
+    ] {
+        if allowed {
+            s.dirty |= f.toggle_when(label, None, true, on);
+        } else {
+            f.toggle_when(label, None, false, &mut false);
+        }
+    }
+}

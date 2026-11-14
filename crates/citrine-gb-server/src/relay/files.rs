@@ -1,11 +1,13 @@
-use super::{Client, MAX_UPLOADS, PutSave, Upload, db, file_path, hex, quota_of, random_file_id};
+use super::{
+    Client, MAX_UPLOADS, PutSave, SaveParts, Upload, db, file_path, hex, quota_of, random_file_id,
+};
 use crate::db::{NewSave, SaveWrite};
 use crate::now;
 use crate::stats::Refused;
 use crate::storage::charge;
 use citrine_gb_net::{
-    CHUNK_BYTES, ErrorCode, FileId, FileInfo, GameKey, MAX_LABEL_BYTES, SaveInfo, ServerMsg, Tag,
-    valid_slot,
+    CHUNK_BYTES, ErrorCode, FileId, FileInfo, GameKey, MAX_LABEL_BYTES, MAX_SAVE_BYTES,
+    SAVE_PART_BYTES, SAVE_PARTS_PROTOCOL, SaveInfo, ServerMsg, Tag, last_part_at, valid_slot,
 };
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -166,6 +168,40 @@ impl Client {
         Ok(())
     }
 
+    pub(super) async fn save_part(&mut self, tag: Tag, data: &[u8]) -> Result<(), ErrorCode> {
+        if self.hello.is_none_or(|v| v < SAVE_PARTS_PROTOCOL) {
+            return Err(ErrorCode::BadMessage);
+        }
+        if let Some(parts) = &self.save_parts
+            && parts.tag == tag
+            && parts.refused
+        {
+            return Ok(());
+        }
+        if self
+            .save_parts
+            .as_ref()
+            .is_none_or(|parts| parts.tag != tag)
+        {
+            let row = self.my_row().await?;
+            if quota_of(&self.app, &row) == 0 {
+                return Err(ErrorCode::SharingOff);
+            }
+            self.save_parts = Some(SaveParts {
+                tag,
+                data: Vec::new(),
+                refused: false,
+            });
+        }
+        let limit = self.app.settings.get().max_file_bytes;
+        let parts = self.save_parts.as_mut().ok_or(ErrorCode::Server)?;
+        if (parts.data.len() + data.len()) as u64 > limit {
+            return Err(ErrorCode::TooLarge);
+        }
+        parts.data.extend_from_slice(data);
+        Ok(())
+    }
+
     pub(super) async fn put_save(
         &mut self,
         tag: Tag,
@@ -256,7 +292,22 @@ impl Client {
             return Ok(());
         };
         match tokio::fs::read(file_path(&self.app, file)).await {
-            Ok(data) => self.send(ServerMsg::Save { info, data }).await,
+            Ok(data) if data.len() <= MAX_SAVE_BYTES => {
+                self.send(ServerMsg::Save { info, data }).await;
+            }
+            Ok(mut data) if self.hello.is_some_and(|v| v >= SAVE_PARTS_PROTOCOL) => {
+                let last = data.split_off(last_part_at(data.len()));
+                for part in data.chunks(SAVE_PART_BYTES) {
+                    self.send(ServerMsg::SavePart {
+                        game,
+                        slot: slot.clone(),
+                        data: part.to_vec(),
+                    })
+                    .await;
+                }
+                self.send(ServerMsg::Save { info, data: last }).await;
+            }
+            Ok(_) => self.send(ServerMsg::SaveMissing { game, slot }).await,
             Err(e) => {
                 log::error!("save {}: {e}", hex(&file.0));
                 self.send(ServerMsg::SaveMissing { game, slot }).await;

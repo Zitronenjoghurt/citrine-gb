@@ -6,8 +6,20 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 8;
 pub const OLDEST_PROTOCOL_VERSION: u16 = 2;
+pub const SAVE_PARTS_PROTOCOL: u16 = 4;
+pub const ROOMS_PROTOCOL: u16 = 4;
+pub const GAME_BUCKET_PROTOCOL: u16 = 5;
+pub const PUSH_PROTOCOL: u16 = 6;
+pub const GTS_PROTOCOL: u16 = 7;
+pub const DS_NET_PROTOCOL: u16 = 8;
+pub const MAX_DATAGRAM_BYTES: usize = 2048;
+pub const MAX_NET_READ_BYTES: usize = 16 * 1024;
+pub const NET_WINDOW_BYTES: usize = 64 * 1024;
+pub const GTS_PAGE: usize = 20;
+pub const MAX_GTS_TARGET_CHARS: usize = 4096;
+pub const MAX_PUSH_TOKEN_BYTES: usize = 4096;
 pub const ROOM_MEMBERS: usize = 16;
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
 pub const CHUNK_BYTES: usize = 256 * 1024;
@@ -147,6 +159,35 @@ pub enum EndReason {
     Declined,
     Left,
     Disconnected,
+    NoCopy,
+    OtherCopy,
+    NoAnswer,
+}
+
+impl EndReason {
+    pub fn for_protocol(self, protocol: u16) -> Self {
+        match self {
+            Self::NoCopy | Self::OtherCopy | Self::NoAnswer if protocol < PUSH_PROTOCOL => {
+                Self::Declined
+            }
+            reason => reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Refusal {
+    NoCopy,
+    OtherCopy,
+}
+
+impl Refusal {
+    pub fn reason(self) -> EndReason {
+        match self {
+            Self::NoCopy => EndReason::NoCopy,
+            Self::OtherCopy => EndReason::OtherCopy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +274,85 @@ pub enum ErrorCode {
     CantJoin,
     #[error("someone in the room needs a newer app")]
     NeedsUpdate,
+    #[error("this relay has no GTS")]
+    GtsOff,
+    #[error("this relay doesn't carry DS online play")]
+    DsNetOff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NetAddr {
+    pub ip: [u8; 4],
+    pub port: u16,
+}
+
+impl NetAddr {
+    pub fn socket(self) -> std::net::SocketAddrV4 {
+        std::net::SocketAddrV4::new(self.ip.into(), self.port)
+    }
+}
+
+impl From<std::net::SocketAddrV4> for NetAddr {
+    fn from(addr: std::net::SocketAddrV4) -> Self {
+        Self {
+            ip: addr.ip().octets(),
+            port: addr.port(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GtsReply {
+    Body(Vec<u8>),
+    Status(u16),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GtsPokemon {
+    pub species: u16,
+    pub level: u8,
+    pub gender: u8,
+    pub shiny: bool,
+    pub nickname: String,
+    pub language: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GtsWanted {
+    pub species: u16,
+    pub gender: u8,
+    pub min_level: u8,
+    pub max_level: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GtsListing {
+    pub offered: GtsPokemon,
+    pub wanted: GtsWanted,
+    pub trainer: String,
+    pub game: u8,
+    pub country: u8,
+    pub deposited: u64,
+    pub friend: Option<OnlineId>,
+    pub simulated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GtsState {
+    Waiting,
+    Traded {
+        at: u64,
+        received: GtsPokemon,
+        trainer: String,
+        simulated: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GtsDeposit {
+    pub generation: u8,
+    pub listing: GtsListing,
+    pub state: GtsState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +497,78 @@ pub enum ClientMsg {
         chats: Vec<OldChat>,
         done: bool,
     },
+    SavePart {
+        tag: Tag,
+        data: Vec<u8>,
+    },
+    SetPush {
+        token: Option<String>,
+        kinds: PushKinds,
+    },
+    Refuse {
+        session: SessionId,
+        why: Refusal,
+    },
+    Gts {
+        call: u64,
+        target: String,
+    },
+    GtsBrowse {
+        generation: u8,
+        species: Option<u16>,
+        page: u32,
+    },
+    GtsMine,
+    NetSend {
+        port: u16,
+        to: NetAddr,
+        data: Vec<u8>,
+    },
+    NetOpen {
+        stream: u32,
+        to: NetAddr,
+    },
+    NetWrite {
+        stream: u32,
+        data: Vec<u8>,
+    },
+    NetClose {
+        stream: u32,
+    },
+    NetLease {
+        want: Option<[u8; 4]>,
+    },
+    NetTaken {
+        stream: u32,
+        total: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PushKinds {
+    pub friend_requests: bool,
+    pub invites: bool,
+    pub chats: bool,
+}
+
+impl PushKinds {
+    pub const ALL: Self = Self {
+        friend_requests: true,
+        invites: true,
+        chats: true,
+    };
+
+    pub fn bits(self) -> u8 {
+        u8::from(self.friend_requests) | u8::from(self.invites) << 1 | u8::from(self.chats) << 2
+    }
+
+    pub fn from_bits(bits: u8) -> Self {
+        Self {
+            friend_requests: bits & 1 != 0,
+            invites: bits & 2 != 0,
+            chats: bits & 4 != 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,6 +727,53 @@ pub enum ServerMsg {
         id: MessageId,
         chat: OldChat,
     },
+    SavePart {
+        game: GameKey,
+        slot: String,
+        data: Vec<u8>,
+    },
+    Gts {
+        call: u64,
+        reply: GtsReply,
+    },
+    GtsListings {
+        generation: u8,
+        species: Option<u16>,
+        page: u32,
+        total: u32,
+        listings: Vec<GtsListing>,
+        simulated: bool,
+    },
+    GtsMine(Vec<GtsDeposit>),
+    GtsTraded(GtsDeposit),
+    GtsSimulated,
+    GtsTradedWithSim {
+        trainer: String,
+        received: GtsPokemon,
+    },
+    NetHeard {
+        port: u16,
+        from: NetAddr,
+        data: Vec<u8>,
+    },
+    NetOpened {
+        stream: u32,
+        ok: bool,
+    },
+    NetRead {
+        stream: u32,
+        data: Vec<u8>,
+    },
+    NetClosed {
+        stream: u32,
+    },
+    NetLeased {
+        ip: Option<[u8; 4]>,
+    },
+    NetWritten {
+        stream: u32,
+        total: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -635,6 +874,7 @@ mod tests {
             ClientMsg::ListFiles => "ListFiles",
             ClientMsg::Invite { .. } => "Invite",
             ClientMsg::AnswerInvite { .. } => "AnswerInvite",
+            ClientMsg::Refuse { .. } => "Refuse",
             ClientMsg::Leave(_) => "Leave",
             ClientMsg::Play { .. } => "Play",
             ClientMsg::Game { .. } => "Game",
@@ -660,6 +900,17 @@ mod tests {
             ClientMsg::RoomChat { .. } => "RoomChat",
             ClientMsg::ChatOnce { .. } => "ChatOnce",
             ClientMsg::KeepOldChats { .. } => "KeepOldChats",
+            ClientMsg::SavePart { .. } => "SavePart",
+            ClientMsg::SetPush { .. } => "SetPush",
+            ClientMsg::Gts { .. } => "Gts",
+            ClientMsg::GtsBrowse { .. } => "GtsBrowse",
+            ClientMsg::GtsMine => "GtsMine",
+            ClientMsg::NetSend { .. } => "NetSend",
+            ClientMsg::NetOpen { .. } => "NetOpen",
+            ClientMsg::NetWrite { .. } => "NetWrite",
+            ClientMsg::NetClose { .. } => "NetClose",
+            ClientMsg::NetLease { .. } => "NetLease",
+            ClientMsg::NetTaken { .. } => "NetTaken",
         }
     }
 
@@ -718,6 +969,19 @@ mod tests {
             ServerMsg::OldChatsWanted => "OldChatsWanted",
             ServerMsg::OldChatsKept => "OldChatsKept",
             ServerMsg::OldChat { .. } => "OldChat",
+            ServerMsg::SavePart { .. } => "SavePart",
+            ServerMsg::Gts { .. } => "Gts",
+            ServerMsg::GtsListings { .. } => "GtsListings",
+            ServerMsg::GtsMine(_) => "GtsMine",
+            ServerMsg::GtsTraded(_) => "GtsTraded",
+            ServerMsg::GtsSimulated => "GtsSimulated",
+            ServerMsg::GtsTradedWithSim { .. } => "GtsTradedWithSim",
+            ServerMsg::NetHeard { .. } => "NetHeard",
+            ServerMsg::NetOpened { .. } => "NetOpened",
+            ServerMsg::NetRead { .. } => "NetRead",
+            ServerMsg::NetClosed { .. } => "NetClosed",
+            ServerMsg::NetLeased { .. } => "NetLeased",
+            ServerMsg::NetWritten { .. } => "NetWritten",
         }
     }
 
@@ -879,6 +1143,55 @@ mod tests {
                     sealed: sealed(),
                 }],
                 done: true,
+            },
+            ClientMsg::SavePart {
+                tag: 4,
+                data: vec![0x66; 300],
+            },
+            ClientMsg::SetPush {
+                token: Some("fcm".into()),
+                kinds: PushKinds::ALL,
+            },
+            ClientMsg::Refuse {
+                session: 77,
+                why: Refusal::OtherCopy,
+            },
+            ClientMsg::Gts {
+                call: 3,
+                target: "/pokemondpds/worldexchange/info.asp?pid=1".into(),
+            },
+            ClientMsg::GtsBrowse {
+                generation: 4,
+                species: Some(396),
+                page: 2,
+            },
+            ClientMsg::GtsMine,
+            ClientMsg::NetSend {
+                port: 5000,
+                to: NetAddr {
+                    ip: [203, 0, 113, 9],
+                    port: 27900,
+                },
+                data: vec![1; 170],
+            },
+            ClientMsg::NetOpen {
+                stream: 3,
+                to: NetAddr {
+                    ip: [203, 0, 113, 9],
+                    port: 29900,
+                },
+            },
+            ClientMsg::NetWrite {
+                stream: 3,
+                data: b"\\login\\".to_vec(),
+            },
+            ClientMsg::NetClose { stream: 3 },
+            ClientMsg::NetLease {
+                want: Some([10, 77, 1, 2]),
+            },
+            ClientMsg::NetTaken {
+                stream: 3,
+                total: 5,
             },
         ]
     }
@@ -1106,14 +1419,100 @@ mod tests {
                     sealed: sealed(),
                 },
             },
+            ServerMsg::SavePart {
+                game: GameKey([3; 32]),
+                slot: "slot0".into(),
+                data: vec![0x77; 300],
+            },
+            ServerMsg::Gts {
+                call: 3,
+                reply: GtsReply::Body(vec![1, 0]),
+            },
+            ServerMsg::GtsListings {
+                generation: 4,
+                species: None,
+                page: 0,
+                total: 1,
+                listings: vec![gts_listing()],
+                simulated: true,
+            },
+            ServerMsg::GtsMine(vec![GtsDeposit {
+                generation: 4,
+                listing: gts_listing(),
+                state: GtsState::Waiting,
+            }]),
+            ServerMsg::GtsTraded(GtsDeposit {
+                generation: 4,
+                listing: gts_listing(),
+                state: GtsState::Traded {
+                    at: 9,
+                    received: gts_listing().offered,
+                    trainer: "Ren".into(),
+                    simulated: true,
+                },
+            }),
+            ServerMsg::GtsSimulated,
+            ServerMsg::GtsTradedWithSim {
+                trainer: "Ren".into(),
+                received: gts_listing().offered,
+            },
+            ServerMsg::NetHeard {
+                port: 5000,
+                from: NetAddr {
+                    ip: [203, 0, 113, 9],
+                    port: 27900,
+                },
+                data: vec![2; 170],
+            },
+            ServerMsg::NetOpened {
+                stream: 3,
+                ok: true,
+            },
+            ServerMsg::NetRead {
+                stream: 3,
+                data: b"\\lc\\1".to_vec(),
+            },
+            ServerMsg::NetClosed { stream: 3 },
+            ServerMsg::NetLeased {
+                ip: Some([10, 77, 1, 2]),
+            },
+            ServerMsg::NetWritten {
+                stream: 3,
+                total: 7,
+            },
         ]
+    }
+
+    fn gts_listing() -> GtsListing {
+        GtsListing {
+            offered: GtsPokemon {
+                species: 396,
+                level: 5,
+                gender: 1,
+                shiny: false,
+                nickname: "STARLY".into(),
+                language: 2,
+            },
+            wanted: GtsWanted {
+                species: 25,
+                gender: 0,
+                min_level: 1,
+                max_level: 100,
+            },
+            trainer: "Lucas".into(),
+            game: 12,
+            country: 0,
+            deposited: 1_700_000_000,
+            friend: Some(friend_id()),
+            simulated: false,
+        }
     }
 
     #[test]
     fn every_client_message_round_trips() {
         let all = all_client();
         let names: BTreeSet<_> = all.iter().map(client_name).collect();
-        assert_eq!(names.len(), 44);
+        assert_eq!(names.len(), 56);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -1125,7 +1524,7 @@ mod tests {
     fn every_server_message_round_trips() {
         let all = all_server();
         let names: BTreeSet<_> = all.iter().map(server_name).collect();
-        assert_eq!(names.len(), 53);
+        assert_eq!(names.len(), 66);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -1180,6 +1579,8 @@ mod tests {
             ErrorCode::RoomFull,
             ErrorCode::CantJoin,
             ErrorCode::NeedsUpdate,
+            ErrorCode::GtsOff,
+            ErrorCode::DsNetOff,
         ];
         for error in errors {
             let msg = ServerMsg::Error(error);
@@ -1203,6 +1604,9 @@ mod tests {
             EndReason::Declined,
             EndReason::Left,
             EndReason::Disconnected,
+            EndReason::NoCopy,
+            EndReason::OtherCopy,
+            EndReason::NoAnswer,
         ] {
             let msg = ServerMsg::SessionEnded { session: 1, reason };
             assert_eq!(ServerMsg::decode(&msg.encode().unwrap()), Ok(msg));
@@ -1210,27 +1614,64 @@ mod tests {
     }
 
     #[test]
-    fn room_messages_take_new_tags_after_the_old_ones() {
-        let all = all_client();
-        let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
-        assert_eq!(tags, (0..44).collect::<Vec<u8>>());
-        assert_eq!(client_name(&all[10]), "Chat");
-        assert_eq!(client_name(&all[35]), "Restate");
-        assert_eq!(client_name(&all[36]), "Typing");
-        assert_eq!(client_name(&all[42]), "ChatOnce");
-        let all = all_server();
-        let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
-        assert_eq!(tags, (0..53).collect::<Vec<u8>>());
-        assert_eq!(server_name(&all[42]), "SavesChanged");
-        assert_eq!(server_name(&all[43]), "Typing");
+    fn older_apps_hear_new_end_reasons_as_declined() {
+        for reason in [EndReason::NoCopy, EndReason::OtherCopy, EndReason::NoAnswer] {
+            assert_eq!(reason.for_protocol(PUSH_PROTOCOL - 1), EndReason::Declined);
+            assert_eq!(reason.for_protocol(PUSH_PROTOCOL), reason);
+        }
+        assert_eq!(EndReason::Left.for_protocol(2), EndReason::Left);
+        assert_eq!(Refusal::NoCopy.reason(), EndReason::NoCopy);
+        assert_eq!(Refusal::OtherCopy.reason(), EndReason::OtherCopy);
     }
 
     #[test]
-    fn this_build_speaks_protocol_two_and_three() {
+    fn room_messages_take_new_tags_after_the_old_ones() {
+        let all = all_client();
+        let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
+        assert_eq!(tags, (0..56).collect::<Vec<u8>>());
+        assert_eq!(client_name(&all[10]), "Chat");
+        assert_eq!(client_name(&all[45]), "SetPush");
+        assert_eq!(client_name(&all[46]), "Refuse");
+        assert_eq!(client_name(&all[35]), "Restate");
+        assert_eq!(client_name(&all[36]), "Typing");
+        assert_eq!(client_name(&all[42]), "ChatOnce");
+        assert_eq!(client_name(&all[47]), "Gts");
+        assert_eq!(client_name(&all[49]), "GtsMine");
+        assert_eq!(client_name(&all[53]), "NetClose");
+        assert_eq!(client_name(&all[54]), "NetLease");
+        assert_eq!(client_name(&all[55]), "NetTaken");
+        let all = all_server();
+        let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
+        assert_eq!(tags, (0..66).collect::<Vec<u8>>());
+        assert_eq!(server_name(&all[42]), "SavesChanged");
+        assert_eq!(server_name(&all[43]), "Typing");
+        assert_eq!(server_name(&all[54]), "Gts");
+        assert_eq!(server_name(&all[57]), "GtsTraded");
+        assert_eq!(server_name(&all[59]), "GtsTradedWithSim");
+        assert_eq!(server_name(&all[63]), "NetClosed");
+        assert_eq!(server_name(&all[64]), "NetLeased");
+        assert_eq!(server_name(&all[65]), "NetWritten");
+    }
+
+    #[test]
+    fn a_lease_ask_and_a_refusal_round_trip() {
+        let ask = ClientMsg::NetLease { want: None };
+        assert_eq!(ClientMsg::decode(&ask.encode().unwrap()), Ok(ask));
+        let refusal = ServerMsg::NetLeased { ip: None };
+        assert_eq!(ServerMsg::decode(&refusal.encode().unwrap()), Ok(refusal));
+    }
+
+    #[test]
+    fn this_build_speaks_protocol_two_to_eight() {
         assert!(!speaks_protocol(1));
         assert!(speaks_protocol(2));
         assert!(speaks_protocol(3));
-        assert!(!speaks_protocol(4));
+        assert!(speaks_protocol(4));
+        assert!(speaks_protocol(5));
+        assert!(speaks_protocol(6));
+        assert!(speaks_protocol(7));
+        assert!(speaks_protocol(8));
+        assert!(!speaks_protocol(9));
     }
 
     #[test]
@@ -1271,6 +1712,17 @@ mod tests {
             data: vec![0xFF; CHUNK_BYTES],
         };
         assert!(chunk.encode().unwrap().len() < MAX_FRAME_BYTES);
+        let part = ClientMsg::SavePart {
+            tag: Tag::MAX,
+            data: vec![0xFF; crate::SAVE_PART_BYTES],
+        };
+        assert!(part.encode().unwrap().len() < MAX_FRAME_BYTES);
+        let part = ServerMsg::SavePart {
+            game: GameKey([0xFF; 32]),
+            slot: "x".repeat(crate::MAX_SLOT_CHARS),
+            data: vec![0xFF; crate::SAVE_PART_BYTES],
+        };
+        assert!(part.encode().unwrap().len() < MAX_FRAME_BYTES);
     }
 
     #[test]

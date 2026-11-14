@@ -1,5 +1,6 @@
 use super::parts::{paint_caught_mark, tile_color};
-use super::{DEX_CELL, Pages, TILE};
+use super::sprites::sprite_texture;
+use super::{DEX_CELL, DEX_ROW, DEX_ROW_HEIGHT, Pages, TILE};
 use crate::game_info::View;
 use crate::icons;
 use citrine_gb_gamedata::GameState;
@@ -28,8 +29,11 @@ impl Pages<'_> {
         ui.add_space(6.0);
         let tables = &self.game.tables;
         let search = view.dex_search.trim().to_lowercase();
+        let sprites = self.has_sprites(ui);
         let numbers: Vec<u16> = if view.dex_caught {
             state.pokedex.caught.clone()
+        } else if !sprites {
+            state.pokedex.seen.clone()
         } else {
             let last = state.pokedex.seen.iter().copied().max().unwrap_or(0);
             (1..=last).collect()
@@ -56,7 +60,12 @@ impl Pages<'_> {
             ui.label(RichText::new("No Pokémon match").weak());
             return;
         }
-        let columns = ((ui.available_width() + 6.0) / (DEX_CELL + 6.0))
+        let (least, height) = if sprites {
+            (DEX_CELL, TILE + 34.0)
+        } else {
+            (DEX_ROW, DEX_ROW_HEIGHT)
+        };
+        let columns = ((ui.available_width() + 6.0) / (least + 6.0))
             .floor()
             .max(1.0) as usize;
         let cell = (ui.available_width() + 6.0) / columns as f32 - 6.0;
@@ -66,14 +75,24 @@ impl Pages<'_> {
             .show(ui, |ui| {
                 for (i, (number, named)) in entries.iter().enumerate() {
                     let caught = state.pokedex.caught.contains(number);
-                    ui.allocate_ui(vec2(cell, TILE + 34.0), |ui| {
-                        self.dex_cell(ui, cell, *number, *named, caught);
+                    ui.allocate_ui(vec2(cell, height), |ui| {
+                        if sprites {
+                            self.dex_cell(ui, cell, *number, *named, caught);
+                        } else {
+                            dex_row(ui, cell, *number, named.map(|(_, name)| name), caught);
+                        }
                     });
                     if i % columns == columns - 1 {
                         ui.end_row();
                     }
                 }
             });
+    }
+
+    fn has_sprites(&self, ui: &Ui) -> bool {
+        self.game.tables.species_for_dex(1).is_some_and(|species| {
+            sprite_texture(ui.ctx(), self.key, self.game, species, false, 'A').is_some()
+        })
     }
 
     pub(super) fn dex_cell(
@@ -135,4 +154,61 @@ impl Pages<'_> {
                 .on_hover_text("Caught");
         }
     }
+}
+
+pub(super) fn dex_row(ui: &mut Ui, width: f32, number: u16, name: Option<&str>, caught: bool) {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, DEX_ROW_HEIGHT), Sense::hover());
+    let visuals = ui.visuals().clone();
+    let mut painter = ui.painter_at(rect);
+    painter.multiply_opacity(if name.is_some() { 1.0 } else { 0.55 });
+    painter.rect(
+        rect,
+        6.0,
+        visuals.faint_bg_color,
+        visuals.widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    painter.text(
+        egui::pos2(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        number.to_string(),
+        small,
+        visuals.weak_text_color(),
+    );
+    let mark = egui::pos2(rect.right() - 14.0, rect.center().y);
+    let left = rect.left() + 42.0;
+    let Some(name) = name else {
+        return;
+    };
+    let galley = egui::WidgetText::from(name).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        mark.x - 12.0 - left,
+        egui::TextStyle::Body,
+    );
+    let elided = galley.elided;
+    painter.galley(
+        egui::pos2(left, rect.center().y - galley.size().y / 2.0),
+        galley,
+        visuals.text_color(),
+    );
+    if caught {
+        paint_caught_mark(&painter, mark);
+    } else {
+        painter.text(
+            mark,
+            egui::Align2::CENTER_CENTER,
+            icons::EYE,
+            egui::FontId::proportional(13.0),
+            visuals.weak_text_color(),
+        );
+    }
+    let hint = match (elided, caught) {
+        (true, true) => format!("{name}, caught"),
+        (true, false) => format!("{name}, seen"),
+        (false, true) => "Caught".to_owned(),
+        (false, false) => "Seen".to_owned(),
+    };
+    response.on_hover_text(hint);
 }

@@ -33,9 +33,13 @@ pub fn share(
     done: Sender<Result<String, String>>,
 ) {
     let path = store.path(id).to_string_lossy().into_owned();
-    let shared = super::java(|env, activity| {
-        let path = env.new_string(&path)?;
-        let mime = env.new_string(mime(kind))?;
+    let _ = done.send(share_file(&path, mime(kind)).map(|()| String::new()));
+}
+
+pub fn share_file(path: &str, mime: &str) -> Result<(), String> {
+    super::java(|env, activity| {
+        let path = env.new_string(path)?;
+        let mime = env.new_string(mime)?;
         env.call_method(
             activity,
             "shareFile",
@@ -43,12 +47,8 @@ pub fn share(
             &[JValue::Object(&path), JValue::Object(&mime)],
         )
         .map(drop)
-    });
-    let _ = done.send(
-        shared
-            .map(|()| String::new())
-            .ok_or_else(|| "could not open the share sheet".into()),
-    );
+    })
+    .ok_or_else(|| "could not open the share sheet".into())
 }
 
 pub fn copy_text(text: &str) {

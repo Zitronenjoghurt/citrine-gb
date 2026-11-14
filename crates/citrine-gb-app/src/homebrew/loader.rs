@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_types,
+    reason = "the download job and the shelf both read and write one outcome, and citrine-gb-threads has no type for two writers yet"
+)]
+
 use super::{HomebrewGame, ShelfRom};
 use crate::progress::{Counter, Progress};
 use citrine_gb::rom::id::RomId;
@@ -176,7 +181,7 @@ mod web {
         fn fetch(&mut self, path: &'static str, bytes: u64) -> Download {
             let download = Download::new(bytes);
             let task = download.clone();
-            wasm_bindgen_futures::spawn_local(async move {
+            citrine_gb_threads::spawn_local(async move {
                 let result = read(path, &task).await.map_err(|err| format!("{err:?}"));
                 task.finish(result);
             });

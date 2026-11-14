@@ -1,0 +1,21 @@
+[package]
+name = "citrine-gb-bench"
+description = "Benchmarks for every console and the app, with their output checked in the same run."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+citrine-gb = { workspace = true, features = ["gba", "nds", "persistence"] }
+citrine-gb-threads = { workspace = true }
+brotli = "8.0.2"
+flate2 = "1"
+inferno = { version = "0.12", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10"
+toml = "1.0.3"
+zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2"] }

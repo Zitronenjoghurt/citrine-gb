@@ -47,7 +47,7 @@ class StartActivity : Activity() {
     }
 
     private fun start() {
-        startActivity(Intent(this, MainActivity::class.java))
+        startActivity(Intent(this, MainActivity::class.java).apply { intent.extras?.let(::putExtras) })
         finish()
     }
 

@@ -22,7 +22,7 @@ impl Layout {
                     live_starts: layout.live_starts,
                 }
             }
-            Generation::Three => Self {
+            Generation::Three | Generation::Four | Generation::Five => Self {
                 sram_size: crate::gen3::FLASH_SIZE,
                 live_starts: &[],
             },

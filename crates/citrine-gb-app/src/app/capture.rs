@@ -14,7 +14,7 @@ const RECORDING_LOAD: &str = "recording";
 impl Citrine {
     pub(super) fn media_saved(&mut self, id: MediaId, touch: bool) {
         let kind = id.kind().unwrap_or(MediaKind::Screenshot);
-        let in_play = touch || self.ui.settings.focus_mode || self.media_would_cover_game();
+        let in_play = touch || self.ui.focus_mode || self.media_would_cover_game();
         let toast = self
             .toasts
             .success(format!("{} saved to Media", kind.label()));
@@ -33,7 +33,7 @@ impl Citrine {
     }
 
     pub(super) fn show_media(&mut self, id: MediaId, touch: bool) {
-        if self.ui.settings.focus_mode && !touch {
+        if self.ui.focus_mode && !touch {
             self.toggle_focus_mode();
         }
         self.ui.media.highlight(id);
@@ -42,7 +42,7 @@ impl Citrine {
 
     pub(super) fn take_screenshot(&mut self) {
         match crate::media::save_screenshot(
-            &self.emulator,
+            &mut self.emulator,
             &mut self.media,
             self.ui.settings.screenshot_scale,
         ) {
@@ -104,7 +104,7 @@ impl Citrine {
     }
 
     fn recording_source(&self) -> recording::Source {
-        recording::Source::new(self.emulator.video(), self.emulator.timing())
+        recording::Source::laid_out(self.emulator.shown_layout(), self.emulator.timing())
     }
 
     pub(super) fn toggle_recording(&mut self) {
@@ -134,15 +134,18 @@ impl Citrine {
                 return;
             }
         }
-        let new = NewMedia::current(MediaKind::Recording, &self.emulator);
-        if let Err(err) = self
-            .emulator
-            .screen_recorder
-            .start(new, source, rate, scale)
+        let new = NewMedia::current(MediaKind::Recording, &mut self.emulator);
+        if let Err(err) =
+            self.emulator
+                .screen_recorder
+                .start(&self.files.spawner, new, source, rate, scale)
         {
             self.toasts
                 .error(format!("Could not start recording: {err}"));
+            return;
         }
+        let layout = self.emulator.shown_layout();
+        self.emulator.screen_recorder.lay_out(layout);
     }
 
     pub(super) fn codec_confirm(&mut self, ctx: &Context) {
@@ -160,7 +163,7 @@ impl Citrine {
             return;
         };
         self.codec_prompt = false;
-        if recording::download_codec(download) {
+        if recording::download_codec(&self.files.spawner, download) {
             self.record_when_ready = true;
         } else {
             self.toasts

@@ -1,4 +1,6 @@
 use crate::app::widgets::progress::ProgressBar;
+use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::settings::page::Page;
 use crate::icons;
 use crate::progress::{Counter, Progress};
 use crate::utils::file_loader::PickedFile;
@@ -9,7 +11,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub const EXPORT: &str = "Export";
 pub const IMPORT: &str = "Import";
-pub const DELETE: &str = "Delete";
+pub const DELETE: &str = "Delete everything";
+pub const DELETE_SHORT: &str = "Delete";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -84,14 +87,20 @@ const ROW_GAP: f32 = 8.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 
 pub fn show(ui: &mut Ui, state: &mut YourDataUi) {
-    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-        rows(ui, &state.rows);
-        ui.add_space(12.0);
-        buttons(ui, state);
-        if let Some((label, progress)) = load(state) {
-            ui.add_space(8.0);
-            ui.add(ProgressBar::new(&label, progress));
-        }
+    Page::show(ui, |page| {
+        page.plain(|ui| {
+            Form::show(ui, "your_data_rows", |form| {
+                form.custom(|ui| rows(ui, &state.rows));
+            })
+        });
+        page.plain(|ui| {
+            Form::show(ui, "your_data_buttons", |form| {
+                form.custom(|ui| buttons(ui, state));
+                if let Some((label, progress)) = load(state) {
+                    form.custom(|ui| ui.add(ProgressBar::new(&label, progress)));
+                }
+            })
+        });
     });
 }
 
@@ -121,12 +130,16 @@ fn rows(ui: &mut Ui, rows: &[(Kind, Tally)]) {
         .iter()
         .map(|(_, tally)| measure(size_text(tally), body.clone()))
         .fold(measure("999 KB".to_owned(), body.clone()), f32::max);
-    let count_widths: Vec<f32> = rows
+    let counts: Vec<(String, f32)> = rows
         .iter()
-        .map(|(kind, tally)| measure(count_text(kind, tally.count), body.clone()))
+        .map(|(kind, tally)| {
+            let count = count_text(kind, tally.count);
+            let width = measure(count.clone(), body.clone());
+            (count, width)
+        })
         .collect();
     let height = ui.spacing().interact_size.y;
-    for ((kind, tally), count_width) in rows.iter().zip(count_widths) {
+    for ((kind, tally), (count, count_width)) in rows.iter().zip(counts) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let name_width =
@@ -147,7 +160,7 @@ fn rows(ui: &mut Ui, rows: &[(Kind, Tally)]) {
                 Layout::right_to_left(Align::Center),
                 |ui| {
                     ui.set_width(count_width);
-                    ui.label(count_text(kind, tally.count));
+                    ui.label(count);
                 },
             );
             ui.add_space(ROW_GAP);
@@ -173,35 +186,48 @@ pub fn size_text(tally: &Tally) -> String {
 
 fn buttons(ui: &mut Ui, state: &mut YourDataUi) {
     let busy = loading(state);
-    let export = format!("{} {EXPORT}", icons::DOWNLOAD_SIMPLE);
-    let labels = [
-        (export, !busy, Request::Export),
-        (
-            format!("{} {IMPORT}", icons::UPLOAD_SIMPLE),
-            !busy,
-            Request::Import,
-        ),
-        (format!("{} {DELETE}", icons::TRASH), true, Request::Delete),
-    ];
     let spacing = ui.spacing().item_spacing.x;
     let padding = 2.0 * ui.spacing().button_padding.x;
     let available = ui.available_width();
     let share = ((available - 2.0 * spacing) / 3.0).max(0.0);
-    let widest = labels
+    let width = |text: &str| {
+        egui::WidgetText::from(text)
+            .into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Button,
+            )
+            .size()
+            .x
+            + padding
+    };
+    let tiers =
+        [(true, DELETE), (true, DELETE_SHORT), (false, DELETE_SHORT)].map(|(icon, delete)| {
+            [
+                (icons::DOWNLOAD_SIMPLE, EXPORT),
+                (icons::UPLOAD_SIMPLE, IMPORT),
+                (icons::TRASH, delete),
+            ]
+            .map(|(mark, label)| {
+                if icon {
+                    format!("{mark} {label}")
+                } else {
+                    label.to_owned()
+                }
+            })
+        });
+    let fitting = tiers
         .iter()
-        .map(|(text, _, _)| {
-            egui::WidgetText::from(text.as_str())
-                .into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Extend),
-                    f32::INFINITY,
-                    egui::TextStyle::Button,
-                )
-                .size()
-                .x
-                + padding
-        })
-        .fold(0.0, f32::max);
+        .find(|tier| tier.iter().all(|text| width(text) <= share))
+        .cloned();
+    let fits = fitting.is_some();
+    let [export, import, delete] = fitting.unwrap_or_else(|| tiers[0].clone());
+    let labels = [
+        (export, !busy, Request::Export),
+        (import, !busy, Request::Import),
+        (delete, true, Request::Delete),
+    ];
     let mut press = |ui: &mut Ui, width: f32| {
         for (text, enabled, request) in &labels {
             let button = egui::Button::new(text.as_str()).min_size(vec2(width, BUTTON_HEIGHT));
@@ -210,7 +236,7 @@ fn buttons(ui: &mut Ui, state: &mut YourDataUi) {
             }
         }
     };
-    if widest <= share {
+    if fits {
         ui.horizontal(|ui| press(ui, share));
     } else {
         press(ui, available);
@@ -263,5 +289,32 @@ mod tests {
                 .collect();
         }
         assert!(elided.is_empty(), "cut short: {elided:?}");
+    }
+
+    #[test]
+    fn the_default_dock_keeps_the_three_buttons_in_one_row() {
+        let ctx = egui::Context::default();
+        let mut state = YourDataUi::default();
+        let mut tops = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.allocate_ui(vec2(201.0, 400.0), |ui| buttons(ui, &mut state));
+                });
+            });
+            tops = output
+                .shapes
+                .into_iter()
+                .filter_map(|clipped| match clipped.shape {
+                    egui::Shape::Text(text) => Some(text.pos.y),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert_eq!(tops.len(), 3);
+        assert!(
+            tops.iter().all(|top| (top - tops[0]).abs() < 0.5),
+            "{tops:?}"
+        );
     }
 }

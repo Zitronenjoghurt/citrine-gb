@@ -1,8 +1,8 @@
 use citrine_gb_net::{
     Account, CHUNK_BYTES, Channel, ClientHandshake, ClientMsg, DeviceId, DeviceInfo, DeviceKey,
-    EndReason, ErrorCode, FriendState, GameKey, MAX_SCREEN_BYTES, NONCE_BYTES, Notice,
-    OLDEST_PROTOCOL_VERSION, OnlineId, PROTOCOL_VERSION, Presence, RelayId, RelayPassword, Sealed,
-    ServerInfo, ServerMsg, SessionId,
+    EndReason, ErrorCode, FriendState, GameKey, GtsReply, MAX_GTS_TARGET_CHARS, MAX_SCREEN_BYTES,
+    NET_WINDOW_BYTES, NONCE_BYTES, NetAddr, Notice, OLDEST_PROTOCOL_VERSION, OnlineId,
+    PROTOCOL_VERSION, Presence, RelayId, RelayPassword, Sealed, ServerInfo, ServerMsg, SessionId,
 };
 use citrine_gb_server::{Config, ConfigError, Running, StartError, start};
 use futures_util::{SinkExt, StreamExt};
@@ -1592,6 +1592,81 @@ async fn relay_off_with_web_on_still_serves_static_files() {
 }
 
 #[tokio::test]
+async fn static_files_send_the_isolation_headers_the_setting_asks_for() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("static")).unwrap();
+    std::fs::write(dir.path().join("static/index.html"), "<h1>citrine web</h1>").unwrap();
+    let s = server(dir.path(), &[("CITRINE_WEB", "true")]).await;
+    let r = http()
+        .get(format!("http://{}/", s.addr))
+        .send()
+        .await
+        .unwrap();
+    let headers = r.headers();
+    assert_eq!(
+        headers["cross-origin-embedder-policy-report-only"],
+        "require-corp; report-to=\"isolation\""
+    );
+    assert!(headers.contains_key("cross-origin-opener-policy-report-only"));
+    assert!(!headers.contains_key("cross-origin-embedder-policy"));
+    let r = http()
+        .post(format!("http://{}/isolation-reports", s.addr))
+        .body(r#"[{"type":"coep","url":"/","body":{"type":"corp","blockedURL":"https://x.example/a.png"}}]"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let missing = http()
+        .get(format!("http://{}/admin/icon.png", s.addr))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !missing
+            .headers()
+            .contains_key("cross-origin-opener-policy-report-only")
+    );
+    s.stop().await;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("static")).unwrap();
+    std::fs::write(dir.path().join("static/index.html"), "<h1>citrine web</h1>").unwrap();
+    let s = server(
+        dir.path(),
+        &[("CITRINE_WEB", "true"), ("CITRINE_ISOLATION", "on")],
+    )
+    .await;
+    for path in ["/", "/missing.js"] {
+        let r = http()
+            .get(format!("http://{}{path}", s.addr))
+            .send()
+            .await
+            .unwrap();
+        let headers = r.headers();
+        assert_eq!(
+            headers["cross-origin-opener-policy"], "same-origin",
+            "{path}"
+        );
+        assert_eq!(
+            headers["cross-origin-embedder-policy"], "require-corp",
+            "{path}"
+        );
+        assert_eq!(
+            headers["cross-origin-resource-policy"], "same-origin",
+            "{path}"
+        );
+    }
+    let r = http()
+        .post(format!("http://{}/isolation-reports", s.addr))
+        .body("[]")
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r.status(), 204);
+    s.stop().await;
+}
+
+#[tokio::test]
 async fn web_off_returns_404_for_the_root() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("static")).unwrap();
@@ -2041,6 +2116,68 @@ async fn discord_pictures_turned_off_are_refused_and_hidden() {
     assert_eq!(r.status(), 200);
     let mut late = Client::connect(s.addr).await;
     assert!(late.hello().await.pictures);
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn a_gts_call_gets_a_token_until_the_panel_turns_the_gts_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+    let target = "/pokemondpds/worldexchange/info.asp?pid=1234567".to_string();
+    c.send(ClientMsg::Gts {
+        call: 9,
+        target: target.clone(),
+    })
+    .await;
+    match c.recv().await {
+        ServerMsg::Gts {
+            call: 9,
+            reply: GtsReply::Body(token),
+        } => {
+            assert_eq!(token.len(), 32);
+            assert!(token.iter().all(u8::is_ascii_alphanumeric));
+        }
+        other => panic!("expected a token, got {other:?}"),
+    }
+    c.send(ClientMsg::Gts {
+        call: 10,
+        target: "/pokemondpds/worldexchange/info.asp".to_string(),
+    })
+    .await;
+    assert_eq!(
+        c.recv().await,
+        ServerMsg::Gts {
+            call: 10,
+            reply: GtsReply::Status(400)
+        }
+    );
+    c.send(ClientMsg::Gts {
+        call: 11,
+        target: "x".repeat(MAX_GTS_TARGET_CHARS + 1),
+    })
+    .await;
+    assert!(matches!(c.recv().await, ServerMsg::Error(_)));
+    c.send(ClientMsg::GtsMine).await;
+    assert_eq!(c.recv().await, ServerMsg::GtsMine(Vec::new()));
+
+    let admin = Admin::login(s.addr).await;
+    let page = admin.get("/admin/settings").await;
+    assert!(page.contains(r#"name="gts" type="checkbox" class="switch" value="on" checked>"#));
+    let fields = [
+        ("name", "Lemon"),
+        ("sign_ups", "on"),
+        ("quota_mb", "100"),
+        ("max_message_kb", "64"),
+        ("max_file_mb", "25"),
+    ];
+    admin.post("/admin/settings", &fields).await;
+    let page = admin.get("/admin/settings").await;
+    assert!(page.contains(r#"name="gts" type="checkbox" class="switch" value="on">"#));
+    c.send(ClientMsg::Gts { call: 12, target }).await;
+    assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::GtsOff));
+    c.send(ClientMsg::GtsMine).await;
+    assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::GtsOff));
     s.stop().await;
 }
 
@@ -2911,5 +3048,517 @@ async fn a_device_signed_out_from_another_loses_the_account() {
     mac.closed().await;
     let (fresh, _) = Client::sign_in(s.addr, &id).await;
     drop(fresh);
+    s.stop().await;
+}
+
+async fn udp_echo() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut buf = [0; 2048];
+        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
+            let _ = socket.send_to(&buf[..n], from).await;
+        }
+    });
+    (addr, task)
+}
+
+fn net_addr(addr: SocketAddr) -> NetAddr {
+    match addr {
+        SocketAddr::V4(addr) => addr.into(),
+        SocketAddr::V6(_) => panic!("expected IPv4"),
+    }
+}
+
+#[tokio::test]
+async fn ds_net_carries_udp_and_tcp_for_a_signed_in_player() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[("CITRINE_DS_NET_PRIVATE", "on")]).await;
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+
+    let (echo, _echo) = udp_echo().await;
+    c.send(ClientMsg::NetSend {
+        port: 5000,
+        to: net_addr(echo),
+        data: b"hello".to_vec(),
+    })
+    .await;
+    assert_eq!(
+        c.expect("udp echo", |m| matches!(m, ServerMsg::NetHeard { .. }))
+            .await,
+        ServerMsg::NetHeard {
+            port: 5000,
+            from: net_addr(echo),
+            data: b"hello".to_vec(),
+        }
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut conn, _) = listener.accept().await.unwrap();
+        let mut buf = [0; 64];
+        let n = conn.read(&mut buf).await.unwrap();
+        conn.write_all(&buf[..n]).await.unwrap();
+    });
+    c.send(ClientMsg::NetOpen {
+        stream: 1,
+        to: net_addr(tcp),
+    })
+    .await;
+    assert_eq!(
+        c.recv().await,
+        ServerMsg::NetOpened {
+            stream: 1,
+            ok: true
+        }
+    );
+    c.send(ClientMsg::NetWrite {
+        stream: 1,
+        data: b"GET".to_vec(),
+    })
+    .await;
+    assert_eq!(
+        c.expect("the echo", |m| matches!(m, ServerMsg::NetRead { .. }))
+            .await,
+        ServerMsg::NetRead {
+            stream: 1,
+            data: b"GET".to_vec(),
+        }
+    );
+    assert_eq!(
+        c.expect("the close", |m| matches!(m, ServerMsg::NetClosed { .. }))
+            .await,
+        ServerMsg::NetClosed { stream: 1 }
+    );
+    c.send(ClientMsg::NetWrite {
+        stream: 1,
+        data: b"late".to_vec(),
+    })
+    .await;
+    assert_eq!(c.recv().await, ServerMsg::NetClosed { stream: 1 });
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn ds_net_hears_replies_on_more_ds_ports_than_it_keeps_sockets_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(
+        dir.path(),
+        &[
+            ("CITRINE_DS_NET_PRIVATE", "on"),
+            ("CITRINE_DS_NET_PORTS", "8"),
+        ],
+    )
+    .await;
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+    let (echo, _echo) = udp_echo().await;
+    for port in 5000..5020u16 {
+        c.send(ClientMsg::NetSend {
+            port,
+            to: net_addr(echo),
+            data: port.to_le_bytes().to_vec(),
+        })
+        .await;
+        assert_eq!(
+            c.expect("udp echo", |m| matches!(m, ServerMsg::NetHeard { .. }))
+                .await,
+            ServerMsg::NetHeard {
+                port,
+                from: net_addr(echo),
+                data: port.to_le_bytes().to_vec(),
+            }
+        );
+    }
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn ds_net_hairpins_between_two_players_on_the_server_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let public = "203.0.113.9";
+    let s = server(
+        dir.path(),
+        &[
+            ("CITRINE_DS_NET_PRIVATE", "on"),
+            ("CITRINE_DS_NET_PUBLIC_IP", public),
+        ],
+    )
+    .await;
+    let (mut a, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+    let (mut b, _) = Client::sign_up(s.addr, &RelayId::random(), "Ben").await;
+
+    let seen = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let ip: std::net::Ipv4Addr = public.parse().unwrap();
+    let a_public = seen_from(&mut a, 1000, &seen, ip).await;
+    let b_public = seen_from(&mut b, 2000, &seen, ip).await;
+
+    a.send(ClientMsg::NetSend {
+        port: 1000,
+        to: b_public,
+        data: b"unasked".to_vec(),
+    })
+    .await;
+    b.quiet().await;
+    b.send(ClientMsg::NetSend {
+        port: 2000,
+        to: a_public,
+        data: b"hi ana".to_vec(),
+    })
+    .await;
+    assert_eq!(
+        a.expect("hairpin", |m| matches!(m, ServerMsg::NetHeard { .. }))
+            .await,
+        ServerMsg::NetHeard {
+            port: 1000,
+            from: b_public,
+            data: b"hi ana".to_vec(),
+        }
+    );
+
+    a.send(ClientMsg::NetSend {
+        port: 1000,
+        to: b_public,
+        data: b"hi ben".to_vec(),
+    })
+    .await;
+    assert_eq!(
+        b.expect("reply", |m| matches!(m, ServerMsg::NetHeard { .. }))
+            .await,
+        ServerMsg::NetHeard {
+            port: 2000,
+            from: a_public,
+            data: b"hi ben".to_vec(),
+        }
+    );
+    s.stop().await;
+}
+
+async fn seen_from(
+    c: &mut Client,
+    port: u16,
+    seen: &tokio::net::UdpSocket,
+    ip: std::net::Ipv4Addr,
+) -> NetAddr {
+    c.send(ClientMsg::NetSend {
+        port,
+        to: net_addr(seen.local_addr().unwrap()),
+        data: b"where am i".to_vec(),
+    })
+    .await;
+    let mut buf = [0; 64];
+    let (_, out) = tokio::time::timeout(Duration::from_secs(5), seen.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    NetAddr {
+        ip: ip.octets(),
+        port: out.port(),
+    }
+}
+
+async fn leased(c: &mut Client) -> [u8; 4] {
+    c.send(ClientMsg::NetLease { want: None }).await;
+    match c
+        .expect("a lease", |m| matches!(m, ServerMsg::NetLeased { .. }))
+        .await
+    {
+        ServerMsg::NetLeased { ip: Some(ip) } => ip,
+        other => panic!("expected a lease, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ds_net_carries_datagrams_between_two_players_leases() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let (mut a, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+    let (mut b, _) = Client::sign_up(s.addr, &RelayId::random(), "Ben").await;
+    let a_lease = leased(&mut a).await;
+    let b_lease = leased(&mut b).await;
+    assert_ne!(a_lease, b_lease);
+    assert_eq!(leased(&mut a).await, a_lease);
+
+    a.send(ClientMsg::NetSend {
+        port: 1000,
+        to: NetAddr {
+            ip: b_lease,
+            port: 2000,
+        },
+        data: b"first".to_vec(),
+    })
+    .await;
+    assert_eq!(
+        b.expect("lan first", |m| matches!(m, ServerMsg::NetHeard { .. }))
+            .await,
+        ServerMsg::NetHeard {
+            port: 2000,
+            from: NetAddr {
+                ip: a_lease,
+                port: 1000,
+            },
+            data: b"first".to_vec(),
+        }
+    );
+    b.send(ClientMsg::NetSend {
+        port: 2000,
+        to: NetAddr {
+            ip: a_lease,
+            port: 1000,
+        },
+        data: b"hi ana".to_vec(),
+    })
+    .await;
+    assert_eq!(
+        a.expect("lan", |m| matches!(m, ServerMsg::NetHeard { .. }))
+            .await,
+        ServerMsg::NetHeard {
+            port: 1000,
+            from: NetAddr {
+                ip: b_lease,
+                port: 2000,
+            },
+            data: b"hi ana".to_vec(),
+        }
+    );
+    a.send(ClientMsg::NetSend {
+        port: 1000,
+        to: NetAddr {
+            ip: b_lease,
+            port: 2000,
+        },
+        data: b"hi ben".to_vec(),
+    })
+    .await;
+    assert_eq!(
+        b.expect("lan reply", |m| matches!(m, ServerMsg::NetHeard { .. }))
+            .await,
+        ServerMsg::NetHeard {
+            port: 2000,
+            from: NetAddr {
+                ip: a_lease,
+                port: 1000,
+            },
+            data: b"hi ben".to_vec(),
+        }
+    );
+
+    drop(b);
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Cai").await;
+    let c_lease = leased(&mut c).await;
+    assert!(c_lease != a_lease && c_lease != b_lease);
+    c.send(ClientMsg::NetSend {
+        port: 3000,
+        to: NetAddr {
+            ip: a_lease,
+            port: 1000,
+        },
+        data: b"open".to_vec(),
+    })
+    .await;
+    a.send(ClientMsg::NetSend {
+        port: 1000,
+        to: NetAddr {
+            ip: b_lease,
+            port: 2000,
+        },
+        data: b"anyone".to_vec(),
+    })
+    .await;
+    a.send(ClientMsg::NetSend {
+        port: 1000,
+        to: NetAddr {
+            ip: c_lease,
+            port: 3000,
+        },
+        data: b"hi cai".to_vec(),
+    })
+    .await;
+    let ServerMsg::NetHeard { data, .. } = c
+        .expect("lan", |m| matches!(m, ServerMsg::NetHeard { .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(data, b"hi cai");
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn ds_net_refuses_private_addresses_and_other_tcp_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+
+    let (echo, _echo) = udp_echo().await;
+    c.send(ClientMsg::NetSend {
+        port: 5000,
+        to: net_addr(echo),
+        data: b"hello".to_vec(),
+    })
+    .await;
+    c.quiet().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    c.send(ClientMsg::NetOpen {
+        stream: 1,
+        to: net_addr(listener.local_addr().unwrap()),
+    })
+    .await;
+    assert_eq!(
+        c.recv().await,
+        ServerMsg::NetOpened {
+            stream: 1,
+            ok: false
+        }
+    );
+    c.send(ClientMsg::NetOpen {
+        stream: 2,
+        to: NetAddr {
+            ip: [1, 1, 1, 1],
+            port: 22,
+        },
+    })
+    .await;
+    assert_eq!(
+        c.recv().await,
+        ServerMsg::NetOpened {
+            stream: 2,
+            ok: false
+        }
+    );
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn ds_net_paces_a_fast_upload_and_reads_only_what_the_window_allows() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(
+        dir.path(),
+        &[
+            ("CITRINE_DS_NET_PRIVATE", "on"),
+            ("CITRINE_DS_NET_KB_PER_SECOND", "16"),
+        ],
+    )
+    .await;
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp = listener.local_addr().unwrap();
+    let upload = 96 * 1024;
+    let (far_got, far) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.unwrap();
+        let mut got = vec![0; upload];
+        conn.read_exact(&mut got).await.unwrap();
+        far_got.send(got.len()).ok();
+        conn.write_all(&vec![7; 4 * NET_WINDOW_BYTES]).await.ok();
+    });
+    c.send(ClientMsg::NetOpen {
+        stream: 1,
+        to: net_addr(tcp),
+    })
+    .await;
+    assert_eq!(
+        c.recv().await,
+        ServerMsg::NetOpened {
+            stream: 1,
+            ok: true
+        }
+    );
+
+    let started = std::time::Instant::now();
+    let (mut sent, mut written) = (0, 0);
+    while written < upload {
+        while sent < upload && sent - written + 16 * 1024 <= NET_WINDOW_BYTES {
+            c.send(ClientMsg::NetWrite {
+                stream: 1,
+                data: vec![1; 16 * 1024],
+            })
+            .await;
+            sent += 16 * 1024;
+        }
+        match c
+            .expect("a write", |m| matches!(m, ServerMsg::NetWritten { .. }))
+            .await
+        {
+            ServerMsg::NetWritten { stream: 1, total } => written = total as usize,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(
+        started.elapsed() >= Duration::from_secs(3),
+        "96 KB at 16 KB per second with a 32 KB burst took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(far.await.unwrap(), upload);
+
+    let mut read = 0;
+    while read < NET_WINDOW_BYTES {
+        match c
+            .expect("a read", |m| matches!(m, ServerMsg::NetRead { .. }))
+            .await
+        {
+            ServerMsg::NetRead { data, .. } => read += data.len(),
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(read, NET_WINDOW_BYTES);
+    c.quiet().await;
+    c.send(ClientMsg::NetTaken {
+        stream: 1,
+        total: 1024,
+    })
+    .await;
+    match c
+        .expect("more after the take", |m| {
+            matches!(m, ServerMsg::NetRead { .. })
+        })
+        .await
+    {
+        ServerMsg::NetRead { data, .. } => assert!(data.len() <= 1024),
+        _ => unreachable!(),
+    }
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn ds_net_off_in_the_admin_panel_refuses_net_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[("CITRINE_DS_NET_PRIVATE", "on")]).await;
+    let (mut c, _) = Client::sign_up(s.addr, &RelayId::random(), "Ana").await;
+
+    let admin = Admin::login(s.addr).await;
+    let page = admin.get("/admin/settings").await;
+    assert!(
+        page.contains(r#"name="ds_online" type="checkbox" class="switch" value="on" checked>"#)
+    );
+    let fields = [
+        ("name", "Lemon"),
+        ("sign_ups", "on"),
+        ("gts", "on"),
+        ("quota_mb", "100"),
+        ("max_message_kb", "64"),
+        ("max_file_mb", "25"),
+    ];
+    admin.post("/admin/settings", &fields).await;
+    let page = admin.get("/admin/settings").await;
+    assert!(page.contains(r#"name="ds_online" type="checkbox" class="switch" value="on">"#));
+
+    let (echo, _echo) = udp_echo().await;
+    c.send(ClientMsg::NetSend {
+        port: 5000,
+        to: net_addr(echo),
+        data: b"hello".to_vec(),
+    })
+    .await;
+    assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::DsNetOff));
+    c.send(ClientMsg::NetOpen {
+        stream: 1,
+        to: net_addr(echo),
+    })
+    .await;
+    assert_eq!(c.recv().await, ServerMsg::Error(ErrorCode::DsNetOff));
     s.stop().await;
 }

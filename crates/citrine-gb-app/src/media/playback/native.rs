@@ -208,6 +208,7 @@ struct Video {
     next: usize,
     unit: Vec<u8>,
     rgba: Vec<u8>,
+    sharp: bool,
 }
 
 impl Video {
@@ -226,6 +227,7 @@ impl Video {
             next: 0,
             unit: Vec::new(),
             rgba: Vec::new(),
+            sharp: false,
         })
     }
 
@@ -264,7 +266,7 @@ impl Video {
                 let (width, height) = yuv.dimensions();
                 self.rgba.resize(width * height * 4, 0);
                 yuv.write_rgba8(&mut self.rgba);
-                shown = Some(super::shrink(&self.rgba, width, height));
+                shown = Some(super::shown(&self.rgba, width, height, &mut self.sharp));
             }
         }
         shown

@@ -122,6 +122,14 @@ pub fn my_unit<'a>(
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 impl Shots {
+    pub fn may_take(&self, now: std::time::Instant, every: ShotInterval) -> bool {
+        self.running_since
+            .is_none_or(|since| now.duration_since(since).as_secs() >= FIRST_SHOT_AFTER)
+            && self
+                .checked
+                .is_none_or(|at| now.duration_since(at).as_secs() >= every.seconds())
+    }
+
     pub fn due(
         &mut self,
         now: std::time::Instant,

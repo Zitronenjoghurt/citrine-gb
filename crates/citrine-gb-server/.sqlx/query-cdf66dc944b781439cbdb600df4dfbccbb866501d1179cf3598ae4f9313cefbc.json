@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(DISTINCT p.account_id) AS \"active!: i64\" FROM gts_profiles p\n                WHERE p.last_search >= ?1 OR p.created_at >= ?1\n                   OR EXISTS (SELECT 1 FROM gts_records r WHERE r.pid = p.pid AND r.deposited_at >= ?1)",
+  "describe": {
+    "columns": [
+      {
+        "name": "active!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cdf66dc944b781439cbdb600df4dfbccbb866501d1179cf3598ae4f9313cefbc"
+}

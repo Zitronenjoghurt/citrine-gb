@@ -5,6 +5,7 @@ use crate::app::mobile::sheet::{self, Amount, percent};
 use crate::app::ui_state::settings::Settings;
 use crate::app::widgets::camera_view;
 use crate::app::widgets::info_mark::info_mark;
+use crate::app::widgets::settings::page::{Heading, Page};
 use crate::app::widgets::tilt;
 use crate::emulator::gimmicks::camera::{CameraView, Feed};
 use crate::emulator::gimmicks::clock::{hours_label, offset_label};
@@ -13,14 +14,15 @@ use crate::emulator::gimmicks::settings::{
     RECENTER,
 };
 use crate::emulator::gimmicks::{CameraSource, LightSource};
-use egui::{Color32, Context, FontId, Rect, RichText, Ui};
+use crate::icons;
+use egui::{Color32, Context, FontId, Rect, RichText};
 use strum::IntoEnumIterator;
 
 const HOUR: i64 = 3600;
 const DOT: f32 = 26.0;
 
 impl Citrine {
-    pub(super) fn cartridge_rows(&mut self, ui: &mut Ui) -> Option<Sheet> {
+    pub(super) fn cartridge_rows(&mut self, page: &mut Page) -> Option<Sheet> {
         let cart = self.emulator.cart();
         let rom_key = self.emulator.rom_key()?.to_owned();
         if !cart.any() {
@@ -36,107 +38,111 @@ impl Citrine {
         let mut open = None;
         let mut level = false;
         let mut choose = false;
-        kit::section_label(ui, "Cartridge");
-        kit::list(ui, |list| {
-            if cart.clock
-                && list
-                    .row(Row::new("Clock").value(offset_label(s.gimmicks.clock_offset(&rom_key))))
-                    .clicked()
-            {
-                open = Some(Sheet::Clock);
-            }
-            if cart.rumble {
-                s.dirty |= list.switch(SwitchRow::new("Rumble", &mut s.gimmicks.rumble));
-            }
-            if cart.motion() {
-                let row = list.row(
-                    Row::new(if cart.tilt { "Tilt" } else { "Rotate" })
-                        .value(RECENTER)
-                        .accent()
-                        .no_chevron(),
-                );
-                level = row.clicked();
-                let ui = list.ui();
-                let value = ui
-                    .painter()
-                    .layout_no_wrap(
-                        RECENTER.to_owned(),
-                        FontId::proportional(15.0),
-                        Color32::WHITE,
-                    )
-                    .size()
-                    .x;
-                let dot = Rect::from_center_size(
-                    egui::pos2(
-                        row.rect.right() - kit::VALUE_EDGE - value - 10.0 - DOT / 2.0,
-                        row.rect.center().y,
-                    ),
-                    egui::vec2(DOT, DOT),
-                );
-                tilt::paint(ui.painter(), ui.visuals(), dot, motion);
-            }
-            if cart.light {
-                let mut sensor = light_sensor && s.gimmicks.light_source == LightSource::Sensor;
-                if light_sensor && list.switch(SwitchRow::new("Light sensor", &mut sensor)) {
-                    s.gimmicks.light_source = if sensor {
-                        LightSource::Sensor
-                    } else {
-                        LightSource::Slider
-                    };
-                    s.dirty = true;
-                }
-                if !sensor
+        page.section(Heading::new(icons::GAME_CONTROLLER, "Cartridge"), |ui| {
+            kit::list(ui, |list| {
+                if cart.clock
                     && list
-                        .row(Row::new("Sunlight").value(percent(s.gimmicks.light.into())))
-                        .clicked()
-                {
-                    open = Some(Sheet::Sunlight);
-                }
-            }
-            if cart.camera {
-                let picture = !live_camera || s.gimmicks.camera == CameraSource::Picture;
-                if !live_camera {
-                    choose = list
-                        .row(Row::new("Camera").value(if picture_set {
-                            "Picture chosen"
-                        } else {
-                            "No picture"
-                        }))
-                        .clicked();
-                } else {
-                    let detail = if picture {
-                        ""
-                    } else {
-                        camera_error.as_deref().unwrap_or_default()
-                    };
-                    if list
                         .row(
-                            Row::new("Camera")
-                                .value(s.gimmicks.camera.to_string())
-                                .detail(detail),
+                            Row::new("Clock")
+                                .value(offset_label(s.gimmicks.clock_offset(&rom_key))),
                         )
                         .clicked()
+                {
+                    open = Some(Sheet::Clock);
+                }
+                if cart.rumble {
+                    s.dirty |= list.switch(SwitchRow::new("Rumble", &mut s.gimmicks.rumble));
+                }
+                if cart.motion() {
+                    let row = list.row(
+                        Row::new(if cart.tilt { "Tilt" } else { "Rotate" })
+                            .value(RECENTER)
+                            .accent()
+                            .no_chevron(),
+                    );
+                    level = row.clicked();
+                    let ui = list.ui();
+                    let value = ui
+                        .painter()
+                        .layout_no_wrap(
+                            RECENTER.to_owned(),
+                            FontId::proportional(15.0),
+                            Color32::WHITE,
+                        )
+                        .size()
+                        .x;
+                    let dot = Rect::from_center_size(
+                        egui::pos2(
+                            row.rect.right() - kit::VALUE_EDGE - value - 10.0 - DOT / 2.0,
+                            row.rect.center().y,
+                        ),
+                        egui::vec2(DOT, DOT),
+                    );
+                    tilt::paint(ui.painter(), ui.visuals(), dot, motion);
+                }
+                if cart.light {
+                    let mut sensor = light_sensor && s.gimmicks.light_source == LightSource::Sensor;
+                    if light_sensor && list.switch(SwitchRow::new("Light sensor", &mut sensor)) {
+                        s.gimmicks.light_source = if sensor {
+                            LightSource::Sensor
+                        } else {
+                            LightSource::Slider
+                        };
+                        s.dirty = true;
+                    }
+                    if !sensor
+                        && list
+                            .row(Row::new("Sunlight").value(percent(s.gimmicks.light.into())))
+                            .clicked()
                     {
-                        open = Some(Sheet::Camera);
+                        open = Some(Sheet::Sunlight);
                     }
                 }
-                if live_camera && picture {
-                    choose = list.row(Row::new("Choose picture")).clicked();
+                if cart.camera {
+                    let picture = !live_camera || s.gimmicks.camera == CameraSource::Picture;
+                    if !live_camera {
+                        choose = list
+                            .row(Row::new("Camera").value(if picture_set {
+                                "Picture chosen"
+                            } else {
+                                "No picture"
+                            }))
+                            .clicked();
+                    } else {
+                        let detail = if picture {
+                            ""
+                        } else {
+                            camera_error.as_deref().unwrap_or_default()
+                        };
+                        if list
+                            .row(
+                                Row::new("Camera")
+                                    .value(s.gimmicks.camera.to_string())
+                                    .detail(detail),
+                            )
+                            .clicked()
+                        {
+                            open = Some(Sheet::Camera);
+                        }
+                    }
+                    if live_camera && picture {
+                        choose = list.row(Row::new("Choose picture")).clicked();
+                    }
                 }
-            }
-            if cart.printer {
-                let mut on = s.gimmicks.printer(&rom_key);
-                let detail = (!printer_free).then_some(PRINTER_LINKED);
-                if list.switch(
-                    SwitchRow::new("Printer", &mut on)
-                        .info(PRINTER_HINT)
-                        .detail(detail)
-                        .enabled(printer_free),
-                ) {
-                    s.gimmicks.set_printer(&rom_key, on);
-                    s.dirty = true;
+                if cart.printer {
+                    let mut on = s.gimmicks.printer(&rom_key);
+                    let detail = (!printer_free).then_some(PRINTER_LINKED);
+                    if list.switch(
+                        SwitchRow::new("Printer", &mut on)
+                            .info(PRINTER_HINT)
+                            .detail(detail)
+                            .enabled(printer_free),
+                    ) {
+                        s.gimmicks.set_printer(&rom_key, on);
+                        s.dirty = true;
+                    }
                 }
-            }
+            })
         });
         if level {
             self.centre_tilt();

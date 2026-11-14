@@ -67,10 +67,14 @@ impl ServerAddress {
     }
 
     pub fn relay_url(&self) -> String {
+        self.socket_url("/relay")
+    }
+
+    pub fn socket_url(&self, path: &str) -> String {
         let scheme = if self.secure { "wss" } else { "ws" };
         match self.port {
-            Some(port) => format!("{scheme}://{}:{port}/relay", self.host),
-            None => format!("{scheme}://{}/relay", self.host),
+            Some(port) => format!("{scheme}://{}:{port}{path}", self.host),
+            None => format!("{scheme}://{}{path}", self.host),
         }
     }
 

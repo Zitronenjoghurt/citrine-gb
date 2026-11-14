@@ -34,10 +34,14 @@ impl Citrine {
                 } else {
                     ui.add_space(8.0);
                 }
+                let ctx = ui.ctx().clone();
                 kit::list(ui, |list| {
                     for &(index, game) in games {
                         let tags = game.tag_str();
                         let mut row = Row::new(game.title).detail(&tags).trailing(icons::INFO);
+                        if let Some(picture) = game.icon_texture(&ctx) {
+                            row = row.icon(console.icon()).picture(Some(picture));
+                        }
                         if is_running(game, running.as_deref()) {
                             row = row.value(format!("{} Resume", icons::PLAY)).accent();
                         }

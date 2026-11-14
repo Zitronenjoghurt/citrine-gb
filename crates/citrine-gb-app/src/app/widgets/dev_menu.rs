@@ -8,7 +8,7 @@ pub struct DevSection {
     pub tools: &'static [(&'static str, Tab)],
 }
 
-pub const DEV_SECTIONS: [DevSection; 3] = [
+pub const DEV_SECTIONS: [DevSection; 4] = [
     DevSection {
         title: "Code",
         tools: &[
@@ -16,6 +16,10 @@ pub const DEV_SECTIONS: [DevSection; 3] = [
             (icons::CPU, Tab::Registers),
             (icons::MEMORY, Tab::Tool(Tool::Memory)),
         ],
+    },
+    DevSection {
+        title: "Cart",
+        tools: &[(icons::FOLDER_OPEN, Tab::DsFiles)],
     },
     DevSection {
         title: "Video and sound",
@@ -28,6 +32,7 @@ pub const DEV_SECTIONS: [DevSection; 3] = [
         title: "App",
         tools: &[
             (icons::GAUGE, Tab::Performance),
+            (icons::TREE_STRUCTURE, Tab::Threads),
             (icons::SPEAKER_HIGH, Tab::AudioDebug),
             (icons::GAME_CONTROLLER, Tab::ControllerDebug),
             (icons::WRENCH, Tab::DebugActions),
@@ -58,9 +63,14 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const NOT_DEV: [Tab; 14] = [
+    const NOT_DEV: [Tab; 23] = [
+        Tab::Achievements,
         Tab::GameBoy,
+        Tab::BottomScreen,
+        Tab::SecondScreens,
         Tab::GameInfo,
+        Tab::Games,
+        Tab::Cheats,
         Tab::Settings,
         Tab::Saves,
         Tab::Media,
@@ -73,6 +83,10 @@ mod tests {
         Tab::RoomChat,
         Tab::TimeControl,
         Tab::ApuWaves,
+        Tab::Walker,
+        Tab::Gts,
+        Tab::DsFile(0),
+        Tab::RomFolders,
     ];
 
     #[test]

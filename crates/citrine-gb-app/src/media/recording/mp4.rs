@@ -63,6 +63,21 @@ impl Track {
             _ => self.chunks.push((offset, 1)),
         }
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stretch(&mut self, extra: u32) {
+        let Some((count, delta)) = self.durations.last_mut() else {
+            return;
+        };
+        let longer = *delta + extra;
+        if *count == 1 {
+            *delta = longer;
+        } else {
+            *count -= 1;
+            self.durations.push((1, longer));
+        }
+        self.total += extra as u64;
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -250,6 +265,10 @@ impl<W: Write + Seek> Mp4Writer<W> {
     pub fn write_video(&mut self, data: &[u8], duration: u32, sync: bool) -> io::Result<()> {
         self.layout.add_video(data.len(), duration, sync);
         self.out.write_all(data)
+    }
+
+    pub fn stretch_video(&mut self, extra: u32) {
+        self.layout.video_track.stretch(extra);
     }
 
     pub fn write_audio(&mut self, data: &[u8], duration: u32) -> io::Result<()> {
@@ -456,4 +475,22 @@ fn sample_tables(out: &mut Vec<u8>, track: &Track) {
             b.extend_from_slice(&offset.to_be_bytes());
         }
     });
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stretched_sample_holds_its_picture_for_the_extra_time() {
+        let mut track = Track::default();
+        for offset in 0..3 {
+            track.push(1, 10, offset == 0, offset, true);
+        }
+        track.stretch(30);
+        track.push(1, 10, false, 3, true);
+        assert_eq!(track.durations, vec![(2, 10), (1, 40), (1, 10)]);
+        assert_eq!(track.total, 70);
+        assert_eq!(track.sizes.len(), 4);
+    }
 }

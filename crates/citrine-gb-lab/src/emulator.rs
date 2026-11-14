@@ -29,7 +29,7 @@ impl Frame {
 
     pub fn canonical_for(console: ConsoleKind) -> fn(&Frame, &mut Frame) {
         match console {
-            ConsoleKind::Gba => Frame::rgb555_into,
+            ConsoleKind::Gba | ConsoleKind::Nds => Frame::rgb555_into,
             ConsoleKind::Gb | ConsoleKind::Gbc => Frame::normalize_into,
         }
     }

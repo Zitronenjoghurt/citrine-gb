@@ -23,13 +23,25 @@ impl Emulator {
         log: Option<&mut PadLog>,
         mut session: Option<&mut PlaySession>,
     ) -> GbResult<()> {
-        self.update_avg_timer.start();
+        self.clock.set_matching(
+            self.match_screen && session.is_none() && !self.linked() && !self.partnered(),
+        );
+        if self.lent.is_some() {
+            return self.finish_lent(ctx);
+        }
+        self.settle(ctx);
+        let lent_frames = self.session_lent.take();
+        if lent_frames.is_none() {
+            self.update_avg_timer.start();
+        }
 
         if self.texture.is_none() {
             self.update_texture(ctx);
         }
 
-        self.handle_input(ctx, pads, bindings, capture, log);
+        if lent_frames.is_none() {
+            self.handle_input(ctx, pads, bindings, capture, log);
+        }
 
         if let Some(session) = session.as_deref_mut() {
             if let Some(back) = session.take_returned() {
@@ -42,7 +54,18 @@ impl Emulator {
                 session.give_state(self.encoded_state()?, self.drop_history.take());
             }
             if session.runs_engine() {
-                if self.advance_rollback(web_time::Instant::now(), session) {
+                let ran = match lent_frames {
+                    Some(true) => {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if !session.wait_frames(self.frame_wait) {
+                            self.late_frames += 1;
+                        }
+                        self.finish_rollback(session)
+                    }
+                    Some(false) => false,
+                    None => self.advance_rollback(web_time::Instant::now(), session),
+                };
+                if ran {
                     self.update_texture(ctx);
                     self.total_frames = self.total_frames.wrapping_add(1);
                 }
@@ -80,23 +103,58 @@ impl Emulator {
         Ok(())
     }
 
+    pub(super) fn begin_rollback(
+        &mut self,
+        ctx: &egui::Context,
+        pads: &mut dyn PadSource,
+        bindings: &KeyBindings,
+        capture: &mut BindingCapture,
+        log: Option<&mut PadLog>,
+        session: &mut PlaySession,
+    ) {
+        if !session.runs_engine() || !session.engine_on_worker() || self.texture.is_none() {
+            return;
+        }
+        self.update_avg_timer.start();
+        self.handle_input(ctx, pads, bindings, capture, log);
+        let now = web_time::Instant::now();
+        let frames = self.rollback_pads(now, session);
+        self.session_lent = Some(frames.is_some());
+        if let Some(frames) = frames {
+            session.set_touch(self.touch);
+            session.run_frames(frames, now);
+        }
+    }
+
     pub(super) fn advance_rollback(
         &mut self,
         now: web_time::Instant,
         session: &mut PlaySession,
     ) -> bool {
+        let Some(frames) = self.rollback_pads(now, session) else {
+            return false;
+        };
+        session.set_touch(self.touch);
+        session.run_frames(frames, now);
+        self.finish_rollback(session)
+    }
+
+    fn rollback_pads(
+        &mut self,
+        now: web_time::Instant,
+        session: &mut PlaySession,
+    ) -> Option<Vec<Keys>> {
         let dt = match self.last_update {
             Some(last) => now.duration_since(last).as_secs_f64(),
             None => 0.0,
         };
         self.last_update = Some(now);
         if !self.running && session.in_group() && !session.watching_only() {
-            if let Some(feed) = &mut self.audio_feed {
+            if let Some(feed) = &mut self.seat.core_mut().audio_feed {
                 feed.set_paused(true);
             }
-            return false;
+            return None;
         }
-        let mut ran = false;
         let step = std::time::Duration::from_secs_f64(dt.min(MAX_PLAY_STEP));
         if let Some(rom) = linked_key(session)
             && let Some(card) = session.my_game()
@@ -116,39 +174,61 @@ impl Emulator {
         let timing = session
             .console(true)
             .or_else(|| session.console(false))
-            .map_or_else(|| self.machine.timing(), Console::timing);
-        for _ in 0..self.clock.advance(dt, timing) {
-            self.frame_avg_timer.start();
-            ran |= session.run_frame(self.held_buttons(), now);
-            self.frame_avg_timer.stop();
+            .map_or_else(|| self.timing(), Console::timing);
+        self.clock.set_matching(false);
+        let due = self.clock.advance(dt, timing);
+        let mut frames = Vec::with_capacity(due);
+        for _ in 0..due {
+            frames.push(self.held_buttons());
             let owed = self.held.take_owed();
             self.apply(Change {
                 pressed: Keys::empty(),
                 released: owed,
             });
         }
+        Some(frames)
+    }
+
+    fn finish_rollback(&mut self, session: &mut PlaySession) -> bool {
+        let ran = session.settle_frames();
+        if let Some(timer) = session.frame_timer() {
+            self.frame_avg_timer = timer.clone();
+        }
         if let Some(console) = session.console(true).or_else(|| session.console(false)) {
             self.linked_video = console.video();
+            self.linked_kind = console.kind();
             let frame = self.linked_frame.get_or_insert_with(Vec::new);
             frame.clear();
             frame.extend_from_slice(Console::frame(console));
         }
-        session.drain_audio(&mut self.linked_audio, &mut self.friend_audio);
-        self.mixer
-            .mix(self.sound, &mut self.linked_audio, &mut self.friend_audio);
-        if let Some(feed) = &mut self.audio_feed {
-            feed.set_paused(false);
-            feed.push(&self.linked_audio);
+        #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+        if self.linked_frame.is_some() {
+            self.draw_3d(session.shown_nds_mut());
         }
-        self.linked_audio.clear();
+        let core = self.seat.core_mut();
+        session.drain_audio(&mut core.linked_audio, &mut core.friend_audio);
+        core.mixer
+            .mix(self.sound, &mut core.linked_audio, &mut core.friend_audio);
+        if let Some(feed) = &mut core.audio_feed {
+            feed.set_paused(false);
+            feed.set_session(true);
+            feed.set_pace(1.0);
+            feed.push(&core.linked_audio);
+        }
+        core.linked_audio.clear();
         ran
     }
 
     fn encoded_state(&self) -> GbResult<Vec<u8>> {
-        match &self.machine {
+        match &self.seat.core().machine {
             Machine::Gb(gb) => citrine_gb::netplay::encode_state(gb.as_ref()),
             #[cfg(feature = "gba")]
             Machine::Gba(gba) => citrine_gb::netplay::encode_state(gba.as_ref()),
+            #[cfg(feature = "nds")]
+            Machine::Nds(nds) => citrine_gb::netplay::encode_state(nds.as_ref()),
+            #[cfg(not(feature = "nds"))]
+            #[allow(unreachable_patterns)]
+            _ => Err(citrine_gb::error::GbError::NdsGame),
         }
     }
 
@@ -168,7 +248,7 @@ impl Emulator {
         let saves = session.finish_saves();
         self.store_saves(saves)?;
         let Some(back) = session.finish() else {
-            if let Some(gb) = self.machine.as_gb_mut()
+            if let Some(gb) = self.seat.core_mut().machine.as_gb_mut()
                 && gb.link_plugged()
             {
                 gb.unplug_link();
@@ -178,6 +258,10 @@ impl Emulator {
         let paused = back.paused;
         self.adopt(back);
         Ok(paused)
+    }
+
+    pub fn holds_download(&self) -> bool {
+        self.download_key.is_some() && self.download_key == self.rom_key
     }
 
     pub fn take_handed_back(&mut self) -> Option<OnlineId> {
@@ -194,9 +278,14 @@ impl Emulator {
         self.replace_machine(back.console);
         self.drop_history = back.history;
         self.linked_frame = None;
-        self.last_frame.clear();
-        self.last_frame.extend_from_slice(self.machine.frame());
+        let core = self.seat.core_mut();
+        core.machine.finish_picture();
+        core.screen.last_frame.clear();
+        core.screen
+            .last_frame
+            .extend_from_slice(core.machine.frame());
         self.texture = None;
+        self.download_key = key.clone().filter(|_| back.downloaded);
         self.rom_key = key;
         if !same_game {
             #[cfg(not(target_arch = "wasm32"))]
@@ -216,7 +305,7 @@ impl Emulator {
 
     pub fn start_partner(&mut self, partner: PartnerLink) -> GbResult<()> {
         self.end_link()?;
-        self.partner = Some(partner);
+        self.seat.core_mut().partner = Some(partner);
         self.attach_printer();
         Ok(())
     }
@@ -228,8 +317,8 @@ impl Emulator {
         file_name: Option<&str>,
     ) -> GbResult<()> {
         self.end_link()?;
-        let rate = self.machine.sample_rate();
-        self.link = Some(LocalLink::start(
+        let rate = self.sample_rate();
+        let link = Some(LocalLink::start(
             rom,
             kind,
             &self.firmware,
@@ -238,19 +327,26 @@ impl Emulator {
             rate,
             self.rom_key.as_deref(),
         )?);
+        self.seat.core_mut().link = link;
         self.release_all();
         self.attach_printer();
         Ok(())
     }
 
     pub fn end_link(&mut self) -> GbResult<()> {
-        if let Some(gb) = self.machine.as_gb_mut()
-            && let Some(partner) = self.partner.take()
+        let core = self.seat.core_mut();
+        if let Some(gb) = core.machine.as_gb_mut()
+            && let Some(partner) = core.partner.take()
         {
             partner.finish(gb);
         }
-        let result = match self.link.take() {
-            Some(link) => link.finish(&mut self.machine, &self.store, self.autosave_keep),
+        let result = match core.link.take() {
+            Some(link) => link.finish(
+                &mut core.machine,
+                &self.store,
+                &mut self.writes,
+                self.autosave_keep,
+            ),
             None => Ok(()),
         };
         self.attach_printer();
@@ -258,7 +354,7 @@ impl Emulator {
     }
 
     pub fn set_link_control(&mut self, game: Game) {
-        let moved = self.link.as_mut().is_some_and(|link| {
+        let moved = self.seat.core_mut().link.as_mut().is_some_and(|link| {
             let moved = link.set_control(game);
             if moved {
                 link.release_all();
@@ -271,7 +367,7 @@ impl Emulator {
     }
 
     pub(super) fn held_of(&mut self, pad: usize, source: InputSource) -> Keys {
-        if let Some(link) = &mut self.link
+        if let Some(link) = &mut self.seat.core_mut().link
             && link.game_for(Source::Pad(pad)) == Game::Second
         {
             return link.held_of(source);
@@ -282,7 +378,7 @@ impl Emulator {
 
 pub(super) fn borrowed_key(hash: &citrine_gb_net::GameHash) -> String {
     let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-    format!("borrowed-{hex}")
+    format!("{}{hex}", crate::storage::BORROWED)
 }
 
 pub(super) fn together_name(card: &citrine_gb_net::GameCard) -> String {

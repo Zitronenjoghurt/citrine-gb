@@ -2,6 +2,14 @@
 //! every local ROM, into `experiments/runs/<date>_<git-short-hash>/`. See `experiments/README.md`.
 //!
 //! Usage: `make results`, or `cargo run --release -p citrine-gb-lab --bin collect -- [options]`.
+#![expect(
+    clippy::disallowed_types,
+    reason = "collect runs ROMs in parallel outside the app"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "collect runs ROMs in parallel outside the app"
+)]
 
 use anyhow::Context;
 use citrine_gb::gb::{GameBoy, GbModel};

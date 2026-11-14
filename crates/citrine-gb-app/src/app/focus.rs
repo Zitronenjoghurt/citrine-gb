@@ -1,4 +1,9 @@
-use egui::{Rect, Vec2, pos2, vec2};
+pub mod popups;
+
+use crate::app::Citrine;
+use egui::{Rect, Response, Sense, Ui, Vec2, pos2, vec2};
+
+const STEP: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScreenPlace {
@@ -36,6 +41,67 @@ impl ScreenPlace {
             x: step(self.x, delta.x, room.x),
             y: step(self.y, delta.y, room.y),
         }
+    }
+}
+
+impl Citrine {
+    pub(super) fn placed_game(&mut self, ui: &mut Ui, area: Rect, touch: bool) -> Option<Rect> {
+        let place = self.ui.settings.focus_place;
+        let painted = self.paint_screen(ui, area, false, place);
+        let grips = painted.map_or_else(Vec::new, |(_, screen)| self.screen_grips(ui, screen));
+        if let Some((_, screen)) = painted {
+            self.ui.toast_picture = Some(screen);
+        }
+        self.game_hud(ui, area, painted.map(|(_, screen)| screen), touch);
+        let (room, screen) = painted?;
+        let moved = self.big.take_screen_move();
+        let settings = &mut self.ui.settings;
+        if moved.centre || grips.iter().any(Response::double_clicked) {
+            settings.focus_place = ScreenPlace::default();
+            settings.dirty = true;
+            return Some(screen);
+        }
+        let dragged: Vec2 = if self.ui.hud.drag.is_some() {
+            Vec2::ZERO
+        } else {
+            grips
+                .iter()
+                .fold(Vec2::ZERO, |sum, grip| sum + grip.drag_delta())
+        };
+        let stepped = moved.steps * (room.size() - screen.size()).max(Vec2::ZERO) * STEP;
+        if dragged + stepped != Vec2::ZERO {
+            settings.focus_place = place.dragged(dragged + stepped, room, screen.size());
+        }
+        if moved.steps != Vec2::ZERO || grips.iter().any(Response::drag_stopped) {
+            settings.dirty = true;
+        }
+        Some(screen)
+    }
+
+    fn screen_grips(&self, ui: &Ui, screen: Rect) -> Vec<Response> {
+        let touch = self.emulator.placed_touch();
+        let rects: Vec<Rect> = match touch {
+            Some(touch) => self
+                .emulator
+                .placed_screens()
+                .iter()
+                .copied()
+                .filter(|rect| *rect != touch)
+                .collect(),
+            None => vec![screen],
+        };
+        rects
+            .into_iter()
+            .enumerate()
+            .map(|(index, rect)| {
+                ui.interact(
+                    rect,
+                    ui.id().with(("focus-screen", index)),
+                    Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::Move)
+            })
+            .collect()
     }
 }
 

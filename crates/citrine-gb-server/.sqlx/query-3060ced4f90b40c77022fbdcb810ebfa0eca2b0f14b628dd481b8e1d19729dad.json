@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gts_sims",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "3060ced4f90b40c77022fbdcb810ebfa0eca2b0f14b628dd481b8e1d19729dad"
+}

@@ -1,4 +1,4 @@
-use super::{Decoded, arm, thumb};
+use super::{Decoded, arm, arm_v5, thumb, thumb_v5};
 use crate::debug::code::{Address, BlockId, InstrClass, Line};
 use crate::debug::disassembly::{CodeEntry, Confidence, Decode, Disassembly, Row};
 use crate::gba::bus::Bus;
@@ -10,6 +10,14 @@ use std::ops::Range;
 pub trait CodeSource {
     fn read_code(&self, addr: u32, width: Width) -> u32;
     fn rom_len(&self) -> usize;
+
+    fn locate(&self, addr: u32) -> Option<Address> {
+        code_address(addr, self.rom_len())
+    }
+
+    fn v5(&self) -> bool {
+        false
+    }
 }
 
 impl CodeSource for Bus {
@@ -74,7 +82,7 @@ impl CodeEntry for GbaCode {
 
 impl<S: CodeSource + ?Sized> Decode<S> for GbaCode {
     fn locate(src: &S, pc: Pc) -> Option<Address> {
-        code_address(pc.aligned().addr, src.rom_len())
+        src.locate(pc.aligned().addr)
     }
 
     fn decode(src: &S, pc: Pc, confidence: Confidence) -> Option<(Self, FlowControl<Pc>, Pc)> {
@@ -112,7 +120,13 @@ pub fn decode_at(src: &(impl CodeSource + ?Sized), pc: Pc) -> Decoded {
     if pc.thumb {
         let op = src.read_code(pc.addr, Width::Half) as u16;
         let next = src.read_code(pc.addr.wrapping_add(2), Width::Half) as u16;
-        thumb(pc.addr, op, Some(next))
+        if src.v5() {
+            thumb_v5(pc.addr, op, Some(next))
+        } else {
+            thumb(pc.addr, op, Some(next))
+        }
+    } else if src.v5() {
+        arm_v5(pc.addr, src.read_code(pc.addr, Width::Word))
     } else {
         arm(pc.addr, src.read_code(pc.addr, Width::Word))
     }
@@ -120,7 +134,7 @@ pub fn decode_at(src: &(impl CodeSource + ?Sized), pc: Pc) -> Decoded {
 
 pub fn line(src: &(impl CodeSource + ?Sized), pc: Pc, confidence: Confidence) -> Option<Line> {
     let pc = pc.aligned();
-    let at = code_address(pc.addr, src.rom_len())?;
+    let at = src.locate(pc.addr)?;
     let decoded = decode_at(src, pc);
     let width = if pc.thumb { Width::Half } else { Width::Word };
     let step = width.bytes() as u32;

@@ -1,7 +1,9 @@
 use super::kit;
 use super::sheet::{self, Amount, SheetResponse};
 use crate::app::Citrine;
+use crate::app::tabs::Tab;
 use crate::app::ui_state::settings::SettingsTab;
+use crate::app::widgets::settings::page::Page;
 use egui::{Context, Id, Ui};
 use std::fmt::Display;
 use strum::IntoEnumIterator;
@@ -9,6 +11,9 @@ use strum::IntoEnumIterator;
 mod about;
 mod cartridge;
 mod controls;
+#[cfg(feature = "nds")]
+mod ds;
+mod ds_screens;
 mod general;
 mod online;
 mod sound;
@@ -26,6 +31,7 @@ pub enum Sheet {
     Keys,
     Volume,
     Latency,
+    Slowdown,
     Channels,
     #[cfg(not(target_arch = "wasm32"))]
     Device,
@@ -33,10 +39,30 @@ pub enum Sheet {
     GameConsole,
     #[cfg(feature = "gba")]
     GbaBios,
+    #[cfg(feature = "nds")]
+    DsNickname,
+    #[cfg(feature = "nds")]
+    DsBirthday,
+    #[cfg(feature = "nds")]
+    DsBirthdayDay,
+    #[cfg(feature = "nds")]
+    DsLanguage,
+    #[cfg(feature = "nds")]
+    DsColor,
+    #[cfg(feature = "nds")]
+    DsClock,
+    #[cfg(feature = "nds")]
+    DsFile(crate::app::ds_firmware::DsFile),
+    #[cfg(ds_wifi)]
+    DsWifi,
+    #[cfg(ds_wifi)]
+    DsDns,
     Layout,
     Theme,
     AutosaveEvery,
     AutosaveKeep,
+    FastForward,
+    Rewind,
     ScreenshotScale,
     RecordingScale,
     Clock,
@@ -47,10 +73,23 @@ pub enum Sheet {
     EdgeDarkness,
     CornerDarkness,
     GhostStrength,
+    HudCard,
     GbcScreen,
+    DsLayout,
+    DsCorner,
+    DsSmall,
+    DsGap,
+    DsRotation,
+    #[cfg(not(target_arch = "wasm32"))]
+    Ds3dResolution,
+    #[cfg(not(target_arch = "wasm32"))]
+    DsSmoothEdges,
     PasteCode,
     DeletePalette,
     InputDelay,
+    ConfirmButton,
+    ButtonIcons,
+    Backdrop,
 }
 
 fn sheet_id() -> Id {
@@ -117,13 +156,8 @@ impl Citrine {
             SettingsTab::Style => kit::place(ui, "style_page", |ui| self.style_page(ui)),
             SettingsTab::Online => kit::place(ui, "online_page", |ui| self.online_page(ui)),
             SettingsTab::YourData => kit::place(ui, "your_data_page", |ui| self.your_data_page(ui)),
-            _ => {
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(kit::SIDE as i8, 0))
-                    .show(ui, |ui| {
-                        let mut viewer = self.viewer();
-                        crate::app::tabs::settings::content(&mut viewer, ui, 0.0);
-                    });
+            SettingsTab::Developer => {
+                kit::place(ui, "developer_page", |ui| self.developer_page(ui))
             }
         }
         if let Some(open) = self.mobile.sheet {
@@ -135,8 +169,13 @@ impl Citrine {
                 | Sheet::TouchScaling
                 | Sheet::Landscape
                 | Sheet::HiddenButtons
+                | Sheet::ConfirmButton
+                | Sheet::ButtonIcons
+                | Sheet::Backdrop
                 | Sheet::Keys => self.controls_sheet(&ctx, open),
-                Sheet::Volume | Sheet::Latency | Sheet::Channels => self.sound_sheet(&ctx, open),
+                Sheet::Volume | Sheet::Latency | Sheet::Slowdown | Sheet::Channels => {
+                    self.sound_sheet(&ctx, open)
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 Sheet::Device => self.sound_sheet(&ctx, open),
                 Sheet::Console
@@ -145,24 +184,67 @@ impl Citrine {
                 | Sheet::Theme
                 | Sheet::AutosaveEvery
                 | Sheet::AutosaveKeep
+                | Sheet::FastForward
+                | Sheet::Rewind
                 | Sheet::ScreenshotScale
                 | Sheet::RecordingScale => self.general_sheet(&ctx, open),
                 #[cfg(feature = "gba")]
                 Sheet::GbaBios => self.general_sheet(&ctx, open),
+                #[cfg(feature = "nds")]
+                Sheet::DsNickname
+                | Sheet::DsBirthday
+                | Sheet::DsBirthdayDay
+                | Sheet::DsLanguage
+                | Sheet::DsColor
+                | Sheet::DsClock
+                | Sheet::DsFile(_) => self.ds_sheet(&ctx, open),
+                #[cfg(ds_wifi)]
+                Sheet::DsWifi | Sheet::DsDns => self.ds_sheet(&ctx, open),
                 Sheet::Clock | Sheet::Sunlight | Sheet::Camera => self.cartridge_sheet(&ctx, open),
                 Sheet::Palette
                 | Sheet::GamePalette
                 | Sheet::EdgeDarkness
                 | Sheet::CornerDarkness
                 | Sheet::GhostStrength
+                | Sheet::HudCard
                 | Sheet::GbcScreen
+                | Sheet::DsLayout
+                | Sheet::DsCorner
+                | Sheet::DsSmall
+                | Sheet::DsGap
+                | Sheet::DsRotation
                 | Sheet::PasteCode
                 | Sheet::DeletePalette => self.style_sheet(&ctx, open),
+                #[cfg(not(target_arch = "wasm32"))]
+                Sheet::Ds3dResolution | Sheet::DsSmoothEdges => self.style_sheet(&ctx, open),
                 Sheet::InputDelay => self.online_sheet(&ctx),
             };
             if closed {
                 self.mobile.sheet = None;
             }
+        }
+    }
+
+    fn developer_page(&mut self, ui: &mut Ui) {
+        let s = &mut self.ui.settings;
+        let mut page = Page::begin(ui);
+        page.plain(|ui| {
+            kit::list(ui, |list| {
+                s.dirty |= list.switch(kit::SwitchRow::new(
+                    "Randomized power-on RAM",
+                    &mut s.randomized_ram,
+                ));
+            })
+        });
+        let files = page.plain(|ui| {
+            kit::list(ui, |list| {
+                list.row(kit::Row::new(Tab::DsFiles.title()).icon(crate::icons::FOLDER_OPEN))
+                    .clicked()
+            })
+        });
+        page.end();
+        if files {
+            self.show_tab(Tab::DsFiles, true);
         }
     }
 
@@ -173,6 +255,3 @@ impl Citrine {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

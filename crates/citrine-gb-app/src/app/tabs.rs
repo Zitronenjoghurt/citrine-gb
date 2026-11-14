@@ -11,16 +11,22 @@ use egui::{Ui, WidgetText};
 use std::collections::{HashMap, HashSet};
 use strum_macros::EnumIter;
 
+pub(crate) mod achievements;
 mod apu;
 mod audio_debug;
 pub mod chat;
+pub mod cheats;
 mod controller_debug;
 mod debug_actions;
 mod debugger;
+pub mod ds_files;
 mod e2e;
 pub mod friends;
 mod game_boy;
-mod game_info;
+pub(crate) mod game_info;
+pub(crate) mod games;
+#[cfg(feature = "nds")]
+pub(crate) mod gts;
 mod homebrew;
 mod info;
 pub mod linked;
@@ -32,17 +38,24 @@ mod registers;
 mod rom_info;
 pub mod room_chat;
 pub mod saves;
+mod second_screens;
 pub(crate) mod settings;
 pub mod stats;
+mod threads;
 mod video;
+#[cfg(feature = "nds")]
+pub(crate) mod walker;
 
 pub const CONTENT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 8);
 
 pub struct TabViewer<'a> {
+    pub achievements: &'a mut crate::achievements::Achievements,
     pub audio: &'a mut Option<Audio>,
+    pub covers: &'a mut crate::app::big_screen::Covers,
     pub commonmark: &'a mut egui_commonmark::CommonMarkCache,
     pub emulator: &'a mut Emulator,
     pub game_info: &'a mut crate::game_info::GameInfo,
+    pub game_facts: &'a crate::game_facts::Finder,
     pub pads: &'a dyn PadSource,
     pub events: &'a mut AppEventQueue,
     pub files: &'a mut FileChannels,
@@ -51,6 +64,7 @@ pub struct TabViewer<'a> {
     pub play: &'a mut crate::play::Play,
     pub senses: &'a crate::senses::Senses,
     pub stats: &'a crate::stats::Stats,
+    pub threads: &'a citrine_gb_threads::Threads,
     pub ui: &'a mut UiState,
 }
 
@@ -104,9 +118,14 @@ impl TabViewer<'_> {
     fn content(&mut self, ui: &mut Ui, tab: Tab) {
         match tab {
             Tab::GameBoy => game_boy::show(self, ui),
+            Tab::Games => games::show(self, ui),
+            Tab::BottomScreen => game_boy::bottom_screen(self, ui),
             Tab::GameInfo => game_info::show(self, ui),
+            Tab::Achievements => achievements::show(self, ui),
+            Tab::Cheats => cheats::show(self, ui),
             Tab::Settings => settings::show(self, ui),
             Tab::Saves => saves::show(self, ui),
+            Tab::SecondScreens => second_screens::show(self, ui),
             Tab::Media => media::show(self, ui),
             Tab::Stats => stats::show(self, ui),
             Tab::Registers => registers::show(self, ui),
@@ -117,16 +136,28 @@ impl TabViewer<'_> {
             Tab::RoomChat => room_chat::show(self, ui),
             Tab::Homebrew => homebrew::show(self, ui),
             Tab::Info => info::show(self, ui),
+            #[cfg(feature = "nds")]
+            Tab::Walker => walker::show(self, ui),
+            #[cfg(not(feature = "nds"))]
+            Tab::Walker => {}
+            #[cfg(feature = "nds")]
+            Tab::Gts => gts::show(self, ui),
+            #[cfg(not(feature = "nds"))]
+            Tab::Gts => {}
             Tab::AudioDebug => audio_debug::show(self, ui),
             Tab::ControllerDebug => controller_debug::show(self, ui),
             Tab::Apu => apu::show(self, ui),
             Tab::ApuWaves => apu::show(self, ui),
             Tab::Disassembly | Tab::TimeControl => debugger::show(self, ui),
             Tab::Performance => performance::show(self, ui),
+            Tab::Threads => threads::show(self, ui),
             Tab::DebugActions => debug_actions::show(self, ui),
             Tab::Tool(Tool::Memory) => memory::show(self, ui),
             Tab::Tool(Tool::Video) => video::show(self, ui),
             Tab::Tool(Tool::Unknown) => {}
+            Tab::DsFiles => ds_files::show(self, ui),
+            Tab::DsFile(slot) => ds_files::show_file(self, ui, slot),
+            Tab::RomFolders => {}
         }
     }
 }
@@ -135,13 +166,26 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     type Tab = Tab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
-        let console = game_title(self.emulator);
+        if *tab == Tab::GameBoy && games::fills(self) {
+            return Tab::Games.title().into();
+        }
+        let console = if self.emulator.screen_tabs() {
+            "Top screen"
+        } else {
+            game_title(self.emulator)
+        };
         let recorder = &self.emulator.screen_recorder;
         if *tab == Tab::GameBoy && recorder.is_recording() {
             let time = recorder.elapsed_label();
             return egui::RichText::new(format!("{}  {}  {time}", console, icons::RECORD))
                 .color(egui::Color32::RED)
                 .into();
+        }
+        if let Tab::DsFile(slot) = *tab {
+            return match self.ui.tab_fit.titles.get(tab) {
+                Some(short) => short.clone().into(),
+                None => self.ui.ds_files.title(slot).into(),
+            };
         }
         let title = match self.ui.tab_fit.titles.get(tab) {
             Some(short) => short.as_str(),
@@ -163,6 +207,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     }
 
     fn on_tab_button(&mut self, tab: &mut Self::Tab, response: &egui::Response) {
+        self.ui.tab_fit.buttons.push(response.rect);
         if *tab == Tab::Friends && self.friends_waiting() {
             let rect = response.rect;
             let close = if self.ui.tab_fit.no_close.contains(tab) {
@@ -188,16 +233,36 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     }
 
     fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        if let Tab::DsFile(slot) = *tab {
+            return egui::Id::new(("ds_file", slot));
+        }
         egui::Id::new(tab.title())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+        if *tab == Tab::GameBoy && games::fills(self) {
+            games::show(self, ui);
+            return;
+        }
+        if *tab == Tab::Games {
+            games::show(self, ui);
+            return;
+        }
         if *tab == Tab::GameBoy {
             game_boy::show(self, ui);
             return;
         }
+        if *tab == Tab::BottomScreen {
+            game_boy::bottom_screen(self, ui);
+            return;
+        }
         if *tab == Tab::Playing && self.play.session().is_some() {
             playing::show(self, ui);
+            return;
+        }
+        #[cfg(feature = "nds")]
+        if *tab == Tab::Walker {
+            walker::show(self, ui);
             return;
         }
         egui::Frame::new()
@@ -206,6 +271,16 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     }
 
     fn on_close(&mut self, tab: &mut Self::Tab) -> egui_dock::tab_viewer::OnCloseResponse {
+        if *tab == Tab::Games {
+            self.ui.games.hidden = true;
+        }
+        if *tab == Tab::BottomScreen {
+            self.ui.settings.ds_screens.separate_tabs = false;
+            self.ui.settings.dirty = true;
+        }
+        if let Tab::DsFile(slot) = *tab {
+            self.ui.ds_files.close(slot, self.emulator);
+        }
         if *tab == Tab::Playing
             && let Some(session) = self.play.session_mut()
         {
@@ -232,6 +307,8 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             !matches!(
                 tab,
                 Tab::GameBoy
+                    | Tab::BottomScreen
+                    | Tab::Games
                     | Tab::Saves
                     | Tab::Media
                     | Tab::Stats
@@ -239,8 +316,18 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
                     | Tab::ControllerDebug
                     | Tab::Friends
                     | Tab::RoomChat
+                    | Tab::DsFiles
+                    | Tab::DsFile(_)
             ) && !(*tab == Tab::Playing && self.play.session().is_some()),
-            !matches!(tab, Tab::Playing | Tab::GameBoy),
+            !matches!(
+                tab,
+                Tab::Playing
+                    | Tab::GameBoy
+                    | Tab::Games
+                    | Tab::BottomScreen
+                    | Tab::DsFiles
+                    | Tab::DsFile(_)
+            ),
         ]
     }
 }
@@ -249,28 +336,39 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, EnumIter,
 )]
 pub enum Tab {
+    Achievements,
     Apu,
+    BottomScreen,
     ApuWaves,
+    Cheats,
     AudioDebug,
     ControllerDebug,
     DebugActions,
     Disassembly,
+    DsFiles,
+    DsFile(u32),
     E2ETest,
     Friends,
     GameBoy,
     GameInfo,
+    Games,
+    Gts,
     Homebrew,
     Info,
     Media,
+    RomFolders,
     Performance,
     Playing,
     Registers,
     RoomChat,
     RomInfo,
     Saves,
+    SecondScreens,
     Settings,
     TimeControl,
     Stats,
+    Threads,
+    Walker,
     Tool(Tool),
 }
 
@@ -299,9 +397,14 @@ impl Tab {
     pub fn title(&self) -> &'static str {
         match self {
             Tab::GameBoy => "Game Boy",
+            Tab::BottomScreen => "Bottom screen",
             Tab::GameInfo => "Game info",
+            Tab::Games => "Games",
+            Tab::Achievements => "Achievements",
+            Tab::Cheats => "Cheats",
             Tab::Settings => "Settings",
             Tab::Saves => "Saves",
+            Tab::SecondScreens => "Second screens",
             Tab::Media => "Media",
             Tab::Stats => "Stats",
             Tab::TimeControl => "Debugger",
@@ -317,9 +420,15 @@ impl Tab {
             Tab::ApuWaves => "APU waves",
             Tab::Disassembly => "Debugger",
             Tab::Performance => "Performance",
+            Tab::Threads => "Threads",
             Tab::Playing => "Playing",
             Tab::RoomChat => "Room chat",
             Tab::DebugActions => "Debug actions",
+            Tab::Walker => "Pokéwalker",
+            Tab::Gts => "GTS",
+            Tab::DsFiles => "DS files",
+            Tab::DsFile(_) => "File",
+            Tab::RomFolders => "ROM folders",
             Tab::Tool(tool) => tool.title(),
         }
     }
@@ -336,6 +445,7 @@ impl Tab {
             Tab::Homebrew => "Homebrew games",
             Tab::Saves => "Saves & snapshots",
             Tab::Info => "About & controls",
+            Tab::Gts => "GTS trades",
             other => other.title(),
         }
     }
@@ -344,15 +454,23 @@ impl Tab {
         matches!(
             self,
             Tab::GameBoy
+                | Tab::BottomScreen
                 | Tab::GameInfo
+                | Tab::Games
+                | Tab::Cheats
+                | Tab::Achievements
                 | Tab::Media
                 | Tab::Stats
                 | Tab::Friends
                 | Tab::Settings
                 | Tab::Homebrew
+                | Tab::Walker
+                | Tab::Gts
                 | Tab::Disassembly
                 | Tab::Tool(Tool::Memory)
                 | Tab::Tool(Tool::Video)
+                | Tab::DsFiles
+                | Tab::DsFile(_)
         )
     }
 
@@ -382,9 +500,16 @@ pub fn retire_old_tabs(dock: &mut egui_dock::DockState<Tab>) {
     while let Some(found) = dock.find_tab(&Tab::Tool(Tool::Unknown)) {
         dock.remove_tab(found);
     }
+    #[cfg(not(feature = "nds"))]
+    for tab in [Tab::Walker, Tab::Gts] {
+        while let Some(found) = dock.find_tab(&tab) {
+            dock.remove_tab(found);
+        }
+    }
+    dock.retain_tabs(|tab| !matches!(tab, Tab::DsFile(_)));
 }
 
-const TAB_PADDING: f32 = 16.0;
+pub const TAB_PADDING: f32 = 16.0;
 const TAB_CLOSE: f32 = 24.0;
 const TAB_TEXT_INSET: f32 = 8.0;
 const FACE_ROOM: &str = "        ";
@@ -405,11 +530,12 @@ fn tab_face(tab: egui::Rect, close: f32, title: f32, room: f32) -> egui::Rect {
 pub struct TabFit {
     pub titles: HashMap<Tab, String>,
     pub no_close: HashSet<Tab>,
+    pub buttons: Vec<egui::Rect>,
 }
 
 pub fn game_title(emulator: &Emulator) -> &'static str {
-    if emulator.has_game() {
-        crate::app::ui_state::settings::kind_name(emulator.kind())
+    if emulator.shows_console() {
+        crate::app::ui_state::settings::kind_name(emulator.played_kind())
     } else {
         Tab::GameBoy.title()
     }
@@ -419,7 +545,13 @@ pub fn fit_titles(
     ctx: &egui::Context,
     dock: &egui_dock::DockState<Tab>,
     console: &'static str,
+    screens: Option<&str>,
+    files: &ds_files::DsFilesUi,
 ) -> TabFit {
+    let shown = |tab: &Tab| match *tab {
+        Tab::DsFile(slot) => files.title(slot),
+        other => other.shown_title(console).to_owned(),
+    };
     let font = egui::TextStyle::Button.resolve(&ctx.style());
     let measure = |text: &str| {
         ctx.fonts_mut(|fonts| {
@@ -435,12 +567,13 @@ pub fn fit_titles(
         if !leaf.rect.is_positive() || !leaf.rect.is_finite() {
             continue;
         }
-        let available = leaf.rect.width() - 1.0;
-        let text: Vec<f32> = leaf
-            .tabs
-            .iter()
-            .map(|tab| measure(tab.shown_title(console)))
-            .collect();
+        let holds_screen = leaf.tabs.contains(&Tab::GameBoy);
+        let control = match screens {
+            Some(label) if holds_screen => measure(label) + TAB_PADDING,
+            _ => 0.0,
+        };
+        let available = leaf.rect.width() - 1.0 - control;
+        let text: Vec<f32> = leaf.tabs.iter().map(|tab| measure(&shown(tab))).collect();
         let all_close = |index: usize| leaf.tabs[index].closable();
         let active_close = |index: usize| all_close(index) && index == leaf.active.0;
         let overhead = |close: bool| TAB_PADDING + if close { TAB_CLOSE } else { 0.0 };
@@ -462,8 +595,7 @@ pub fn fit_titles(
             }
             if let Some(budget) = budgets[index] {
                 let room = budget - overhead(active_close(index));
-                fit.titles
-                    .insert(*tab, shorten(tab.shown_title(console), room, measure));
+                fit.titles.insert(*tab, shorten(&shown(tab), room, measure));
             }
         }
     }
@@ -734,7 +866,7 @@ mod tests {
             opened.app.ui.settings.layout = LayoutMode::Desktop;
             let ctx = Context::default();
             let output = info_frame_out(&mut opened.app, &ctx, 1280.0, 900.0);
-            assert!(text_rect(&output, "Game Boy").is_some(), "no game");
+            assert!(text_rect(&output, "Games").is_some(), "no game");
             let file = opened.picked();
             opened.app.handle_load_rom(file);
             info_frame_out(&mut opened.app, &ctx, 1280.0, 900.0);

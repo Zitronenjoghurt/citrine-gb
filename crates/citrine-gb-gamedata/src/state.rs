@@ -1,6 +1,7 @@
 use crate::battle::{Battle, Clock};
 use crate::game::Game;
 use crate::gen3::{Nature, Spread, Whereabouts};
+pub use citrine_gb_pkm::legality::Reason;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameState {
@@ -24,6 +25,14 @@ pub struct GameState {
 pub enum Position {
     Gb(Location),
     Gba(Whereabouts),
+    Ds(DsSpot),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DsSpot {
+    pub map: u16,
+    pub x: i32,
+    pub z: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +153,22 @@ pub struct MoveSlot {
 pub enum Genes {
     Gb { dvs: Dvs, stat_exp: [u16; 5] },
     Gba(Gen3Genes),
+    Ds(DsGenes),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DsGenes {
+    pub genes: Gen3Genes,
+    pub ability: u16,
+    pub form: u8,
+    pub legality: Legality,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Legality {
+    Passes,
+    Breaks(Reason),
+    NotChecked(Reason),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +205,7 @@ pub struct Caught {
     pub time_of_day: TimeOfDay,
     pub level: u8,
     pub ot_gender: Gender,
-    pub location: u8,
+    pub location: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,21 +230,28 @@ impl Mon {
     pub fn dvs(&self) -> Option<Dvs> {
         match self.genes {
             Genes::Gb { dvs, .. } => Some(dvs),
-            Genes::Gba(_) => None,
+            Genes::Gba(_) | Genes::Ds(_) => None,
         }
     }
 
     pub fn gen3(&self) -> Option<&Gen3Genes> {
         match &self.genes {
             Genes::Gb { .. } => None,
-            Genes::Gba(genes) => Some(genes),
+            Genes::Gba(genes) | Genes::Ds(DsGenes { genes, .. }) => Some(genes),
+        }
+    }
+
+    pub fn ds(&self) -> Option<&DsGenes> {
+        match &self.genes {
+            Genes::Ds(genes) => Some(genes),
+            Genes::Gb { .. } | Genes::Gba(_) => None,
         }
     }
 
     pub fn shiny(&self) -> bool {
         match &self.genes {
             Genes::Gb { dvs, .. } => dvs.shiny(),
-            Genes::Gba(genes) => {
+            Genes::Gba(genes) | Genes::Ds(DsGenes { genes, .. }) => {
                 let p = genes.personality;
                 (self.ot_id ^ genes.ot_secret_id ^ (p >> 16) as u16 ^ p as u16) < 8
             }
@@ -295,7 +327,7 @@ impl Position {
     pub fn gb(&self) -> Option<&Location> {
         match self {
             Position::Gb(location) => Some(location),
-            Position::Gba(_) => None,
+            Position::Gba(_) | Position::Ds(_) => None,
         }
     }
 }
@@ -310,5 +342,89 @@ impl GameState {
             .iter()
             .find(|step| !step.done)
             .map(|step| step.milestone)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fixtures::{crystal_save, game, put, seal};
+    use crate::layout::CRYSTAL_INTERNATIONAL;
+    use crate::test_support::{international_save, seal_international};
+    use crate::{Language, Location, Milestone, Position, Step, Version, read_save};
+
+    #[test]
+    fn a_gen1_save_says_where_the_player_is_and_what_is_done() {
+        let mut save = international_save();
+        put(&mut save, 0x260A, &[0x0C, 0, 0, 5, 7]);
+        save[0x29F3 + 4] |= 1 << 5;
+        seal_international(&mut save);
+        let state = read_save(game(Version::Red, Language::English), &save).expect("save");
+        assert_eq!(
+            state.location,
+            Some(Position::Gb(Location {
+                group: 0,
+                map: 0x0C,
+                x: 7,
+                y: 5,
+                outside: None
+            }))
+        );
+        assert_eq!(state.hall_of_fame, Some(0));
+        let done: Vec<bool> = state.journey.iter().map(|s| s.done).collect();
+        assert_eq!(
+            done,
+            [
+                true, true, false, true, false, false, false, false, false, false
+            ]
+        );
+        assert_eq!(state.next_goal(), Some(Milestone::Badge(1)));
+
+        save[0x284E] = 2;
+        save[0x2602] = 0xFF;
+        seal_international(&mut save);
+        let state = read_save(game(Version::Red, Language::English), &save).expect("save");
+        assert_eq!(state.hall_of_fame, Some(2));
+        assert_eq!(state.next_goal(), None);
+        assert_eq!(
+            state.journey.last(),
+            Some(&Step {
+                milestone: Milestone::EliteFour,
+                done: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_gen2_save_says_where_the_player_is_and_what_is_done() {
+        let layout = &CRYSTAL_INTERNATIONAL;
+        let mut save = crystal_save();
+        put(&mut save, 0x2843, &[24, 2, 7, 9]);
+        put(&mut save, 0x283B, &[24, 1]);
+        save[0x23DA] |= 1;
+        seal(layout, &mut save);
+        let state = read_save(game(Version::Crystal, Language::English), &save).expect("save");
+        assert_eq!(
+            state.location,
+            Some(Position::Gb(Location {
+                group: 24,
+                map: 2,
+                x: 9,
+                y: 7,
+                outside: Some((24, 1))
+            }))
+        );
+        let milestones: Vec<Milestone> = state.journey.iter().map(|s| s.milestone).collect();
+        assert_eq!(milestones.len(), 10);
+        assert_eq!(milestones[0], Milestone::Pokedex);
+        assert_eq!(milestones[9], Milestone::EliteFour);
+        assert_eq!(state.next_goal(), Some(Milestone::Badge(4)));
+
+        save[layout.johto_badges] = 0xFF;
+        save[0x2600 + 8] |= 1 << 4;
+        save[layout.visited_spawns] |= 0x80;
+        seal(layout, &mut save);
+        let state = read_save(game(Version::Crystal, Language::English), &save).expect("save");
+        assert_eq!(state.journey.len(), 18);
+        assert_eq!(state.next_goal(), Some(Milestone::Badge(8)));
     }
 }

@@ -87,7 +87,6 @@ impl Memory {
         self.wram.len()
     }
 
-    #[cfg(feature = "debug")]
     pub(crate) fn wram_bank_mut(&mut self, bank: usize) -> Option<&mut [u8]> {
         self.wram.get_mut(bank).map(|bytes| &mut bytes[..])
     }
@@ -97,7 +96,6 @@ impl Memory {
         &mut self.hram
     }
 
-    #[cfg(feature = "debug")]
     pub(crate) fn hram(&self) -> &[u8] {
         &self.hram
     }
@@ -105,6 +103,129 @@ impl Memory {
     pub(crate) fn switchable_bank(&self) -> usize {
         let bank = (self.svbk as usize).max(1);
         if bank < self.wram.len() { bank } else { 1 }
+    }
+
+    #[inline(always)]
+    pub(crate) fn read_quiet(&self, addr: u16) -> u8 {
+        debug_assert!((0xC000..0xFE00).contains(&addr) || (0xFF80..0xFFFF).contains(&addr));
+        if addr >= 0xFF80 {
+            self.read_hram(addr)
+        } else {
+            self.read_wram(addr)
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn read_hram(&self, addr: u16) -> u8 {
+        debug_assert!((0xFF80..0xFFFF).contains(&addr));
+        self.hram[usize::from(addr - 0xFF80)]
+    }
+
+    #[inline(always)]
+    pub(crate) fn read_wram(&self, addr: u16) -> u8 {
+        debug_assert!((0xC000..0xFE00).contains(&addr));
+        if addr & 0x1000 == 0 {
+            self.wram[0][usize::from(addr & 0x0FFF)]
+        } else {
+            self.wram[self.switchable_bank()][usize::from(addr & 0x0FFF)]
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn wram_page(&self, page: u8) -> &[u8] {
+        let bank = if page & 0x10 == 0 {
+            0
+        } else {
+            self.switchable_bank()
+        };
+        let start = usize::from(page & 0x0F) << 8;
+        &self.wram[bank][start..start + 0x100]
+    }
+
+    #[inline(always)]
+    pub(crate) fn write_quiet(&mut self, addr: u16, value: u8) {
+        debug_assert!((0xC000..0xFE00).contains(&addr) || (0xFF80..0xFFFF).contains(&addr));
+        if addr >= 0xFF80 {
+            self.write_hram(addr, value);
+        } else {
+            self.write_wram(addr, value);
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn write_hram(&mut self, addr: u16, value: u8) {
+        debug_assert!((0xFF80..0xFFFF).contains(&addr));
+        self.hram[usize::from(addr - 0xFF80)] = value;
+    }
+
+    #[inline(always)]
+    pub(crate) fn write_wram(&mut self, addr: u16, value: u8) {
+        debug_assert!((0xC000..0xFE00).contains(&addr));
+        if addr & 0x1000 == 0 {
+            self.wram[0][usize::from(addr & 0x0FFF)] = value;
+        } else {
+            let bank = self.switchable_bank();
+            self.wram[bank][usize::from(addr & 0x0FFF)] = value;
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn read_quiet_pair(&self, addr: u16) -> u16 {
+        debug_assert!((0xC000..0xFDFF).contains(&addr) || (0xFF80..0xFFFE).contains(&addr));
+        if addr >= 0xFF80 {
+            self.read_hram_pair(addr)
+        } else {
+            self.read_wram_pair(addr)
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn read_hram_pair(&self, addr: u16) -> u16 {
+        debug_assert!((0xFF80..0xFFFE).contains(&addr));
+        let at = usize::from(addr - 0xFF80);
+        let pair = &self.hram[at..at + 2];
+        u16::from_le_bytes([pair[0], pair[1]])
+    }
+
+    #[inline(always)]
+    pub(crate) fn read_wram_pair(&self, addr: u16) -> u16 {
+        debug_assert!((0xC000..0xFDFF).contains(&addr));
+        if addr & 0x0FFF == 0x0FFF {
+            return u16::from_le_bytes([self.read_quiet(addr), self.read_quiet(addr + 1)]);
+        }
+        let bank = if addr & 0x1000 == 0 {
+            0
+        } else {
+            self.switchable_bank()
+        };
+        let at = usize::from(addr & 0x0FFF);
+        let pair = &self.wram[bank][at..at + 2];
+        u16::from_le_bytes([pair[0], pair[1]])
+    }
+
+    #[inline(always)]
+    pub(crate) fn write_hram_pair(&mut self, addr: u16, value: u16) {
+        debug_assert!((0xFF80..0xFFFE).contains(&addr));
+        let at = usize::from(addr - 0xFF80);
+        self.hram[at..at + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[inline(always)]
+    pub(crate) fn write_wram_pair(&mut self, addr: u16, value: u16) {
+        debug_assert!((0xC000..0xFDFF).contains(&addr));
+        if addr & 0x0FFF == 0x0FFF {
+            let [low, high] = value.to_le_bytes();
+            self.write_quiet(addr, low);
+            self.write_quiet(addr + 1, high);
+            return;
+        }
+        let bank = if addr & 0x1000 == 0 {
+            0
+        } else {
+            self.switchable_bank()
+        };
+        let at = usize::from(addr & 0x0FFF);
+        self.wram[bank][at..at + 2].copy_from_slice(&value.to_le_bytes());
     }
 
     fn fill_power_on(&mut self, model: GbModel, ram_init: RamInit) {

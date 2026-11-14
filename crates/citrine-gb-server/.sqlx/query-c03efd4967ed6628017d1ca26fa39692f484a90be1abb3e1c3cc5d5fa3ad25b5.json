@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO gts_profiles (pid, account_id, generation, created_at)\n             VALUES (?1, ?2, ?3, ?4) ON CONFLICT (pid) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c03efd4967ed6628017d1ca26fa39692f484a90be1abb3e1c3cc5d5fa3ad25b5"
+}

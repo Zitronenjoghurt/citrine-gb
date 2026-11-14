@@ -1,4 +1,5 @@
 use crate::ReadMemory;
+use crate::gb::apu::Step;
 use crate::gb::apu::WriteContext;
 use crate::gb::apu::components::frequency_sweep::FrequencySweep;
 use crate::gb::apu::components::length_counter::LengthCounter;
@@ -49,11 +50,33 @@ impl Channel1 {
         }
     }
 
-    pub fn tick(&mut self) -> bool {
+    pub fn quiet_ticks(&self) -> u32 {
+        if self.enabled {
+            self.square_wave.quiet_ticks()
+        } else {
+            u32::MAX
+        }
+    }
+
+    pub fn steady_ticks(&self) -> u32 {
+        if !self.enabled || self.volume_envelope.current_volume == 0 {
+            u32::MAX
+        } else {
+            self.square_wave.steady_ticks(self.get_period())
+        }
+    }
+
+    pub fn advance(&mut self, ticks: u32) {
+        if self.enabled {
+            self.square_wave.advance(ticks, self.get_period());
+        }
+    }
+
+    pub fn tick(&mut self) -> Step {
         if self.enabled {
             self.square_wave.tick(self.get_period())
         } else {
-            false
+            Step::Idle
         }
     }
 

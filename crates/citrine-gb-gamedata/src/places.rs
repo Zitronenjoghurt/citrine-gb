@@ -45,7 +45,7 @@ impl Places {
         match game.generation() {
             Generation::One => gen1(game, rom).unwrap_or_default(),
             Generation::Two => gen2(game, rom),
-            Generation::Three => Self::default(),
+            Generation::Three | Generation::Four | Generation::Five => Self::default(),
         }
     }
 
@@ -205,4 +205,59 @@ fn gen2_maps(rom: &[u8], landmarks: usize) -> Option<Vec<Vec<u8>>> {
                 .collect(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::{crystal_world, location, red_world};
+    use crate::{Region, Spot};
+
+    #[test]
+    fn gen1_places_come_from_the_town_map_entries() {
+        let tables = red_world();
+        let spot = |map| tables.spot(&location(0, map, None));
+        assert_eq!(
+            spot(0),
+            Some(Spot {
+                name: "PALLET TOWN",
+                region: Region::Kanto,
+                x: 2,
+                y: 11
+            })
+        );
+        assert_eq!(spot(0x0C).map(|s| s.name), Some("ROUTE 1"));
+        assert_eq!(spot(0x28).map(|s| s.name), Some("OAK LAB"));
+        assert_eq!(
+            spot(0x30).map(|s| (s.name, s.x, s.y)),
+            Some(("MT MOON", 6, 2))
+        );
+        assert_eq!(spot(0x40), None);
+    }
+
+    #[test]
+    fn gen2_places_follow_the_map_headers_and_landmarks() {
+        let tables = crystal_world();
+        assert_eq!(
+            tables.spot(&location(24, 2, None)),
+            Some(Spot {
+                name: "ROUTE 29",
+                region: Region::Johto,
+                x: 11,
+                y: 19
+            })
+        );
+        assert_eq!(
+            tables.spot(&location(24, 3, Some((24, 1)))).map(|s| s.name),
+            Some("NEW BARK TOWN")
+        );
+        assert_eq!(tables.spot(&location(24, 3, None)), None);
+        assert_eq!(
+            tables
+                .spot(&location(1, 2, None))
+                .map(|s| (s.name, s.region)),
+            Some(("PALLET TOWN", Region::Kanto))
+        );
+        assert_eq!(tables.spot(&location(27, 1, None)), None);
+        assert_eq!(tables.spot(&location(24, 9, None)), None);
+    }
 }

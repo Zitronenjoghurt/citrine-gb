@@ -1,18 +1,19 @@
-use super::engine::Rollback;
+use super::engine::{Rollback, Ticks};
 use super::messages::to_byte;
 use super::{
-    DropHistory, Engine, LinkedSave, MyGame, PlaySession, Returned, Role, Round, STALL_SHOWN,
-    SaveKey, Stage, sha1_of,
+    DropHistory, Engine, LinkedSave, MyGame, Picture, PlaySession, Returned, Role, Round,
+    STALL_SHOWN, SaveKey, Shown, Stage, sha1_of,
 };
 use citrine_gb::console::{Console, Keys};
 use citrine_gb::gb::GameBoy;
 use citrine_gb::persistence::sram_dump::SramDump;
-use citrine_gb_net::{CableByte, GameCard, Mode, OnlineId, Origin, PlayMsg, SessionId};
+use citrine_gb_net::{CableByte, GameCard, Mode, OnlineId, Origin, Pieces, PlayMsg, SessionId};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use web_time::Instant;
 
 impl PlaySession {
-    pub(super) fn new(friend: OnlineId, role: Role, stage: Stage, sharing: bool) -> Self {
+    pub(super) fn new(friend: OnlineId, role: Role, stage: Stage, sharing: Option<u32>) -> Self {
         let now = Instant::now();
         Self {
             id: None,
@@ -21,11 +22,13 @@ impl PlaySession {
             apart: false,
             began: false,
             links_in: Vec::new(),
-            sync: super::links::sync_for(None, 2),
+            sync: super::links::sync_for(None, 2, 1),
+            lanes: 1,
             input_delay: None,
             role,
             stage,
             borrowing: false,
+            downloading: false,
             borrowed_save: None,
             lent: false,
             round: Round::new(1, None, None),
@@ -35,21 +38,34 @@ impl PlaySession {
             pings: VecDeque::new(),
             next_ping: 0,
             round_trips: VecDeque::new(),
+            #[cfg(test)]
+            spread_for_test: None,
             pinged_at: None,
             started_at: now,
             heard_at: now,
             let_watch: true,
             friend_lets_watch: false,
             watch_friend: true,
+            watch_chosen: false,
             my_cable: true,
             friend_cable: true,
             saves: Vec::new(),
             sharing,
             outbox: Vec::new(),
             game_outbox: Vec::new(),
+            sealer: None,
+            sealing: VecDeque::new(),
+            sealed: Vec::new(),
+            pieces: Pieces::default(),
+            last_piece: 0,
             sample_rate: 44_100,
             grouped: false,
             stashed: None,
+            outbox_mark: None,
+            parked: VecDeque::new(),
+            failure: None,
+            touch: None,
+            ds_user: super::random_ds_user(),
         }
     }
 
@@ -78,10 +94,32 @@ impl PlaySession {
         self.stage
     }
 
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
     pub fn sends_game(&self) -> bool {
         matches!(self.stage, Stage::Preparing | Stage::Receiving { .. })
-            && self.sharing
+            && self.sharing.is_some()
             && self.round.they_hold_mine == Some(false)
+    }
+
+    pub fn state_received(&self) -> Option<(u64, u64)> {
+        if self.stage != Stage::Preparing {
+            return None;
+        }
+        let (got, total) = self.pieces.receiving()?;
+        Some((u64::from(got), u64::from(total)))
+    }
+
+    pub fn game_sent(&self) -> Option<(u64, u64)> {
+        let total = self.round.mine.as_ref()?.rom.len();
+        let done = match (self.round.acked, self.round.sending) {
+            (Some((acked, _)), _) => acked,
+            (None, Some(offset)) => offset,
+            (None, None) => total,
+        };
+        Some((done.min(total) as u64, total as u64))
     }
 
     pub fn is_live(&self) -> bool {
@@ -104,6 +142,10 @@ impl PlaySession {
         self.borrowing
     }
 
+    pub fn downloading(&self) -> bool {
+        self.downloading
+    }
+
     pub fn holds_theirs(&self) -> Option<bool> {
         self.round.i_hold_theirs
     }
@@ -117,13 +159,24 @@ impl PlaySession {
     }
 
     pub fn delay(&self) -> Option<u8> {
-        self.round.start.as_ref().map(|s| s.delay)
+        let start = self.round.start.as_ref()?.delay;
+        Some(self.round.rollback().map_or(start, |r| r.delay() as u8))
     }
 
     pub fn round_trip_ms(&self) -> Option<u32> {
         let mut sorted: Vec<u32> = self.round_trips.iter().copied().collect();
         sorted.sort_unstable();
         sorted.get(sorted.len() / 2).copied()
+    }
+
+    pub fn round_trip_spread_ms(&self) -> Option<u32> {
+        #[cfg(test)]
+        if let Some(ms) = self.spread_for_test {
+            return Some(ms);
+        }
+        let median = self.round_trip_ms()?;
+        let most = self.round_trips.iter().copied().max()?;
+        Some(most - median)
     }
 
     pub fn lets_friend_watch(&self) -> bool {
@@ -139,7 +192,7 @@ impl PlaySession {
     }
 
     pub fn sees_friend(&self) -> bool {
-        self.watch_friend && self.friend_lets_watch && self.console(false).is_some()
+        self.watch_friend && self.friend_lets_watch && self.friend_picture().is_some()
     }
 
     pub fn my_cable(&self) -> bool {
@@ -152,7 +205,7 @@ impl PlaySession {
 
     pub fn cable_plugged(&self) -> bool {
         match &self.round.engine {
-            Some(Engine::Rollback(r)) => r.cable_plugged(),
+            Some(Engine::Rollback(_)) => self.round.shown().is_some_and(Shown::plugged),
             Some(Engine::Cable(c)) => c.plugged,
             Some(Engine::Apart) => false,
             None => self.round.start.as_ref().is_some_and(|s| s.plugged),
@@ -161,22 +214,45 @@ impl PlaySession {
 
     pub fn waiting_for_friend(&self, now: Instant) -> bool {
         self.round
-            .rollback()
+            .shown()
             .is_some_and(|r| r.stalled_for(now) >= STALL_SHOWN)
     }
 
     pub fn in_group(&self) -> bool {
-        self.round
-            .rollback()
-            .is_some_and(super::engine::Rollback::is_group)
+        self.round.shown().is_some_and(Shown::group)
     }
 
     pub fn runs_engine(&self) -> bool {
-        self.round.rollback().is_some()
+        matches!(self.round.engine, Some(Engine::Rollback(_)))
+    }
+
+    pub fn friend_picture(&self) -> Option<Picture<'_>> {
+        self.round.shown().and_then(Shown::friend)
+    }
+
+    pub fn fetch(&self) -> Option<super::fetch::Fetch> {
+        match self.downloading {
+            true => self.round.shown().and_then(Shown::fetch),
+            false => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn engine_home(&self) -> bool {
+        match &self.round.engine {
+            Some(Engine::Rollback(r)) => r.is_home(),
+            _ => true,
+        }
     }
 
     pub fn console(&self, local: bool) -> Option<&dyn Console> {
         self.round.rollback().and_then(|r| r.console(local))
+    }
+
+    #[cfg(feature = "nds")]
+    pub fn shown_nds_mut(&mut self) -> Option<&mut citrine_gb::nds::machine::Nds> {
+        let local = self.console(true).is_some();
+        self.round.rollback_mut().and_then(|r| r.nds_mut(local))
     }
 
     pub fn wants_state(&self) -> bool {
@@ -200,6 +276,11 @@ impl PlaySession {
         self.send_setup();
     }
 
+    #[cfg(all(test, feature = "nds"))]
+    pub(crate) fn resumed_mine(&self) -> bool {
+        matches!(self.round.my_origin, Some(Origin::Resume(_)))
+    }
+
     pub fn take_returned(&mut self) -> Option<Returned> {
         self.returned.take()
     }
@@ -214,7 +295,7 @@ impl PlaySession {
     }
 
     pub fn shares_games(&self) -> bool {
-        self.sharing
+        self.sharing.is_some()
     }
 
     pub fn watching_only(&self) -> bool {
@@ -243,6 +324,10 @@ impl PlaySession {
 
     pub fn set_sample_rate(&mut self, rate: u32) {
         self.sample_rate = rate;
+    }
+
+    pub fn set_touch(&mut self, touch: Option<citrine_gb::console::Touch>) {
+        self.touch = touch;
     }
 
     #[cfg(test)]
@@ -286,6 +371,7 @@ impl PlaySession {
 
     pub fn set_watch_friend(&mut self, on: bool) {
         self.watch_friend = on;
+        self.watch_chosen = true;
         let shown = self.friend_lets_watch && on;
         if let Some(r) = self.round.rollback_mut() {
             r.watch(shown);
@@ -304,7 +390,7 @@ impl PlaySession {
     pub(super) fn join_cables(&mut self) {
         let linked = self.my_cable && self.friend_cable;
         match &mut self.round.engine {
-            Some(Engine::Rollback(r)) => r.request_cable(linked),
+            Some(Engine::Rollback(r)) => r.get_mut().request_cable(linked),
             Some(Engine::Cable(c)) => c.plugged = linked,
             Some(Engine::Apart) | None => {}
         }
@@ -319,10 +405,11 @@ impl PlaySession {
                 Some(card) => (Some(file), Some(card)),
                 None => return false,
             },
-            MyGame::Borrow { .. } => return false,
+            MyGame::Borrow { .. } | MyGame::Download => return false,
             MyGame::Nothing => (None, None),
         };
         self.borrowing = false;
+        self.downloading = false;
         self.next_round(self.round.number + 1, mine, card);
         true
     }
@@ -339,11 +426,11 @@ impl PlaySession {
         true
     }
 
-    pub fn hand_rom(&mut self, rom: &[u8]) -> bool {
+    pub fn hand_rom(&mut self, rom: Arc<[u8]>) -> bool {
         if !self.is_live() || self.id.is_none() {
             return false;
         }
-        let Some(hash) = sha1_of(rom).filter(|h| self.friend_game().map(|g| g.hash) == Some(*h))
+        let Some(hash) = sha1_of(&rom).filter(|h| self.friend_game().map(|g| g.hash) == Some(*h))
         else {
             return false;
         };
@@ -355,6 +442,7 @@ impl PlaySession {
     }
 
     pub fn take_saves(&mut self) -> Vec<LinkedSave> {
+        self.settle_frames();
         std::mem::take(&mut self.saves)
     }
 
@@ -385,20 +473,92 @@ impl PlaySession {
     }
 
     pub fn run_frame(&mut self, buttons: Keys, now: Instant) -> bool {
+        self.run_frames(vec![buttons], now);
+        self.settle_frames()
+    }
+
+    pub fn run_frames(&mut self, pads: Vec<Keys>, now: Instant) {
+        self.settle_frames();
         if self.stage != Stage::Playing {
-            return false;
+            return;
         }
-        let round_trip = self.round_trip_ms().unwrap_or(0);
+        let plan = Ticks {
+            pads,
+            touch: self.touch,
+            cable: Some(self.my_cable && self.friend_cable),
+            saves: true,
+            round_trip_ms: self.round_trip_ms().unwrap_or(0),
+            now,
+        };
+        let Some(Engine::Rollback(r)) = &mut self.round.engine else {
+            return;
+        };
+        self.outbox_mark = Some(self.outbox.len());
+        if r.has_worker() {
+            self.round.seen.publish(r.get());
+        }
+        r.lend(plan);
+    }
+
+    pub fn wait_frames(&self, timeout: std::time::Duration) -> bool {
+        match &self.round.engine {
+            Some(Engine::Rollback(r)) => r.wait(timeout),
+            _ => true,
+        }
+    }
+
+    pub fn settle_frames(&mut self) -> bool {
+        let Some(mark) = self.outbox_mark.take() else {
+            return false;
+        };
         let Some(r) = self.round.rollback_mut() else {
             return false;
         };
-        if !r.cable_settling() && r.cable_plugged() != (self.my_cable && self.friend_cable) {
-            r.request_cable(self.my_cable && self.friend_cable);
+        let ticked = r.take_ticked();
+        let mark = mark.min(self.outbox.len());
+        self.outbox.splice(mark..mark, ticked.outbox);
+        self.keep_saves(ticked.saves);
+        ticked.ran
+    }
+
+    pub fn frame_timer(&self) -> Option<&crate::utils::avg_timer::AvgTimer> {
+        self.round.rollback().map(Rollback::frame_timer)
+    }
+
+    pub fn frame_totals(&self) -> Option<crate::frame_log::SessionTotals> {
+        let r = self.round.rollback()?;
+        let counts = r.counts();
+        Some(crate::frame_log::SessionTotals {
+            delay: r.delay(),
+            ping_ms: self.round_trip_ms(),
+            ran: counts.ran,
+            waited: counts.waited,
+            skipped: counts.skipped,
+            repaid: counts.repaid,
+            ahead: r.ahead(),
+            watching: r.watches(),
+        })
+    }
+
+    pub fn engine_on_worker(&self) -> bool {
+        matches!(&self.round.engine, Some(Engine::Rollback(r)) if r.has_worker())
+    }
+
+    pub(super) fn place_engine(&mut self, threads: Option<&citrine_gb_threads::Threads>) {
+        if let Some(threads) = threads {
+            self.lanes = threads.pool_size();
         }
-        let ran = r.tick(buttons, round_trip, now, &mut self.outbox);
-        let save = r.take_save();
-        self.keep_saves(save);
-        ran
+        let Some(Engine::Rollback(r)) = &mut self.round.engine else {
+            return;
+        };
+        match threads {
+            Some(threads) if !r.has_worker() => {
+                r.run_on(threads, format!("session: {}", self.friend))
+            }
+            Some(_) => {}
+            None if r.has_worker() => r.park(),
+            None => {}
+        }
     }
 
     pub fn pump_link(&mut self, gb: &mut GameBoy) {
@@ -434,6 +594,7 @@ impl PlaySession {
     }
 
     pub fn finish_saves(&mut self) -> Vec<LinkedSave> {
+        self.settle_frames();
         let save = self.round.rollback_mut().and_then(Rollback::final_save);
         self.keep_saves(save);
         self.take_saves()

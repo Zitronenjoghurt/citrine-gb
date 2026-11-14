@@ -8,3 +8,4 @@ pub mod metrics;
 pub mod recording;
 pub mod report;
 pub mod runner;
+pub mod scene3d;

@@ -1,11 +1,16 @@
-use super::lines::card_name;
+use super::lines::{card_name, ds_line, member_name, refused_line};
 use super::room::{RoomFacts, adds_to_room, in_room, names};
-use super::{Fit, PickFor, PlayingUi, fit_of};
+use super::{Ended, Fit, PickFor, PlayingUi, fit_of, refresh_shelf};
 use crate::app::ui_state::recent::RecentRoms;
 use crate::emulator::Emulator;
 use crate::online::Online;
-use crate::play::{GameFile, IncomingInvite, MyGame, Play, PlaySession, Shelf, kind_of};
-use citrine_gb_net::OnlineId;
+use crate::play::shelf::ShelfIndex;
+use crate::play::{
+    GameFile, IncomingInvite, Look, MyGame, Play, PlaySession, Shelf, kind_of, plays_together,
+    refusal, shares_games,
+};
+use citrine_gb_net::{Console, GameCard, OnlineId, Refusal};
+use std::sync::Arc;
 
 pub fn group_partners(play: &Play, online: &Online) -> Option<String> {
     group_link(play, online).map(|(partners, _)| partners)
@@ -32,18 +37,31 @@ pub fn unlink_group(play: &mut Play, emulator: &mut Emulator) -> bool {
     true
 }
 
-pub fn shelf_from(recent: &RecentRoms) -> Box<dyn Shelf> {
+pub fn shelf_from(recent: &RecentRoms, index: &Arc<ShelfIndex>) -> Box<dyn Shelf> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         Box::new(crate::play::shelf::Files {
             paths: recent.entries().iter().map(|e| e.path.clone()).collect(),
+            index: index.clone(),
         })
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = recent;
+        let _ = (recent, index);
         Box::new(crate::play::shelf::Homebrew)
     }
+}
+
+fn shelf_file(emulator: &Emulator, rom: Arc<[u8]>, card: &GameCard) -> GameFile {
+    let save = emulator.battery_for(&rom);
+    let mut file = GameFile::new(
+        rom,
+        card.hash,
+        card_name(card).to_string(),
+        kind_of(card.console),
+    );
+    file.save = save;
+    file
 }
 
 pub fn link_theirs(play: &mut Play, emulator: &Emulator, who: OnlineId) -> bool {
@@ -56,16 +74,11 @@ pub fn link_theirs(play: &mut Play, emulator: &Emulator, who: OnlineId) -> bool 
         return false;
     };
     let game = match play.find(&card.hash) {
-        Some(rom) => MyGame::Own(GameFile {
-            save: emulator.battery_for(&rom),
-            rom,
-            title: card_name(&card).to_string(),
-            kind: kind_of(card.console),
-            running: false,
-        }),
-        None => MyGame::Borrow {
+        Look::Found(rom) => MyGame::Own(shelf_file(emulator, rom, &card)),
+        Look::Missing => MyGame::Borrow {
             save: emulator.borrowed_save(&card.hash),
         },
+        Look::Looking => return false,
     };
     play.play_theirs(who, game)
 }
@@ -137,8 +150,20 @@ fn send_invite(
     friend: OnlineId,
     game: Option<GameFile>,
 ) -> bool {
+    if let Some(card) = game
+        .as_ref()
+        .and_then(GameFile::card)
+        .filter(|card| !plays_together(card))
+    {
+        playing.ended = Some(Ended {
+            friend,
+            line: ds_line(card_name(&card)),
+            paused: false,
+        });
+        return true;
+    }
     prepare(emulator, playing);
-    play.set_shelf(shelf_from(recent));
+    refresh_shelf(play, playing, recent);
     if !play.invite(online, friend, game) {
         return false;
     }
@@ -154,25 +179,59 @@ pub fn join(
     recent: &RecentRoms,
     invite: &IncomingInvite,
 ) -> bool {
+    join_as(play, online, emulator, playing, recent, invite, true)
+}
+
+pub fn join_theirs(
+    play: &mut Play,
+    online: &mut Online,
+    emulator: &mut Emulator,
+    playing: &mut PlayingUi,
+    recent: &RecentRoms,
+    invite: &IncomingInvite,
+) -> bool {
+    join_as(play, online, emulator, playing, recent, invite, false)
+}
+
+fn join_as(
+    play: &mut Play,
+    online: &mut Online,
+    emulator: &mut Emulator,
+    playing: &mut PlayingUi,
+    recent: &RecentRoms,
+    invite: &IncomingInvite,
+    asks_how: bool,
+) -> bool {
     if play.is_live() {
         playing.joining = Some(invite.clone());
         return true;
     }
-    let fit = fit_of(playing, play, online, emulator, recent, invite);
+    if declines_ds(play, online, playing, invite) {
+        return true;
+    }
+    refresh_shelf(play, playing, recent);
+    let Some(fit) = fit_of(playing, play, online, emulator, invite) else {
+        playing.join_looking = Some(invite.clone());
+        return true;
+    };
+    if asks_how
+        && fit == Fit::Borrow
+        && invite
+            .game
+            .as_ref()
+            .is_some_and(|card| card.console.is_ds())
+    {
+        playing.picking = Some(PickFor::Join(invite.clone()));
+        return true;
+    }
     let game = match (fit, &invite.game) {
         (Fit::Open | Fit::Cable, _) => match emulator.game_file() {
             Some(file) => MyGame::Own(file),
             None => return false,
         },
         (Fit::Shelf, Some(card)) => match play.find(&card.hash) {
-            Some(rom) => MyGame::Own(GameFile {
-                save: emulator.battery_for(&rom),
-                rom,
-                title: card_name(card).to_string(),
-                kind: kind_of(card.console),
-                running: false,
-            }),
-            None => return false,
+            Look::Found(rom) => MyGame::Own(shelf_file(emulator, rom, card)),
+            Look::Missing | Look::Looking => return false,
         },
         (Fit::Borrow, Some(card)) => MyGame::Borrow {
             save: emulator.borrowed_save(&card.hash),
@@ -191,10 +250,60 @@ pub fn join_with(
     invite: &IncomingInvite,
     game: MyGame,
 ) -> bool {
+    if declines_ds(play, online, playing, invite) {
+        return true;
+    }
+    if let Some(card) = &invite.game
+        && let Some(why) = ds_refusal(play, card, &game, shares_games(online))
+    {
+        let name = member_name(play, online, invite.from);
+        if !play.refuse(online, invite.session, why) {
+            return false;
+        }
+        playing.ended = Some(Ended {
+            friend: invite.from,
+            line: refused_line(&name, card_name(card), why),
+            paused: false,
+        });
+        return true;
+    }
     prepare(emulator, playing);
     if !play.accept(online, invite.session, game) {
         return false;
     }
     tune(play, emulator);
     true
+}
+
+fn declines_ds(
+    play: &mut Play,
+    online: &mut Online,
+    playing: &mut PlayingUi,
+    invite: &IncomingInvite,
+) -> bool {
+    let Some(card) = invite.game.as_ref().filter(|card| !plays_together(card)) else {
+        return false;
+    };
+    play.decline(online, invite.session);
+    playing.ended = Some(Ended {
+        friend: invite.from,
+        line: ds_line(card_name(card)),
+        paused: false,
+    });
+    true
+}
+
+fn ds_refusal(play: &Play, card: &GameCard, game: &MyGame, sharing: bool) -> Option<Refusal> {
+    let mine = match game {
+        MyGame::Own(file) => file.card(),
+        MyGame::Download => return None,
+        MyGame::Borrow { .. } | MyGame::Nothing => None,
+    };
+    let other_copy = match card.console {
+        Console::Nds { code } if mine.as_ref().is_none_or(|m| m.hash != card.hash) => {
+            play.holds_ds_game(code)
+        }
+        _ => false,
+    };
+    refusal(card, mine.as_ref(), other_copy, sharing)
 }

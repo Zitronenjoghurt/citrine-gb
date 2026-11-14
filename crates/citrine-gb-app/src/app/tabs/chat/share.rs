@@ -212,7 +212,7 @@ pub(super) fn share_item(item: &MediaItem, bytes: Vec<u8>) -> Option<NewShare> {
     })
 }
 
-pub(super) fn replay_share(emulator: &Emulator) -> Option<NewShare> {
+pub(super) fn replay_share(emulator: &mut Emulator) -> Option<NewShare> {
     let json = emulator.recorder.export_json()?;
     let recording = crate::replay::parse(json.as_bytes()).ok()?;
     let video = emulator.video();
@@ -310,4 +310,24 @@ pub fn share_facts(share: &Share) -> String {
         facts.push(media::format_size(share.size));
     }
     facts.join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::share;
+    use super::share_facts;
+    use crate::media;
+    use citrine_gb_net::ShareKind;
+
+    #[test]
+    fn share_cards_name_the_kind_length_and_size() {
+        assert_eq!(
+            share_facts(&share(ShareKind::Screenshot, 2_048, None)),
+            format!("Screenshot · {}", media::format_size(2_048))
+        );
+        assert_eq!(
+            share_facts(&share(ShareKind::Replay, 900, Some(83_000))),
+            format!("Input replay · {}", media::format_length(83_000))
+        );
+    }
 }

@@ -8,6 +8,12 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
         return;
     }
 
+    #[cfg(feature = "nds")]
+    if viewer.emulator.kind() == citrine_gb::console::ConsoleKind::Nds {
+        crate::app::widgets::rom_info::NdsRomInfo::new(&viewer.emulator.rom_bytes()).ui(ui);
+        return;
+    }
+
     #[cfg(feature = "gba")]
     if let Some(gba) = viewer.emulator.as_gba() {
         let header = citrine_gb::gba::header::GbaHeader::parse(gba.bus().rom());

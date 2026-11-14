@@ -50,7 +50,7 @@ fn find(
     let at = |block: &MemoryBlock, bank: u16| {
         let offset = addr.checked_sub(block.start)?;
         let found = Address::at(block.id, bank, offset);
-        let absolute = found.gba_address().is_none_or(|at| at == addr);
+        let absolute = found.flat_address().is_none_or(|at| at == addr);
         (offset < block.size && block.holds(bank) && absolute).then_some(found)
     };
     if let Some(bank) = bank {

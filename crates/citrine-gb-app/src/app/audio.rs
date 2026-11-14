@@ -1,7 +1,21 @@
 use super::Citrine;
+use crate::frame_log::AudioTotals;
 use egui::Context;
 
 impl Citrine {
+    pub(super) fn audio_totals(&self) -> AudioTotals {
+        let Some(audio) = self.audio.as_ref().filter(|audio| audio.is_running()) else {
+            return AudioTotals::default();
+        };
+        let stats = audio.stats();
+        AudioTotals {
+            rate: audio.get_sample_rate(),
+            underrun_frames: stats.underrun_frames(),
+            overrun_frames: stats.overrun_frames(),
+            queued_frames: (!cfg!(target_arch = "wasm32")).then(|| stats.left_frames()),
+        }
+    }
+
     pub fn try_start_audio(&mut self) {
         let Some(audio) = &self.audio else {
             return;

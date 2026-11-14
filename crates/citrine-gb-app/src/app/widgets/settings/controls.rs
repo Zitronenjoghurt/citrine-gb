@@ -1,3 +1,4 @@
+use crate::app::big_screen::{Backdrop, ButtonIcons, ConfirmButton};
 use crate::app::ui_state::hotkeys::{Hotkey, HotkeyAction, Hotkeys};
 use crate::app::ui_state::keybinds::{
     BindingCapture, BindingKind, BindingTarget, Captured, GbButton, KeyBindings, key_label,
@@ -9,8 +10,8 @@ use crate::app::widgets::chip::{CHIP_HEIGHT, chip_text};
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::info_mark::info_mark;
 use crate::app::widgets::reset_slider::ResetSlider;
-use crate::app::widgets::section::{section, section_with_hint};
 use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::settings::page::{Heading, Page};
 use crate::app::widgets::text::faint;
 use crate::icons;
 use crate::local_link::Half;
@@ -21,107 +22,148 @@ use strum::IntoEnumIterator;
 pub const RINGER_HINT: &str = "Chrome on Android vibrates only while the ringer is on.";
 
 pub fn show(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) -> bool {
-    let debug = bindings(ui, settings, capture);
-    section_with_hint(
-        ui,
-        icons::DEVICE_MOBILE,
-        "On-screen buttons",
-        "The touch layout shows these on phones and small windows.",
-        |ui| {
-            touch_grid(ui, settings);
-        },
-    );
-    debug
+    Page::show(ui, |page| {
+        let debug = bindings(page, settings, capture);
+        page.boxed(
+            Some(Heading::new(icons::TELEVISION_SIMPLE, "Big screen")),
+            |ui| {
+                Form::show(ui, "controls_big_screen", |form| {
+                    form.row_with_hint("Confirm button", ConfirmButton::NOTE, |ui| {
+                        settings.dirty |= GenericSelect::from_enum(
+                            &mut settings.big_screen.confirm,
+                            "enum_select_confirm_button",
+                        )
+                        .default_value(ConfirmButton::default())
+                        .ui(ui)
+                        .changed();
+                    });
+                    form.row("Button icons", |ui| {
+                        settings.dirty |= GenericSelect::from_enum(
+                            &mut settings.big_screen.icons,
+                            "enum_select_button_icons",
+                        )
+                        .default_value(ButtonIcons::default())
+                        .ui(ui)
+                        .changed();
+                    });
+                    form.row(crate::app::big_screen::BACKDROP, |ui| {
+                        settings.dirty |= GenericSelect::from_enum(
+                            &mut settings.big_screen.backdrop,
+                            "enum_select_backdrop",
+                        )
+                        .default_value(Backdrop::default())
+                        .ui(ui)
+                        .changed();
+                    });
+                });
+            },
+        );
+        page.section(
+            Heading::new(icons::DEVICE_MOBILE, "On-screen buttons")
+                .hint("The touch layout shows these on phones and small windows."),
+            |ui| {
+                touch_grid(ui, settings);
+            },
+        );
+        debug
+    })
 }
 
-pub fn bindings(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) -> bool {
+pub fn bindings(page: &mut Page, settings: &mut Settings, capture: &mut BindingCapture) -> bool {
     capture.mark_shown();
     apply_capture(settings, capture);
-    capture_banner(ui, capture);
+    if capture.is_waiting() {
+        page.plain(|ui| capture_banner(ui, capture));
+    }
     let mut debug = false;
-    section(ui, icons::GAME_CONTROLLER, BUTTONS_HEADING, |ui| {
-        let unbound = settings.bindings.unbound();
-        if !unbound.is_empty() {
-            let names: Vec<String> = unbound.iter().map(|b| b.to_string()).collect();
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("{} has nothing bound to it.", names.join(", ")),
-            );
-            ui.add_space(6.0);
-        }
+    page.boxed(
+        Some(Heading::new(icons::GAME_CONTROLLER, BUTTONS_HEADING)),
+        |ui| {
+            Form::show(ui, "controls_buttons", |form| {
+                let unbound = settings.bindings.unbound();
+                if !unbound.is_empty() {
+                    let names: Vec<String> = unbound.iter().map(|b| b.to_string()).collect();
+                    let warn = form.ctx().style().visuals.warn_fg_color;
+                    form.custom(|ui| {
+                        ui.colored_label(
+                            warn,
+                            format!("{} has nothing bound to it.", names.join(", ")),
+                        )
+                    });
+                }
 
-        buttons_table(ui, settings, capture);
+                form.custom(|ui| buttons_table(ui, settings, capture));
 
-        ui.add_space(10.0);
-        Form::show(ui, "stick_steering", |form| {
-            form.row_with_hint(
-                "Left stick steers",
-                "Also reads the analog stick as a d-pad.",
-                |ui| {
-                    settings.dirty |= ui
-                        .checkbox(&mut settings.bindings.stick_as_dpad, "")
-                        .changed();
-                },
-            );
-            form.row_with_hint("Stick dead zone", DEAD_ZONE_HINT, |ui| {
-                ui.add_enabled_ui(settings.bindings.stick_as_dpad, |ui| {
-                    let response = ResetSlider::new(
-                        &mut settings.bindings.stick_deadzone,
-                        KeyBindings::DEADZONES,
-                    )
-                    .default_value(KeyBindings::DEFAULT_DEADZONE)
-                    .suffix("%")
-                    .ui(ui);
-                    if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                settings.dirty |= form.toggle_with_hint(
+                    "Left stick steers",
+                    "Also reads the analog stick as a d-pad.",
+                    &mut settings.bindings.stick_as_dpad,
+                );
+                form.row_with_hint("Stick dead zone", DEAD_ZONE_HINT, |ui| {
+                    ui.add_enabled_ui(settings.bindings.stick_as_dpad, |ui| {
+                        let response = ResetSlider::new(
+                            &mut settings.bindings.stick_deadzone,
+                            KeyBindings::DEADZONES,
+                        )
+                        .default_value(KeyBindings::DEFAULT_DEADZONE)
+                        .suffix("%")
+                        .ui(ui);
+                        if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                            settings.dirty = true;
+                        }
+                    });
+                });
+                form.buttons(|ui| {
+                    if reset_button(ui, !settings.bindings.is_default()) {
+                        settings.bindings = KeyBindings::default();
+                        capture.cancel();
+                        settings.dirty = true;
+                    }
+                    debug = ui
+                        .button(format!("{} Controller debug", icons::BUG))
+                        .on_hover_text(
+                            "Live controller state and an input log to send with a bug report",
+                        )
+                        .clicked();
+                });
+            });
+        },
+    );
+
+    page.boxed(Some(Heading::new(icons::KEYBOARD, "Shortcuts")), |ui| {
+        Form::show(ui, "controls_shortcuts", |form| {
+            form.custom(|ui| shortcuts_table(ui, settings, capture));
+            form.buttons(|ui| {
+                if reset_button(ui, !settings.hotkeys.is_default()) {
+                    settings.hotkeys = Hotkeys::default();
+                    capture.cancel();
+                    settings.dirty = true;
+                }
+            });
+        });
+    });
+
+    page.boxed(
+        Some(Heading::new(
+            crate::app::tabs::linked::LINK_ICON,
+            "Keyboard split in two",
+        )),
+        |ui| {
+            Form::show(ui, "controls_split", |form| {
+                for half in Half::BOTH {
+                    form.custom(|ui| {
+                        ui.label(RichText::new(half.label()).strong());
+                        split_table(ui, settings, capture, half);
+                    });
+                }
+                form.buttons(|ui| {
+                    if reset_button(ui, !settings.local_link.keys_are_default()) {
+                        settings.local_link.reset_keys();
+                        capture.cancel();
                         settings.dirty = true;
                     }
                 });
             });
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if reset_button(ui, !settings.bindings.is_default()) {
-                settings.bindings = KeyBindings::default();
-                capture.cancel();
-                settings.dirty = true;
-            }
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            debug = ui
-                .button(format!("{} Controller debug", icons::BUG))
-                .on_hover_text("Live controller state and an input log to send with a bug report")
-                .clicked();
-        });
-    });
-
-    section(ui, icons::KEYBOARD, "Shortcuts", |ui| {
-        shortcuts_table(ui, settings, capture);
-
-        ui.add_space(10.0);
-        if reset_button(ui, !settings.hotkeys.is_default()) {
-            settings.hotkeys = Hotkeys::default();
-            capture.cancel();
-            settings.dirty = true;
-        }
-    });
-
-    section(
-        ui,
-        crate::app::tabs::linked::LINK_ICON,
-        "Keyboard split in two",
-        |ui| {
-            for half in Half::BOTH {
-                ui.horizontal(|ui| ui.label(RichText::new(half.label()).strong()));
-                ui.add_space(2.0);
-                split_table(ui, settings, capture, half);
-                ui.add_space(8.0);
-            }
-            if reset_button(ui, !settings.local_link.keys_are_default()) {
-                settings.local_link.reset_keys();
-                capture.cancel();
-                settings.dirty = true;
-            }
         },
     );
 
@@ -147,6 +189,13 @@ fn apply_capture(settings: &mut Settings, capture: &mut BindingCapture) {
             settings.hotkeys.unbind_pad(pad);
             settings.bindings.bind_shoulder_pad(pad, shoulder);
         }
+        (BindingTarget::Ds(button), Captured::Key(key, _)) => {
+            settings.bindings.bind_ds_key(key, button);
+        }
+        (BindingTarget::Ds(button), Captured::Pad(pad)) => {
+            settings.hotkeys.unbind_pad(pad);
+            settings.bindings.bind_ds_pad(pad, button);
+        }
         (BindingTarget::Shortcut(action), Captured::Pad(pad)) => {
             if action.is_hold() {
                 return;
@@ -168,10 +217,6 @@ fn apply_capture(settings: &mut Settings, capture: &mut BindingCapture) {
 }
 
 fn capture_banner(ui: &mut Ui, capture: &mut BindingCapture) {
-    if !capture.is_waiting() {
-        return;
-    }
-
     egui::Frame::new()
         .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
         .inner_margin(egui::Margin::symmetric(10, 8))
@@ -192,7 +237,6 @@ fn capture_banner(ui: &mut Ui, capture: &mut BindingCapture) {
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         capture.cancel();
     }
-    ui.add_space(8.0);
 }
 
 const DEAD_ZONE_HINT: &str = "How far the stick moves before it presses a direction.";
@@ -249,7 +293,7 @@ fn button_row(
             }
             for key in keys {
                 if chip(ui, icons::KEYBOARD, &key_label(key), key.name()) {
-                    settings.bindings.unbind_key(key);
+                    settings.bindings.remove_key(target, key);
                     settings.dirty = true;
                 }
             }
@@ -260,7 +304,7 @@ fn button_row(
                     pad.short_name(),
                     &pad.to_string(),
                 ) {
-                    settings.bindings.unbind_pad(pad);
+                    settings.bindings.remove_pad(target, pad);
                     settings.dirty = true;
                 }
             }
@@ -316,7 +360,9 @@ fn split_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCaptur
 
 fn shortcuts_table(ui: &mut Ui, settings: &mut Settings, capture: &mut BindingCapture) {
     let dev_mode = settings.dev_mode;
-    let actions = HotkeyAction::iter().filter(|action| dev_mode || !action.is_debugger());
+    let actions = HotkeyAction::iter()
+        .filter(|action| dev_mode || !action.is_debugger())
+        .filter(|action| cfg!(feature = "nds") || !action.is_ds());
     for (index, action) in actions.enumerate() {
         let target = BindingTarget::Shortcut(action);
 
@@ -387,7 +433,7 @@ fn binding_row(
     chips: impl FnOnce(&mut Ui, &mut Settings),
     waiting: bool,
 ) -> bool {
-    let stacked = ui.available_width() - cell.width < STACK_BELOW;
+    let stacked = ui.available_width() - ACTION_NAME.width < STACK_BELOW;
     let mut add = false;
 
     ui.vertical(|ui| {
@@ -470,17 +516,13 @@ fn reset_button(ui: &mut Ui, enabled: bool) -> bool {
 fn touch_grid(ui: &mut Ui, settings: &mut Settings) -> Response {
     let s = &mut settings.touch;
     let mut dirty = false;
-    let mut ui_scale_response = None;
 
     let response = ui
         .scope(|ui| {
             Form::show(ui, "controls", |form| {
-                form.row("Show buttons", |ui| {
-                    dirty |= crate::app::widgets::check::checkbox(ui, &mut s.show_controls, "")
-                        .changed();
-                });
+                dirty |= form.toggle("Show", &mut s.show_controls);
 
-                form.row("Button size", |ui| {
+                form.row("Size", |ui| {
                     dirty |= ResetSlider::new(
                         &mut s.scale,
                         TouchSettings::MIN_SCALE..=TouchSettings::MAX_SCALE,
@@ -497,18 +539,6 @@ fn touch_grid(ui: &mut Ui, settings: &mut Settings) -> Response {
                         .default_value(TouchSettings::DEFAULT_OPACITY)
                         .ui(ui)
                         .changed();
-                });
-
-                form.row("UI size", |ui| {
-                    ui_scale_response = Some(
-                        ResetSlider::new(
-                            &mut s.ui_scale,
-                            TouchSettings::MIN_UI_SCALE..=TouchSettings::MAX_UI_SCALE,
-                        )
-                        .step_by(0.05)
-                        .default_value(1.0)
-                        .ui(ui),
-                    );
                 });
 
                 form.row_with_hint(
@@ -539,26 +569,24 @@ fn touch_grid(ui: &mut Ui, settings: &mut Settings) -> Response {
                     .changed();
                 });
 
-                form.row_with_hint("Left-handed", "Puts the d-pad on the right.", |ui| {
-                    dirty |=
-                        crate::app::widgets::check::checkbox(ui, &mut s.mirrored, "").changed();
-                });
+                dirty |= form.toggle_with_hint(
+                    "Left-handed",
+                    "Puts the d-pad on the right.",
+                    &mut s.mirrored,
+                );
 
                 #[cfg(target_arch = "wasm32")]
-                form.row_with_hint("Vibrate on press", RINGER_HINT, |ui| {
-                    dirty |= crate::app::widgets::check::checkbox(ui, &mut s.haptics, "").changed();
-                });
+                {
+                    dirty |= form.toggle_with_hint("Vibrate on press", RINGER_HINT, &mut s.haptics);
+                }
                 #[cfg(not(target_arch = "wasm32"))]
-                form.row("Vibrate on press", |ui| {
-                    dirty |= crate::app::widgets::check::checkbox(ui, &mut s.haptics, "").changed();
-                });
+                {
+                    dirty |= form.toggle("Vibrate on press", &mut s.haptics);
+                }
             })
         })
         .response;
 
     settings.dirty |= dirty;
-    if let Some(scale) = ui_scale_response {
-        settings.note_scale_drag(&scale);
-    }
     response
 }

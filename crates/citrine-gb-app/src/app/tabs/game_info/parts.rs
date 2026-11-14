@@ -255,3 +255,33 @@ pub(super) fn grouped(value: u32) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::{card_with_margin, type_text_color};
+
+    #[test]
+    fn type_tags_pick_the_text_colour_with_more_contrast() {
+        assert_eq!(type_text_color(0), Color32::from_rgb(0x1a, 0x1a, 0x1a));
+        assert_eq!(type_text_color(8), Color32::WHITE);
+        assert_eq!(type_text_color(1), Color32::WHITE);
+    }
+
+    #[test]
+    fn selecting_a_card_keeps_its_content_in_place() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert_eq!(
+                    card(ui, true).total_margin(),
+                    card(ui, false).total_margin()
+                );
+                assert_eq!(
+                    card_with_margin(ui, true, 2, 4).total_margin(),
+                    card_with_margin(ui, false, 2, 4).total_margin()
+                );
+            });
+        });
+    }
+}

@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const LOCAL_PREFIX: &str = "citrine/";
 const SETTINGS_NAMESPACE: &str = "settings";
+pub const LOCAL_MAX_CHARS: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
@@ -35,6 +36,10 @@ pub fn key(namespace: &str, name: &str) -> String {
 
 pub fn local_key(namespace: &str, name: &str) -> String {
     format!("{LOCAL_PREFIX}{namespace}/{name}")
+}
+
+pub fn fits_local(encoded: &str) -> bool {
+    encoded.len() <= LOCAL_MAX_CHARS
 }
 
 impl Mirror {
@@ -289,5 +294,37 @@ mod tests {
         assert!(written.moved.is_empty());
         assert!(after.ops.is_empty());
         assert_eq!(after.moved, ["citrine-crash"]);
+    }
+
+    #[test]
+    fn a_save_from_version_0_11_still_moves_out_of_local_storage() {
+        let mut mirror = Mirror::default();
+        mirror.adopt_local([(
+            "citrine/ABCDEF0123/battery.sav".to_string(),
+            "c3JhbQ==".to_string(),
+        )]);
+        assert_eq!(mirror.read("ABCDEF0123/battery.sav"), Some(&b"sram"[..]));
+    }
+
+    #[test]
+    fn an_eight_megabyte_state_round_trips_through_the_database_only() {
+        let big: Vec<u8> = (0..8 << 20).map(|i: u32| (i % 251) as u8).collect();
+        assert!(!fits_local(&encoded(&big)));
+        assert!(fits_local(&encoded(&[0; 4096])));
+
+        let mut mirror = Mirror::default();
+        let path = key(GAME, "slot0.snap");
+        mirror.write(path.clone(), &big);
+        let batch = mirror.take_pending();
+        assert_eq!(batch.ops, [Op::Put(path.clone(), big.clone())]);
+        mirror.retry(batch);
+        assert_eq!(
+            mirror.take_pending().ops,
+            [Op::Put(path.clone(), big.clone())]
+        );
+
+        let mut reopened = Mirror::default();
+        reopened.fill([(path.clone(), big.clone())]);
+        assert_eq!(reopened.read(&path), Some(&big[..]));
     }
 }

@@ -38,6 +38,10 @@ fn side(ui: &Ui) -> f32 {
     if touch > 0.0 { touch } else { glyph_width(ui) }
 }
 
+pub fn info_mark_width(ui: &Ui) -> f32 {
+    side(ui) + ui.spacing().item_spacing.x / 2.0
+}
+
 pub fn info_mark(ui: &mut Ui, text: &str) -> Response {
     if ui.layout().main_dir() == Direction::LeftToRight {
         ui.add_space(-ui.spacing().item_spacing.x / 2.0);

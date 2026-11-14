@@ -1,28 +1,105 @@
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub use native::TestDirs;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Backend, data_dir};
+pub use native::{Backend, cache_dir, data_dir};
 #[cfg(target_arch = "wasm32")]
 pub use web::{Backend, keep_crash_save, open_saves};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use directories::ProjectDirs;
     use std::path::PathBuf;
 
+    #[cfg(not(test))]
     const FALLBACK_DIR: &str = "citrine-data";
+    #[cfg(not(test))]
+    const FALLBACK_CACHE_DIR: &str = "citrine-cache";
 
     #[derive(Clone)]
     pub struct Backend {
         root: PathBuf,
     }
 
+    #[cfg(test)]
+    thread_local! {
+        static TEST_DIRS: std::cell::RefCell<Option<(PathBuf, PathBuf)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub struct TestDirs {
+        pub data: PathBuf,
+        pub cache: PathBuf,
+    }
+
+    #[cfg(test)]
+    impl TestDirs {
+        pub fn new(name: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("citrine-dirs-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let dirs = Self {
+                data: root.join("data"),
+                cache: root.join("cache"),
+            };
+            TEST_DIRS.set(Some((dirs.data.clone(), dirs.cache.clone())));
+            dirs
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for TestDirs {
+        fn drop(&mut self) {
+            TEST_DIRS.set(None);
+            if let Some(root) = self.data.parent() {
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn test_dir(cache: bool) -> PathBuf {
+        TEST_DIRS
+            .with_borrow(|dirs| {
+                dirs.as_ref()
+                    .map(|(data, cached)| if cache { cached } else { data }.clone())
+            })
+            .unwrap_or_else(|| {
+                let suffix = if cache { "-cache" } else { "" };
+                std::env::temp_dir().join(format!("citrine-test-{}{suffix}", std::process::id()))
+            })
+    }
+
+    #[cfg(test)]
+    pub fn data_dir() -> PathBuf {
+        test_dir(false)
+    }
+
+    #[cfg(test)]
+    pub fn cache_dir() -> PathBuf {
+        test_dir(true)
+    }
+
+    #[cfg(not(test))]
     pub fn data_dir() -> PathBuf {
         #[cfg(target_os = "android")]
         if let Some(dir) = crate::platform::android::data_dir() {
             return dir;
         }
-        match ProjectDirs::from("", "", "citrine") {
+        match directories::ProjectDirs::from("", "", "citrine") {
             Some(dirs) => dirs.data_dir().to_path_buf(),
             None => PathBuf::from(FALLBACK_DIR),
+        }
+    }
+
+    #[cfg(not(test))]
+    pub fn cache_dir() -> PathBuf {
+        #[cfg(target_os = "android")]
+        if let Some(dir) = crate::platform::android::cache_dir() {
+            return dir;
+        }
+        match directories::ProjectDirs::from("", "", "citrine") {
+            Some(dirs) => dirs.cache_dir().to_path_buf(),
+            None => PathBuf::from(FALLBACK_CACHE_DIR),
         }
     }
 
@@ -37,6 +114,10 @@ mod native {
     impl Backend {
         pub fn settings() -> Self {
             Self { root: data_dir() }
+        }
+
+        pub fn cache() -> Self {
+            Self { root: cache_dir() }
         }
 
         pub fn at(root: PathBuf) -> Self {

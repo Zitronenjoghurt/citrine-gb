@@ -4,6 +4,7 @@ use crate::app::widgets::breakpoints::{BreakpointList, Entry, EntryAction};
 use crate::app::widgets::debugger::{CodeView, DebuggerAction, DebuggerBar, Position};
 use crate::app::widgets::disassembly::{self, CodeAction, DisassemblyView};
 use crate::app::widgets::registers::RegisterTable;
+use crate::app::widgets::tab_bar::tab_bar;
 use crate::icons;
 use crate::utils::file_saver::FileSaver;
 use citrine_gb::debug::Debug;
@@ -22,6 +23,10 @@ const LOG_HEIGHT: f32 = 160.0;
 const LOG_FLOOR_LINES: f32 = 4.0;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
+    let machine = viewer.emulator.debug_mut();
+    if let Some(picked) = cpu_picker(ui, machine.features().cpus, machine.cpu()) {
+        machine.select_cpu(picked);
+    }
     toolbar(viewer, ui);
     ui.separator();
     if ui.available_width() >= SIDE_BY_SIDE {
@@ -168,6 +173,7 @@ fn toolbar(viewer: &mut TabViewer, ui: &mut Ui) {
                     FileSaver::new("citrine_trace.txt")
                         .add_filter("Text", &["txt"])
                         .dispatch(
+                            &viewer.files.spawner,
                             machine.trace().export().into_bytes(),
                             viewer.files.save_tx.clone(),
                         );
@@ -187,6 +193,21 @@ fn cpu(viewer: &mut TabViewer, ui: &mut Ui, bare: bool) {
     groups.retain(|group| cpu_groups.contains(&group.name));
     let table = RegisterTable::new(&groups, &mut viewer.ui.registers);
     if bare { table.bare() } else { table }.ui(ui);
+}
+
+fn cpu_picker(ui: &mut Ui, cpus: &[&str], selected: usize) -> Option<usize> {
+    if cpus.len() < 2 {
+        return None;
+    }
+    let tabs: Vec<(usize, String)> = cpus
+        .iter()
+        .map(|name| name.to_string())
+        .enumerate()
+        .collect();
+    let mut picked = selected;
+    tab_bar(ui, &mut picked, &tabs);
+    ui.separator();
+    (picked != selected).then_some(picked)
 }
 
 #[derive(Clone, Default)]
@@ -399,6 +420,71 @@ mod tests {
             level,
             text: text.into(),
         }
+    }
+
+    fn picker_frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        selected: usize,
+    ) -> (egui::FullOutput, Option<usize>) {
+        let mut picked = None;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(320.0, 200.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                picked = cpu_picker(ui, &["ARM9", "ARM7"], selected);
+            });
+        });
+        (output, picked)
+    }
+
+    fn drawn(output: &egui::FullOutput, wanted: &str) -> Option<egui::Rect> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == wanted => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn a_console_with_two_cpus_shows_both_and_a_click_picks_one() {
+        let ctx = egui::Context::default();
+        let (output, picked) = picker_frame(&ctx, Vec::new(), 0);
+        assert_eq!(picked, None);
+        assert!(drawn(&output, "ARM9").is_some());
+        let arm7 = drawn(&output, "ARM7").expect("ARM7 is shown").center();
+
+        let press = |pressed| egui::Event::PointerButton {
+            pos: arm7,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        picker_frame(&ctx, vec![egui::Event::PointerMoved(arm7), press(true)], 0);
+        let (_, picked) = picker_frame(&ctx, vec![press(false)], 0);
+        assert_eq!(picked, Some(1));
+    }
+
+    #[test]
+    fn a_console_with_one_cpu_shows_no_picker() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput::default();
+        let output = ctx.run(input, |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                assert_eq!(cpu_picker(ui, &["ARM7TDMI"], 0), None);
+            });
+        });
+        assert!(drawn(&output, "ARM7TDMI").is_none());
     }
 
     #[test]

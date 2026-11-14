@@ -1,12 +1,14 @@
 use super::Room;
 use crate::play::engine::{GROUP_UNITS, Rollback, Setup};
 use crate::play::links::{self, LinkGroup};
+use crate::play::seen::Shown;
 use crate::play::{
     Engine, GUEST_POWER_ON, PlaySession, Returned, Role, SETUP_PINGS, SETUP_WAIT, Stage, kind_of,
     random_seed, unix_now,
 };
 use citrine_gb::netplay::{NEVER, Player};
-use citrine_gb_net::{Console, Mode, OnlineId, Origin, PlayMsg, Start};
+use citrine_gb_net::{Console, DsUser, Mode, OnlineId, Origin, PlayMsg, Start};
+use citrine_gb_threads::{Lent, Pending, Threads};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -18,9 +20,10 @@ pub(in crate::play) struct GroupPlay {
     pub(in crate::play) members: Vec<OnlineId>,
     pub(in crate::play) start: Option<Start>,
     pub(in crate::play) gone: Vec<OnlineId>,
-    pub(in crate::play) left: Vec<(u8, u32)>,
+    pub(in crate::play) left: Vec<(u8, u32, OnlineId)>,
     pending: Vec<(OnlineId, PlayMsg)>,
     pub(in crate::play) watching: Vec<OnlineId>,
+    building: Option<Pending<Option<Rollback>>>,
 }
 
 pub(in crate::play) fn is_group_round(round: u32) -> bool {
@@ -49,6 +52,7 @@ impl GroupPlay {
             left: Vec::new(),
             pending: Vec::new(),
             watching: Vec::new(),
+            building: None,
         }
     }
 
@@ -75,6 +79,13 @@ impl PlaySession {
             Some(Some(_)) => {
                 if self.round.their_origin.is_none()
                     || self.round.i_hold_theirs != Some(true)
+                    || (self
+                        .round
+                        .theirs
+                        .iter()
+                        .flatten()
+                        .any(|c| c.console.is_ds())
+                        && self.round.their_user.is_none())
                     || self.round.their_rom.is_none()
                 {
                     return false;
@@ -113,10 +124,11 @@ impl PlaySession {
 
     fn take_group_engine(&mut self) -> Option<Box<Rollback>> {
         if self.round.rollback().is_some_and(Rollback::is_group) {
+            self.settle_frames();
             let Some(Engine::Rollback(r)) = self.round.engine.take() else {
                 return None;
             };
-            return Some(r);
+            return Some(r.into_inner());
         }
         self.stashed.take()
     }
@@ -144,7 +156,7 @@ impl Room {
     fn engine_index(&self) -> Option<usize> {
         self.pairs
             .iter()
-            .position(|p| p.group_engine().is_some() || p.stashed.is_some())
+            .position(|p| p.round.shown().is_some_and(Shown::group) || p.stashed.is_some())
     }
 
     pub(in crate::play) fn group_engine_mut(&mut self) -> Option<&mut Rollback> {
@@ -177,13 +189,13 @@ impl Room {
         };
         let pair = &mut self.pairs[index];
         if let Some(Engine::Rollback(old)) = pair.round.engine.take()
-            && !old.is_group()
+            && !old.get().is_group()
         {
             pair.round.engine = Some(Engine::Rollback(old));
             pair.stashed = Some(engine);
             return;
         }
-        pair.round.engine = Some(Engine::Rollback(engine));
+        pair.round.engine = Some(Engine::Rollback(Lent::new(engine)));
         pair.round.start = start;
         pair.stage = Stage::Playing;
         let shown = pair.friend_lets_watch && pair.watch_friend;
@@ -207,6 +219,7 @@ impl Room {
                 paused: false,
                 friend,
                 history: None,
+                downloaded: false,
             });
             for pair in &mut self.pairs {
                 if let Some(mine) = &mut pair.round.mine {
@@ -277,7 +290,7 @@ impl Room {
                 }
             }
             PlayMsg::MemberLeft { unit, at_frame, .. } => {
-                g.left.push((unit, at_frame));
+                g.left.push((unit, at_frame, from));
             }
             msg => {
                 let unit = g.unit_of(from)?;
@@ -294,7 +307,12 @@ impl Room {
         None
     }
 
-    pub(in crate::play) fn step_group(&mut self, me: OnlineId, now: Instant) {
+    #[cfg(all(test, feature = "gba"))]
+    pub(in crate::play) fn builds_group(&self) -> bool {
+        self.group.as_ref().is_some_and(|g| g.building.is_some())
+    }
+
+    pub(in crate::play) fn step_group(&mut self, me: OnlineId, threads: &Threads, now: Instant) {
         let mut engine = self.lift_group();
         let linked = self.links.group_of(me).cloned();
         let continues = |g: &GroupPlay, l: &LinkGroup| {
@@ -336,9 +354,9 @@ impl Room {
         let Some(l) = linked else {
             return;
         };
-        self.follow_leaves(&l, engine.as_deref_mut());
+        self.follow_leaves(me, &l, engine.as_deref_mut());
         if engine.is_none() {
-            engine = self.launch_group(me, &l, now);
+            engine = self.launch_group(me, &l, threads, now);
         }
         if let Some(r) = engine.as_deref_mut() {
             let authority = self
@@ -368,10 +386,11 @@ impl Room {
         }
     }
 
-    fn follow_leaves(&mut self, linked: &LinkGroup, engine: Option<&mut Rollback>) {
+    fn follow_leaves(&mut self, me: OnlineId, linked: &LinkGroup, engine: Option<&mut Rollback>) {
         let Some(g) = &mut self.group else {
             return;
         };
+        let authority = linked.authority();
         let gone: Vec<OnlineId> = g
             .members
             .iter()
@@ -382,19 +401,52 @@ impl Room {
             g.gone.extend(gone);
             return;
         };
+        let mut decided = Vec::new();
         for who in gone {
             let Some(unit) = g.unit_of(who) else {
                 continue;
             };
-            let told = g.left.iter().find(|(u, _)| *u == unit).map(|(_, at)| *at);
+            let told = |by: &dyn Fn(OnlineId) -> bool| {
+                g.left
+                    .iter()
+                    .find(|(u, _, from)| *u == unit && by(*from))
+                    .map(|(_, at, _)| *at)
+            };
+            let told = if me == authority {
+                told(&|from| from == who).or_else(|| told(&|_| true))
+            } else {
+                told(&|from| from == authority)
+            };
             let live = self.pairs.iter().any(|p| p.friend == who && p.is_live());
             let at = match told {
                 Some(at) => at,
-                None if live => continue,
+                None if live || me != authority => continue,
                 None => 0,
             };
-            engine.leave_unit(unit, at);
+            if me != authority {
+                engine.follow_leave(unit, at);
+            } else if let Some(at_frame) = engine.leave_unit(unit, at) {
+                decided.extend(engine.pads_before(unit, at_frame));
+                decided.push(PlayMsg::MemberLeft {
+                    round: g.round,
+                    unit,
+                    at_frame,
+                });
+            }
             g.gone.push(who);
+        }
+        if decided.is_empty() {
+            return;
+        }
+        let told: Vec<OnlineId> = g
+            .playing()
+            .chain(g.watching.iter().copied())
+            .filter(|w| *w != me)
+            .collect();
+        for pair in &mut self.pairs {
+            if told.contains(&pair.friend) && pair.is_live() {
+                pair.outbox.extend(decided.iter().cloned());
+            }
         }
     }
 
@@ -406,7 +458,8 @@ impl Room {
             .or_else(|| self.shelved.as_ref().and_then(|s| s.mine.clone()));
         let card = self.my_card();
         let host = linked.authority() == me;
-        let sync = links::sync_for(Some(Console::Gba), linked.members().len());
+        let console = linked.console().or(Some(Console::Gba));
+        let sync = links::sync_for(console, linked.members().len(), self.lanes);
         for pair in self.pairs.iter_mut() {
             if !linked.holds(pair.friend) || !pair.is_live() || !pair.began {
                 continue;
@@ -457,9 +510,16 @@ impl Room {
         &mut self,
         me: OnlineId,
         linked: &LinkGroup,
+        threads: &Threads,
         now: Instant,
     ) -> Option<Box<Rollback>> {
+        if let Some(pending) = self.group.as_mut()?.building.as_mut() {
+            let built = pending.try_take()?;
+            self.group.as_mut()?.building = None;
+            return built.ok().flatten().map(Box::new);
+        }
         let g = self.group.as_ref()?;
+        let console = linked.console().or(Some(Console::Gba));
         let authority = linked.authority() == me;
         let members = g.members.clone();
         let round = g.round;
@@ -473,12 +533,16 @@ impl Room {
             return None;
         }
         let mut games: [Option<Setup>; GROUP_UNITS] = Default::default();
+        let mut users: [Option<DsUser>; GROUP_UNITS] = Default::default();
         for (unit, who) in members.iter().enumerate().take(GROUP_UNITS) {
-            games[unit] = if *who == me {
-                mine.clone()
+            if *who == me {
+                games[unit] = mine.clone();
+                users[unit] = Some(view.ds_user.clone());
             } else {
-                pairs.iter().find(|p| p.friend == *who)?.their_setup()
-            };
+                let pair = pairs.iter().find(|p| p.friend == *who)?;
+                games[unit] = pair.their_setup();
+                users[unit] = pair.round.their_user.clone();
+            }
         }
         let trips: Vec<Option<u32>> = pairs.iter().map(|p| p.round_trip_ms()).collect();
         let input_delay = view.input_delay;
@@ -487,8 +551,8 @@ impl Room {
         let start = match self.group.as_ref()?.start.clone() {
             Some(start) => start,
             None if authority => {
-                let sync = links::sync_for(Some(Console::Gba), members.len());
-                let delay = links::group_delay(input_delay, &trips, sync.budget());
+                let sync = links::sync_for(console, members.len(), self.lanes);
+                let delay = links::group_delay(console, input_delay, &trips, sync.budget());
                 let power_on = games
                     .iter()
                     .take(members.len())
@@ -496,8 +560,8 @@ impl Room {
                     .map(|(unit, game)| match game {
                         None => NEVER,
                         Some((_, _, Origin::Resume(_))) => 0,
-                        Some((_, _, Origin::Boot(_))) if unit == 0 => 0,
-                        Some((_, _, Origin::Boot(_))) => GUEST_POWER_ON,
+                        Some((_, _, Origin::Boot(_) | Origin::Download)) if unit == 0 => 0,
+                        Some((_, _, Origin::Boot(_) | Origin::Download)) => GUEST_POWER_ON,
                     })
                     .collect();
                 let start = Start {
@@ -519,24 +583,26 @@ impl Room {
             }
             None => return None,
         };
-        let sync = links::sync_for(Some(Console::Gba), members.len());
+        let sync = links::sync_for(console, members.len(), self.lanes);
         let authority_unit = members
             .iter()
             .position(|w| *w == linked.authority())
             .unwrap_or(0) as u8;
-        let engine = Rollback::group(
-            Player::ALL[local],
-            start.clone(),
-            games,
-            sample_rate,
-            sync,
-            authority_unit,
-        )
-        .ok()?;
-        if let Some(g) = &mut self.group {
-            g.start = Some(start);
-        }
-        Some(Box::new(engine))
+        let g = self.group.as_mut()?;
+        g.start = Some(start.clone());
+        g.building = Some(threads.background("group engine build", move || {
+            Rollback::group(
+                Player::ALL[local],
+                start,
+                games,
+                users,
+                sample_rate,
+                sync,
+                authority_unit,
+            )
+            .ok()
+        }));
+        None
     }
 
     pub(in crate::play) fn flush_group(&mut self) {
@@ -608,7 +674,10 @@ impl Room {
     }
 
     pub fn group_waiting_for(&self, now: Instant) -> Option<(OnlineId, Duration)> {
-        let r = self.group_engine()?;
+        let pair = &self.pairs[self.engine_index()?];
+        let r = (pair.round.shown())
+            .filter(|r| r.group())
+            .or(pair.stashed.as_deref().map(Shown::Home))?;
         let stalled = r.stalled_for(now);
         if stalled < crate::play::STALL_SHOWN {
             return None;
@@ -667,23 +736,21 @@ impl Room {
             .copied()
             .filter(|w| *w != who)
             .collect();
-        let left = PlayMsg::MemberLeft {
-            round,
-            unit,
-            at_frame,
-        };
-        let playing: Vec<OnlineId> = g
-            .playing()
-            .chain(g.watching.iter().copied())
-            .filter(|w| *w != me)
-            .collect();
-        for pair in &mut self.pairs {
-            if playing.contains(&pair.friend) && pair.is_live() {
-                pair.outbox.push(left.clone());
+        let decider = members.first().copied();
+        if decider == Some(me) {
+            if let Some(g) = &mut self.group {
+                g.left.push((unit, at_frame, me));
             }
-        }
-        if let Some(g) = &mut self.group {
-            g.left.push((unit, at_frame));
+        } else if let Some(pair) = self
+            .pairs
+            .iter_mut()
+            .find(|p| Some(p.friend) == decider && p.is_live())
+        {
+            pair.outbox.push(PlayMsg::MemberLeft {
+                round,
+                unit,
+                at_frame,
+            });
         }
         let console = self.console();
         self.links.set(members.clone(), console);

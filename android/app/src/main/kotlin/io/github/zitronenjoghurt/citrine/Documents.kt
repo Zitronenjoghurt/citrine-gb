@@ -173,7 +173,7 @@ class Documents(private val activity: MainActivity) {
 
         fun isRom(name: String): Boolean {
             val lower = name.lowercase()
-            return lower.endsWith(".gb") || lower.endsWith(".gbc") || lower.endsWith(".gba")
+            return lower.endsWith(".gb") || lower.endsWith(".gbc") || lower.endsWith(".gba") || lower.endsWith(".nds") || lower.endsWith(".zip")
         }
     }
 }

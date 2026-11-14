@@ -158,8 +158,10 @@ impl Play {
 #[test]
 #[ignore]
 fn silver_receives_celebi_from_the_event_partner() {
-    let Some(save_path) = std::env::var_os("CITRINE_SILVER_SAVE") else {
-        println!("CITRINE_SILVER_SAVE not set, skipped");
+    let Some(save_path) = citrine_gb_test_roms::env_path(
+        "silver_receives_celebi_from_the_event_partner",
+        "CITRINE_SILVER_SAVE",
+    ) else {
         return;
     };
     let save = std::fs::read(save_path).expect("silver save");

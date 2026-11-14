@@ -60,6 +60,12 @@ impl RGBA {
     pub fn a(&self) -> u8 {
         self.0[3]
     }
+
+    pub const fn pair(self, next: Self) -> u64 {
+        let [r, g, b, a] = self.0;
+        let [r2, g2, b2, a2] = next.0;
+        u64::from_ne_bytes([r, g, b, a, r2, g2, b2, a2])
+    }
 }
 
 impl From<[u8; 4]> for RGBA {

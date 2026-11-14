@@ -71,7 +71,7 @@ impl Citrine {
             picked = kit::rows(ui, rows).map(|index| entries[index].2);
         });
         if update_tapped {
-            let tap = self.ui.update.tap();
+            let tap = self.ui.update.tap(&self.files.spawner);
             crate::app::widgets::update::follow(ui.ctx(), tap);
         }
         match picked {

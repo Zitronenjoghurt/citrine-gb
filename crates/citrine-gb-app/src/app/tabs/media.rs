@@ -1,3 +1,4 @@
+use crate::app::big_screen::scroll::Following;
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::app::widgets;
@@ -315,7 +316,7 @@ impl Browse {
             .id_salt((id, "list"))
             .max_height((height - footer).max(0.0))
             .auto_shrink([false, true])
-            .show(ui, |ui| body(ui, page));
+            .show_following(ui, |ui| body(ui, page));
 
         if pages > 1 {
             pager(ui, &mut self.page, pages);
@@ -700,10 +701,12 @@ fn apply(viewer: &mut TabViewer, action: Action) {
         Action::Pass(id, way) => {
             crate::media::clipboard::run(way, viewer.media, &id, viewer.files.copy_tx.clone())
         }
-        Action::Export(id) => crate::media::export(viewer.media, &id, viewer.files.save_tx.clone()),
+        Action::Export(id) => crate::media::export(viewer.media, &id, viewer.files),
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         Action::Reveal(id) => {
-            if let Err(err) = crate::media::reveal::reveal(&viewer.media.path(&id)) {
+            if let Err(err) =
+                crate::media::reveal::reveal(&viewer.files.spawner, &viewer.media.path(&id))
+            {
                 viewer
                     .events
                     .notify_error(format!("Could not open the folder: {err}"));

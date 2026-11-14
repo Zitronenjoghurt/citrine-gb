@@ -5,7 +5,7 @@ mod moves;
 mod protocol;
 mod rng;
 #[cfg(test)]
-mod tests;
+mod test_support;
 
 use build::Context;
 use citrine_gb::netplay::LinkPeer;
@@ -155,5 +155,22 @@ impl LinkPeer for Partner {
             self.happened.push(happening);
         }
         reply
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Partner;
+    use crate::test_support::game;
+    use citrine_gb_gamedata::{Language, Version};
+
+    #[test]
+    fn partners_refuse_roms_without_tables() {
+        let red = game(Version::Red, Language::English);
+        let event = crate::event("mew-training-tour-1999").unwrap();
+        assert_eq!(
+            Partner::new(red, &[0; 0x8000], event, 1).err(),
+            Some(crate::OfferError::Rom)
+        );
     }
 }

@@ -51,6 +51,15 @@ impl Mbc5 {
         }
     }
 
+    pub fn advance(&mut self, cycles: u32) {
+        if self.rumble {
+            self.cycles = self.cycles.saturating_add(cycles);
+            if self.motor {
+                self.motor_cycles = self.motor_cycles.saturating_add(cycles);
+            }
+        }
+    }
+
     pub fn take_rumble(&mut self) -> f32 {
         let level = if self.cycles == 0 {
             if self.motor { 1.0 } else { 0.0 }

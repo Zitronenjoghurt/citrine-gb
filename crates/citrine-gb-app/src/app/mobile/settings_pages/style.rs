@@ -1,12 +1,17 @@
-use super::{Sheet, pick, pick_from, slide};
+use super::{Sheet, ds_screens, pick, pick_from, slide};
 use crate::app::Citrine;
+use crate::app::hud::DEFAULT_OPACITY;
+use crate::app::hud::editor::CARD_HINT;
 use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::mobile::sheet::{self, Amount};
 use crate::app::ui_state::palette::{CustomPalette, PaletteChoice};
 use crate::app::ui_state::settings::{
-    GBA_SCREEN_NOTE, GBC_SCREEN_NOTE, GbaScreen, ScalingMode, Settings, rom_header,
+    GBA_SCREEN_NOTE, GBC_SCREEN_NOTE, GHOSTING_NOTE, GRID_LABEL, GRID_NOTE, GbaScreen,
+    MATCH_SCREEN_LABEL, MATCH_SCREEN_NOTE, OWN_COLORS_NOTE, SAME_SIZE_PIXELS_NOTE, ScalingMode,
+    Settings, match_screen_line, rom_header,
 };
 use crate::app::widgets::palette_strip::paint_strip;
+use crate::app::widgets::settings::page::{Heading, Page};
 use crate::app::widgets::settings::palette::{
     Action, PaletteEditorState, SHADE_NAMES, all_choices, apply, choice_colors, choice_label,
 };
@@ -15,8 +20,6 @@ use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::ppu::types::theme::DmgTheme;
 use egui::{Context, Rect, RichText, Ui, vec2};
 
-const MATRIX_NOTE: &str = "Draws the grid between pixels.";
-const GHOSTING_NOTE: &str = "Smears frames together, the way the original LCD did.";
 const STRIP: f32 = 22.0;
 
 pub struct StyleGame {
@@ -81,50 +84,56 @@ impl Citrine {
     }
 
     pub(super) fn style_page(&mut self, ui: &mut Ui) {
+        let ds = self.emulator.kind() == ConsoleKind::Nds;
+        let context = ds_screens::phone_context(self.emulator.screen_context);
         let game = self.style_game();
         let palettes = self.emulator.as_gb().is_some();
         let gba = self.emulator.kind() == ConsoleKind::Gba;
+        let match_line = match_screen_line(self.emulator.screen_match());
         let header = game.as_ref().map(|g| g.header.clone()).unwrap_or_default();
         let s = &mut self.ui.settings;
         let state = &mut self.ui.palette_editor;
         let mut open = None;
         let mut action = None;
-        ui.add_space(8.0);
+        let mut page = Page::begin(ui);
         if palettes {
             let global = s.global_choice();
-            kit::list(ui, |list| {
-                if list
-                    .row(Row::new("Palette").value(choice_label(&global)))
-                    .clicked()
-                {
-                    open = Some(Sheet::Palette);
-                }
-                list.custom(|ui| strip_row(ui, s, &global, &header));
-                if list
-                    .row(Row::new("New palette").icon(icons::PLUS).no_chevron())
-                    .clicked()
-                {
-                    let name = s.palettes.unique_name("My palette");
-                    action = Some(Action::Create(CustomPalette::from_theme(
-                        name,
-                        &DmgTheme::GreyScale,
-                    )));
-                }
-                if list
-                    .row(Row::new("Duplicate").icon(icons::COPY).no_chevron())
-                    .clicked()
-                {
-                    let shown = DmgTheme::Custom(choice_colors(s, &global, &header)[0]);
-                    let name = s.palettes.unique_name(&choice_label(&global));
-                    action = Some(Action::Create(CustomPalette::from_theme(name, &shown)));
-                }
+            page.plain(|ui| {
+                kit::list(ui, |list| {
+                    if list
+                        .row(Row::new("Palette").value(choice_label(&global)))
+                        .clicked()
+                    {
+                        open = Some(Sheet::Palette);
+                    }
+                    list.custom(|ui| strip_row(ui, s, &global, &header));
+                    if list
+                        .row(Row::new("New palette").icon(icons::PLUS).no_chevron())
+                        .clicked()
+                    {
+                        let name = s.palettes.unique_name("My palette");
+                        action = Some(Action::Create(CustomPalette::from_theme(
+                            name,
+                            &DmgTheme::GreyScale,
+                        )));
+                    }
+                    if list
+                        .row(Row::new("Duplicate").icon(icons::COPY).no_chevron())
+                        .clicked()
+                    {
+                        let shown = DmgTheme::Custom(choice_colors(s, &global, &header)[0]);
+                        let name = s.palettes.unique_name(&choice_label(&global));
+                        action = Some(Action::Create(CustomPalette::from_theme(name, &shown)));
+                    }
+                })
             });
             if let Some(selected) = s.custom_palette.clone()
                 && let Some(palette) = s.palettes.get(&selected).cloned()
             {
                 state.focus(&selected, &palette);
-                kit::section_label(ui, &palette.name);
-                editor(ui, &palette, state, &mut action, &mut open);
+                page.section(Heading::new(icons::PALETTE, &palette.name), |ui| {
+                    editor(ui, &palette, state, &mut action, &mut open)
+                });
             } else {
                 state.forget();
             }
@@ -134,87 +143,123 @@ impl Citrine {
                 } else {
                     &game.title
                 };
-                kit::section_label(ui, "This game");
-                kit::list(ui, |list| {
-                    if game.own_colors {
-                        list.row(
-                            Row::new(title)
-                                .detail("Uses its own colours, not a palette")
-                                .no_chevron(),
-                        );
-                        return;
-                    }
-                    let own = s.game_palette(Some(&game.rom_key)).cloned();
-                    let mut keep = own.is_some();
-                    if list.switch(SwitchRow::new("Own palette", &mut keep).detail(Some(title))) {
-                        action = Some(Action::SetGame {
-                            rom_key: game.rom_key.clone(),
-                            choice: keep.then(|| global.clone()),
-                        });
-                    }
-                    if let Some(own) = own {
-                        if list
-                            .row(Row::new("Palette").value(choice_label(&own)))
-                            .clicked()
-                        {
-                            open = Some(Sheet::GamePalette);
+                page.section(Heading::new(icons::GAME_CONTROLLER, "This game"), |ui| {
+                    kit::list(ui, |list| {
+                        if game.own_colors {
+                            list.row(Row::new(title).detail(OWN_COLORS_NOTE).no_chevron());
+                            return;
                         }
-                        list.custom(|ui| strip_row(ui, s, &own, &game.header));
-                    }
+                        let own = s.game_palette(Some(&game.rom_key)).cloned();
+                        let mut keep = own.is_some();
+                        if list.switch(SwitchRow::new("Own palette", &mut keep).detail(Some(title)))
+                        {
+                            action = Some(Action::SetGame {
+                                rom_key: game.rom_key.clone(),
+                                choice: keep.then(|| global.clone()),
+                            });
+                        }
+                        if let Some(own) = own {
+                            if list
+                                .row(Row::new("Palette").value(choice_label(&own)))
+                                .clicked()
+                            {
+                                open = Some(Sheet::GamePalette);
+                            }
+                            list.custom(|ui| strip_row(ui, s, &own, &game.header));
+                        }
+                    })
                 });
             }
         }
-        kit::section_label(ui, "Screen");
         let mut dirty = false;
-        kit::list(ui, |list| {
-            if list
-                .row(Row::new("Scaling").value(s.touch.scaling.to_string()))
-                .clicked()
-            {
-                open = Some(Sheet::TouchScaling);
-            }
-            let detail = (s.matrix && s.touch.scaling != ScalingMode::Integer)
-                .then_some("Scales by whole numbers while on");
-            dirty |= list.switch(
-                SwitchRow::new("Matrix", &mut s.matrix)
-                    .detail(detail)
-                    .info(MATRIX_NOTE),
+        if ds {
+            page.section(
+                Heading::new(icons::SQUARE_SPLIT_VERTICAL, "DS screens"),
+                |ui| {
+                    kit::list(ui, |list| {
+                        dirty |=
+                            ds_screens::rows(list, &mut s.ds_screens, s.ds_3d, context, &mut open);
+                    })
+                },
             );
-            if s.matrix {
-                let rows = [
-                    (Sheet::EdgeDarkness, "Edge darkness", s.matrix_edge_darkness),
-                    (
-                        Sheet::CornerDarkness,
-                        "Corner darkness",
-                        s.matrix_corner_darkness,
-                    ),
-                ];
-                for (sheet, label, value) in rows {
-                    if list
-                        .row(Row::new(label).value(sheet::percent(value.into())))
-                        .clicked()
-                    {
-                        open = Some(sheet);
+        }
+        page.section(Heading::new(icons::MONITOR, "Screen"), |ui| {
+            kit::list(ui, |list| {
+                if list
+                    .row(Row::new("Scaling").value(s.touch.scaling.to_string()))
+                    .clicked()
+                {
+                    open = Some(Sheet::TouchScaling);
+                }
+                if s.touch.scaling != ScalingMode::Integer {
+                    dirty |= list.switch(
+                        SwitchRow::new("Same-size pixels", &mut s.same_size_pixels)
+                            .info(SAME_SIZE_PIXELS_NOTE),
+                    );
+                }
+                let detail =
+                    (s.matrix && s.touch.scaling != ScalingMode::Integer && !s.same_size_pixels)
+                        .then_some("Shows the game at Integer scaling");
+                dirty |= list.switch(
+                    SwitchRow::new(GRID_LABEL, &mut s.matrix)
+                        .detail(detail)
+                        .info(GRID_NOTE),
+                );
+                if s.matrix {
+                    let rows = [
+                        (Sheet::EdgeDarkness, "Line darkness", s.matrix_edge_darkness),
+                        (
+                            Sheet::CornerDarkness,
+                            "Crossing darkness",
+                            s.matrix_corner_darkness,
+                        ),
+                    ];
+                    for (sheet, label, value) in rows {
+                        if list
+                            .row(Row::new(label).value(sheet::percent(value.into())))
+                            .clicked()
+                        {
+                            open = Some(sheet);
+                        }
                     }
                 }
-            }
-            dirty |= list.switch(SwitchRow::new("Ghosting", &mut s.ghosting).info(GHOSTING_NOTE));
-            if s.ghosting
-                && list
-                    .row(Row::new("Strength").value(sheet::percent(s.ghosting_strength.into())))
+                dirty |=
+                    list.switch(SwitchRow::new("Ghosting", &mut s.ghosting).info(GHOSTING_NOTE));
+                if s.ghosting
+                    && list
+                        .row(Row::new("Strength").value(sheet::percent(s.ghosting_strength.into())))
+                        .clicked()
+                {
+                    open = Some(Sheet::GhostStrength);
+                }
+                let (screen, value) = if gba {
+                    ("GBA screen", GbaScreen(s.color_correction).to_string())
+                } else {
+                    ("GBC screen", s.color_correction.to_string())
+                };
+                if !ds && list.row(Row::new(screen).value(value)).clicked() {
+                    open = Some(Sheet::GbcScreen);
+                }
+                dirty |= list.switch(
+                    SwitchRow::new(MATCH_SCREEN_LABEL, &mut s.match_screen).info(MATCH_SCREEN_NOTE),
+                );
+                dirty |= list.switch(SwitchRow::new("Show HUDs", &mut s.hud.shown));
+                if list
+                    .row(
+                        Row::new("HUD card")
+                            .value(sheet::percent(s.hud.opacity().into()))
+                            .info(CARD_HINT),
+                    )
                     .clicked()
-            {
-                open = Some(Sheet::GhostStrength);
-            }
-            let (screen, value) = if gba {
-                ("GBA screen", GbaScreen(s.color_correction).to_string())
-            } else {
-                ("GBC screen", s.color_correction.to_string())
-            };
-            if list.row(Row::new(screen).value(value)).clicked() {
-                open = Some(Sheet::GbcScreen);
-            }
+                {
+                    open = Some(Sheet::HudCard);
+                }
+            })
         });
+        if let Some(line) = match_line {
+            page.note(line);
+        }
+        page.end();
         s.dirty |= dirty;
         if let Some(action) = action {
             apply(action, s, state);
@@ -243,6 +288,22 @@ impl Citrine {
             )
         };
         match open {
+            Sheet::DsLayout
+            | Sheet::DsCorner
+            | Sheet::DsSmall
+            | Sheet::DsGap
+            | Sheet::DsRotation => {
+                let context = ds_screens::phone_context(self.emulator.screen_context);
+                let (changed, done) = ds_screens::sheet(ctx, open, &mut s.ds_screens, context);
+                s.dirty |= changed;
+                done
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Sheet::Ds3dResolution | Sheet::DsSmoothEdges => {
+                let (changed, done) = ds_screens::three_d_sheet(ctx, open, &mut s.ds_3d);
+                s.dirty |= changed;
+                done
+            }
             Sheet::Palette => {
                 let (picked, done) = palette_sheet(ctx, "Palette", s, &s.global_choice(), &header);
                 if let Some(choice) = picked {
@@ -296,7 +357,7 @@ impl Citrine {
                 let shown = darkness(
                     &mut s.matrix_edge_darkness,
                     Settings::DEFAULT_MATRIX_EDGE_DARKNESS,
-                    "Edge darkness",
+                    "Line darkness",
                 );
                 s.dirty |= shown.inner.changed();
                 shown.closed
@@ -305,7 +366,23 @@ impl Citrine {
                 let shown = darkness(
                     &mut s.matrix_corner_darkness,
                     Settings::DEFAULT_MATRIX_CORNER_DARKNESS,
-                    "Corner darkness",
+                    "Crossing darkness",
+                );
+                s.dirty |= shown.inner.changed();
+                shown.closed
+            }
+            Sheet::HudCard => {
+                let shown = slide(
+                    ctx,
+                    "HUD card",
+                    Some(CARD_HINT),
+                    Amount {
+                        value: &mut s.hud.opacity,
+                        range: 0.0..=1.0,
+                        step: 0.05,
+                        default: DEFAULT_OPACITY,
+                        text: sheet::percent,
+                    },
                 );
                 s.dirty |= shown.inner.changed();
                 shown.closed
@@ -472,4 +549,32 @@ fn editor(
             *open = Some(Sheet::DeletePalette);
         }
     });
+}
+
+#[cfg(all(test, feature = "nds"))]
+mod tests {
+    use crate::app::Citrine;
+    use crate::app::files::nds_tests::Opened;
+    use crate::app::tests::{info_frame_out, text_rect};
+    use crate::app::ui_state::settings::SettingsTab;
+    use egui::Context;
+
+    fn shows(app: &mut Citrine, ctx: &Context, text: &str) -> bool {
+        info_frame_out(app, ctx, 412.0, 4000.0);
+        text_rect(&info_frame_out(app, ctx, 412.0, 4000.0), text).is_some()
+    }
+
+    #[test]
+    fn the_ds_style_page_has_no_gbc_screen_row() {
+        let mut opened = Opened::new("ds-style-phone");
+        let picked = opened.picked();
+        let app = &mut opened.app;
+        let ctx = Context::default();
+        app.mobile.nav.open_settings(SettingsTab::Style);
+        assert!(shows(app, &ctx, "GBC screen"));
+        app.handle_load_rom(picked);
+        app.mobile.nav.open_settings(SettingsTab::Style);
+        assert!(shows(app, &ctx, "Ghosting"));
+        assert!(!shows(app, &ctx, "GBC screen"));
+    }
 }

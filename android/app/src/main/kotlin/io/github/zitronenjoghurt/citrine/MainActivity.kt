@@ -1,5 +1,6 @@
 package io.github.zitronenjoghurt.citrine
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -9,11 +10,13 @@ import android.os.Build
 import android.hardware.input.InputManager
 import android.os.Bundle
 import android.os.Process
+import android.provider.Settings
 import android.text.InputType
 import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -38,6 +41,10 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
     private val camera by lazy {
         CameraFeed(this, { senses.rotation() }, ::nativeCameraFrame, ::nativeCameraDenied)
     }
+    private val stepCounter by lazy { StepCounter(this, ::nativeSteps, ::nativeStepsDenied) }
+    private val second by lazy {
+        SecondDisplay(this, ::nativeSecondDisplay, ::nativeSecondSurface, ::nativeSecondTouch)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -53,10 +60,55 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
         val input = getSystemService(InputManager::class.java)
         input.registerInputDeviceListener(this, null)
         InputDevice.getDeviceIds().forEach(::onInputDeviceAdded)
+        second.start()
+        PushService.onToken = ::nativePushToken
+        PushService.fetchToken()
+        opened(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        opened(intent)
+    }
+
+    private fun opened(intent: Intent?) {
+        val kind = intent?.getStringExtra(Notifications.EXTRA_KIND) ?: return
+        nativeOpen(
+            kind,
+            intent.getStringExtra(Notifications.EXTRA_FROM).orEmpty(),
+            intent.getStringExtra(Notifications.EXTRA_SESSION).orEmpty(),
+        )
+        intent.removeExtra(Notifications.EXTRA_KIND)
+    }
+
+    private fun tellPush() = nativePush(PushService.AVAILABLE, PushService.AVAILABLE && Notifications.allowed(this))
+
+    fun askNotifications() = runOnUiThread {
+        if (Notifications.allowed(this)) {
+            tellPush()
+            return@runOnUiThread
+        }
+        val blocked = getSharedPreferences(PUSH_PREFS, MODE_PRIVATE).getBoolean(BLOCKED, false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !Notifications.permitted(this) && !blocked) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), Notifications.PERMISSION_REQUEST)
+        } else {
+            openNotificationSettings()
+        }
+    }
+
+    fun notificationSettings() = runOnUiThread { openNotificationSettings() }
+
+    private fun openNotificationSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName),
+        )
     }
 
     override fun onDestroy() {
+        PushService.onToken = null
         getSystemService(InputManager::class.java).unregisterInputDeviceListener(this)
+        second.stop()
         super.onDestroy()
         if (!isChangingConfigurations) Process.killProcess(Process.myPid())
     }
@@ -72,6 +124,7 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     override fun onPause() {
         super.onPause()
+        inFront = false
         senses.pause()
         camera.pause()
         senses.rumble(0f)
@@ -80,6 +133,8 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     override fun onResume() {
         super.onResume()
+        inFront = true
+        tellPush()
         senses.resume()
         camera.resume()
     }
@@ -88,6 +143,16 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
         super.onRequestPermissionsResult(code, permissions, results)
         if (code == CameraFeed.PERMISSION_REQUEST) {
             camera.permissionAnswered(results.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+        }
+        if (code == StepCounter.PERMISSION_REQUEST) {
+            stepCounter.permissionAnswered(results.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+        }
+        if (code == Notifications.PERMISSION_REQUEST) {
+            val granted = results.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            if (!granted && !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
+                getSharedPreferences(PUSH_PREFS, MODE_PRIVATE).edit().putBoolean(BLOCKED, true).apply()
+            }
+            tellPush()
         }
     }
 
@@ -203,6 +268,12 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     fun rumble(strength: Float) = runOnUiThread { senses.rumble(strength) }
 
+    fun steps(on: Boolean, ask: Boolean) = runOnUiThread { stepCounter.follow(on, ask) }
+
+    fun openSecondDisplay() = runOnUiThread { second.open() }
+
+    fun closeSecondDisplay() = runOnUiThread { second.close() }
+
     fun copyText(text: String) = runOnUiThread {
         getSystemService(ClipboardManager::class.java)
             .setPrimaryClip(ClipData.newPlainText("Citrine", text))
@@ -302,7 +373,31 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     private external fun nativeLight(lux: Float)
 
+    private external fun nativeSteps(count: Long, boot: Long)
+
+    private external fun nativeStepsDenied()
+
     private external fun nativeCameraFrame(width: Int, height: Int, luma: ByteArray, mirror: Boolean)
 
     private external fun nativeCameraDenied()
+
+    private external fun nativeSecondDisplay(name: String?)
+
+    private external fun nativeSecondSurface(surface: Surface?, width: Int, height: Int, density: Float)
+
+    private external fun nativeSecondTouch(action: Int, x: Float, y: Float)
+
+    private external fun nativePush(available: Boolean, allowed: Boolean)
+
+    private external fun nativePushToken(token: String)
+
+    private external fun nativeOpen(kind: String, from: String, session: String)
+
+    companion object {
+        private const val PUSH_PREFS = "push"
+        private const val BLOCKED = "blocked"
+
+        @Volatile
+        var inFront = false
+    }
 }

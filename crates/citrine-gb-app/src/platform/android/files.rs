@@ -1,4 +1,4 @@
-use crate::app::ui_state::rom_folder::Listing;
+use crate::app::ui_state::library::scan::Listing;
 use crate::utils::file_loader::PickedFile;
 use crate::utils::file_saver::SaveOutcome;
 use jni::JNIEnv;
@@ -11,7 +11,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Mutex, MutexGuard};
 
 enum Waiting {
-    One(Sender<PickedFile>),
+    One(Box<dyn FnOnce(PickedFile) + Send>),
     Many(Sender<Vec<PickedFile>>),
     Save(Sender<SaveOutcome>),
     Folder(Sender<PathBuf>),
@@ -48,7 +48,9 @@ pub fn list_roms(tree: &str, tx: Sender<Listing>) {
 }
 
 pub fn read_rom(uri: &str, tx: Sender<PickedFile>) {
-    let id = wait(Waiting::One(tx));
+    let id = wait(Waiting::One(Box::new(move |file| {
+        let _ = tx.send(file);
+    })));
     let called = super::java(|env, activity| {
         let uri = env.new_string(uri)?;
         env.call_method(
@@ -121,11 +123,25 @@ impl FileLoader {
         self
     }
 
-    pub fn dispatch(self, tx: Sender<PickedFile>) {
-        open(wait(Waiting::One(tx)), false);
+    pub fn dispatch(self, spawner: &citrine_gb_threads::Spawner, tx: Sender<PickedFile>) {
+        self.pick(spawner, move |file| {
+            let _ = tx.send(file);
+        });
     }
 
-    pub fn dispatch_many(self, tx: Sender<Vec<PickedFile>>) {
+    pub fn pick(
+        self,
+        _spawner: &citrine_gb_threads::Spawner,
+        done: impl FnOnce(PickedFile) + Send + 'static,
+    ) {
+        open(wait(Waiting::One(Box::new(done))), false);
+    }
+
+    pub fn dispatch_many(
+        self,
+        _spawner: &citrine_gb_threads::Spawner,
+        tx: Sender<Vec<PickedFile>>,
+    ) {
         open(wait(Waiting::Many(tx)), true);
     }
 }
@@ -142,7 +158,7 @@ impl FolderPicker {
         self
     }
 
-    pub fn dispatch(self, tx: Sender<PathBuf>) {
+    pub fn dispatch(self, _spawner: &citrine_gb_threads::Spawner, tx: Sender<PathBuf>) {
         let id = wait(Waiting::Folder(tx));
         let called = super::java(|env, activity| {
             env.call_method(activity, "openTree", "(I)V", &[JValue::Int(id)])
@@ -169,11 +185,21 @@ impl FileSaver {
         self
     }
 
-    pub fn dispatch(self, data: Vec<u8>, tx: Sender<SaveOutcome>) {
+    pub fn dispatch(
+        self,
+        _spawner: &citrine_gb_threads::Spawner,
+        data: Vec<u8>,
+        tx: Sender<SaveOutcome>,
+    ) {
         save(vec![(self.name, data)], tx);
     }
 
-    pub fn dispatch_copy(self, source: PathBuf, tx: Sender<SaveOutcome>) {
+    pub fn dispatch_copy(
+        self,
+        _spawner: &citrine_gb_threads::Spawner,
+        source: PathBuf,
+        tx: Sender<SaveOutcome>,
+    ) {
         match std::fs::read(&source) {
             Ok(data) => save(vec![(self.name, data)], tx),
             Err(err) => {
@@ -184,6 +210,7 @@ impl FileSaver {
 
     pub fn dispatch_pair(
         self,
+        _spawner: &citrine_gb_threads::Spawner,
         data: Vec<u8>,
         companion_extension: &'static str,
         companion: Vec<u8>,
@@ -245,8 +272,9 @@ fn picked(env: &mut JNIEnv, names: &JObjectArray, data: &JObjectArray) -> Vec<Pi
             let bytes = JByteArray::from(env.get_object_array_element(data, index as i32)?);
             files.push(PickedFile {
                 name,
-                data: env.convert_byte_array(&bytes)?,
+                data: env.convert_byte_array(&bytes)?.into(),
                 path: None,
+                seen: None,
             });
         }
         Ok(files)
@@ -266,9 +294,9 @@ extern "system" fn Java_io_github_zitronenjoghurt_citrine_MainActivity_nativeOpe
 ) {
     let files = picked(&mut env, &names, &data);
     match take(id) {
-        Some(Waiting::One(tx)) => {
+        Some(Waiting::One(done)) => {
             if let Some(file) = files.into_iter().next() {
-                let _ = tx.send(file);
+                done(file);
             }
         }
         Some(Waiting::Many(tx)) if !files.is_empty() => {
@@ -328,8 +356,8 @@ extern "system" fn Java_io_github_zitronenjoghurt_citrine_MainActivity_nativeTre
         }
         _ => return,
     };
-    let dir = crate::storage::data_dir()
-        .join("export")
+    let dir = crate::storage::cache_dir()
+        .join(crate::storage::EXPORT)
         .join(id.to_string());
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(err) = std::fs::create_dir_all(&dir) {

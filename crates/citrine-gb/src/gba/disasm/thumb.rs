@@ -265,7 +265,7 @@ pub fn thumb(addr: u32, op: u16, next: Option<u16>) -> Decoded {
     }
 }
 
-fn relative(base: &str, offset: u32) -> Operand {
+pub(super) fn relative(base: &str, offset: u32) -> Operand {
     let text = if (offset as i32) < 0 {
         format!("{base}-0x{:X}", offset.wrapping_neg())
     } else {

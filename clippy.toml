@@ -1,0 +1,10 @@
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "start threads through citrine-gb-threads: Threads::start, Threads::background or Spawner" },
+    { path = "std::thread::Builder::spawn", reason = "start threads through citrine-gb-threads: Threads::start, Threads::background or Spawner" },
+    { path = "std::thread::scope", reason = "run parallel steps with citrine-gb-threads' Scope" },
+    { path = "wasm_bindgen_futures::spawn_local", reason = "use citrine_gb_threads::spawn_local or Spawner::run_future", allow-invalid = true },
+]
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "share state through citrine-gb-threads: Worker messages, latest or Pending" },
+    { path = "std::sync::RwLock", reason = "share state through citrine-gb-threads: Worker messages, latest or Pending" },
+]

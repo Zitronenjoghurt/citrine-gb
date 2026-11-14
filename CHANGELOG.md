@@ -1,3 +1,78 @@
+# 0.12.0
+
+## Added
+
+- Nintendo DS games on desktop, Android and the web, with the built-in FreeBIOS or your own BIOS and firmware
+- DS saves, snapshots, autosaves and cloud saves, with DeSmuME .dsv import
+- DS screen layouts with touch, X and Y buttons and a lid you can close
+- DS 3D at up to 8x resolution with Smooth 3D edges, and a JIT recompiler, on desktop and Android
+- DS settings for nickname, birthday, language, favourite colour, date and time
+- Second screens: a paired phone or tablet, another window or a second display shows the DS bottom screen, a controller or the game info
+- DS online through Kaeru WFC or another server, over your relay or a direct connection
+- DS local wireless and experimental Download Play in Play together
+- Game info for Pokémon Diamond to Black 2 and White 2, with wild lists and legality marks in Gen 4
+- Pokéwalker for HeartGold and SoulSilver, with steps from the game or an Android phone's step counter
+- GTS on your relay for the Gen 4 Pokémon games and Black and White, with trades in the app and optional simulated trainers
+- Game library with folders, cover tiles, search, filters, sorting, your own tags and a Game info panel
+- Game covers for Game Boy, Game Boy Color, Game Boy Advance and DS games
+- Games pane on desktop with search, Open and recent games
+- Games open from .zip files
+- Big screen layout for a controller or TV remote, with a games shelf, an in-game menu and an on-screen keyboard, also on Android TV
+- Rewind of up to 2 minutes on every system
+- Fast forward on desktop at 2x to 10x or Max, from Space, a controller button or the toolbar
+- Cheats: Game Genie, GameShark, Action Replay and CodeBreaker codes, saved per game and synced with your account
+- RetroAchievements for Game Boy and Game Boy Color, with an Achievements pane, unlock notices and progress in the library
+- Match refresh rate, Same-size pixels and sound Slowdown settings
+- Android push notifications for friend requests, play invites and messages, and play invites that ring a closed app
+- Focus mode shows new messages, play invites and friend requests beside the game
+- Game HUD with FPS, a frame graph, frame time and other live values over the game
+- Performance recordings and Game report: a zip of frame timings or of the last seconds of play to send with a bug report
+- Threads pane, a DS debugger for both CPUs and a DS files tool
+
+## Changed
+
+- Playing together needs 0.12.0 on both sides, and online play needs an updated server
+- Game Boy and Game Boy Color games need about a tenth of the CPU time, Game Boy Advance games under a fifth
+- The console runs on its own thread on desktop and Android, and in a Web Worker in browsers that allow threads
+- Three or four linked Game Boy Advances run in parallel
+- Game Boy Advance games open faster
+- Every game frame shows for the same number of screen refreshes on desktop
+- Saves, save states and autosaves no longer stall the game
+- Enter presses Start, and Space fast-forwards
+- Online play shares games up to 32 MB, enough for every Game Boy Advance game
+- Faster answers from the relay in online play
+- Popups and invite banners float beside the game
+- Notices wrap, and one you have to act on stays until you do
+- Error messages for failed loads, saves, deletes and renames name the game or save
+- Settings pages share one layout, with the same names and places on desktop and phone
+- Matrix is now LCD grid, and the sign-in key is called Relay ID everywhere
+- Focus mode starts off on every launch
+- Performance tab with frames a second, a 10-second frame graph and a bar for each part of a frame
+- ROM info with one wording for every console
+- Journey names only the badges and places you have reached
+- Phone game strip without the game's name
+- Desktop look for check boxes, menu ticks and progress bars
+- Server: rate limits for shared games, CITRINE_ISOLATION for browser threads, and connection logs with the app version and close reason
+
+## Fixed
+
+- Game Boy and Game Boy Color timing matches SameBoy for DIV after power-on, GDMA length, the CGB halt wake-up, the joypad interrupt and frames with the LCD off
+- A Game Boy Advance game no longer freezes when it shortens the cartridge wait states during a prefetch
+- Game Boy Advance sound plays at the speaker's rate when sound was on before the game opened
+- Sound plays without gaps when a game runs below full speed
+- Ruby, Sapphire and Emerald export their clock inside the .sav for mGBA
+- Recording no longer stops with "couldn't keep up"
+- LCD grid no longer tints the whole picture at 1x
+- A friend whose browser tab or phone app sat in the background no longer drops off the relay
+- The app no longer freezes for up to 3 s when it connects to a relay or syncs cloud saves
+- Link groups no longer split when a member who stopped answering is unlinked
+- A Play together session that can't start shows the reason
+- Notices no longer cover the game, another pane or the phone's touch buttons
+- Desktop toolbar fits narrow windows, with a More menu for the least used tools
+- Debugger code is readable in light and dark themes
+- Online settings on a phone no longer shows an empty Account card while signed in
+- Server startup waits for the database upgrade on a slow disk
+
 # 0.11.0 - 2026-11-04
 
 ## Added

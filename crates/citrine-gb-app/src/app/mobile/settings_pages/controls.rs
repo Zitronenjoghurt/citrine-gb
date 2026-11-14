@@ -1,10 +1,13 @@
 use super::{Sheet, pick, settled, slide};
 use crate::app::Citrine;
+use crate::app::big_screen::{self, BACKDROP, ConfirmButton};
 use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::mobile::sheet::{self, Amount};
 use crate::app::tabs::Tab;
 use crate::app::ui_state::touch::{HiddenButtons, TouchSettings};
 use crate::app::widgets::settings::controls;
+use crate::app::widgets::settings::page::{Heading, Page};
+use crate::icons;
 use egui::{Context, Ui};
 
 impl Citrine {
@@ -12,40 +15,97 @@ impl Citrine {
         let s = &mut self.ui.settings;
         let mut open = None;
         let mut dirty = false;
-        kit::section_label(ui, "On-screen buttons");
-        kit::list(ui, |list| {
-            let t = &mut s.touch;
-            dirty |= list.switch(SwitchRow::new("Show", &mut t.show_controls));
-            let vibrate = SwitchRow::new("Vibrate on press", &mut t.haptics);
-            #[cfg(target_arch = "wasm32")]
-            let vibrate = vibrate.info(controls::RINGER_HINT);
-            dirty |= list.switch(vibrate);
-            let rows = [
-                (Sheet::ButtonSize, "Size", sheet::percent(t.scale.into())),
-                (Sheet::Opacity, "Opacity", sheet::percent(t.opacity.into())),
-                (Sheet::Landscape, "In landscape", t.landscape.to_string()),
-                (
-                    Sheet::HiddenButtons,
-                    "With the UI hidden",
-                    t.hidden_buttons.to_string(),
-                ),
-            ];
-            for (sheet, label, value) in rows {
-                if list.row(Row::new(label).value(value)).clicked() {
-                    open = Some(sheet);
-                }
-            }
-            dirty |= list.switch(
-                SwitchRow::new("Left-handed", &mut t.mirrored).info("Puts the d-pad on the right."),
-            );
-        });
-        kit::section_label(ui, "Keyboard and controller");
+        let mut page = Page::begin(ui);
+        page.section(
+            Heading::new(icons::DEVICE_MOBILE, "On-screen buttons"),
+            |ui| {
+                kit::list(ui, |list| {
+                    let t = &mut s.touch;
+                    dirty |= list.switch(SwitchRow::new("Show", &mut t.show_controls));
+                    let vibrate = SwitchRow::new("Vibrate on press", &mut t.haptics);
+                    #[cfg(target_arch = "wasm32")]
+                    let vibrate = vibrate.info(controls::RINGER_HINT);
+                    dirty |= list.switch(vibrate);
+                    let rows = [
+                        (Sheet::ButtonSize, "Size", sheet::percent(t.scale.into())),
+                        (Sheet::Opacity, "Opacity", sheet::percent(t.opacity.into())),
+                        (Sheet::Landscape, "In landscape", t.landscape.to_string()),
+                        (
+                            Sheet::HiddenButtons,
+                            "With the UI hidden",
+                            t.hidden_buttons.to_string(),
+                        ),
+                    ];
+                    for (sheet, label, value) in rows {
+                        if list.row(Row::new(label).value(value)).clicked() {
+                            open = Some(sheet);
+                        }
+                    }
+                    dirty |= list.switch(
+                        SwitchRow::new("Left-handed", &mut t.mirrored)
+                            .info("Puts the d-pad on the right."),
+                    );
+                })
+            },
+        );
         let changed =
             !s.bindings.is_default() || !s.hotkeys.is_default() || !s.local_link.keys_are_default();
-        let keys = Row::new("Keys and buttons").value(if changed { "Changed" } else { "Default" });
-        if kit::rows(ui, vec![keys]).is_some() {
-            open = Some(Sheet::Keys);
-        }
+        page.section(
+            Heading::new(icons::KEYBOARD, "Keyboard and controller"),
+            |ui| {
+                kit::list(ui, |list| {
+                    let keys = Row::new("Keys and buttons").value(if changed {
+                        "Changed"
+                    } else {
+                        "Default"
+                    });
+                    if list.row(keys).clicked() {
+                        open = Some(Sheet::Keys);
+                    }
+                    list.row(
+                        Row::new("Menu button")
+                            .value(big_screen::MENU_BUTTON)
+                            .no_chevron(),
+                    );
+                    let b = &mut s.big_screen;
+                    let confirm = list.row(
+                        Row::new("Confirm button")
+                            .value(b.confirm.to_string())
+                            .info(ConfirmButton::NOTE)
+                            .stepper(),
+                    );
+                    if confirm.clicked() {
+                        open = Some(Sheet::ConfirmButton);
+                    }
+                    if let Some(step) = big_screen::take_step(&confirm) {
+                        b.confirm = big_screen::cycle(b.confirm, step);
+                        dirty = true;
+                    }
+                    let glyphs = list.row(
+                        Row::new("Button icons")
+                            .value(b.icons.to_string())
+                            .stepper(),
+                    );
+                    if glyphs.clicked() {
+                        open = Some(Sheet::ButtonIcons);
+                    }
+                    if let Some(step) = big_screen::take_step(&glyphs) {
+                        b.icons = big_screen::cycle(b.icons, step);
+                        dirty = true;
+                    }
+                    let backdrop =
+                        list.row(Row::new(BACKDROP).value(b.backdrop.to_string()).stepper());
+                    if backdrop.clicked() {
+                        open = Some(Sheet::Backdrop);
+                    }
+                    if let Some(step) = big_screen::take_step(&backdrop) {
+                        b.backdrop = big_screen::cycle(b.backdrop, step);
+                        dirty = true;
+                    }
+                })
+            },
+        );
+        page.end();
         s.dirty |= dirty;
         self.open_sheet(open);
     }
@@ -125,6 +185,26 @@ impl Citrine {
                 s.dirty |= changed;
                 done
             }
+            Sheet::ConfirmButton => {
+                let (changed, done) = pick(
+                    ctx,
+                    "Confirm button",
+                    Some(ConfirmButton::NOTE),
+                    &mut s.big_screen.confirm,
+                );
+                s.dirty |= changed;
+                done
+            }
+            Sheet::ButtonIcons => {
+                let (changed, done) = pick(ctx, "Button icons", None, &mut s.big_screen.icons);
+                s.dirty |= changed;
+                done
+            }
+            Sheet::Backdrop => {
+                let (changed, done) = pick(ctx, BACKDROP, None, &mut s.big_screen.backdrop);
+                s.dirty |= changed;
+                done
+            }
             _ => {
                 let capture = &mut self.ui.capture;
                 let shown = crate::app::mobile::sheet::show(
@@ -133,7 +213,7 @@ impl Citrine {
                     "Keys and buttons",
                     |ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        controls::bindings(ui, s, capture)
+                        Page::show(ui, |page| controls::bindings(page, s, capture))
                     },
                 );
                 if shown.inner {

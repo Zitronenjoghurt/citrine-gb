@@ -1,5 +1,5 @@
 use crate::online::address::ServerAddress;
-use citrine_gb_net::{Account, DeviceKey, Fingerprint, RelayId, RelayKey};
+use citrine_gb_net::{Account, DeviceKey, Fingerprint, PushKinds, RelayId, RelayKey};
 use std::collections::BTreeMap;
 use std::fmt;
 use strum_macros::EnumIter;
@@ -17,10 +17,23 @@ pub struct OnlineSettings {
     pub friend_volume: f32,
     pub friend_muted: bool,
     pub input_delay: InputDelay,
+    pub notify_friend_requests: bool,
+    pub notify_invites: bool,
+    pub notify_chats: bool,
+    pub notify_asked: bool,
+    pub focus_popups: bool,
 }
 
 impl OnlineSettings {
     pub const DEFAULT_FRIEND_VOLUME: f32 = 0.5;
+
+    pub fn push_kinds(&self) -> PushKinds {
+        PushKinds {
+            friend_requests: self.notify_friend_requests,
+            invites: self.notify_invites,
+            chats: self.notify_chats,
+        }
+    }
 }
 
 impl Default for OnlineSettings {
@@ -36,6 +49,11 @@ impl Default for OnlineSettings {
             friend_volume: Self::DEFAULT_FRIEND_VOLUME,
             friend_muted: false,
             input_delay: InputDelay::Auto,
+            notify_friend_requests: true,
+            notify_invites: true,
+            notify_chats: true,
+            notify_asked: false,
+            focus_popups: true,
         }
     }
 }

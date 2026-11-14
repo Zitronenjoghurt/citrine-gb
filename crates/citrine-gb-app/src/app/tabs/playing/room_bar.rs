@@ -799,8 +799,11 @@ fn link_button(ui: &mut Ui, phone: bool) -> bool {
         return kit::pill(ui, "Link", true).clicked();
     }
     let height = action_height(ui);
-    ui.add(main_button(ui, "Link").min_size(vec2(height * 1.8, height)))
-        .clicked()
+    crate::app::widgets::action::add_centered(
+        ui,
+        main_button(ui, "Link").min_size(vec2(height * 1.8, height)),
+    )
+    .clicked()
 }
 
 fn not_now_button(ui: &mut Ui, phone: bool) -> egui::Response {
@@ -1761,13 +1764,13 @@ mod tests {
             .find(|(t, _)| t == "Maximilian's sound")
             .map(|(_, r)| r.right())
             .expect("no sound label");
+        let side = ctx.style().spacing.icon_width;
         let switch = shapes
             .iter()
             .find_map(|clipped| match &clipped.shape {
                 Shape::Rect(rect)
-                    if rect.rect.height() > 4.0
-                        && (rect.rect.width() / rect.rect.height() - 1.7).abs() < 0.05
-                        && f32::from(rect.corner_radius.nw) >= rect.rect.height() / 2.0 - 1.0 =>
+                    if (rect.rect.width() - side).abs() < 0.5
+                        && (rect.rect.height() - side).abs() < 0.5 =>
                 {
                     Some(rect.rect.right())
                 }

@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.pid AS \"pid!\", p.account_id AS \"account!\", a.online_id AS \"online_id!\",\n                      r.record AS \"record!\", r.deposited_at AS \"deposited_at!\"\n                 FROM gts_records r JOIN gts_profiles p ON p.pid = r.pid\n                 JOIN accounts a ON a.id = p.account_id\n                WHERE r.generation = ?1 AND (?2 IS NULL OR r.species = ?2)\n                  AND r.traded_at IS NULL AND p.account_id != ?3\n                ORDER BY r.deposited_at DESC\n                LIMIT 500",
+  "describe": {
+    "columns": [
+      {
+        "name": "pid!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "name": "account!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_profiles",
+            "name": "account_id"
+          }
+        }
+      },
+      {
+        "name": "online_id!",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "online_id"
+          }
+        }
+      },
+      {
+        "name": "record!",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "record"
+          }
+        }
+      },
+      {
+        "name": "deposited_at!",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "deposited_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "289d69c7cdb5128fd1f7f0b01cb55f0cca82f1f9c77548f06417363554fad4e0"
+}

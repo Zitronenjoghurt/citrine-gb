@@ -47,7 +47,11 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
             } else {
                 FileSaver::new(REPORT_FILE)
                     .add_filter("Text", &["txt"])
-                    .dispatch(report.into_bytes(), viewer.files.save_tx.clone());
+                    .dispatch(
+                        &viewer.files.spawner,
+                        report.into_bytes(),
+                        viewer.files.save_tx.clone(),
+                    );
             }
         }
     });

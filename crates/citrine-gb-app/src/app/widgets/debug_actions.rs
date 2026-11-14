@@ -30,7 +30,11 @@ impl Widget for DebugActions<'_> {
                 {
                     FileSaver::new("citrine_dump.json")
                         .add_filter("JSON", &["json"])
-                        .dispatch(json.into_bytes(), self.files.save_tx.clone());
+                        .dispatch(
+                            &self.files.spawner,
+                            json.into_bytes(),
+                            self.files.save_tx.clone(),
+                        );
                 }
                 response = Some(export);
             });
@@ -62,7 +66,7 @@ fn recording(ui: &mut egui::Ui, emulator: &mut Emulator, files: &mut FileChannel
         {
             FileSaver::new("citrine_recording.json")
                 .add_filter("JSON", &["json"])
-                .dispatch(json.into_bytes(), files.save_tx.clone());
+                .dispatch(&files.spawner, json.into_bytes(), files.save_tx.clone());
         }
     }
 }

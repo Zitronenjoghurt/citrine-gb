@@ -17,7 +17,9 @@ use super::serial::{LinkMessage, REGISTERS_LEN, Serial};
 use super::sound::{FIFO_ADDRESSES, Sound};
 use super::timer::{Overflows, Timers};
 use super::wait::{Access, WaitControl, Width};
+use crate::cheats::PatchedRom;
 use crate::console::Keys;
+use crate::paged::Paged;
 use cpu_access::Clock;
 use std::sync::Arc;
 
@@ -65,21 +67,22 @@ const FIFO_TICK_DELAY: u32 = 1;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Bus {
     #[cfg_attr(feature = "serde", serde(skip))]
-    bios: Box<[u8]>,
-    #[cfg_attr(feature = "serde", serde(with = "crate::utils::bytes"))]
-    ewram: Box<[u8]>,
-    #[cfg_attr(feature = "serde", serde(with = "crate::utils::bytes"))]
-    iwram: Box<[u8]>,
+    bios: Arc<[u8]>,
+    ewram: Paged,
+    iwram: Paged,
     #[cfg_attr(feature = "serde", serde(with = "crate::utils::bytes"))]
     io: Box<[u8]>,
     #[cfg_attr(feature = "serde", serde(with = "crate::utils::bytes"))]
     palette: Box<[u8]>,
-    #[cfg_attr(feature = "serde", serde(with = "crate::utils::bytes"))]
-    vram: Box<[u8]>,
+    vram: Paged,
     #[cfg_attr(feature = "serde", serde(with = "crate::utils::bytes"))]
     oam: Box<[u8]>,
     #[cfg_attr(feature = "serde", serde(skip))]
     rom: Arc<[u8]>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    plain_rom_end: usize,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    patches: PatchedRom,
     backup: Backup,
     cart: Cart,
     wait: WaitControl,
@@ -103,21 +106,39 @@ pub struct Bus {
     after_dma: bool,
     #[cfg_attr(feature = "serde", serde(skip))]
     prepaid: u32,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    owed: u32,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    quiet: u32,
+    #[cfg(jit)]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    code: jit::Code,
 }
 
 impl Bus {
     pub fn new(rom: &[u8]) -> Self {
+        Self::with_rom(rom.into())
+    }
+
+    pub fn with_rom(rom: Arc<[u8]>) -> Self {
+        let rom = if rom.len() > ROM_MAX_SIZE {
+            rom[..ROM_MAX_SIZE].into()
+        } else {
+            rom
+        };
         Self {
-            bios: zeroed(BIOS_SIZE),
-            ewram: zeroed(EWRAM_SIZE),
-            iwram: zeroed(IWRAM_SIZE),
+            bios: zeroed(BIOS_SIZE).into(),
+            ewram: Paged::zeroed(EWRAM_SIZE),
+            iwram: Paged::zeroed(IWRAM_SIZE),
             io: zeroed(IO_SIZE),
             palette: zeroed(PALETTE_SIZE),
-            vram: zeroed(VRAM_SIZE),
+            vram: Paged::zeroed(VRAM_SIZE),
             oam: zeroed(OAM_SIZE),
-            rom: rom[..rom.len().min(ROM_MAX_SIZE)].into(),
-            backup: Backup::for_rom(rom),
-            cart: Cart::for_rom(rom),
+            backup: Backup::for_rom(&rom),
+            cart: Cart::for_rom(&rom),
+            plain_rom_end: Cart::plain_rom_end(rom.len()),
+            rom,
+            patches: PatchedRom::default(),
             wait: WaitControl::default(),
             keypad: Keypad::default(),
             interrupts: Interrupts::default(),
@@ -135,13 +156,25 @@ impl Bus {
             dma_check: 0,
             after_dma: false,
             prepaid: 0,
+            owed: 0,
+            quiet: 0,
+            #[cfg(jit)]
+            code: jit::Code::default(),
         }
     }
 
     pub fn load_bios(&mut self, bios: &[u8]) {
         let len = bios.len().min(BIOS_SIZE);
-        self.bios[..len].copy_from_slice(&bios[..len]);
-        self.bios[len..].fill(0);
+        let mut image = zeroed(BIOS_SIZE);
+        image[..len].copy_from_slice(&bios[..len]);
+        self.share_bios(image.into());
+    }
+
+    pub fn share_bios(&mut self, bios: Arc<[u8]>) {
+        if bios.len() != BIOS_SIZE {
+            return self.load_bios(&bios);
+        }
+        self.bios = bios;
         self.open_bus
             .latch_bios(read_le(&self.bios, BIOS_BOOT_LATCH, Width::Word));
     }
@@ -156,6 +189,8 @@ impl Bus {
             vram,
             oam,
             rom: _,
+            plain_rom_end: _,
+            patches: _,
             backup,
             cart,
             wait,
@@ -175,12 +210,16 @@ impl Bus {
             dma_check,
             after_dma,
             prepaid,
+            owed,
+            quiet,
+            #[cfg(jit)]
+                code: _,
         } = self;
-        ewram.copy_from_slice(&source.ewram);
-        iwram.copy_from_slice(&source.iwram);
+        ewram.copy_from(&source.ewram);
+        iwram.copy_from(&source.iwram);
         io.copy_from_slice(&source.io);
         palette.copy_from_slice(&source.palette);
-        vram.copy_from_slice(&source.vram);
+        vram.copy_from(&source.vram);
         oam.copy_from_slice(&source.oam);
         backup.clone_from(&source.backup);
         cart.clone_from(&source.cart);
@@ -193,21 +232,39 @@ impl Bus {
         *power = source.power;
         *prefetch = source.prefetch;
         *open_bus = source.open_bus;
-        serial.clone_from(&source.serial);
+        serial.copy_keeping_traffic(&source.serial);
         sound.copy_state_from(&source.sound);
         *clock = source.clock;
         *dma_check = 0;
         *after_dma = source.after_dma;
         *prepaid = 0;
+        *owed = source.owed;
+        *quiet = 0;
     }
 
-    pub fn adopt_rom(&mut self, source: &Bus) {
-        if !Arc::ptr_eq(&self.rom, &source.rom) {
+    pub fn share_pages_into(&mut self, slot: &mut Bus) {
+        slot.ewram.snapshot_from(&mut self.ewram);
+        slot.iwram.snapshot_from(&mut self.iwram);
+        slot.vram.snapshot_from(&mut self.vram);
+    }
+
+    pub fn adopt_rom(&mut self, source: &Bus) -> bool {
+        let changed = !Arc::ptr_eq(&self.rom, &source.rom);
+        if changed {
             self.rom = Arc::clone(&source.rom);
+            self.plain_rom_end = source.plain_rom_end;
+            #[cfg(jit)]
+            self.code.rom_changed();
         }
-        if self.bios != source.bios {
-            self.bios.clone_from(&source.bios);
+        self.patches.clone_from(&source.patches);
+        if !Arc::ptr_eq(&self.bios, &source.bios) {
+            self.bios = Arc::clone(&source.bios);
         }
+        changed
+    }
+
+    pub fn retime_prefetch(&mut self) {
+        self.prefetch.retime(self.wait);
     }
 
     pub fn set_blind(&mut self, blind: bool) {
@@ -234,6 +291,22 @@ impl Bus {
 
     pub fn rom(&self) -> &[u8] {
         &self.rom
+    }
+
+    pub fn shared_rom(&self) -> Arc<[u8]> {
+        self.patches.pristine(&self.rom).clone()
+    }
+
+    pub(crate) fn pristine_rom(&self) -> &[u8] {
+        self.patches.pristine(&self.rom)
+    }
+
+    pub(crate) fn set_rom_patches(&mut self, patches: &[(usize, u8)]) -> bool {
+        let before = Arc::clone(&self.rom);
+        self.patches.set(&mut self.rom, patches);
+        #[cfg(jit)]
+        self.code.rom_changed();
+        !Arc::ptr_eq(&before, &self.rom)
     }
 
     pub fn wait(&self) -> WaitControl {
@@ -276,6 +349,10 @@ impl Bus {
         &self.serial
     }
 
+    pub fn serial_mut(&mut self) -> &mut Serial {
+        &mut self.serial
+    }
+
     pub fn sound(&self) -> &Sound {
         &self.sound
     }
@@ -286,7 +363,7 @@ impl Bus {
 
     pub fn step(&mut self, cycles: u32) {
         self.stall_rest_of_dma();
-        self.cart.tick(cycles);
+        self.cart.tick(cycles.saturating_sub(self.clock.cart()));
         let serial_start = self.take_serial_start();
         let last = self.timers_step_last(cycles);
         let (irq, at) = self.serial.step_at(cycles.saturating_sub(serial_start));
@@ -314,7 +391,7 @@ impl Bus {
 
     #[cfg(feature = "debug")]
     pub fn video_memory(&self) -> (&[u8], &[u8], &[u8]) {
-        (&self.vram, &self.palette, &self.oam)
+        (&self.vram[..], &self.palette, &self.oam)
     }
 
     pub fn ppu(&self) -> &Ppu {
@@ -376,6 +453,16 @@ impl Bus {
     pub fn start_special_dma(&mut self, channel: usize) {
         self.dma.trigger_special(channel);
         self.dma_check = 0;
+    }
+
+    fn quiet_span(&self) -> u32 {
+        if !self.interrupts.idle() || self.dma.active() || self.serial.active() || self.prepaid > 0
+        {
+            return 0;
+        }
+        let timers = self.timers.until_overflow().unwrap_or(u32::MAX);
+        self.ppu
+            .until_effect(self.interrupts.ie(), self.dma.capturing(), timers)
     }
 
     pub fn until_event(&self) -> u32 {
@@ -446,11 +533,11 @@ impl Bus {
     #[cfg(feature = "debug")]
     pub(crate) fn memory(&self, region: Region) -> Option<&[u8]> {
         match region {
-            Region::Bios => Some(&self.bios),
-            Region::Ewram => Some(&self.ewram),
-            Region::Iwram => Some(&self.iwram),
+            Region::Bios => Some(&self.bios[..]),
+            Region::Ewram => Some(&self.ewram[..]),
+            Region::Iwram => Some(&self.iwram[..]),
             Region::Palette => Some(&self.palette),
-            Region::Vram => Some(&self.vram),
+            Region::Vram => Some(&self.vram[..]),
             Region::Oam => Some(&self.oam),
             Region::Io | Region::Rom(_) | Region::Sram | Region::Unmapped => None,
         }
@@ -482,7 +569,10 @@ impl Bus {
     }
 
     pub(crate) fn read(&self, addr: u32, width: Width) -> u32 {
-        let region = Region::of(addr);
+        self.read_in(Region::of(addr), addr, width)
+    }
+
+    fn read_in(&self, region: Region, addr: u32, width: Width) -> u32 {
         let offset = region.offset(addr);
         let aligned = offset & !(width.bytes() - 1);
         match region {
@@ -517,26 +607,44 @@ impl Bus {
                 self.backup.write_eeprom(value as u16)
             }
             (Region::Rom(_), Width::Half | Width::Word) if Cart::in_gpio(aligned) => {
+                self.catch_up_to_step_start();
                 self.cart.write_gpio16(aligned, value as u16);
                 if width == Width::Word {
                     self.cart.write_gpio16(aligned + 2, (value >> 16) as u16);
                 }
             }
             (Region::Bios | Region::Rom(_) | Region::Unmapped, _) => {}
-            (Region::Ewram, _) => write_le(&mut self.ewram, aligned, width, value),
-            (Region::Iwram, _) => write_le(&mut self.iwram, aligned, width, value),
+            (Region::Ewram, _) => {
+                write_le(self.ewram.touch(aligned), aligned, width, value);
+                #[cfg(jit)]
+                self.code.written(region, aligned);
+            }
+            (Region::Iwram, _) => {
+                write_le(self.iwram.touch(aligned), aligned, width, value);
+                #[cfg(jit)]
+                self.code.written(region, aligned);
+            }
             (Region::Io, _) => self.write_io(aligned, width, value),
             (Region::Palette, Width::Byte) => {
+                self.ppu.palette_written();
                 write_le(&mut self.palette, aligned & !1, Width::Half, value * 0x0101)
             }
-            (Region::Palette, _) => write_le(&mut self.palette, aligned, width, value),
+            (Region::Palette, _) => {
+                self.ppu.palette_written();
+                write_le(&mut self.palette, aligned, width, value)
+            }
             (Region::Vram, _) if self.in_vram_hole(addr) => {}
             (Region::Vram, Width::Byte) => {
                 if aligned < self.vram_bg_end() {
-                    write_le(&mut self.vram, aligned & !1, Width::Half, value * 0x0101);
+                    write_le(
+                        self.vram.touch(aligned),
+                        aligned & !1,
+                        Width::Half,
+                        value * 0x0101,
+                    );
                 }
             }
-            (Region::Vram, _) => write_le(&mut self.vram, aligned, width, value),
+            (Region::Vram, _) => write_le(self.vram.touch(aligned), aligned, width, value),
             (Region::Oam, Width::Byte) => {}
             (Region::Oam, _) => {
                 let ahead = self.clock.before_now_since_video();
@@ -557,6 +665,9 @@ impl Bus {
     }
 
     fn read_rom(&self, aligned: usize, width: Width) -> u32 {
+        if let Some(value) = self.plain_rom(aligned, width) {
+            return value;
+        }
         let gpio = self.cart.shows_gpio(aligned);
         (0..width.bytes()).fold(0, |value, i| {
             let offset = aligned + i;
@@ -566,6 +677,13 @@ impl Bus {
                 .unwrap_or_else(|| ((offset >> 1) as u16).to_le_bytes()[offset & 1]);
             value | u32::from(byte) << (8 * i)
         })
+    }
+
+    #[inline(always)]
+    fn plain_rom(&self, aligned: usize, width: Width) -> Option<u32> {
+        (Cart::in_plain_rom(aligned, self.plain_rom_end)
+            || aligned + width.bytes() <= self.rom.len() && !self.cart.shows_gpio(aligned))
+        .then(|| read_le(&self.rom, aligned, width))
     }
 
     fn read_io(&self, aligned: usize, width: Width) -> u32 {
@@ -645,7 +763,10 @@ impl Bus {
             }
             IE => self.interrupts.write_ie(value, mask, self.clock.now()),
             IF => self.interrupts.acknowledge(value, mask, self.clock.now()),
-            WAITCNT => self.wait.write(value, mask),
+            WAITCNT => {
+                self.wait.write(value, mask);
+                self.prefetch.retime(self.wait);
+            }
             IME => self.interrupts.write_ime(value, mask, self.clock.now()),
             SOUND_FIRST..=SOUND_LAST => self.sound.write(offset - SOUND_FIRST, value, mask),
             DMA_FIRST..=DMA_LAST => {
@@ -660,6 +781,7 @@ impl Bus {
             POSTFLG => {
                 if mask & HALTCNT_MASK != 0 {
                     self.power = Power::from_haltcnt((value >> 8) as u8);
+                    self.quiet = 0;
                 }
                 self.io[offset] = (self.io[offset] & !mask as u8) | (value & mask) as u8;
             }
@@ -712,19 +834,833 @@ fn splat(width: Width) -> u32 {
 }
 
 fn read_le(memory: &[u8], offset: usize, width: Width) -> u32 {
-    memory[offset..offset + width.bytes()]
-        .iter()
-        .rev()
-        .fold(0, |value, &byte| value << 8 | u32::from(byte))
+    match width {
+        Width::Byte => u32::from(memory[offset]),
+        Width::Half => u32::from(u16::from_le_bytes(
+            memory[offset..offset + 2].try_into().unwrap(),
+        )),
+        Width::Word => u32::from_le_bytes(memory[offset..offset + 4].try_into().unwrap()),
+    }
 }
 
 fn write_le(memory: &mut [u8], offset: usize, width: Width, value: u32) {
-    let bytes = value.to_le_bytes();
-    memory[offset..offset + width.bytes()].copy_from_slice(&bytes[..width.bytes()]);
+    match width {
+        Width::Byte => memory[offset] = value as u8,
+        Width::Half => memory[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+        Width::Word => memory[offset..offset + 4].copy_from_slice(&value.to_le_bytes()),
+    }
 }
 
 mod cpu_access;
+mod idle;
+#[cfg(jit)]
+mod jit;
 mod video;
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    fn rom_counting(len: usize) -> Vec<u8> {
+        (0..len).map(|i| i as u8).collect()
+    }
+
+    fn bus() -> Bus {
+        Bus::new(&rom_counting(0x100))
+    }
+
+    #[test]
+    fn bios_reads_the_loaded_image_and_ignores_writes() {
+        let mut bus = bus();
+        bus.load_bios(&[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(bus.read32(0x0000_0000), 0x4433_2211);
+        assert_eq!(bus.read16(0x0000_0002), 0x4433);
+        assert_eq!(bus.read8(0x0000_0001), 0x22);
+        bus.write32(0x0000_0000, 0xDEAD_BEEF);
+        assert_eq!(bus.read32(0x0000_0000), 0x4433_2211);
+        assert_eq!(bus.read32(0x0000_4000), 0);
+    }
+
+    #[test]
+    fn ewram_is_256k_and_mirrors_through_the_region() {
+        let mut bus = bus();
+        bus.write32(0x0200_0000, 0x1122_3344);
+        bus.write8(0x0203_FFFF, 0xAB);
+        assert_eq!(bus.read32(0x0204_0000), 0x1122_3344);
+        assert_eq!(bus.read32(0x02FC_0000), 0x1122_3344);
+        assert_eq!(bus.read8(0x02FF_FFFF), 0xAB);
+        assert_eq!(bus.read8(0x0200_0000), 0x44);
+    }
+
+    #[test]
+    fn iwram_is_32k_and_mirrors_through_the_region() {
+        let mut bus = bus();
+        bus.write32(0x0300_7FFC, 0x0300_1234);
+        assert_eq!(bus.read32(0x03FF_FFFC), 0x0300_1234);
+        assert_eq!(bus.read32(0x0300_FFFC), 0x0300_1234);
+        bus.write16(0x0300_8000, 0xBEEF);
+        assert_eq!(bus.read16(0x0300_0000), 0xBEEF);
+    }
+
+    #[test]
+    fn wide_accesses_align_down() {
+        let mut bus = bus();
+        bus.write32(0x0300_0002, 0x1122_3344);
+        assert_eq!(bus.read32(0x0300_0000), 0x1122_3344);
+        assert_eq!(bus.read32(0x0300_0003), 0x1122_3344);
+        assert_eq!(bus.read16(0x0300_0001), 0x3344);
+        bus.write16(0x0300_0001, 0xAAAA);
+        assert_eq!(bus.read32(0x0300_0000), 0x1122_AAAA);
+    }
+
+    #[test]
+    fn io_keeps_plain_registers_and_ends_at_3ff() {
+        let mut bus = bus();
+        bus.write16(0x0400_0000, 0x0403);
+        assert_eq!(bus.read16(0x0400_0000), 0x0403);
+        bus.write8(0x0400_0001, 0x1F);
+        assert_eq!(bus.read16(0x0400_0000), 0x1F03);
+        bus.write32(0x0400_0400, 0xFFFF_FFFF);
+        assert_eq!(bus.read32(0x0400_0400), 0);
+    }
+
+    #[test]
+    fn waitcnt_reads_and_writes_through_the_bus() {
+        let mut bus = bus();
+        bus.write16(0x0400_0204, 0x4317);
+        assert_eq!(bus.read16(0x0400_0204), 0x4317);
+        assert_eq!(bus.wait().read(), 0x4317);
+        assert_eq!(
+            bus.cycles(0x0800_0000, Width::Half, Access::NonSequential),
+            4
+        );
+        bus.write8(0x0400_0205, 0x00);
+        assert_eq!(bus.read16(0x0400_0204), 0x0017);
+        bus.write32(0x0400_0204, 0xFFFF_FFFF);
+        assert_eq!(bus.read8(0x0400_0205), 0x5F);
+    }
+
+    #[test]
+    fn palette_is_1k_mirrored_and_byte_writes_fill_the_halfword() {
+        let mut bus = bus();
+        bus.write16(0x0500_0000, 0x7FFF);
+        assert_eq!(bus.read16(0x0500_0400), 0x7FFF);
+        assert_eq!(bus.read16(0x05FF_FC00), 0x7FFF);
+        bus.write8(0x0500_0003, 0x12);
+        assert_eq!(bus.read16(0x0500_0002), 0x1212);
+        bus.write32(0x0500_03FC, 0xAABB_CCDD);
+        assert_eq!(bus.read32(0x0500_07FC), 0xAABB_CCDD);
+    }
+
+    #[test]
+    fn vram_is_96k_with_the_upper_32k_mirroring_the_obj_bank() {
+        let mut bus = bus();
+        bus.write16(0x0601_0000, 0x1234);
+        assert_eq!(bus.read16(0x0601_8000), 0x1234);
+        bus.write16(0x0601_FFFE, 0x5678);
+        assert_eq!(bus.read16(0x0601_7FFE), 0x5678);
+        bus.write32(0x0600_0000, 0xCAFE_F00D);
+        assert_eq!(bus.read32(0x0602_0000), 0xCAFE_F00D);
+        assert_eq!(bus.read32(0x06FE_0000), 0xCAFE_F00D);
+    }
+
+    #[test]
+    fn vram_byte_writes_fill_bg_and_skip_obj_in_tiled_modes() {
+        let mut bus = bus();
+        bus.write8(0x0600_FFFF, 0x42);
+        assert_eq!(bus.read16(0x0600_FFFE), 0x4242);
+        bus.write8(0x0601_0000, 0x42);
+        assert_eq!(bus.read16(0x0601_0000), 0);
+    }
+
+    #[test]
+    fn vram_byte_writes_reach_further_in_bitmap_modes() {
+        let mut bus = bus();
+        bus.write16(0x0400_0000, 0x0003);
+        bus.write8(0x0601_3FFE, 0x42);
+        assert_eq!(bus.read16(0x0601_3FFE), 0x4242);
+        bus.write8(0x0601_4000, 0x42);
+        assert_eq!(bus.read16(0x0601_4000), 0);
+    }
+
+    #[test]
+    fn oam_is_1k_mirrored_and_ignores_byte_writes() {
+        let mut bus = bus();
+        bus.write32(0x0700_0000, 0x0102_0304);
+        assert_eq!(bus.read32(0x0700_0400), 0x0102_0304);
+        assert_eq!(bus.read32(0x07FF_FC00), 0x0102_0304);
+        bus.write8(0x0700_0000, 0xFF);
+        assert_eq!(bus.read32(0x0700_0000), 0x0102_0304);
+        bus.write16(0x0700_0002, 0xFFFF);
+        assert_eq!(bus.read32(0x0700_0000), 0xFFFF_0304);
+    }
+
+    #[test]
+    fn rom_reads_little_endian_in_all_three_windows() {
+        let bus = bus();
+        for base in [0x0800_0000, 0x0A00_0000, 0x0C00_0000] {
+            assert_eq!(bus.read32(base + 4), 0x0706_0504, "{base:08X}");
+            assert_eq!(bus.read16(base + 6), 0x0706, "{base:08X}");
+            assert_eq!(bus.read8(base + 5), 0x05, "{base:08X}");
+        }
+        assert_eq!(bus.read8(0x0900_0005), 0);
+    }
+
+    #[test]
+    fn rom_mirrors_every_32m() {
+        let bus = Bus::new(&rom_counting(0x200_0000 + 0x10));
+        assert_eq!(bus.read8(0x0900_0001), 0x01);
+        assert_eq!(bus.read8(0x0B00_0001), 0x01);
+        assert_eq!(bus.read8(0x0D00_00FF), 0xFF);
+    }
+
+    #[test]
+    fn rom_past_its_end_reads_the_address_halves() {
+        let bus = bus();
+        assert_eq!(bus.read16(0x0800_0100), 0x0080);
+        assert_eq!(bus.read16(0x0800_0102), 0x0081);
+        assert_eq!(bus.read32(0x0800_0100), 0x0081_0080);
+        assert_eq!(bus.read8(0x0800_0103), 0x00);
+        assert_eq!(bus.read16(0x0A01_FFFE), 0xFFFF);
+        assert_eq!(bus.read16(0x0802_0000), 0x0000);
+    }
+
+    #[test]
+    fn rom_ignores_writes() {
+        let mut bus = bus();
+        bus.write32(0x0800_0000, 0xFFFF_FFFF);
+        assert_eq!(bus.read32(0x0800_0000), 0x0302_0100);
+    }
+
+    #[test]
+    fn sram_is_64k_on_an_8_bit_bus() {
+        let mut bus = bus();
+        assert_eq!(bus.read8(0x0E00_0000), 0xFF);
+        bus.write8(0x0E00_0001, 0x5A);
+        assert_eq!(bus.read8(0x0E01_0001), 0x5A);
+        assert_eq!(bus.read8(0x0F00_0001), 0x5A);
+        assert_eq!(bus.read16(0x0E00_0001), 0x5A5A);
+        assert_eq!(bus.read32(0x0E00_0001), 0x5A5A_5A5A);
+    }
+
+    #[test]
+    fn sram_wide_writes_store_the_addressed_byte_lane() {
+        let mut bus = bus();
+        bus.write16(0x0E00_0011, 0xAABB);
+        assert_eq!(bus.read8(0x0E00_0011), 0xAA);
+        assert_eq!(bus.read8(0x0E00_0010), 0xFF);
+        bus.write32(0x0E00_0022, 0x1122_3344);
+        assert_eq!(bus.read8(0x0E00_0022), 0x22);
+        assert_eq!(bus.read8(0x0E00_0020), 0xFF);
+    }
+
+    #[test]
+    fn unmapped_reads_zero_and_ignores_writes() {
+        let mut bus = bus();
+        for addr in [0x0000_4000, 0x0100_0000, 0x1000_0000, 0xFFFF_FFFC] {
+            bus.write32(addr, 0xFFFF_FFFF);
+            assert_eq!(bus.read32(addr), 0, "{addr:08X}");
+        }
+    }
+
+    #[test]
+    fn rom_is_capped_at_32m() {
+        let bus = Bus::new(&vec![0xAA; 0x200_0000 + 4]);
+        assert_eq!(bus.rom.len(), 0x200_0000);
+    }
+
+    #[test]
+    fn keyinput_reads_through_the_bus_and_ignores_writes() {
+        let mut bus = bus();
+        assert_eq!(bus.read16(0x0400_0130), 0x03FF);
+        bus.set_keys(Keys::A | Keys::L);
+        assert_eq!(bus.read16(0x0400_0130), 0x01FE);
+        assert_eq!(bus.read8(0x0400_0131), 0x01);
+        bus.write16(0x0400_0130, 0x0000);
+        assert_eq!(bus.read16(0x0400_0130), 0x01FE);
+    }
+
+    #[test]
+    fn keycnt_shares_a_word_with_keyinput() {
+        let mut bus = bus();
+        bus.write32(0x0400_0130, 0xC00F_0000);
+        assert_eq!(bus.read32(0x0400_0130), 0xC00F_03FF);
+        assert_eq!(bus.keypad().keycnt(), 0xC00F);
+    }
+
+    #[test]
+    fn keypad_irq_sets_if_bit_12_in_any_of_mode() {
+        let mut bus = bus();
+        bus.write16(0x0400_0132, 0x4000 | Keys::START.bits());
+        bus.set_keys(Keys::A);
+        assert_eq!(bus.read16(0x0400_0202), 0);
+        bus.set_keys(Keys::START);
+        assert_eq!(bus.read16(0x0400_0202), 0);
+        bus.step_video(1);
+        assert_eq!(bus.read16(0x0400_0202), Irq::KEYPAD.bits());
+    }
+
+    #[test]
+    fn keypad_irq_in_all_of_mode_waits_for_every_key() {
+        let mut bus = bus();
+        let combo = Keys::A | Keys::B | Keys::SELECT | Keys::START;
+        bus.write16(0x0400_0132, 0xC000 | combo.bits());
+        bus.set_keys(Keys::A | Keys::B | Keys::START);
+        assert_eq!(bus.interrupts().if_(), 0);
+        bus.set_keys(combo);
+        bus.step_video(1);
+        assert_eq!(bus.interrupts().if_(), Irq::KEYPAD.bits());
+    }
+
+    #[test]
+    fn keycnt_write_with_the_keys_held_raises_the_irq() {
+        let mut bus = bus();
+        bus.set_keys(Keys::R);
+        bus.write16(0x0400_0132, Keys::R.bits());
+        assert_eq!(bus.interrupts().if_(), 0);
+        bus.write8(0x0400_0133, 0x41);
+        assert_eq!(bus.keypad().keycnt(), 0x4100);
+        assert_eq!(bus.interrupts().if_(), 0);
+        bus.step_video(1);
+        assert_eq!(bus.interrupts().if_(), Irq::KEYPAD.bits());
+    }
+
+    #[test]
+    fn keypad_irq_is_acknowledged_by_writing_one_to_if() {
+        let mut bus = bus();
+        bus.write16(0x0400_0200, Irq::KEYPAD.bits());
+        bus.write16(0x0400_0208, 1);
+        bus.write16(0x0400_0132, 0x4000 | Keys::A.bits());
+        bus.set_keys(Keys::A);
+        assert!(bus.interrupts().asserted());
+        bus.write16(0x0400_0202, Irq::KEYPAD.bits());
+        assert_eq!(bus.read16(0x0400_0202), 0);
+        assert!(!bus.interrupts().asserted());
+    }
+
+    #[test]
+    fn ie_if_and_ime_read_back_through_the_bus() {
+        let mut bus = bus();
+        bus.write32(0x0400_0200, 0xFFFF_FFFF);
+        assert_eq!(bus.read32(0x0400_0200), 0x0000_3FFF);
+        bus.write32(0x0400_0208, 0xFFFF_FFFF);
+        assert_eq!(bus.read16(0x0400_0208), 1);
+    }
+
+    const TM0CNT: u32 = 0x0400_0100;
+    const DMA_BASE: u32 = 0x0400_00B0;
+    const IF_ADDR: u32 = 0x0400_0202;
+
+    fn dma_registers(
+        bus: &mut Bus,
+        channel: u32,
+        source: u32,
+        dest: u32,
+        count: u16,
+        control: u16,
+    ) {
+        let base = DMA_BASE + 12 * channel;
+        bus.write32(base, source);
+        bus.write32(base + 4, dest);
+        bus.write16(base + 8, count);
+        bus.write16(base + 10, control | 0x8000);
+    }
+
+    #[test]
+    fn a_32_bit_timer_write_starts_from_the_new_reload() {
+        let mut bus = bus();
+        bus.write32(TM0CNT, 0x00C0_FFFE);
+        bus.step(1);
+        assert_eq!(bus.read16(TM0CNT), 0);
+        assert_eq!(bus.read16(TM0CNT + 2), 0x00C0);
+        bus.step(1);
+        assert_eq!(bus.read16(TM0CNT), 0xFFFE);
+        bus.step(1);
+        assert_eq!(bus.read16(TM0CNT), 0xFFFF);
+        assert_eq!(bus.read16(IF_ADDR), 0);
+        bus.step(1);
+        assert_eq!(bus.read16(TM0CNT), 0xFFFE);
+        bus.step_video(1);
+        assert_eq!(bus.read16(IF_ADDR), 0);
+        bus.step(1);
+        bus.step_video(1);
+        assert_eq!(bus.read16(IF_ADDR), Irq::TIMER0.bits());
+    }
+
+    #[test]
+    fn timer_registers_take_byte_writes() {
+        let mut bus = bus();
+        bus.write8(TM0CNT + 4, 0x34);
+        bus.write8(TM0CNT + 5, 0x12);
+        bus.write8(TM0CNT + 6, 0x80);
+        bus.step(2);
+        assert_eq!(bus.read16(TM0CNT + 4), 0x1234);
+        assert_eq!(bus.read8(TM0CNT + 6), 0x80);
+    }
+
+    #[test]
+    fn step_without_timers_requests_nothing() {
+        let mut bus = bus();
+        bus.write16(TM0CNT, 0xFFFF);
+        bus.write16(TM0CNT + 2, 0x0040);
+        assert_eq!(bus.timers_step(100_000), Overflows::default());
+        assert_eq!(bus.read16(IF_ADDR), 0);
+    }
+
+    #[test]
+    fn immediate_dma_copies_and_reports_its_cycles() {
+        let mut bus = bus();
+        for i in 0..4 {
+            bus.write32(0x0200_0000 + 4 * i, 0x1111_1111 * (i + 1));
+        }
+        dma_registers(&mut bus, 3, 0x0200_0000, 0x0300_0000, 4, 0x4400);
+        assert!(bus.dma_active());
+        assert_eq!(bus.run_dma(), 2 + 2 + 4 * 6 + 4);
+        for i in 0..4 {
+            assert_eq!(bus.read32(0x0300_0000 + 4 * i), 0x1111_1111 * (i + 1));
+        }
+        assert!(!bus.dma_active());
+        assert_eq!(bus.read16(DMA_BASE + 12 * 3 + 10) & 0x8000, 0);
+        assert_eq!(bus.interrupts().raised(), Irq::DMA3.bits());
+    }
+
+    #[test]
+    fn a_dma_irq_shows_in_if_the_cycle_after_the_dma_gives_the_bus_back() {
+        let mut bus = bus();
+        dma_registers(&mut bus, 3, 0x0200_0000, 0x0300_0000, 4, 0x4400);
+        let cycles = bus.run_dma();
+        assert_eq!(bus.interrupts().if_at(cycles), 0);
+        assert_eq!(bus.interrupts().if_at(cycles + 1), Irq::DMA3.bits());
+    }
+
+    #[test]
+    fn vblank_dma_runs_only_after_the_vblank_call() {
+        let mut bus = bus();
+        bus.write16(0x0200_0000, 0xBEEF);
+        dma_registers(&mut bus, 1, 0x0200_0000, 0x0300_0000, 1, 0x1000);
+        assert_eq!(bus.run_dma(), 0);
+        bus.start_dma(Timing::HBlank);
+        assert_eq!(bus.run_dma(), 0);
+        bus.start_dma(Timing::VBlank);
+        assert!(bus.run_dma() > 0);
+        assert_eq!(bus.read16(0x0300_0000), 0xBEEF);
+    }
+
+    #[test]
+    fn channels_started_together_run_lower_first() {
+        let mut bus = bus();
+        bus.write16(0x0200_0000, 0xAAAA);
+        bus.write16(0x0300_0000, 0x5555);
+        dma_registers(&mut bus, 2, 0x0300_0000, 0x0300_0010, 1, 0x2000);
+        dma_registers(&mut bus, 1, 0x0200_0000, 0x0300_0000, 1, 0x2000);
+        bus.start_dma(Timing::HBlank);
+        bus.run_dma();
+        assert_eq!(bus.read16(0x0300_0010), 0xAAAA);
+    }
+
+    #[test]
+    fn dma0_masks_rom_down_to_the_bios_and_gets_its_latch() {
+        let mut bus = bus();
+        bus.load_bios(&[0x11, 0x22]);
+        bus.write16(0x0300_0000, 0xFFFF);
+        dma_registers(&mut bus, 0, 0x0800_0000, 0x0300_0000, 1, 0);
+        dma_registers(&mut bus, 3, 0x0800_0000, 0x0300_0002, 1, 0);
+        bus.run_dma();
+        assert_eq!(bus.read16(0x0300_0000), 0);
+        assert_eq!(bus.read16(0x0300_0002), 0x0100);
+    }
+
+    #[test]
+    fn dma_from_the_bios_repeats_the_last_word_it_moved() {
+        let mut bus = bus();
+        bus.load_bios(&[0x11, 0x22, 0x33, 0x44]);
+        bus.write32(0x0300_0100, 0xAABB_CCDD);
+        dma_registers(&mut bus, 1, 0x0300_0100, 0x0300_0000, 1, 0x0400);
+        bus.run_dma();
+        dma_registers(&mut bus, 1, 0x0000_0000, 0x0300_0010, 2, 0x0400);
+        bus.run_dma();
+        assert_eq!(bus.read32(0x0300_0010), 0xAABB_CCDD);
+        assert_eq!(bus.read32(0x0300_0014), 0xAABB_CCDD);
+    }
+
+    #[test]
+    fn halfword_dma_from_unmapped_memory_repeats_the_last_half_on_both_lanes() {
+        let mut bus = bus();
+        bus.write16(0x0300_0100, 0xCCDD);
+        dma_registers(&mut bus, 3, 0x0300_0100, 0x0300_0000, 1, 0);
+        bus.run_dma();
+        dma_registers(&mut bus, 3, 0x0100_0000, 0x0300_0020, 2, 0);
+        bus.run_dma();
+        assert_eq!(bus.read32(0x0300_0020), 0xCCDD_CCDD);
+    }
+
+    #[test]
+    fn each_dma_channel_keeps_its_own_latch() {
+        let mut bus = bus();
+        bus.write32(0x0300_0100, 0x1111_1111);
+        bus.write32(0x0300_0104, 0x2222_2222);
+        dma_registers(&mut bus, 1, 0x0300_0100, 0x0300_0000, 1, 0x0400);
+        dma_registers(&mut bus, 2, 0x0300_0104, 0x0300_0000, 1, 0x0400);
+        bus.run_dma();
+        dma_registers(&mut bus, 1, 0x0000_0000, 0x0300_0010, 1, 0x0400);
+        bus.run_dma();
+        assert_eq!(bus.read32(0x0300_0010), 0x1111_1111);
+    }
+
+    #[test]
+    fn dma3_writes_to_rom_addresses_change_nothing() {
+        let mut bus = bus();
+        bus.write16(0x0300_0000, 0xFFFF);
+        dma_registers(&mut bus, 3, 0x0300_0000, 0x0800_0000, 1, 0);
+        bus.run_dma();
+        assert_eq!(bus.read16(0x0800_0000), 0x0100);
+    }
+
+    #[test]
+    fn special_dma_starts_from_its_hook() {
+        let mut bus = bus();
+        bus.write32(0x0200_0000, 0x1234_5678);
+        dma_registers(&mut bus, 1, 0x0200_0000, 0x0400_00A0, 0, 0x3200);
+        bus.start_special_dma(1);
+        assert_eq!(bus.run_dma(), 2 + 6 + 3 * 6 + 4);
+        assert_eq!(bus.read32(0x0400_00A0), 0);
+        assert_ne!(bus.read16(DMA_BASE + 12 + 10) & 0x8000, 0);
+    }
+
+    #[test]
+    fn an_hblank_dma_takes_over_a_running_dma_between_units() {
+        let mut bus = bus();
+        let units = 2000;
+        for i in 0..units {
+            bus.write16(0x0200_0000 + 2 * i, 0xAAAA);
+        }
+        let last = 0x0300_0000 + 2 * (units - 1);
+        dma_registers(&mut bus, 0, last, 0x0300_4000, 1, 0x2000);
+        dma_registers(&mut bus, 3, 0x0200_0000, 0x0300_0000, units as u16, 0);
+        bus.run_dma();
+        assert_eq!(bus.read16(0x0300_4000), 0);
+        assert_eq!(bus.read16(last), 0xAAAA);
+        assert_eq!(bus.read16(DMA_BASE + 12 * 3 + 10) & 0x8000, 0);
+    }
+
+    fn bus_with_hblank_marker_dma() -> Bus {
+        let mut bus = bus();
+        bus.write32(0x0200_F000, 0xBEEF_CAFE);
+        dma_registers(&mut bus, 0, 0x0200_F000, 0x0300_7000, 1, 0x2400);
+        bus
+    }
+
+    #[test]
+    fn an_hblank_dma_due_when_a_dma_ends_runs_before_the_next_cpu_access() {
+        for lead in 1..=3 {
+            let mut bus = bus_with_hblank_marker_dma();
+            for _ in 0..lead {
+                bus.cpu_idle();
+            }
+            dma_registers(&mut bus, 3, 0x0800_0000, 0x0900_0000, 166, 0);
+            let mut addr = 0x0800_0000;
+            let mut access = Access::NonSequential;
+            while bus.dma_cycles() == 0 {
+                bus.code_cycles(addr, Width::Half, access);
+                addr += 2;
+                access = Access::Sequential;
+            }
+            assert_eq!(
+                bus.read32(0x0300_7000),
+                0xBEEF_CAFE,
+                "{lead} idle cycles first"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_cpu_access_after_a_dma_is_nonsequential() {
+        let mut bus = bus();
+        dma_registers(&mut bus, 3, 0x0200_0000, 0x0300_0000, 1, 0);
+        let wait = WaitControl::default();
+        let n = wait.cycles(0x0800_0002, Width::Half, Access::NonSequential);
+        let s = wait.cycles(0x0800_0002, Width::Half, Access::Sequential);
+        assert_ne!(n, s);
+        bus.code_cycles(0x0800_0000, Width::Half, Access::NonSequential);
+        assert_eq!(bus.dma_cycles(), 0);
+        assert_eq!(
+            bus.code_cycles(0x0800_0002, Width::Half, Access::Sequential),
+            n
+        );
+        assert_ne!(bus.dma_cycles(), 0);
+        assert_eq!(
+            bus.code_cycles(0x0800_0004, Width::Half, Access::Sequential),
+            s
+        );
+    }
+
+    #[test]
+    fn siocnt_reads_the_busy_bit_at_the_access_cycle() {
+        let siocnt = 0x0400_0128;
+        let cycles = 8 * 8 + 6;
+        for (idle, busy) in [(cycles - 1, 0x80), (cycles, 0)] {
+            let mut bus = bus();
+            bus.start_cpu_step();
+            bus.cpu_write(siocnt, Width::Half, 0x0083);
+            for _ in 0..idle {
+                bus.cpu_idle();
+            }
+            assert_eq!(bus.cpu_read(siocnt, Width::Half) & 0x80, busy);
+        }
+    }
+
+    fn prefetching_bus_with_dma(source: u32) -> Bus {
+        let mut bus = bus();
+        bus.write16(0x0400_0204, 0x4014);
+        dma_registers(&mut bus, 3, source, 0x0300_0000, 4, 0x0400);
+        bus.code_cycles(0x0800_0000, Width::Half, Access::NonSequential);
+        assert_eq!(bus.dma_cycles(), 0);
+        bus
+    }
+
+    #[test]
+    fn the_prefetch_buffer_keeps_filling_while_a_dma_runs_off_the_game_pak() {
+        let mut bus = prefetching_bus_with_dma(0x0200_0000);
+        assert_eq!(
+            bus.code_cycles(0x0800_0002, Width::Half, Access::Sequential),
+            1
+        );
+        assert_ne!(bus.dma_cycles(), 0);
+    }
+
+    #[test]
+    fn a_dma_from_the_game_pak_drops_the_prefetch_buffer() {
+        let mut bus = prefetching_bus_with_dma(0x0800_0080);
+        let n = bus
+            .wait
+            .cycles(0x0800_0002, Width::Half, Access::NonSequential);
+        assert_eq!(
+            bus.code_cycles(0x0800_0002, Width::Half, Access::Sequential),
+            n
+        );
+        assert_ne!(bus.dma_cycles(), 0);
+    }
+
+    #[test]
+    fn a_held_instruction_skips_the_cycles_it_ran_before_the_halt() {
+        let mut bus = bus();
+        bus.start_cpu_step();
+        bus.resume_held(1, 2);
+        assert_eq!(
+            bus.code_cycles(0x0300_0000, Width::Word, Access::Sequential),
+            0
+        );
+        assert_eq!(
+            bus.data_cycles(0x0300_0100, Width::Word, Access::NonSequential),
+            0
+        );
+        assert_eq!(
+            bus.code_cycles(0x0300_0004, Width::Word, Access::Sequential),
+            1
+        );
+        assert_eq!(bus.step_cycles(), 2);
+        assert_eq!(bus.end_held(), 0);
+    }
+
+    struct Xorshift(u32);
+
+    impl Xorshift {
+        fn below(&mut self, n: u32) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 17;
+            self.0 ^= self.0 << 5;
+            self.0 % n
+        }
+    }
+
+    fn assert_same_bus(fast: &Bus, slow: &Bus, seed: u32, step: u32) {
+        assert_eq!(fast.prefetch, slow.prefetch, "seed {seed} step {step}");
+        assert_eq!(fast.open_bus, slow.open_bus, "seed {seed} step {step}");
+        assert_eq!(
+            format!("{:?}", fast.clock),
+            format!("{:?}", slow.clock),
+            "seed {seed} step {step}"
+        );
+    }
+
+    #[test]
+    fn timed_fetches_and_reads_match_paying_the_cycles_first() {
+        use crate::gba::cpu::CpuBus;
+        let rom = rom_counting(0x4_0000);
+        let targets = [
+            0x0800_0000,
+            0x0801_FFE0,
+            0x0803_FFE0,
+            0x0A01_FFF0,
+            0x0C00_0100,
+            0x0D00_0000,
+            0x0300_0000,
+            0x0200_0000,
+        ];
+        for seed in 1..=64u32 {
+            let mut rng = Xorshift(seed.wrapping_mul(0x9E37_79B9));
+            let mut fast = Bus::new(&rom);
+            let mut slow = Bus::new(&rom);
+            let mut pc = 0x0800_0000;
+            let mut thumb = true;
+            let mut access = Access::NonSequential;
+            for bus in [&mut fast, &mut slow] {
+                bus.write16(0x0400_0204, 0x4317);
+            }
+            for step in 0..4000 {
+                match rng.below(24) {
+                    0 => {
+                        pc = targets[rng.below(8) as usize] + 4 * rng.below(8);
+                        access = Access::NonSequential;
+                        fast.branch();
+                        slow.branch();
+                    }
+                    1 => {
+                        thumb = !thumb;
+                        pc &= !3;
+                        access = Access::NonSequential;
+                        fast.branch();
+                        slow.branch();
+                    }
+                    2 => {
+                        let idles = 1 + rng.below(4);
+                        for bus in [&mut fast, &mut slow] {
+                            (0..idles).for_each(|_| bus.cpu_idle());
+                        }
+                    }
+                    3 | 4 => {
+                        let base = [
+                            0x0200_0000,
+                            0x0300_0000,
+                            0x0800_0000,
+                            0x0A00_0000,
+                            0x0E00_0000,
+                        ][rng.below(5) as usize];
+                        let addr = base + 4 * rng.below(0x100);
+                        let width = [Width::Byte, Width::Half, Width::Word][rng.below(3) as usize];
+                        let data = if rng.below(2) == 0 {
+                            Access::Sequential
+                        } else {
+                            Access::NonSequential
+                        };
+                        let fast_read = CpuBus::timed_read(&mut fast, addr, width, data);
+                        let slow_read = (
+                            slow.data_cycles(addr, width, data),
+                            slow.cpu_read(addr, width),
+                        );
+                        assert_eq!(fast_read, slow_read, "seed {seed} step {step}");
+                    }
+                    5 => {
+                        let prefetch = if rng.below(4) == 0 { 0 } else { 0x4000 };
+                        let bits = rng.below(0x4000) as u16 | prefetch;
+                        for bus in [&mut fast, &mut slow] {
+                            bus.write16(0x0400_0204, bits);
+                        }
+                    }
+                    6 => {
+                        let source = [0x0200_0000, 0x0800_0080][rng.below(2) as usize];
+                        for bus in [&mut fast, &mut slow] {
+                            dma_registers(bus, 3, source, 0x0300_1000, 4, 0x0400);
+                        }
+                    }
+                    7 => {
+                        fast.start_cpu_step();
+                        slow.start_cpu_step();
+                    }
+                    _ => {
+                        let width = if thumb { Width::Half } else { Width::Word };
+                        let aligned = pc & !(width.bytes() as u32 - 1);
+                        let fetched = CpuBus::timed_fetch(&mut fast, pc, width, access);
+                        let cycles = slow.code_cycles(pc, width, access);
+                        let expected = (cycles, slow.fetch_code(aligned, width));
+                        assert_eq!(fetched, expected, "seed {seed} step {step} at {pc:08X}");
+                        pc = pc.wrapping_add(width.bytes() as u32);
+                        access = Access::Sequential;
+                    }
+                }
+                assert_same_bus(&fast, &slow, seed, step);
+            }
+        }
+    }
+
+    #[test]
+    fn iwram_runs_match_fetching_one_at_a_time() {
+        let rom = rom_counting(0x4_0000);
+        let mut flat = 0;
+        for seed in 1..=64u32 {
+            let mut rng = Xorshift(seed.wrapping_mul(0x85EB_CA6B));
+            let mut fast = Bus::new(&rom);
+            let mut slow = Bus::new(&rom);
+            for bus in [&mut fast, &mut slow] {
+                bus.write16(0x0400_0204, 0x4317);
+                for word in 0..0x40u32 {
+                    bus.cpu_write(
+                        0x0300_0000 + 4 * word,
+                        Width::Word,
+                        word.wrapping_mul(0x9E37_79B9),
+                    );
+                }
+            }
+            for step in 0..2000 {
+                match rng.below(8) {
+                    0 => {
+                        let idles = 1 + rng.below(4);
+                        for bus in [&mut fast, &mut slow] {
+                            (0..idles).for_each(|_| bus.cpu_idle());
+                        }
+                    }
+                    1 => {
+                        let prefetch = if rng.below(3) == 0 { 0 } else { 0x4000 };
+                        let bits = rng.below(0x4000) as u16 | prefetch;
+                        for bus in [&mut fast, &mut slow] {
+                            bus.write16(0x0400_0204, bits);
+                        }
+                    }
+                    2 => {
+                        let source = [0x0200_0000, 0x0800_0080][rng.below(2) as usize];
+                        for bus in [&mut fast, &mut slow] {
+                            dma_registers(bus, 3, source, 0x0300_1000, 4, 0x0400);
+                        }
+                    }
+                    3 => {
+                        fast.start_cpu_step();
+                        slow.start_cpu_step();
+                    }
+                    4 => {
+                        fast.branch();
+                        slow.branch();
+                    }
+                    _ => {
+                        let width = if rng.below(2) == 0 {
+                            Width::Half
+                        } else {
+                            Width::Word
+                        };
+                        let step_bytes = width.bytes() as u32;
+                        let base = [0x0300_0000, 0x0300_7FF0, 0x03FF_FFF8, 0x02FF_FFF8]
+                            [rng.below(4) as usize];
+                        let addr = base + step_bytes * rng.below(8);
+                        let count = 2 + rng.below(8);
+                        let room = 1 + rng.below(14);
+                        let ran = fast.iwram_run(addr, width, count, room);
+                        flat += u32::from(ran);
+                        let mut access = Access::NonSequential;
+                        for index in 0..count {
+                            let at = addr.wrapping_add(index * step_bytes);
+                            let (cycles, value) = slow.timed_code(at, width, access);
+                            if ran {
+                                assert_eq!(cycles, 1, "seed {seed} step {step} at {at:08X}");
+                            } else {
+                                let fetched = fast.timed_code(at, width, access);
+                                assert_eq!(fetched, (cycles, value), "seed {seed} step {step}");
+                            }
+                            access = Access::Sequential;
+                        }
+                    }
+                }
+                assert_same_bus(&fast, &slow, seed, step);
+            }
+        }
+        assert!(flat > 1000, "only {flat} flat runs");
+    }
+}

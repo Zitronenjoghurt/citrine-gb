@@ -1,5 +1,5 @@
 use super::psr::Bank;
-use super::{Cpu, CpuBus};
+use super::{Core, CpuBus, Jump};
 use crate::gba::wait::{Access, Width};
 
 #[derive(Debug, Clone, Copy)]
@@ -33,8 +33,38 @@ pub fn rotate_word(value: u32, addr: u32) -> u32 {
     value.rotate_right((addr & 3) * 8)
 }
 
-impl Cpu {
-    pub(super) fn load_value(
+#[inline(always)]
+pub fn loaded_value(value: u32, addr: u32, width: Width, signed: bool) -> u32 {
+    match (width, signed) {
+        (Width::Word, _) => rotate_word(value, addr),
+        (Width::Byte, true) => value as u8 as i8 as u32,
+        (Width::Half, true) => value as u16 as i16 as u32,
+        _ => value,
+    }
+}
+
+const BYTE_ONES: [u8; 256] = {
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < 256 {
+        table[index] = (index as u32).count_ones() as u8;
+        index += 1;
+    }
+    table
+};
+
+#[inline(always)]
+fn list_len(list: u32) -> u32 {
+    if cfg!(all(target_arch = "x86_64", not(target_feature = "popcnt"))) {
+        u32::from(BYTE_ONES[(list & 0xFF) as usize] + BYTE_ONES[((list >> 8) & 0xFF) as usize])
+    } else {
+        list.count_ones()
+    }
+}
+
+impl<const V5: bool> Core<V5> {
+    #[inline(always)]
+    pub(crate) fn load_value(
         &mut self,
         bus: &mut impl CpuBus,
         addr: u32,
@@ -51,6 +81,13 @@ impl Cpu {
                 let value = self.load(bus, addr, Width::Byte, Access::NonSequential);
                 value as u8 as i8 as u32
             }
+            (Width::Half, false) if V5 => {
+                self.load(bus, addr & !1, Width::Half, Access::NonSequential)
+            }
+            (Width::Half, true) if V5 => {
+                let value = self.load(bus, addr & !1, Width::Half, Access::NonSequential);
+                value as u16 as i16 as u32
+            }
             (Width::Half, false) => {
                 let value = self.load(bus, addr, Width::Half, Access::NonSequential);
                 value.rotate_right((addr & 1) * 8)
@@ -66,7 +103,14 @@ impl Cpu {
         }
     }
 
-    pub(super) fn block_transfer(&mut self, bus: &mut impl CpuBus, block: Block) {
+    #[inline(always)]
+    pub(super) fn near_block(&mut self, bus: &mut impl CpuBus, block: Block, width: Width) {
+        if !V5 {
+            if !bus.near_blocks() {
+                return self.block_transfer(bus, block, width);
+            }
+            return self.near_block_v4(bus, block, width);
+        }
         let Block {
             base: rn,
             list,
@@ -76,10 +120,167 @@ impl Cpu {
             writeback,
             user,
         } = block;
-        let (list, bytes) = if list == 0 {
-            (1 << 15, 0x40)
+        if user || list == 0 || rn == 15 {
+            return self.block_elsewhere(bus, block, width);
+        }
+        let count = list_len(list);
+        let base = self.regs.r[rn];
+        let new_base = offset_base(base, count * 4, up);
+        let mut addr = if up { base } else { new_base };
+        if pre == up {
+            addr = addr.wrapping_add(4);
+        }
+        let pc = self.regs.r[15];
+        let Some(near) = self.near_next(bus, pc, width) else {
+            return self.block_elsewhere(bus, block, width);
+        };
+        let count = count as usize;
+        let cycles = if load {
+            let Some((cycles, words)) = bus.near_words(addr, count) else {
+                return self.block_elsewhere(bus, block, width);
+            };
+            self.take_next(pc, width, near);
+            let mut left = list;
+            for word in words {
+                self.regs.r[left.trailing_zeros() as usize] = u32::from_le_bytes(*word);
+                left &= left - 1;
+            }
+            cycles
         } else {
-            (list, list.count_ones() * 4)
+            let Some((cycles, words)) = bus.near_words_mut(addr, count) else {
+                return self.block_elsewhere(bus, block, width);
+            };
+            self.take_next(pc, width, near);
+            let mut left = list;
+            for word in words {
+                let reg = left.trailing_zeros() as usize;
+                left &= left - 1;
+                let value = if reg == rn { base } else { self.regs.r[reg] };
+                *word = value.to_le_bytes();
+            }
+            cycles
+        };
+        self.data += cycles;
+        self.next_fetch = Access::NonSequential;
+        let loaded_base = load && list != 1 << rn && list >> rn == 1;
+        if writeback && !loaded_base {
+            self.regs.r[rn] = new_base;
+        }
+        if !load {
+            return;
+        }
+        self.ldm_glitch = false;
+        if list & (1 << 15) != 0 {
+            let target = self.regs.r[15];
+            if !self.exchange_landed(bus, target) {
+                self.load_pc_exchange(bus, target);
+            }
+            self.take_refetch();
+        }
+    }
+
+    #[inline(always)]
+    fn near_block_v4(&mut self, bus: &mut impl CpuBus, block: Block, width: Width) {
+        let Block {
+            base: rn,
+            list,
+            load,
+            up,
+            pre,
+            writeback,
+            user,
+        } = block;
+        if user || list == 0 || rn == 15 {
+            return self.block_elsewhere(bus, block, width);
+        }
+        let count = list_len(list);
+        let base = self.operand(rn);
+        let new_base = offset_base(base, count * 4, up);
+        let mut addr = if up { base } else { new_base };
+        if pre == up {
+            addr = addr.wrapping_add(4);
+        }
+        let pc = self.regs.r[15];
+        let count = count as usize;
+        let access = self.next_fetch;
+        if load {
+            let Some((cycles, next, words)) = bus.near_block_words(pc, width, access, addr, count)
+            else {
+                return self.block_elsewhere(bus, block, width);
+            };
+            self.advanced_v4(pc, width, cycles, next);
+            if writeback {
+                self.regs.r[rn] = new_base;
+            }
+            let mut left = list;
+            for word in words {
+                self.regs.r[left.trailing_zeros() as usize] = u32::from_le_bytes(*word);
+                left &= left - 1;
+            }
+        } else {
+            let Some((cycles, next, words)) =
+                bus.near_block_words_mut(pc, width, access, addr, count)
+            else {
+                return self.block_elsewhere(bus, block, width);
+            };
+            self.advanced_v4(pc, width, cycles, next);
+            let mut left = list;
+            for (index, word) in words.iter_mut().enumerate() {
+                let reg = left.trailing_zeros() as usize;
+                left &= left - 1;
+                let value = if reg == rn && writeback && index != 0 {
+                    new_base
+                } else {
+                    self.regs.r[reg]
+                };
+                *word = value.to_le_bytes();
+            }
+            if writeback {
+                self.regs.r[rn] = new_base;
+            }
+        }
+        self.next_fetch = Access::NonSequential;
+        if !load {
+            return;
+        }
+        self.load_idle(bus);
+        self.ldm_glitch = false;
+        if list & (1 << 15) != 0 {
+            bus.jump(Jump::BlockLoad);
+            self.reload(bus);
+        }
+    }
+
+    #[inline(always)]
+    fn advanced_v4(&mut self, pc: u32, width: Width, cycles: u32, next: u32) {
+        self.cycles += cycles;
+        self.pipeline = [self.pipeline[1], next];
+        self.regs.r[15] = pc.wrapping_add(width.bytes() as u32);
+    }
+
+    #[inline(never)]
+    fn block_elsewhere(&mut self, bus: &mut impl CpuBus, block: Block, width: Width) {
+        self.block_transfer(bus, block, width);
+    }
+
+    #[inline(always)]
+    pub(super) fn block_transfer(&mut self, bus: &mut impl CpuBus, block: Block, width: Width) {
+        let Block {
+            base: rn,
+            list,
+            load,
+            up,
+            pre,
+            writeback,
+            user,
+        } = block;
+        let (list, count, bytes) = match list {
+            0 if V5 => (0, 0, 0x40),
+            0 => (1 << 15, 1, 0x40),
+            _ => {
+                let count = list_len(list);
+                (list, count, count * 4)
+            }
         };
 
         let base = self.operand(rn);
@@ -90,46 +291,80 @@ impl Cpu {
         }
 
         let user_bank = user && !(load && list & (1 << 15) != 0);
-        self.prefetch(bus);
+        self.advance(bus, width);
         let bank = self.regs.bank();
         if user_bank {
             self.regs.switch_bank(Bank::User);
         }
 
-        let mut access = Access::NonSequential;
-        let mut first = true;
-        for reg in (0..16).filter(|r| list & (1 << r) != 0) {
-            if load {
-                let value = self.load(bus, addr, Width::Word, access);
-                if first && writeback {
+        let count = count as usize;
+        if count != 0 {
+            let mut words = [0; 16];
+            let words = &mut words[..count];
+            let cycles = if load {
+                let cycles = bus.timed_read_block(addr, words);
+                if writeback && !V5 {
                     self.regs.r[rn] = new_base;
                 }
-                self.regs.r[reg] = value;
+                let mut left = list;
+                for &value in words.iter() {
+                    self.regs.r[left.trailing_zeros() as usize] = value;
+                    left &= left - 1;
+                }
+                cycles
             } else {
-                let value = self.regs.r[reg];
-                self.store(bus, addr, Width::Word, value, access);
-                if first && writeback {
+                let mut left = list;
+                for (index, value) in words.iter_mut().enumerate() {
+                    let reg = left.trailing_zeros() as usize;
+                    left &= left - 1;
+                    *value = if reg != rn || (V5 && user_bank && rn != 15) {
+                        self.regs.r[reg]
+                    } else if V5 {
+                        base
+                    } else if writeback && index != 0 {
+                        new_base
+                    } else {
+                        self.regs.r[reg]
+                    };
+                }
+                let cycles = bus.timed_write_block(addr, words);
+                if writeback && !V5 {
                     self.regs.r[rn] = new_base;
                 }
+                cycles
+            };
+            if V5 {
+                self.data += cycles;
+            } else {
+                self.cycles += cycles;
             }
-            first = false;
-            access = Access::Sequential;
-            addr = addr.wrapping_add(4);
+            self.next_fetch = Access::NonSequential;
         }
 
         if user_bank {
             self.regs.switch_bank(bank);
         }
+        let loaded_base = load && list != 1 << rn && list >> rn == 1;
+        if V5 && writeback && !loaded_base {
+            self.regs.r[rn] = new_base;
+        }
         let loads_pc = load && list & (1 << 15) != 0;
         if load {
-            self.idle(bus);
-            self.ldm_glitch = user_bank && bank != Bank::User;
+            self.load_idle(bus);
+            self.ldm_glitch = !V5 && user_bank && bank != Bank::User;
         }
         if writeback && rn == 15 && !loads_pc {
             self.reload(bus);
         } else if loads_pc {
             if user {
                 self.restore_cpsr();
+            } else if V5 {
+                self.load_pc_exchange(bus, self.regs.r[15]);
+                self.take_refetch();
+                return;
+            }
+            if !V5 {
+                bus.jump(Jump::BlockLoad);
             }
             self.reload(bus);
         }
@@ -225,5 +460,12 @@ mod tests {
         assert_eq!(cpu.reg(10), 8);
         assert_eq!(bus.read32(0x0300_0004), 3);
         assert_eq!(bus.read32(0x0300_0000), 4);
+    }
+
+    #[test]
+    fn every_register_list_counts_its_registers() {
+        for list in 0..=0xFFFF_u32 {
+            assert_eq!(super::list_len(list), list.count_ones());
+        }
     }
 }

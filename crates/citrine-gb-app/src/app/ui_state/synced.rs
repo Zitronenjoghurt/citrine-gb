@@ -14,6 +14,7 @@ const SYNCED: &[(&str, Kind)] = &[
     ("console", Kind::Whole),
     ("game_consoles", Kind::Map),
     ("game_names", Kind::Map),
+    ("cheats", Kind::Map),
     ("gimmicks.clock_offsets", Kind::Map),
     ("gimmicks.printers", Kind::Whole),
     ("dmg_theme", Kind::Whole),
@@ -23,6 +24,8 @@ const SYNCED: &[(&str, Kind)] = &[
     ("game_palettes", Kind::Map),
     ("color_correction", Kind::Whole),
     ("scaling", Kind::Whole),
+    ("same_size_pixels", Kind::Whole),
+    ("ds_screens", Kind::Whole),
     ("matrix", Kind::Whole),
     ("ghosting", Kind::Whole),
     ("matrix_edge_darkness", Kind::Whole),
@@ -30,27 +33,44 @@ const SYNCED: &[(&str, Kind)] = &[
     ("ghosting_strength", Kind::Whole),
     ("bindings.keyboard", Kind::Whole),
     ("bindings.shoulders.keyboard", Kind::Whole),
+    ("bindings.ds.keyboard", Kind::Whole),
     ("hotkeys", Kind::Whole),
     ("online.show_playing", Kind::Whole),
     ("online.input_delay", Kind::Whole),
     ("online.typing_indicators", Kind::Whole),
+    ("online.notify_friend_requests", Kind::Whole),
+    ("online.notify_invites", Kind::Whole),
+    ("online.notify_chats", Kind::Whole),
+    ("online.focus_popups", Kind::Whole),
     ("local_link.swapped", Kind::Whole),
     ("local_link.second_sound", Kind::Whole),
     ("local_link.left_keys", Kind::Whole),
     ("local_link.right_keys", Kind::Whole),
     ("autosave_interval", Kind::Whole),
     ("autosave_keep", Kind::Whole),
+    ("rewind", Kind::Whole),
+    ("fast_forward_speed", Kind::Whole),
     ("screenshot_scale", Kind::Whole),
     ("recording_scale", Kind::Whole),
     ("randomized_ram", Kind::Whole),
     ("dev_mode", Kind::Whole),
     ("track_pc", Kind::Whole),
     ("stats_range", Kind::Whole),
+    ("ds_user.nickname", Kind::Whole),
+    ("ds_user.birthday", Kind::Whole),
+    ("ds_user.language", Kind::Whole),
+    ("ds_user.favorite_color", Kind::Whole),
+    ("ds_online.service", Kind::Whole),
+    ("ds_online.dns", Kind::Whole),
+    ("walker.in_game", Kind::Whole),
 ];
 
 #[cfg_attr(not(test), allow(dead_code))]
 const LOCAL: &[&str] = &[
     "ui_scale",
+    "ds_3d",
+    "ds_jit",
+    "match_screen",
     "ui_scale_per_ratio",
     "bindings.shoulders.triggers",
     "layout",
@@ -58,10 +78,13 @@ const LOCAL: &[&str] = &[
     "muted",
     "audio_queue_ms",
     "audio_device",
+    "slow_sound",
     "channels",
     "gba_channels",
     "bindings.gamepad",
     "bindings.shoulders.gamepad",
+    "bindings.ds.gamepad",
+    "bindings.ds.adopted",
     "bindings.stick_as_dpad",
     "bindings.stick_deadzone",
     "touch",
@@ -77,13 +100,21 @@ const LOCAL: &[&str] = &[
     "online.sync_settings",
     "online.friend_volume",
     "online.friend_muted",
+    "online.notify_asked",
     "local_link.controls",
     "current_tab",
     "check_updates",
+    "covers",
     "quick_slot",
-    "focus_mode",
     "focus_place",
+    "hud",
+    "big_screen",
+    "ds_user.keep_firmware_settings",
+    "ds_user.clock",
+    "ds_online.direct",
+    "walker.phone",
     "discord",
+    "achievements",
     "synced",
 ];
 
@@ -205,6 +236,7 @@ mod tests {
     use super::*;
     use crate::app::ui_state::palette::{CustomPalette, PaletteChoice};
     use crate::app::ui_state::ui_theme::UiTheme;
+    use crate::emulator::fast_forward::FastForwardSpeed;
     use citrine_gb::gb::ppu::types::theme::DmgTheme;
 
     fn walk(value: &Value, path: &str, found: &mut Vec<String>) {
@@ -261,7 +293,6 @@ mod tests {
             audio_queue_ms: 77,
             audio_device: Some(format!("{MARK} speakers")),
             channels: [true, false, true, false],
-            focus_mode: true,
             quick_slot: 7,
             ..Default::default()
         };
@@ -359,5 +390,50 @@ mod tests {
             .map(|p| p.name.as_str())
             .collect();
         assert_eq!(names, ["Zest", "Mango"]);
+    }
+
+    #[test]
+    fn the_fast_forward_speed_follows_the_account() {
+        let phone = Settings {
+            fast_forward_speed: FastForwardSpeed::Ten,
+            ..Settings::default()
+        };
+        let mut laptop = Settings::default();
+        assert!(adopt(&mut laptop, &synced_values(&phone)));
+        assert_eq!(laptop.fast_forward_speed, FastForwardSpeed::Ten);
+        assert!(is_synced_key("fast_forward_speed"));
+    }
+
+    #[test]
+    fn the_refresh_rate_match_stays_on_the_device() {
+        let phone = Settings {
+            match_screen: false,
+            ..Settings::default()
+        };
+        let mut laptop = Settings::default();
+        adopt(&mut laptop, &synced_values(&phone));
+        assert!(laptop.match_screen);
+        assert!(!is_synced_key("match_screen"));
+    }
+
+    #[test]
+    fn notification_switches_follow_the_account() {
+        let mut phone = Settings::default();
+        phone.online.notify_invites = false;
+        phone.online.notify_chats = false;
+        let mut laptop = Settings::default();
+        assert!(adopt(&mut laptop, &synced_values(&phone)));
+        assert_eq!(
+            laptop.online.push_kinds(),
+            citrine_gb_net::PushKinds {
+                friend_requests: true,
+                invites: false,
+                chats: false,
+            }
+        );
+        assert_eq!(
+            Settings::default().online.push_kinds(),
+            citrine_gb_net::PushKinds::ALL
+        );
     }
 }

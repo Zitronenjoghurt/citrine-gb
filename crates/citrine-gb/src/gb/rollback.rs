@@ -3,7 +3,7 @@ use super::ppu::types::color::{ColorCorrection, DmgColors};
 use super::ppu::types::theme::DmgTheme;
 use crate::console::Rollback;
 use crate::error::GbResult;
-use crate::netplay::state::Fnv;
+use crate::netplay::state::CheckHash;
 use std::io::Write;
 
 impl Rollback for GameBoy {
@@ -67,6 +67,7 @@ impl Rollback for GameBoy {
             ppu.blind,
         );
         ppu.clone_from(&source.ppu);
+        ppu.settle();
         (
             ppu.dmg_theme,
             ppu.dmg_colors,
@@ -75,7 +76,7 @@ impl Rollback for GameBoy {
         ) = display;
         apu.copy_state_from(&source.apu);
         joypad.clone_from(&source.joypad);
-        serial.clone_from(&source.serial);
+        serial.copy_keeping_traffic(&source.serial);
         *model = source.model;
         *cycle_counter = source.cycle_counter;
         *ram_init = source.ram_init;
@@ -86,17 +87,23 @@ impl Rollback for GameBoy {
         scratch.ppu.dmg_theme = DmgTheme::default();
         scratch.ppu.dmg_colors = DmgColors::default();
         scratch.ppu.color_correction = ColorCorrection::default();
-        let mut fnv = Fnv::new();
-        let _ = rmp_serde::encode::write(&mut fnv, &*scratch);
+        let mut hash = CheckHash::new();
+        let _ = rmp_serde::encode::write(&mut hash, &*scratch);
         for bank in scratch.cartridge.ram_banks() {
-            let _ = fnv.write_all(bank);
+            let _ = hash.write_all(bank);
         }
-        fnv.finish()
+        hash.finish()
     }
 
     fn encode_state(&self) -> GbResult<Vec<u8>> {
+        let mut out = Vec::new();
+        self.encode_state_into(&mut out)?;
+        Ok(out)
+    }
+
+    fn encode_state_into(&self, out: &mut Vec<u8>) -> GbResult<()> {
         let ram = self.cartridge.ram_banks().concat();
-        Ok(rmp_serde::to_vec(&(self, ram))?)
+        Ok(rmp_serde::encode::write(out, &(self, ram))?)
     }
 
     fn decode_state(&self, data: &[u8]) -> GbResult<GameBoy> {
@@ -109,6 +116,9 @@ impl Rollback for GameBoy {
     }
 
     fn set_blind(&mut self, blind: bool) {
+        if self.ppu.blind != blind {
+            self.ppu.settle();
+        }
         self.ppu.blind = blind;
     }
 

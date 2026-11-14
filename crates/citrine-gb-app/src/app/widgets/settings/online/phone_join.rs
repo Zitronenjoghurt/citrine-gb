@@ -1,4 +1,6 @@
-use super::{CODE_HINT, JoinForm, Step, accounts, busy, key_card};
+use super::{
+    CODE_HINT, JoinForm, RELAY_ID_PLACEHOLDER, RELAY_ID_WHERE, Step, accounts, busy, key_card,
+};
 use crate::app::mobile::kit::{self, Row};
 use crate::app::mobile::sheet;
 use crate::app::ui_state::settings::Settings;
@@ -123,7 +125,7 @@ pub fn join_dialogs(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &m
         return;
     };
     let question = format!(
-        "Forget {key}? Citrine deletes the server password and every sign-in key it keeps for this server. Without a key you can't sign in to that account again."
+        "Forget {key}? Citrine deletes the saved password and the relay IDs stored here for this server. Without a relay ID saved somewhere else, you can't sign in to that account again."
     );
     if let Some(yes) = confirm::confirm(ui.ctx(), "online_forget_server", &question, "Forget") {
         form.forget_server = None;
@@ -197,7 +199,7 @@ fn problem(ui: &mut Ui, text: &str) {
 
 fn phone_text(problem: Problem) -> String {
     match problem {
-        Problem::UnknownAccount => "This server has no account with that sign-in key".into(),
+        Problem::UnknownAccount => "No account on this server has that relay ID".into(),
         Problem::WrongPassword => "Wrong server password. Change it under Server.".into(),
         Problem::PasswordChanged => "The server password changed. Change it under Server.".into(),
         other => other.text(),
@@ -324,13 +326,14 @@ fn sign_in_body(
     if saved_accounts(ui, s, online, form, now) {
         gap(ui);
     }
-    sheet::label(ui, "Sign-in key");
+    sheet::label(ui, "Relay ID");
     let response = kit::field(
         ui,
         row_field(ui, &mut form.pasted)
             .password(true)
-            .hint_text("Copy it from a device that's signed in"),
+            .hint_text(RELAY_ID_PLACEHOLDER),
     );
+    sheet::note(ui, RELAY_ID_WHERE);
     if response.changed() {
         form.paste_error = None;
     }
@@ -385,7 +388,9 @@ fn sign_in_body(
                 online.use_relay_id(relay_id, code, now);
             }
         }
-        Err(_) => form.paste_error = Some("That isn't a sign-in key".into()),
+        Err(_) => {
+            form.paste_error = Some("That isn't a relay ID. A relay ID starts with cgb1-".into())
+        }
     }
 }
 

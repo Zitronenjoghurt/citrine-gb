@@ -8,11 +8,13 @@ repository.workspace = true
 publish = false
 
 [features]
-default = ["audio-codec", "gba"]
+default = ["audio-codec", "nds"]
 audio-codec = ["dep:rusty_aac", "dep:symphonia-codec-aac", "dep:symphonia-core"]
 openh264-source = ["openh264/source"]
-gba = ["citrine-gb/gba"]
+gba = ["citrine-gb/gba", "citrine-gb-report/gba"]
+nds = ["gba", "citrine-gb/nds", "citrine-gb/jit", "citrine-gb-report/nds", "dep:citrine-gb-walker", "dep:citrine-gb-pkm", "dep:citrine-gb-nds-net", "dep:citrine-gb-nds-gpu", "dep:citrine-gb-nds-sound"]
 dev-route = []
+profile = ["dep:puffin", "dep:puffin_egui"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -20,27 +22,39 @@ targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 
 [dependencies]
 citrine-gb = { workspace = true, features = ["debug", "persistence", "recording", "base64", "brotli", "strum"] }
+citrine-gb-achievements.workspace = true
 citrine-gb-gamedata = { workspace = true }
 citrine-gb-net = { workspace = true }
+citrine-gb-websocket = { workspace = true }
+citrine-gb-nds-files.workspace = true
+citrine-gb-nds-sound = { workspace = true, optional = true }
+citrine-gb-surface = { workspace = true }
+citrine-gb-threads.workspace = true
 citrine-gb-partner = { workspace = true }
+citrine-gb-report = { workspace = true }
+citrine-gb-walker = { workspace = true, optional = true }
+citrine-gb-pkm = { workspace = true, optional = true }
 anyhow = "1.0.102"
 brotli = "8.0.2"
 catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
 cpal = "0.17.3"
 eframe = { version = "0.33.0", default-features = false, features = ["persistence"] }
 egui = "0.33.0"
+flate2 = "1"
 egui_commonmark = "0.22.0"
 egui_dock = { version = "0.18.0", features = ["serde"] }
 egui-phosphor = { version = "0.11.0", features = ["regular"] }
 egui_plot = "0.34.1"
-ewebsock = "0.8.0"
 getrandom = "0.2.17"
 image-webp = "0.2.4"
 jiff = "0.2.20"
 log = "0.4.29"
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 png = "0.18.1"
 pollster = "0.4.0"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+puffin = { version = "0.20.0", optional = true }
+puffin_egui = { version = "0.30.0", optional = true }
 qrcode = { version = "0.14.1", default-features = false }
 resvg = { version = "0.49.0", default-features = false }
 ringbuf = "0.4.8"
@@ -48,10 +62,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 strum = "0.28.0"
 strum_macros = "0.28.0"
+sys-locale = { version = "0.3.2", features = ["js"] }
 thiserror = "2.0.18"
 web-time = "1.1.0"
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2"] }
-
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.17.2"
 
@@ -64,13 +78,14 @@ nokhwa = { version = "0.10.11", features = ["input-native"] }
 android-activity = { version = "0.6.0", features = ["game-activity"] }
 android_logger = { version = "0.15.1", default-features = false }
 jni = "0.21.1"
+ndk = { version = "0.9.0", features = ["rwh_06"] }
 eframe = { version = "0.33.0", default-features = false, features = ["android-game-activity"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bzip2 = "0.6"
+citrine-gb-nds-gpu = { workspace = true, optional = true }
+citrine-gb-nds-net = { workspace = true, optional = true }
 directories = "6.0"
-ewebsock = { version = "0.8.0", features = ["tls"] }
-flate2 = "1"
 minisign-verify = "0.2"
 self-replace = "1.5"
 tar = { version = "0.4", default-features = false }
@@ -88,15 +103,20 @@ wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
 [target.'cfg(not(any(windows, target_os = "android")))'.dependencies]
 gilrs = "0.11.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo"] }
+
 [target.'cfg(windows)'.dependencies]
 sdl3-sys = { version = "0.7.2", default-features = false, features = ["build-from-source-static", "no-sdl-audio", "no-sdl-camera", "no-sdl-dialog", "no-sdl-gpu", "no-sdl-render", "no-sdl-tray"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+puffin = { version = "0.20.0", optional = true, features = ["web"] }
 base64 = "0.22.1"
 cpal = { version = "0.17.3", features = ["wasm-bindgen"] }
 eframe = { version = "0.33.0", default-features = false, features = ["glow", "persistence"] }
 jiff = { version = "0.2.20", features = ["js"] }
 poll-promise = { version = "0.3.0", features = ["web"] }
+rfd = { version = "0.17.2", features = ["file-handle-inner"] }
 wasm-bindgen-futures = "0.4.50"
 js-sys = "0.3.70"
 wasm-bindgen = "0.2.100"
@@ -119,6 +139,7 @@ web-sys = { version = "0.3.70", features = [
     "DomStringList",
     "Element",
     "EventTarget",
+    "File",
     "GainNode",
     "History",
     "HtmlAnchorElement",
@@ -130,6 +151,7 @@ web-sys = { version = "0.3.70", features = [
     "IdbRequest",
     "IdbTransaction",
     "IdbTransactionMode",
+    "Location",
     "MediaQueryList",
     "MessageEvent",
     "MessagePort",
@@ -145,7 +167,10 @@ web-sys = { version = "0.3.70", features = [
 ] }
 
 [dev-dependencies]
+citrine-gb-test-roms = { workspace = true }
+citrine-gb-threads = { workspace = true, features = ["testing"] }
 citrine-gb-gamedata = { workspace = true, features = ["fixtures"] }
+citrine-gb-nds-files = { workspace = true, features = ["fixtures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 base64 = "0.22.1"

@@ -17,7 +17,7 @@ impl Dex {
         let count = match tables.game.generation() {
             Generation::One => 151,
             Generation::Two => 251,
-            Generation::Three => 0,
+            Generation::Three | Generation::Four | Generation::Five => 0,
         };
         let entries = (1..=count)
             .map(|dex| {

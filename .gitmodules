@@ -10,3 +10,6 @@
 [submodule "crates/mgba-sys/mGBA"]
 	path = crates/mgba-sys/mGBA
 	url = https://github.com/mgba-emu/mgba.git
+[submodule "crates/melonds-sys/melonDS"]
+	path = crates/melonds-sys/melonDS
+	url = https://github.com/melonDS-emu/melonDS.git

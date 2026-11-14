@@ -1,19 +1,27 @@
 use super::Emulator;
+use super::runner::Taken;
 use crate::autosave::{PlayClock, StateCopy};
-use crate::storage::now_unix;
+use crate::storage::{Write, now_unix};
 use citrine_gb::console::Console;
 use citrine_gb::error::GbResult;
 use citrine_gb::gb::GbModel;
+use citrine_gb::persistence::state::StateBody;
 
 impl Emulator {
     pub fn save_snapshot(&mut self, slot: usize) -> GbResult<()> {
         let Some(key) = self.rom_key.clone() else {
             return Ok(());
         };
-        let state = self.machine.save_state(now_unix())?;
-        let frame = self.machine.frame().to_vec();
-        self.store
-            .store_snapshot(&key, slot, &state, &frame, self.machine.kind())?;
+        let core = self.seat.core_mut();
+        let state = core.machine.state_body(now_unix())?;
+        let frame = core.machine.frame().to_vec();
+        self.writes.send(Write::Snapshot {
+            store: self.store.clone(),
+            key,
+            slot,
+            state,
+            frame,
+        });
         self.started_at = Some(web_time::Instant::now());
         self.stat_events.snapshots += 1;
         Ok(())
@@ -23,6 +31,7 @@ impl Emulator {
         let Some(key) = self.rom_key.clone() else {
             return Ok(false);
         };
+        self.writes.settle();
         let Some(state) = self.store.load_snapshot(&key, slot) else {
             return Ok(false);
         };
@@ -35,6 +44,7 @@ impl Emulator {
         let Some(key) = self.rom_key.clone() else {
             return Ok(false);
         };
+        self.writes.settle();
         let Some(state) = self.store.load_autosave(&key, id) else {
             return Ok(false);
         };
@@ -44,13 +54,17 @@ impl Emulator {
     }
 
     pub(super) fn restore(&mut self, state: &[u8]) -> GbResult<()> {
-        let restored = self.machine.restore(state, now_unix(), &self.firmware)?;
-        let sample_rate = self.machine.sample_rate();
-        if restored.kind() != self.machine.kind() {
+        let restored = self
+            .seat
+            .core_mut()
+            .machine
+            .restore(state, now_unix(), &self.firmware)?;
+        let sample_rate = self.seat.core_mut().machine.sample_rate();
+        if restored.kind() != self.seat.core_mut().machine.kind() {
             self.console_switched = GbModel::try_from(restored.kind()).ok();
         }
         self.replace_machine(restored);
-        self.machine.set_sample_rate(sample_rate);
+        self.seat.core_mut().machine.set_sample_rate(sample_rate);
         self.sync_joypad();
         self.running = true;
         self.started_at = Some(web_time::Instant::now());
@@ -61,55 +75,99 @@ impl Emulator {
 
     pub fn delete_autosave(&mut self, id: usize) -> GbResult<()> {
         if let Some(key) = self.rom_key.clone() {
+            self.writes.settle();
             self.store.delete_autosave(&key, id)?;
         }
         Ok(())
     }
 
-    pub fn autosave(&mut self) -> GbResult<Option<usize>> {
+    pub fn autosave(&mut self) -> GbResult<bool> {
         let Some(key) = self.rom_key.clone() else {
-            return Ok(None);
+            return Ok(false);
         };
+        let core = self.seat.core_mut();
+        let state = core.machine.state_body(now_unix())?;
+        let frame = core.machine.frame().to_vec();
+        self.send_autosave(key, state, frame)
+    }
+
+    fn send_autosave(&mut self, key: String, state: StateBody, frame: Vec<u8>) -> GbResult<bool> {
         self.play.attempted();
         self.flush_save()?;
-        let state = self.machine.save_state(now_unix())?;
-        let frame = self.machine.frame().to_vec();
-        let id = self.store.store_autosave(
-            &key,
-            &state,
-            &frame,
-            self.machine.kind(),
-            self.autosave_keep,
-        )?;
+        self.writes.send(Write::Autosave {
+            store: self.store.clone(),
+            key,
+            state,
+            frame,
+            keep: self.autosave_keep,
+        });
         self.play.saved();
         self.last_good.mark_saved();
         self.started_at = Some(web_time::Instant::now());
-        Ok(Some(id))
+        Ok(true)
     }
 
-    pub fn autosave_if_played(&mut self) -> GbResult<Option<usize>> {
+    pub fn autosave_if_played(&mut self) -> GbResult<bool> {
         if !self.play.has_unsaved_play() {
-            return Ok(None);
+            return Ok(false);
         }
         self.autosave()
     }
 
-    pub fn autosave_if_due(&mut self) -> GbResult<Option<usize>> {
+    pub fn autosave_if_due(&mut self) -> GbResult<bool> {
         if !self.play.autosave_due(self.autosave_interval) {
-            return Ok(None);
+            return Ok(false);
         }
-        self.autosave()
+        let Some(key) = self.rom_key.clone() else {
+            return Ok(false);
+        };
+        match self.play_copy() {
+            None => Ok(false),
+            Some(Ok(taken)) => self.send_autosave(key, taken.state, taken.frame),
+            Some(Err(err)) => {
+                self.play.attempted();
+                Err(err)
+            }
+        }
     }
 
     pub(super) fn copy_last_good(&mut self) {
+        if self.rom_key.is_none() {
+            self.play.copied();
+            return;
+        }
+        let taken = Taken::of(&mut self.seat.core_mut().machine, now_unix());
+        self.keep_copy(taken);
+    }
+
+    pub(super) fn copy_in_play(&mut self) {
+        if self.rom_key.is_none() {
+            self.play.copied();
+            return;
+        }
+        if let Some(taken) = self.play_copy() {
+            self.keep_copy(taken);
+        }
+    }
+
+    fn play_copy(&mut self) -> Option<GbResult<Taken>> {
+        if let Some(ready) = self.ready.take() {
+            return Some(Ok(ready));
+        }
+        if self.lending || self.lent.is_some() {
+            self.want_copy = true;
+            return None;
+        }
+        Some(Taken::of(&mut self.seat.core_mut().machine, now_unix()))
+    }
+
+    fn keep_copy(&mut self, taken: GbResult<Taken>) {
         self.play.copied();
         let Some(key) = self.rom_key.clone() else {
             return;
         };
-        let now = now_unix();
-        let battery = self.machine.battery(true, now);
-        let state = match self.machine.state_body(now) {
-            Ok(state) => state,
+        let taken = match taken {
+            Ok(taken) => taken,
             Err(err) => {
                 log::error!("could not copy the state for autosave: {err:?}");
                 return;
@@ -118,17 +176,17 @@ impl Emulator {
         self.last_good.keep(StateCopy {
             store: self.store.clone(),
             rom_key: key,
-            state,
-            frame: self.machine.frame().to_vec(),
-            battery,
+            state: taken.state,
+            frame: taken.frame,
+            battery: taken.battery,
             keep: self.autosave_keep,
             unsaved: self.play.has_unsaved_play(),
-            written: false,
         });
     }
 
     pub fn delete_snapshot(&mut self, slot: usize) -> GbResult<()> {
         if let Some(key) = self.rom_key.clone() {
+            self.writes.settle();
             self.store.delete_snapshot(&key, slot)?;
         }
         Ok(())
@@ -143,6 +201,7 @@ impl Emulator {
 
     pub fn rename_snapshot(&mut self, slot: usize, name: &str) -> GbResult<()> {
         if let Some(key) = self.rom_key.clone() {
+            self.writes.settle();
             self.store.set_snapshot_name(&key, slot, name)?;
         }
         Ok(())

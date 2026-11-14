@@ -56,7 +56,7 @@ pub(crate) fn load(game: Game, rom: &[u8]) -> TypeChart {
     let types = match game.generation() {
         Generation::One => 0x1B,
         Generation::Two => 0x1C,
-        Generation::Three => return TypeChart::default(),
+        Generation::Three | Generation::Four | Generation::Five => return TypeChart::default(),
     };
     let rule = |at: usize| -> Option<(u8, u8, u8)> {
         let bytes = rom.get(at..at + 3)?;

@@ -99,6 +99,15 @@ gh secret set UPDATE_SIGNING_KEY -R Zitronenjoghurt/citrine-gb < citrine-update.
 safe and offline: with a new key, apps that have the old one refuse the update and point to the release page. The
 second line of `citrine-update.pub` goes into `PUBLIC_KEY`.
 
+# Push notifications
+
+Push is in a build only when Gradle finds the Firebase app file: the path in `CITRINE_GOOGLE_SERVICES`, or
+`app/google-services.json` (ignored by git). Without it the APK has no Firebase, no notification permission and no
+notification settings. With it the build adds `firebase-messaging`, the messaging service in `app/src/push` and the
+Firebase values as string resources, without Google's Gradle plugin. The app asks for the notification permission
+from a card on the Friends page once there is a friend, or from Settings, never at launch. The server needs its own
+key; see the server's README.
+
 # Signing
 
 Debug builds are signed with `debug.keystore` in this folder (password `android`, alias `androiddebugkey`), so every

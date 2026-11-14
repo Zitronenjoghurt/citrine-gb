@@ -1,9 +1,9 @@
 use crate::app::ui_state::palette::{CustomPalette, PaletteChoice};
-use crate::app::ui_state::settings::Settings;
+use crate::app::ui_state::settings::{OWN_COLORS_NOTE, Settings};
 use crate::app::widgets::palette_strip::palette_strip;
-use crate::app::widgets::section::heading;
 use crate::app::widgets::settings::content::LoadedGame;
 use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::settings::page::{Heading, Page};
 use crate::icons;
 use citrine_gb::gb::ppu::compat::CompatPalette;
 use citrine_gb::gb::ppu::types::color::RGBA;
@@ -56,7 +56,7 @@ pub(crate) enum Action {
 }
 
 pub fn show(
-    ui: &mut Ui,
+    page: &mut Page,
     settings: &mut Settings,
     state: &mut PaletteEditorState,
     game: Option<LoadedGame>,
@@ -64,75 +64,76 @@ pub fn show(
     let mut action = None;
     let header = game.map(|game| game.header).unwrap_or_default();
 
-    Form::show(ui, "style", |form| {
-        form.row_with_hint(
-            "Palette",
-            "Applies to every game without a palette of its own. Built-in palettes can't be edited; duplicate one to make it yours.",
-            |ui| {
-                if let Some(chosen) = picker(
+    page.plain(|ui| {
+        Form::show(ui, "style", |form| {
+            form.row_with_hint(
+                "Palette",
+                "Applies to every game without a palette of its own. Built-in palettes can't be edited; duplicate one to make it yours.",
+                |ui| {
+                    if let Some(chosen) = picker(
+                        ui,
+                        "dmg_palette_picker",
+                        &settings.global_choice(),
+                        settings,
+                    ) {
+                        action = Some(Action::SetGlobal(chosen));
+                    }
+                },
+            );
+            form.under(|ui| {
+                palette_strip(
                     ui,
-                    "dmg_palette_picker",
-                    &settings.global_choice(),
-                    settings,
-                ) {
-                    action = Some(Action::SetGlobal(chosen));
+                    &choice_colors(settings, &settings.global_choice(), header),
+                )
+            });
+            form.buttons(|ui| {
+                if ui
+                    .button(format!("{} New palette", icons::PLUS))
+                    .on_hover_text("Start from a blank greyscale")
+                    .clicked()
+                {
+                    let name = settings.palettes.unique_name("My palette");
+                    action = Some(Action::Create(CustomPalette::from_theme(
+                        name,
+                        &DmgTheme::GreyScale,
+                    )));
                 }
-            },
-        );
-        form.under(|ui| {
-            palette_strip(
-                ui,
-                &choice_colors(settings, &settings.global_choice(), header),
-            )
+
+                if ui
+                    .button(format!("{} Duplicate", icons::COPY))
+                    .on_hover_text("Make an editable copy of the palette shown")
+                    .clicked()
+                {
+                    let global = settings.global_choice();
+                    let shown = DmgTheme::Custom(choice_colors(settings, &global, header)[0]);
+                    let base = choice_label(&global);
+                    let name = settings.palettes.unique_name(&base);
+                    action = Some(Action::Create(CustomPalette::from_theme(name, &shown)));
+                }
+
+                if let Some(selected) = settings.custom_palette.clone()
+                    && settings.palettes.contains(&selected)
+                    && ui.button(format!("{} Delete", icons::TRASH)).clicked()
+                {
+                    action = Some(Action::Delete(selected));
+                }
+            });
         });
-    });
-    ui.add_space(6.0);
-
-    ui.horizontal(|ui| {
-        if ui
-            .button(format!("{} New", icons::PLUS))
-            .on_hover_text("Start from a blank greyscale")
-            .clicked()
-        {
-            let name = settings.palettes.unique_name("My palette");
-            action = Some(Action::Create(CustomPalette::from_theme(
-                name,
-                &DmgTheme::GreyScale,
-            )));
-        }
-
-        if ui
-            .button(format!("{} Duplicate", icons::COPY))
-            .on_hover_text("Make an editable copy of the palette shown")
-            .clicked()
-        {
-            let global = settings.global_choice();
-            let shown = DmgTheme::Custom(choice_colors(settings, &global, header)[0]);
-            let base = choice_label(&global);
-            let name = settings.palettes.unique_name(&base);
-            action = Some(Action::Create(CustomPalette::from_theme(name, &shown)));
-        }
-
-        if let Some(selected) = settings.custom_palette.clone()
-            && settings.palettes.contains(&selected)
-            && ui.button(format!("{} Delete", icons::TRASH)).clicked()
-        {
-            action = Some(Action::Delete(selected));
-        }
     });
 
     if let Some(selected) = settings.custom_palette.clone()
         && let Some(palette) = settings.palettes.get(&selected)
     {
         state.focus(&selected, palette);
-        ui.add_space(8.0);
-        editor(ui, palette, state, &mut action);
+        page.section(Heading::new(icons::PALETTE, &palette.name), |ui| {
+            editor(ui, palette, state, &mut action);
+        });
     } else {
         state.forget();
     }
 
     if let Some(game) = game {
-        game_section(ui, settings, game, &mut action);
+        game_section(page, settings, game, &mut action);
     }
 
     if let Some(action) = action {
@@ -232,61 +233,39 @@ fn picker(
     chosen
 }
 
-fn game_section(ui: &mut Ui, settings: &Settings, game: LoadedGame, action: &mut Option<Action>) {
-    ui.add_space(12.0);
-    ui.separator();
-
-    let title = if game.title.is_empty() {
-        "This game"
-    } else {
-        game.title
-    };
-    ui.horizontal(|ui| {
-        heading(ui, icons::GAME_CONTROLLER, title);
-    });
-    ui.add_space(4.0);
-
-    if game.own_colors {
-        ui.label("This game has its own colours, so palettes don't change it.");
-        return;
-    }
-
-    let own = settings.game_palette(Some(game.rom_key)).cloned();
-    let global = settings.global_choice();
-
-    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-        if ui
-            .radio(own.is_none(), "Follow the palette above")
-            .clicked()
-            && own.is_some()
-        {
-            *action = Some(Action::SetGame {
-                rom_key: game.rom_key.to_string(),
-                choice: None,
-            });
-        }
-
-        if ui.radio(own.is_some(), "Use just for this game").clicked() && own.is_none() {
-            *action = Some(Action::SetGame {
-                rom_key: game.rom_key.to_string(),
-                choice: Some(global.clone()),
-            });
-        }
-    });
-
-    Form::show(ui, "style", |form| {
-        form.row("Palette", |ui| {
-            let shown = own.clone().unwrap_or_else(|| global.clone());
-            if let Some(chosen) = picker(ui, "game_palette_picker", &shown, settings) {
+fn game_section(
+    page: &mut Page,
+    settings: &Settings,
+    game: LoadedGame,
+    action: &mut Option<Action>,
+) {
+    page.section(Heading::new(icons::GAME_CONTROLLER, "This game"), |ui| {
+        Form::show(ui, "style", |form| {
+            if game.own_colors {
+                form.custom(|ui| ui.label(OWN_COLORS_NOTE));
+                return;
+            }
+            let own = settings.game_palette(Some(game.rom_key)).cloned();
+            let global = settings.global_choice();
+            let mut keep = own.is_some();
+            if form.toggle("Own palette", &mut keep) {
                 *action = Some(Action::SetGame {
                     rom_key: game.rom_key.to_string(),
-                    choice: Some(chosen),
+                    choice: keep.then(|| global.clone()),
                 });
             }
+            if let Some(own) = &own {
+                form.row("Palette", |ui| {
+                    if let Some(chosen) = picker(ui, "game_palette_picker", own, settings) {
+                        *action = Some(Action::SetGame {
+                            rom_key: game.rom_key.to_string(),
+                            choice: Some(chosen),
+                        });
+                    }
+                });
+                form.under(|ui| palette_strip(ui, &choice_colors(settings, own, game.header)));
+            }
         });
-        if let Some(own) = &own {
-            form.under(|ui| palette_strip(ui, &choice_colors(settings, own, game.header)));
-        }
     });
 }
 

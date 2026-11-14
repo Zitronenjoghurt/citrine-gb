@@ -11,8 +11,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use citrine_gb_net::Sealer;
 use citrine_gb_net::{
-    ClientMsg, ErrorCode, FileId, GameKey, MAX_FRAME_BYTES, MessageId, Notice, OnlineId,
-    PROTOCOL_VERSION, Presence, ServerInfo, ServerMsg, Tag, speaks_protocol,
+    ClientMsg, ErrorCode, FileId, GameKey, MAX_FRAME_BYTES, MAX_GTS_TARGET_CHARS, MessageId,
+    Notice, OnlineId, PROTOCOL_VERSION, Presence, ServerInfo, ServerMsg, Tag, speaks_protocol,
 };
 use futures_util::{SinkExt, StreamExt};
 use handshake::handshake;
@@ -38,6 +38,7 @@ mod account;
 mod files;
 mod friends;
 mod handshake;
+mod net;
 mod sessions;
 mod sign_in;
 
@@ -142,6 +143,7 @@ async fn writer(
     mut rx: mpsc::Receiver<Queued>,
     close: watch::Sender<Option<Notice>>,
     mut sealer: Sealer,
+    conn_id: u64,
 ) {
     let limit = app.config.limits.send_timeout;
     let mut ping = tokio::time::interval(PING_EVERY);
@@ -155,12 +157,21 @@ async fn writer(
             }
             _ = ping.tick() => (Message::Ping(Default::default()), None),
         };
-        if !matches!(
-            tokio::time::timeout(limit, sink.send(message)).await,
-            Ok(Ok(()))
-        ) {
-            close.send_replace(Some(Notice::Disconnected));
-            return;
+        match tokio::time::timeout(limit, sink.send(message)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                log::info!("relay connection {conn_id}: send failed: {err}");
+                close.send_replace(Some(Notice::Disconnected));
+                return;
+            }
+            Err(_) => {
+                log::info!(
+                    "relay connection {conn_id}: a send waited over {} s",
+                    limit.as_secs()
+                );
+                close.send_replace(Some(Notice::Disconnected));
+                return;
+            }
         }
         drop(room);
     }
@@ -174,6 +185,12 @@ struct Upload {
     file: tokio::fs::File,
     path: PathBuf,
     reserved: Reservation,
+}
+
+struct SaveParts {
+    tag: Tag,
+    data: Vec<u8>,
+    refused: bool,
 }
 
 struct PutSave<'a> {
@@ -198,9 +215,11 @@ struct Client {
     close: watch::Sender<Option<Notice>>,
     me: Option<Me>,
     hello: Option<u16>,
+    app_name: String,
     limit: ConnLimit,
     limited_at: Option<Instant>,
     uploads: HashMap<Tag, Upload>,
+    save_parts: Option<SaveParts>,
     downloads: Vec<JoinHandle<()>>,
     download_slots: Arc<Semaphore>,
     screen: Option<String>,
@@ -208,11 +227,12 @@ struct Client {
     device: Option<i64>,
     device_name: String,
     pending_totp: Option<Vec<u8>>,
+    net: crate::ds_net::Net,
 }
 
 enum Event {
     Frame(Vec<u8>),
-    Closed,
+    Closed(String),
     Close(Notice),
     Tick,
 }
@@ -225,10 +245,18 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
     let (sealer, mut opener) = channel.split();
     let (outbox, rx) = Outbox::new(app.config.limits.queue_bytes);
     let (close, mut close_rx) = watch::channel(None);
-    let mut writer = tokio::spawn(writer(app.clone(), sink, rx, close.clone(), sealer));
+    let conn_id = app.hub.conn_id();
+    let mut writer = tokio::spawn(writer(
+        app.clone(),
+        sink,
+        rx,
+        close.clone(),
+        sealer,
+        conn_id,
+    ));
     let mut gate = app.hub.gate();
     let mut client = Client {
-        conn_id: app.hub.conn_id(),
+        conn_id,
         app: app.clone(),
         ip,
         slot,
@@ -236,9 +264,11 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
         close,
         me: None,
         hello: None,
+        app_name: String::new(),
         limit: ConnLimit::default(),
         limited_at: None,
         uploads: HashMap::new(),
+        save_parts: None,
         downloads: Vec::new(),
         download_slots: Arc::new(Semaphore::new(app.config.limits.downloads_at_once)),
         screen: None,
@@ -246,6 +276,11 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
         device: None,
         device_name: String::new(),
         pending_totp: None,
+        net: crate::ds_net::Net::new(
+            app.ds_ports.clone(),
+            app.config.limits.ds_net_bytes_per_second,
+            app.config.limits.ds_net_packets_per_second,
+        ),
     };
     let settings = app.settings.get();
     let refused = if settings.kill {
@@ -258,18 +293,24 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
     let started = Instant::now();
     let mut heard = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
-    if let Some(notice) = refused {
+    let ended = if let Some(notice) = refused {
         client.send(ServerMsg::Notice(notice)).await;
+        format!("{notice:?}")
     } else {
         loop {
             let event = tokio::select! {
                 frame = stream.next() => match frame {
                     Some(Ok(Message::Binary(bytes))) => match opener.open(&bytes) {
                         Ok(plain) => Event::Frame(plain),
-                        Err(_) => Event::Closed,
+                        Err(_) => Event::Closed("a frame failed to decrypt".into()),
                     },
                     Some(Ok(Message::Text(_))) => Event::Frame(Vec::new()),
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => Event::Closed,
+                    Some(Ok(Message::Close(frame))) => Event::Closed(match frame {
+                        Some(frame) => format!("the client closed it ({})", frame.code),
+                        None => "the client closed it".into(),
+                    }),
+                    Some(Err(err)) => Event::Closed(format!("read failed: {err}")),
+                    None => Event::Closed("the stream ended".into()),
                     Some(Ok(_)) => { heard = Instant::now(); continue }
                 },
                 _ = close_rx.changed() => match *close_rx.borrow() {
@@ -279,34 +320,39 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
                 notice = gate.recv() => match notice {
                     Ok(notice) => Event::Close(notice),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => Event::Closed,
+                    Err(broadcast::error::RecvError::Closed) => Event::Closed("the server stopped".into()),
                 },
                 _ = tick.tick() => Event::Tick,
             };
             match event {
                 Event::Frame(bytes) => {
                     if client.me.is_none() && bytes.len() > app.config.limits.sign_in_frame_bytes {
-                        break;
+                        break "a frame before sign-in was too large".to_owned();
                     }
                     heard = Instant::now();
                     app.stats.received(bytes.len());
                     client.frame(&bytes).await;
                 }
-                Event::Closed => break,
+                Event::Closed(why) => break why,
                 Event::Close(notice) => {
                     client.send(ServerMsg::Notice(notice)).await;
-                    break;
+                    break format!("{notice:?}");
                 }
                 Event::Tick => {
-                    let silent = heard.elapsed() > IDLE_TIMEOUT;
-                    let anonymous = client.me.is_none() && started.elapsed() > SIGN_IN_TIMEOUT;
-                    if silent || anonymous {
-                        break;
+                    if heard.elapsed() > IDLE_TIMEOUT {
+                        break format!("nothing heard for {} s", IDLE_TIMEOUT.as_secs());
+                    }
+                    if client.me.is_none() && started.elapsed() > SIGN_IN_TIMEOUT {
+                        break format!("no sign-in within {} s", SIGN_IN_TIMEOUT.as_secs());
                     }
                 }
             }
         }
-    }
+    };
+    log::info!(
+        "relay connection {conn_id} closed after {} s: {ended}",
+        started.elapsed().as_secs()
+    );
     client.finish().await;
     drop(client);
     if tokio::time::timeout(Duration::from_secs(5), &mut writer)
@@ -373,6 +419,8 @@ impl Client {
                 }
             }
             ClientMsg::Screen(_) => ServerMsg::ScreenRefused(error),
+            ClientMsg::NetOpen { stream, .. } => ServerMsg::NetOpened { stream, ok: false },
+            ClientMsg::NetLease { .. } => ServerMsg::NetLeased { ip: None },
             _ => return self.rate_limited().await,
         };
         self.send(refusal).await;
@@ -399,8 +447,9 @@ impl Client {
 
     async fn handle(&mut self, msg: ClientMsg) -> Result<(), ErrorCode> {
         match msg {
-            ClientMsg::Hello { protocol, .. } => {
+            ClientMsg::Hello { protocol, app } => {
                 self.hello = Some(protocol);
+                self.app_name = app.chars().take(40).collect();
                 self.send(ServerMsg::Info(info(&self.app))).await;
                 if !speaks_protocol(protocol) {
                     return Err(ErrorCode::Protocol {
@@ -457,6 +506,11 @@ impl Client {
                 | ClientMsg::RoomPlay { .. }
                 | ClientMsg::RoomGame { .. }
                 | ClientMsg::UploadChunk { .. }
+                | ClientMsg::SavePart { .. }
+                | ClientMsg::NetSend { .. }
+                | ClientMsg::NetWrite { .. }
+                | ClientMsg::NetClose { .. }
+                | ClientMsg::NetTaken { .. }
         );
         if !streamed && !self.app.rates.messages.take(me, 1.0) {
             self.refuse(msg).await;
@@ -579,6 +633,7 @@ impl Client {
             ClientMsg::AnswerInvite { session, accept } => {
                 self.answer_invite(session, accept).await
             }
+            ClientMsg::Refuse { session, why } => self.refuse_invite(session, why).await,
             ClientMsg::Leave(session) => {
                 let me = self.me()?.id;
                 let out = self
@@ -596,7 +651,7 @@ impl Client {
             }
             ClientMsg::Play { session, sealed } => {
                 let other = self.peer(session)?;
-                if !self.session_room(session, &sealed) {
+                if !self.session_room(session, &sealed, false) {
                     self.refused(Refused::Play);
                     self.rate_limited().await;
                     return Ok(());
@@ -611,7 +666,7 @@ impl Client {
                     return Err(ErrorCode::GameSharingOff);
                 }
                 let other = self.peer(session)?;
-                if !self.session_room(session, &sealed) {
+                if !self.session_room(session, &sealed, true) {
                     self.refused(Refused::Play);
                     self.rate_limited().await;
                     return Ok(());
@@ -635,9 +690,26 @@ impl Client {
             }
             ClientMsg::Typing { to, typing } => self.typing(to, typing).await,
             ClientMsg::KeepOldChats { chats, done } => self.keep_old_chats(chats, done).await,
+            ClientMsg::SetPush { token, kinds } => self.set_push(token, kinds).await,
             ClientMsg::ListSaves => {
                 let saves = db(self.app.db.saves_of(self.me()?.id).await)?;
                 self.send(ServerMsg::Saves(saves)).await;
+                Ok(())
+            }
+            ClientMsg::SavePart { tag, data } => {
+                if let Err(error) = self.save_part(tag, &data).await {
+                    self.save_parts = Some(SaveParts {
+                        tag,
+                        data: Vec::new(),
+                        refused: true,
+                    });
+                    self.send(ServerMsg::SaveRefused {
+                        tag,
+                        error,
+                        current: None,
+                    })
+                    .await;
+                }
                 Ok(())
             }
             ClientMsg::PutSave {
@@ -648,6 +720,14 @@ impl Client {
                 label,
                 data,
             } => {
+                let data = match self.save_parts.take_if(|parts| parts.tag == tag) {
+                    Some(parts) if parts.refused => return Ok(()),
+                    Some(mut parts) => {
+                        parts.data.extend_from_slice(&data);
+                        parts.data
+                    }
+                    None => data,
+                };
                 let put = PutSave {
                     game,
                     slot: &slot,
@@ -704,11 +784,78 @@ impl Client {
             ClientMsg::TwoFactorOff(code) => self.two_factor_off(code).await,
             ClientMsg::NewRecoveryCodes(code) => self.new_recovery_codes(code).await,
             ClientMsg::DeleteAccount { code } => self.delete_account(code).await,
+            ClientMsg::Gts { call, target } => self.gts(call, target).await,
+            ClientMsg::GtsBrowse {
+                generation,
+                species,
+                page,
+            } => {
+                let me = self.gts_account()?;
+                let friends = db(self.app.db.friend_ids(me).await)?;
+                let listings = db(self
+                    .app
+                    .gts
+                    .browse(
+                        &self.app.db,
+                        me,
+                        &friends,
+                        generation,
+                        species,
+                        page,
+                        self.app.settings.get().gts_sims,
+                    )
+                    .await)?;
+                self.send(listings).await;
+                Ok(())
+            }
+            ClientMsg::GtsMine => {
+                let me = self.gts_account()?;
+                let mine = db(self.app.gts.mine(&self.app.db, me).await)?;
+                self.send(ServerMsg::GtsMine(mine)).await;
+                Ok(())
+            }
+            ClientMsg::NetSend { port, to, data } => self.net_send(port, to, data).await,
+            ClientMsg::NetOpen { stream, to } => self.net_open(stream, to).await,
+            ClientMsg::NetWrite { stream, data } => self.net_write(stream, data).await,
+            ClientMsg::NetClose { stream } => self.net_close(stream),
+            ClientMsg::NetTaken { stream, total } => self.net_taken(stream, total),
+            ClientMsg::NetLease { want } => self.net_lease(want).await,
             ClientMsg::Hello { .. }
             | ClientMsg::Ping(_)
             | ClientMsg::SignUp { .. }
             | ClientMsg::SignIn { .. } => Err(ErrorCode::AlreadySignedIn),
         }
+    }
+
+    fn gts_account(&self) -> Result<i64, ErrorCode> {
+        let me = self.me()?.id;
+        if self.app.settings.get().gts {
+            Ok(me)
+        } else {
+            Err(ErrorCode::GtsOff)
+        }
+    }
+
+    async fn gts(&mut self, call: u64, target: String) -> Result<(), ErrorCode> {
+        let me = self.gts_account()?;
+        if target.chars().count() > MAX_GTS_TARGET_CHARS {
+            return Err(ErrorCode::TooLarge);
+        }
+        let friends = db(self.app.db.friend_ids(me).await)?;
+        let reply = self
+            .app
+            .gts
+            .handle(&self.app.db, me, &friends, &target)
+            .await;
+        let searched = target.contains("/worldexchange/search.asp?") && target.contains("&hash=");
+        self.send(ServerMsg::Gts { call, reply }).await;
+        if searched && self.app.settings.get().gts_sims {
+            self.send(ServerMsg::GtsSimulated).await;
+        }
+        for (account, msg) in self.app.gts.take_notices() {
+            self.app.hub.send(account, msg);
+        }
+        Ok(())
     }
 
     async fn tell_me(&self, msg: ServerMsg) {
@@ -724,6 +871,7 @@ impl Client {
     }
 
     async fn finish(&mut self) {
+        self.net.finish();
         if let Some(token) = self.screen.take() {
             self.app.screens.remove(&token);
         }

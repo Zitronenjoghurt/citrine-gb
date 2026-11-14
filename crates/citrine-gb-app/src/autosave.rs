@@ -1,13 +1,26 @@
 use crate::storage::{CrashSave, SaveStore, now_unix};
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::persistence::battery_save::BatterySave;
 use citrine_gb::persistence::state::StateBody;
+use citrine_gb_threads::{Claim, Publisher, Reader, latest};
 use std::fmt::Display;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use strum_macros::EnumIter;
 
 pub const DEFAULT_KEEP: usize = 10;
 pub const MAX_KEEP: usize = 50;
+pub fn max_keep(kind: ConsoleKind) -> usize {
+    match kind {
+        ConsoleKind::Gb | ConsoleKind::Gbc | ConsoleKind::Gba | ConsoleKind::Nds => MAX_KEEP,
+    }
+}
+
+pub fn keep_for(kind: ConsoleKind, keep: usize) -> usize {
+    keep.clamp(1, max_keep(kind))
+}
+
 const LAST_GOOD_QUALITY: u32 = 6;
 const COPY_EVERY: Duration = Duration::from_secs(1);
 
@@ -112,80 +125,118 @@ pub struct StateCopy {
     pub battery: Option<BatterySave>,
     pub keep: usize,
     pub unsaved: bool,
-    pub written: bool,
 }
 
-#[derive(Clone, Default)]
-pub struct LastGood(Arc<Mutex<Option<StateCopy>>>);
+pub struct LastGood {
+    publisher: Publisher<Option<StateCopy>>,
+    crash: CrashCopy,
+}
+
+#[derive(Clone)]
+pub struct CrashCopy(Arc<Shared>);
+
+struct Shared {
+    reader: Claim<Reader<Option<StateCopy>>>,
+    unsaved: AtomicBool,
+    written: AtomicBool,
+}
+
+impl Default for LastGood {
+    fn default() -> Self {
+        let (publisher, reader) = latest();
+        Self {
+            publisher,
+            crash: CrashCopy(Arc::new(Shared {
+                reader: Claim::new(reader),
+                unsaved: AtomicBool::new(false),
+                written: AtomicBool::new(false),
+            })),
+        }
+    }
+}
 
 impl LastGood {
-    fn hold(&self) -> MutexGuard<'_, Option<StateCopy>> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    pub fn keep(&mut self, copy: StateCopy) {
+        let unsaved = copy.unsaved;
+        self.publisher.publish(|slot| *slot = Some(copy));
+        self.crash.0.unsaved.store(unsaved, Ordering::Release);
     }
 
-    pub fn keep(&self, copy: StateCopy) {
-        *self.hold() = Some(copy);
-    }
-
-    pub fn clear(&self) {
-        *self.hold() = None;
+    pub fn clear(&mut self) {
+        self.crash.0.unsaved.store(false, Ordering::Release);
+        self.publisher.publish(|slot| *slot = None);
     }
 
     pub fn take_written(&self) -> bool {
-        match self.hold().as_mut() {
-            Some(copy) if copy.written => {
-                copy.written = false;
-                true
-            }
-            _ => false,
-        }
+        self.crash.0.written.swap(false, Ordering::AcqRel)
     }
 
     pub fn mark_saved(&self) {
-        if let Some(copy) = self.hold().as_mut() {
-            copy.unsaved = false;
-        }
+        self.crash.0.unsaved.store(false, Ordering::Release);
+    }
+
+    pub fn crash_copy(&self) -> CrashCopy {
+        self.crash.clone()
     }
 
     pub fn write_out(&self) -> Result<Option<usize>, String> {
-        let mut guard = match self.0.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return Err("the last state is in use".into()),
-        };
-        let Some(copy) = guard.as_mut().filter(|copy| copy.unsaved) else {
-            return Ok(None);
-        };
-        let state = match copy.state.pack(LAST_GOOD_QUALITY) {
-            Ok(state) => state,
-            Err(err) => {
-                if let Some(save) = &copy.battery {
-                    let _ = copy.store.store_battery_save(&copy.rom_key, save);
-                }
-                return Err(err.to_string());
-            }
-        };
-        let crash = CrashSave::new(
-            copy.rom_key.clone(),
-            now_unix(),
-            copy.state.kind,
-            state,
-            &copy.frame,
-            copy.battery.as_ref(),
-        );
-        let stored = copy.store.store_crash_save(&crash, copy.keep);
-        #[cfg(target_arch = "wasm32")]
-        crate::storage::keep_crash_save(&crash);
-        let id = stored.map_err(|err| err.to_string())?;
-        copy.unsaved = false;
-        copy.written = true;
-        Ok(Some(id))
+        self.crash.write_out()
     }
 }
 
-pub fn install_panic_hook(last_good: LastGood) {
+impl CrashCopy {
+    pub fn write_out(&self) -> Result<Option<usize>, String> {
+        let shared = &self.0;
+        shared
+            .reader
+            .try_with(|reader| {
+                let Some(copy) = reader.newest() else {
+                    return Ok(None);
+                };
+                if !shared.unsaved.swap(false, Ordering::AcqRel) {
+                    return Ok(None);
+                }
+                let written = write_copy(copy);
+                match &written {
+                    Ok(_) => shared.written.store(true, Ordering::Release),
+                    Err(_) => shared.unsaved.store(true, Ordering::Release),
+                }
+                written.map(Some)
+            })
+            .unwrap_or_else(|| Err("the last state is in use".into()))
+    }
+}
+
+fn write_copy(copy: &StateCopy) -> Result<usize, String> {
+    let state = match copy
+        .state
+        .pack(copy.state.quality(false).min(LAST_GOOD_QUALITY))
+    {
+        Ok(state) => state,
+        Err(err) => {
+            if let Some(save) = &copy.battery {
+                let _ = copy.store.store_battery_save(&copy.rom_key, save);
+            }
+            return Err(err.to_string());
+        }
+    };
+    let crash = CrashSave::new(
+        copy.rom_key.clone(),
+        now_unix(),
+        copy.state.kind,
+        state,
+        &copy.frame,
+        copy.battery.as_ref(),
+    );
+    let stored = copy
+        .store
+        .store_crash_save(&crash, keep_for(copy.state.kind, copy.keep));
+    #[cfg(target_arch = "wasm32")]
+    crate::storage::keep_crash_save(&crash);
+    stored.map_err(|err| err.to_string())
+}
+
+pub fn install_panic_hook(last_good: CrashCopy) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         previous(info);
@@ -198,7 +249,7 @@ pub fn install_panic_hook(last_good: LastGood) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn save_when_hidden(last_good: LastGood) {
+pub fn save_when_hidden(last_good: CrashCopy) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
 
@@ -231,7 +282,6 @@ pub fn save_when_hidden(last_good: LastGood) {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use citrine_gb::console::ConsoleKind;
 
     const KEY: &str = "GAME";
 
@@ -256,7 +306,6 @@ mod tests {
             battery: Some(BatterySave::raw(b"sram".to_vec())),
             keep: 3,
             unsaved,
-            written: false,
         }
     }
 
@@ -313,7 +362,7 @@ mod tests {
     #[test]
     fn writing_out_saves_once_and_flushes_the_battery() {
         let (store, root) = store("write-out");
-        let last_good = LastGood::default();
+        let mut last_good = LastGood::default();
         assert_eq!(last_good.write_out(), Ok(None));
 
         last_good.keep(copy(&store, true));
@@ -332,7 +381,7 @@ mod tests {
     #[test]
     fn a_saved_copy_is_not_written_again() {
         let (store, root) = store("marked");
-        let last_good = LastGood::default();
+        let mut last_good = LastGood::default();
         last_good.keep(copy(&store, true));
         last_good.mark_saved();
         assert_eq!(last_good.write_out(), Ok(None));
@@ -343,24 +392,25 @@ mod tests {
     #[test]
     fn a_held_lock_is_skipped_not_waited_on() {
         let (store, root) = store("locked");
-        let last_good = LastGood::default();
+        let mut last_good = LastGood::default();
         last_good.keep(copy(&store, true));
-        let held = last_good.0.lock().expect("lock");
-        assert!(last_good.write_out().is_err());
-        drop(held);
+        let inside = last_good.crash.0.reader.try_with(|_| last_good.write_out());
+        assert!(matches!(inside, Some(Err(_))));
         assert_eq!(last_good.write_out(), Ok(Some(0)));
+        assert!(last_good.take_written());
+        assert!(!last_good.take_written());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn a_panic_writes_an_autosave() {
         let (store, root) = store("panic");
-        let last_good = LastGood::default();
+        let mut last_good = LastGood::default();
         last_good.keep(copy(&store, true));
 
         let before = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        install_panic_hook(last_good.clone());
+        install_panic_hook(last_good.crash_copy());
         let result = std::panic::catch_unwind(|| panic!("forced crash"));
         let _ = std::panic::take_hook();
         std::panic::set_hook(before);
@@ -368,6 +418,23 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(store.autosave_ids(KEY), vec![0]);
         assert_eq!(store.load_battery(KEY).as_deref(), Some(&b"sram"[..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn each_console_keeps_at_most_its_own_count_of_autosaves() {
+        for kind in [ConsoleKind::Gb, ConsoleKind::Gbc, ConsoleKind::Gba] {
+            assert_eq!(keep_for(kind, 0), 1);
+            assert_eq!(keep_for(kind, 7), 7);
+            assert_eq!(keep_for(kind, 500), max_keep(kind));
+        }
+        let (store, root) = store("console-keep");
+        let mut copy = copy(&store, true);
+        copy.keep = 500;
+        for _ in 0..=MAX_KEEP {
+            write_copy(&copy).expect("written");
+        }
+        assert_eq!(store.autosave_ids(KEY).len(), max_keep(ConsoleKind::Gb));
         let _ = std::fs::remove_dir_all(root);
     }
 }

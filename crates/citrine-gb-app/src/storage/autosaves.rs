@@ -116,6 +116,17 @@ impl SaveStore {
         ids.into_iter().map(|(_, id)| id).collect()
     }
 
+    pub fn newest_autosave_info(&self, rom_key: &str) -> Option<SnapshotInfo> {
+        let id = *self.autosave_ids(rom_key).last()?;
+        self.read_info(
+            rom_key,
+            id,
+            &autosave_blob(id),
+            &autosave_meta(id),
+            &autosave_thumb(id),
+        )
+    }
+
     pub fn autosave_infos(&self, rom_key: &str) -> Vec<SnapshotInfo> {
         self.autosave_ids(rom_key)
             .into_iter()

@@ -13,7 +13,7 @@ pub use chat::{
     MAX_UNPACKED_BYTES, Receipt, Share, ShareKind, pack, unpack,
 };
 pub use crypto::{
-    AuthKey, DeviceKey, Keys, NONCE_BYTES, OpenError, PublicKey, SEAL_OVERHEAD, Sealed,
+    AuthKey, DeviceKey, Keys, NONCE_BYTES, OpenError, PeerSealer, PublicKey, SEAL_OVERHEAD, Sealed,
 };
 pub use id::{IdError, OnlineId, RelayId};
 pub use invite::InviteCode;
@@ -23,8 +23,9 @@ pub use name::{
 pub use play::*;
 pub use proto::*;
 pub use saves::{
-    GameKey, MAX_LABEL_BYTES, MAX_SAVE_BYTES, MAX_SLOT_CHARS, STORAGE_BLOCK, SaveInfo, SaveLabel,
-    SavePayload, storage_cost, valid_slot,
+    GameKey, MAX_CLOUD_SAVE_BYTES, MAX_LABEL_BYTES, MAX_SAVE_BYTES, MAX_SLOT_CHARS,
+    SAVE_PART_BYTES, STORAGE_BLOCK, SaveInfo, SaveLabel, SavePayload, last_part_at, storage_cost,
+    valid_slot,
 };
 pub use secure::{
     Channel, ClientHandshake, Fingerprint, MAGIC, Opener, RelayKey, RelaySecret, Sealer,

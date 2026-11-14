@@ -7,9 +7,19 @@ pub enum GbError {
     Base64Decode(#[from] base64::DecodeError),
     #[error("Citrine can't play Game Boy Advance games")]
     GbaGame,
+    #[error("Citrine can't play Nintendo DS games")]
+    NdsGame,
+    #[error("Nintendo DS games can't link or play online yet")]
+    NdsLink,
+    #[cfg(feature = "nds")]
+    #[error("This isn't a Nintendo DS game")]
+    NotNds,
     #[cfg(feature = "gba")]
     #[error("This snapshot needs a newer version of Citrine")]
     NewerState,
+    #[cfg(feature = "gba")]
+    #[error("This snapshot is from an older version of Citrine")]
+    OlderState,
     #[cfg(feature = "gba")]
     #[error("This isn't a Game Boy Advance game")]
     NotGba,

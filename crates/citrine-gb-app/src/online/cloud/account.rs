@@ -1,9 +1,7 @@
 use super::device::device_name;
 use super::{Op, Remote, SETTLE, SyncState};
 use crate::online::Online;
-use citrine_gb_net::{
-    ClientMsg, ErrorCode, GameKey, Keys, MAX_SAVE_BYTES, SaveInfo, SaveLabel, SavePayload,
-};
+use citrine_gb_net::{ClientMsg, ErrorCode, GameKey, Keys, SaveInfo, SaveLabel, SavePayload};
 use std::collections::{BTreeMap, BTreeSet};
 use web_time::Instant;
 
@@ -236,7 +234,7 @@ impl Online {
                 let sealed_label = keys.seal_label(&label);
                 let data = keys.seal_save(&wanted.payload);
                 let hash = wanted.hash;
-                if data.len() + sealed_label.len() > MAX_SAVE_BYTES {
+                if !self.fits_cloud(data.len() + sealed_label.len()) {
                     self.cloud
                         .account
                         .refused
@@ -250,14 +248,7 @@ impl Online {
                     return true;
                 }
                 let tag = self.cloud.tag();
-                self.send(ClientMsg::PutSave {
-                    tag,
-                    game,
-                    slot: slot.clone(),
-                    base,
-                    label: sealed_label,
-                    data,
-                });
+                self.put_save(tag, game, slot.clone(), base, sealed_label, data);
                 self.cloud.start(Op::AccountPut {
                     tag,
                     name,
@@ -267,6 +258,7 @@ impl Online {
                 });
             }
             Next::Get { slot } => {
+                self.cloud.parts.clear();
                 self.send(ClientMsg::GetSave {
                     game,
                     slot: slot.clone(),

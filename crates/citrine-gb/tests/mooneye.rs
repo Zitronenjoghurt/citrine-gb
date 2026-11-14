@@ -15,6 +15,10 @@ fn build_root() -> String {
     if build.is_dir() {
         return build.to_string_lossy().into_owned();
     }
+    citrine_gb_test_roms::missing(
+        "mooneye",
+        format_args!("the built test ROMs in {}", build.display()),
+    );
 
     let placeholder =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/mooneye-unbuilt");

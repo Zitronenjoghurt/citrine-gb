@@ -3,7 +3,45 @@ use crate::app::ui_state::settings::SettingsTab;
 use crate::media::MediaId;
 use citrine_gb::gb::GbModel;
 
+#[derive(Debug, PartialEq)]
+pub enum GamesAction {
+    Open,
+    Resume,
+    Search,
+    Homebrew,
+    SecondScreens,
+    #[cfg(feature = "nds")]
+    Walker,
+    #[cfg(feature = "nds")]
+    Gts,
+    Recent(std::path::PathBuf),
+    Remove(std::path::PathBuf),
+    AddFolder,
+    RemoveFolder(String),
+    Play(String),
+    RemoveGame(String),
+    RemoveMissing,
+    Undo,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    ShowInFolder(String),
+    LibraryFilter,
+    Folders,
+    GameMenu(String),
+    GameInfo(String),
+    CloseInfo,
+    AddTag(String, String),
+    RemoveTag(String, String),
+}
+
 pub enum AppEvent {
+    RemoveHud {
+        id: u32,
+    },
+    RestoreHud {
+        index: usize,
+        hud: crate::app::hud::Hud,
+    },
+    Games(GamesAction),
     LoadRomData {
         data: Vec<u8>,
     },
@@ -34,7 +72,7 @@ pub enum AppEvent {
     },
     PickSecondGame,
     LinkGame {
-        data: Vec<u8>,
+        data: std::sync::Arc<[u8]>,
         name: Option<String>,
     },
     EndLink,
@@ -49,11 +87,28 @@ pub enum AppEvent {
         slot: usize,
     },
     PickCameraPicture,
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
+    DownloadCodec,
     CentreTilt,
+    SaveGameReport,
+    Screens(crate::app::ui_state::ds_screens::ScreensAction),
+    ScreenSettings {
+        phone: bool,
+    },
     #[cfg(feature = "gba")]
     PickGbaBios,
     #[cfg(feature = "gba")]
     UseBuiltInBios,
+    #[cfg(feature = "nds")]
+    PickDsFile(crate::app::ds_firmware::DsFile),
+    #[cfg(feature = "nds")]
+    RemoveDsFile(crate::app::ds_firmware::DsFile),
+    #[cfg(feature = "nds")]
+    FindDsBios,
+    #[cfg(feature = "nds")]
+    FindDsDirect,
+    #[cfg(feature = "nds")]
+    ClearJitCache,
 }
 
 #[derive(Default)]
@@ -68,6 +123,10 @@ impl AppEventQueue {
 
     pub fn push(&mut self, event: AppEvent) {
         self.queue.push(event);
+    }
+
+    pub fn games(&mut self, action: GamesAction) {
+        self.queue.push(AppEvent::Games(action));
     }
 
     pub fn load_rom_data(&mut self, data: Vec<u8>) {
@@ -92,6 +151,21 @@ impl AppEventQueue {
         self.queue.push(AppEvent::UseBuiltInBios);
     }
 
+    #[cfg(feature = "nds")]
+    pub fn pick_ds_file(&mut self, file: crate::app::ds_firmware::DsFile) {
+        self.queue.push(AppEvent::PickDsFile(file));
+    }
+
+    #[cfg(feature = "nds")]
+    pub fn remove_ds_file(&mut self, file: crate::app::ds_firmware::DsFile) {
+        self.queue.push(AppEvent::RemoveDsFile(file));
+    }
+
+    #[cfg(feature = "nds")]
+    pub fn clear_jit_cache(&mut self) {
+        self.queue.push(AppEvent::ClearJitCache);
+    }
+
     pub fn play_on(&mut self, model: GbModel) {
         self.queue.push(AppEvent::PlayOn { model });
     }
@@ -100,7 +174,7 @@ impl AppEventQueue {
         self.queue.push(AppEvent::PickSecondGame);
     }
 
-    pub fn link_game(&mut self, data: Vec<u8>, name: Option<String>) {
+    pub fn link_game(&mut self, data: std::sync::Arc<[u8]>, name: Option<String>) {
         self.queue.push(AppEvent::LinkGame { data, name });
     }
 
@@ -120,8 +194,29 @@ impl AppEventQueue {
         self.queue.push(AppEvent::PickCameraPicture);
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
+    pub fn download_codec(&mut self) {
+        self.queue.push(AppEvent::DownloadCodec);
+    }
+
+    pub fn screens(&mut self, action: crate::app::ui_state::ds_screens::ScreensAction) {
+        self.queue.push(AppEvent::Screens(action));
+    }
+
+    pub fn remove_hud(&mut self, id: u32) {
+        self.queue.push(AppEvent::RemoveHud { id });
+    }
+
+    pub fn screen_settings(&mut self, phone: bool) {
+        self.queue.push(AppEvent::ScreenSettings { phone });
+    }
+
     pub fn centre_tilt(&mut self) {
         self.queue.push(AppEvent::CentreTilt);
+    }
+
+    pub fn save_game_report(&mut self) {
+        self.queue.push(AppEvent::SaveGameReport);
     }
 
     pub fn open_tab(&mut self, tab: Tab) {

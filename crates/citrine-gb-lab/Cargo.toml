@@ -20,8 +20,18 @@ path = "src/bin/collect.rs"
 name = "analyze"
 path = "src/bin/analyze.rs"
 
+[[bin]]
+name = "scene3d"
+path = "src/bin/scene3d.rs"
+
+[[bin]]
+name = "ds_audio"
+path = "src/bin/ds_audio.rs"
+
 [dependencies]
-citrine-gb = { workspace = true, features = ["debug", "persistence", "recording"] }
+citrine-gb = { workspace = true, features = ["debug", "nds", "persistence", "recording"] }
+citrine-gb-nds-gpu = { path = "../citrine-gb-nds-gpu" }
+melonds-sys = { workspace = true }
 mgba-sys = { workspace = true }
 sameboy-sys = { workspace = true }
 anyhow = "1.0"
@@ -30,3 +40,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 png = "0.18"
 indicatif = "0.17"
+pollster = "0.4.0"
+wgpu = "27.0.1"
+
+[dev-dependencies]
+citrine-gb-test-roms = { workspace = true }

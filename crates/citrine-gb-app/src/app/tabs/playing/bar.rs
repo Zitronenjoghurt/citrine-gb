@@ -230,7 +230,7 @@ pub fn bar_switches(session: &PlaySession, name: &str) -> Vec<BarSwitch> {
         });
     }
     if theirs {
-        let missing = session.stage() == Stage::Playing && session.console(false).is_none();
+        let missing = session.stage() == Stage::Playing && session.friend_picture().is_none();
         let why_off = if missing && session.holds_theirs() == Some(true) {
             let title = session.my_game().map(card_name).unwrap_or_default();
             Some(format!("{name} doesn't have {title}"))
@@ -295,7 +295,7 @@ pub(super) fn switch_ui(ui: &mut Ui, item: &BarSwitch, missing: bool) -> Option<
 pub(super) fn switch_missing(session: &PlaySession, item: &BarSwitch) -> bool {
     item.switch == Switch::Watch
         && session.stage() == Stage::Playing
-        && session.console(false).is_none()
+        && session.friend_picture().is_none()
 }
 
 pub(super) fn change_button(ui: &mut Ui) -> bool {
@@ -514,9 +514,60 @@ pub fn settle_bar(
 #[cfg(test)]
 mod tests {
     use super::server_line;
+    use super::{LineWidths, MIN_NAME, fixed_label, line_widths};
 
     #[test]
     fn the_server_time_names_the_server() {
         assert_eq!(server_line(12), "12 ms to the server");
+    }
+
+    #[test]
+    fn a_shortened_name_fills_its_room_and_shows_whole_on_hover() {
+        let ctx = egui::Context::default();
+        let mut shown = None;
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(40.0);
+                        let response = fixed_label(ui, "Maximiliane".into(), 44.0);
+                        shown = response.map(|r| r.rect.width());
+                        assert!(fixed_label(ui, "Maximiliane".into(), 4.0).is_none());
+                    });
+                });
+            });
+        }
+        let width = shown.unwrap();
+        assert!(width > 30.0 && width <= 44.0, "the name took {width}");
+    }
+
+    #[test]
+    fn the_connection_word_keeps_its_room_and_names_shorten() {
+        let fits = line_widths(400.0, 8.0, 60.0, 200.0, 90.0, 40.0);
+        assert_eq!(
+            fits,
+            LineWidths {
+                name: 60.0,
+                title: 200.0,
+                tail: 90.0,
+                full_tail: true
+            }
+        );
+        let squeezed = line_widths(216.0, 8.0, 60.0, 200.0, 90.0, 40.0);
+        assert!(squeezed.full_tail);
+        assert!((squeezed.name - 55.0).abs() < 1e-3);
+        assert!((squeezed.title - 55.0).abs() < 1e-3);
+        let narrow = line_widths(152.0, 8.0, 60.0, 200.0, 90.0, 40.0);
+        assert!(!narrow.full_tail);
+        assert_eq!(narrow.tail, 40.0);
+        assert!(narrow.name + narrow.title + narrow.tail + 16.0 <= 152.0 + 1e-3);
+        assert!(narrow.name >= MIN_NAME && narrow.title >= MIN_NAME);
+        let no_title = line_widths(90.0, 8.0, 60.0, 200.0, 90.0, 40.0);
+        assert_eq!((no_title.title, no_title.tail), (0.0, 40.0));
+        assert!((no_title.name - 42.0).abs() < 1e-3);
+        let word_only = line_widths(60.0, 8.0, 60.0, 0.0, 90.0, 40.0);
+        assert_eq!((word_only.name, word_only.tail), (0.0, 40.0));
+        let cut_word = line_widths(30.0, 8.0, 60.0, 0.0, 90.0, 40.0);
+        assert_eq!((cut_word.name, cut_word.tail), (0.0, 30.0));
     }
 }

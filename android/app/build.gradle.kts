@@ -1,3 +1,5 @@
+import com.android.build.api.variant.ResValue
+import groovy.json.JsonSlurper
 import java.util.Properties
 import javax.inject.Inject
 
@@ -15,6 +17,30 @@ val keystoreFile: File = rootProject.file("keystore.properties")
 val keystore = Properties().apply { if (keystoreFile.isFile) keystoreFile.inputStream().use(::load) }
 fun releaseKey(env: String, property: String): String? =
     providers.environmentVariable(env).orNull?.takeIf { it.isNotEmpty() } ?: keystore.getProperty(property)
+
+val appId = "io.github.zitronenjoghurt.citrine"
+val googleServices: File? = listOfNotNull(
+    providers.environmentVariable("CITRINE_GOOGLE_SERVICES").orNull?.takeIf { it.isNotEmpty() }?.let(::File),
+    file("google-services.json"),
+).firstOrNull { it.isFile }
+
+fun firebaseValues(json: File): Map<String, String> {
+    val root = JsonSlurper().parse(json) as Map<*, *>
+    val project = root["project_info"] as Map<*, *>
+    val client = (root["client"] as List<*>).map { it as Map<*, *> }.firstOrNull {
+        val info = it["client_info"] as Map<*, *>
+        (info["android_client_info"] as Map<*, *>)["package_name"] == appId
+    } ?: error("${json.path} has no Android app $appId")
+    val key = (client["api_key"] as List<*>).map { it as Map<*, *> }.first()["current_key"]
+    return mapOf(
+        "google_app_id" to (client["client_info"] as Map<*, *>)["mobilesdk_app_id"].toString(),
+        "gcm_defaultSenderId" to project["project_number"].toString(),
+        "google_api_key" to key.toString(),
+        "project_id" to project["project_id"].toString(),
+    )
+}
+
+val firebase: Map<String, String>? = googleServices?.let(::firebaseValues)
 
 abstract class CargoNdk @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
     @get:Input
@@ -76,16 +102,20 @@ abstract class LauncherIcon : DefaultTask() {
 }
 
 android {
-    namespace = "io.github.zitronenjoghurt.citrine"
+    namespace = appId
     compileSdk = 36
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
-        applicationId = "io.github.zitronenjoghurt.citrine"
+        applicationId = appId
         minSdk = 26
         targetSdk = 36
         versionCode = major * 10000 + minor * 100 + patch
         versionName = cargoVersion
+    }
+
+    buildFeatures {
+        resValues = firebase != null
     }
 
     testOptions {
@@ -140,6 +170,16 @@ androidComponents {
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargoNdk, CargoNdk::outputDir)
         variant.packaging.jniLibs.keepDebugSymbols.add("**/libcitrine_gb_app.so")
         variant.sources.res?.addGeneratedSourceDirectory(launcherIcon, LauncherIcon::outputDir)
+        val kotlinSources = variant.sources.kotlin ?: variant.sources.java
+        if (firebase == null) {
+            kotlinSources?.addStaticSourceDirectory("src/nopush/kotlin")
+        } else {
+            kotlinSources?.addStaticSourceDirectory("src/push/kotlin")
+            variant.sources.manifests.addStaticManifestFile("src/push/AndroidManifest.xml")
+            for ((name, value) in firebase) {
+                variant.resValues.put(variant.makeResValueKey("string", name), ResValue(value, null))
+            }
+        }
     }
 }
 
@@ -150,4 +190,7 @@ dependencies {
     implementation("androidx.core:core:1.16.0")
     implementation("androidx.documentfile:documentfile:1.1.0")
     testImplementation("junit:junit:4.13.2")
+    if (firebase != null) {
+        implementation("com.google.firebase:firebase-messaging:26.0.1")
+    }
 }

@@ -105,7 +105,7 @@ pub fn availability(source: Source, sample_rate: u32, scale: usize) -> Availabil
                 video_bitrate(WEB_VIDEO_BITRATE, scale),
                 AUDIO_BITRATE,
             );
-            wasm_bindgen_futures::spawn_local(async move {
+            citrine_gb_threads::spawn_local(async move {
                 let result = JsFuture::from(promise).await.unwrap_or(JsValue::NULL);
                 let video = string_field(&result, "video");
                 let audio = string_field(&result, "audio");
@@ -348,7 +348,7 @@ impl Worker {
         } = self;
         let pending = state.clone();
         let promise = recorder.finish();
-        wasm_bindgen_futures::spawn_local(async move {
+        citrine_gb_threads::spawn_local(async move {
             let flushed = JsFuture::from(promise)
                 .await
                 .ok()

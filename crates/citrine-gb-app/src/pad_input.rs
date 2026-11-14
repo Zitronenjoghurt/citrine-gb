@@ -1,5 +1,5 @@
 use crate::app::ui_state::keybinds::{
-    BindingCapture, BindingKind, GbButton, KeyBindings, PadButton, Shoulder,
+    BindingCapture, BindingKind, DsButton, GbButton, KeyBindings, PadButton, Shoulder,
 };
 use crate::controller_debug::PadInfo;
 use std::fmt::{Display, Formatter};
@@ -146,6 +146,7 @@ pub enum PadAction {
     Press(GbButton),
     Release(GbButton),
     Shoulder(Shoulder, bool),
+    Ds(DsButton, bool),
     Steer {
         on: Option<GbButton>,
         off: &'static [GbButton],
@@ -162,6 +163,8 @@ impl PadAction {
             Self::Release(button) => format!("Game Boy {button} up"),
             Self::Shoulder(shoulder, true) => format!("{shoulder} down"),
             Self::Shoulder(shoulder, false) => format!("{shoulder} up"),
+            Self::Ds(button, true) => format!("{button} down"),
+            Self::Ds(button, false) => format!("{button} up"),
             Self::Steer { on: Some(on), off } => {
                 let off: Vec<String> = off.iter().map(|b| b.to_string()).collect();
                 format!("Game Boy {on} down, {} up", off.join(" and "))
@@ -189,6 +192,7 @@ pub fn route(
     bindings: &KeyBindings,
     capture: &BindingCapture,
     steering: Option<GbButton>,
+    ds: bool,
 ) -> PadAction {
     match input {
         PadInput::Pressed(key) => {
@@ -197,6 +201,9 @@ pub fn route(
             };
             if capture.wants(BindingKind::Gamepad) {
                 return PadAction::Capture(pad);
+            }
+            if ds && let Some(button) = bindings.ds_for_pad(pad) {
+                return PadAction::Ds(button, true);
             }
             if let Some(shoulder) = bindings.shoulder_for_pad(pad) {
                 return PadAction::Shoulder(shoulder, true);
@@ -207,6 +214,9 @@ pub fn route(
             let PadKey::Known(pad) = key else {
                 return PadAction::Ignore(Ignored::UnknownButton);
             };
+            if ds && let Some(button) = bindings.ds_for_pad(pad) {
+                return PadAction::Ds(button, false);
+            }
             if let Some(shoulder) = bindings.shoulder_for_pad(pad) {
                 return PadAction::Shoulder(shoulder, false);
             }
@@ -291,6 +301,7 @@ mod tests {
             &KeyBindings::default(),
             &BindingCapture::default(),
             None,
+            false,
         )
     }
 
@@ -308,6 +319,28 @@ mod tests {
             PadAction::Shoulder(Shoulder::L, true).describe(true),
             "L down"
         );
+    }
+
+    #[test]
+    fn the_top_and_left_face_buttons_press_x_and_y_on_the_ds() {
+        let route_on = |input: PadInput, ds: bool| {
+            route(
+                input,
+                &KeyBindings::default(),
+                &BindingCapture::default(),
+                None,
+                ds,
+            )
+        };
+        let north = PadInput::Pressed(PadKey::Known(PadButton::North));
+        let west = PadInput::Released(PadKey::Known(PadButton::West));
+        assert_eq!(route_on(north, true), PadAction::Ds(DsButton::X, true));
+        assert_eq!(route_on(west, true), PadAction::Ds(DsButton::Y, false));
+        assert_eq!(route_on(north, false), PadAction::Press(GbButton::B));
+        assert_eq!(route_on(west, false), PadAction::Release(GbButton::A));
+        let east = PadInput::Pressed(PadKey::Known(PadButton::East));
+        assert_eq!(route_on(east, true), PadAction::Press(GbButton::A));
+        assert_eq!(PadAction::Ds(DsButton::X, true).describe(true), "DS X down");
     }
 
     #[test]
@@ -344,7 +377,8 @@ mod tests {
                 PadInput::Pressed(PadKey::Known(PadButton::South)),
                 &bindings,
                 &capture,
-                None
+                None,
+                false,
             ),
             PadAction::Capture(PadButton::South)
         );
@@ -353,7 +387,8 @@ mod tests {
                 PadInput::Released(PadKey::Known(PadButton::South)),
                 &bindings,
                 &capture,
-                None
+                None,
+                false,
             ),
             PadAction::Release(GbButton::B)
         );
@@ -368,7 +403,8 @@ mod tests {
                 PadInput::Moved(PadAxis::LeftStickX, -0.9),
                 &bindings,
                 &capture,
-                None
+                None,
+                false,
             ),
             PadAction::Steer {
                 on: Some(GbButton::Left),
@@ -380,7 +416,8 @@ mod tests {
                 PadInput::Moved(PadAxis::LeftStickY, 0.1),
                 &bindings,
                 &capture,
-                None
+                None,
+                false,
             ),
             PadAction::Steer {
                 on: None,
@@ -392,7 +429,8 @@ mod tests {
                 PadInput::Moved(PadAxis::RightStickX, 1.0),
                 &bindings,
                 &capture,
-                None
+                None,
+                false,
             ),
             PadAction::Ignore(Ignored::UnusedAxis)
         );
@@ -403,7 +441,8 @@ mod tests {
                 PadInput::Moved(PadAxis::LeftStickX, -0.9),
                 &bindings,
                 &capture,
-                None
+                None,
+                false,
             ),
             PadAction::Ignore(Ignored::StickOff)
         );
@@ -419,6 +458,7 @@ mod tests {
                 &bindings,
                 &capture,
                 steering,
+                false,
             )
         };
         let centred = PadAction::Steer {

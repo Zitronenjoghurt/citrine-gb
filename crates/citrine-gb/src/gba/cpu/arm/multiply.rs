@@ -1,8 +1,11 @@
 mod booth;
 
 use super::super::psr::{FLAG_C, FLAG_N, FLAG_Z};
-use super::super::{Cpu, CpuBus};
+use super::super::{Core, CpuBus};
 use booth::Flavor;
+
+const V5_IDLES: u32 = 1;
+const V5_FLAG_IDLES: u32 = 3;
 
 fn signed_steps(value: u32) -> u32 {
     let mut steps = 1;
@@ -24,23 +27,31 @@ fn unsigned_steps(value: u32) -> u32 {
     steps
 }
 
+fn v5_idles(set_flags: bool) -> u32 {
+    if set_flags { V5_FLAG_IDLES } else { V5_IDLES }
+}
+
 pub fn multiply_carry(rm: u32, rs: u32, acc: u32) -> bool {
     booth::carry(Flavor::Short, rm, rs, u64::from(acc))
 }
 
-impl Cpu {
+impl<const V5: bool> Core<V5> {
     pub(in super::super) fn arm_multiply(&mut self, bus: &mut impl CpuBus, op: u32) {
         let accumulate = op & (1 << 21) != 0;
         let set_flags = op & (1 << 20) != 0;
         let rd = ((op >> 16) & 0xF) as usize;
         let rn = ((op >> 12) & 0xF) as usize;
-        self.prefetch(bus);
+        self.prefetch_arm(bus);
         let rs = self.factor(((op >> 8) & 0xF) as usize, accumulate);
         let rm = self.factor((op & 0xF) as usize, accumulate);
         let acc = if accumulate { self.operand(rn) } else { 0 };
-        let result = self.multiply(bus, rm, rs, acc, accumulate);
+        let result = self.multiply(bus, rm, rs, acc, accumulate, set_flags);
         if set_flags {
-            let carry = multiply_carry(rm, rs, acc);
+            let carry = if V5 {
+                self.regs.cpsr() & FLAG_C != 0
+            } else {
+                multiply_carry(rm, rs, acc)
+            };
             self.set_nzc(result >> 31 != 0, result == 0, carry);
         }
         self.write_pc_or_reg(bus, rd, result);
@@ -53,10 +64,14 @@ impl Cpu {
         rs: u32,
         acc: u32,
         accumulate: bool,
+        set_flags: bool,
     ) -> u32 {
-        for _ in 0..signed_steps(rs) + u32::from(accumulate) {
-            self.idle(bus);
-        }
+        let idles = if V5 {
+            v5_idles(set_flags)
+        } else {
+            signed_steps(rs) + u32::from(accumulate)
+        };
+        self.idle_for(bus, idles);
         rm.wrapping_mul(rs).wrapping_add(acc)
     }
 
@@ -66,7 +81,7 @@ impl Cpu {
         let set_flags = op & (1 << 20) != 0;
         let rd_hi = ((op >> 16) & 0xF) as usize;
         let rd_lo = ((op >> 12) & 0xF) as usize;
-        self.prefetch(bus);
+        self.prefetch_arm(bus);
         let rs = self.factor(((op >> 8) & 0xF) as usize, accumulate);
         let rm = self.factor((op & 0xF) as usize, accumulate);
         let product = if signed {
@@ -80,21 +95,25 @@ impl Cpu {
             0
         };
         let result = product.wrapping_add(acc);
-        let steps = if signed {
-            signed_steps(rs)
+        let idles = if V5 {
+            v5_idles(set_flags)
+        } else if signed {
+            signed_steps(rs) + 1 + u32::from(accumulate)
         } else {
-            unsigned_steps(rs)
+            unsigned_steps(rs) + 1 + u32::from(accumulate)
         };
-        for _ in 0..steps + 1 + u32::from(accumulate) {
-            self.idle(bus);
-        }
+        self.idle_for(bus, idles);
         if set_flags {
             let flavor = if signed {
                 Flavor::LongSigned
             } else {
                 Flavor::LongUnsigned
             };
-            let carry = booth::carry(flavor, rm, rs, acc);
+            let carry = if V5 {
+                self.regs.cpsr() & FLAG_C != 0
+            } else {
+                booth::carry(flavor, rm, rs, acc)
+            };
             self.set_nzc(result >> 63 != 0, result == 0, carry);
         }
         self.regs.r[rd_lo] = result as u32;
@@ -119,6 +138,6 @@ impl Cpu {
                 cpsr |= flag;
             }
         }
-        self.regs.set_cpsr(cpsr);
+        self.regs.set_flags(cpsr);
     }
 }

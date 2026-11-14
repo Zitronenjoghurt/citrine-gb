@@ -3,9 +3,6 @@ use citrine_gb::netplay::PeerCable;
 use citrine_gb_gamedata::{Game, Generation, RomTables};
 use citrine_gb_partner::{Event, Happening, OfferError, Partner, Stage};
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Desk {
     CableClub,
@@ -93,14 +90,15 @@ impl PartnerLink {
             .filter_map(|&id| tables.move_name(u16::from(id)).map(str::to_owned))
             .collect();
         let held = match game.generation() {
-            Generation::One | Generation::Three => None,
+            Generation::One | Generation::Three | Generation::Four | Generation::Five => None,
             Generation::Two => event.item.and_then(|id| tables.item_name(u16::from(id))),
         };
         let partner = Partner::new(game, rom, event, seed)?;
         let desk = match (game.generation(), partner.through_time_capsule()) {
             (Generation::One, _) => Desk::CableClub,
             (Generation::Two, true) => Desk::TimeCapsule,
-            (Generation::Two, false) | (Generation::Three, _) => Desk::Trade,
+            (Generation::Two, false)
+            | (Generation::Three | Generation::Four | Generation::Five, _) => Desk::Trade,
         };
         let mut cable = PeerCable::new();
         cable.set_plugged(true);
@@ -167,5 +165,48 @@ impl PartnerLink {
 
     pub fn finish(mut self, gb: &mut GameBoy) {
         self.cable.unplug(gb);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Desk, status};
+    use citrine_gb_partner::Stage;
+
+    #[test]
+    fn waiting_names_the_desk_for_each_kind_of_trade() {
+        let detail = |desk| {
+            status(Stage::Waiting, desk, false, "CELEBI")
+                .detail
+                .unwrap()
+        };
+        assert!(detail(Desk::Trade).contains("trade desk upstairs"));
+        assert!(detail(Desk::TimeCapsule).contains("Time Capsule desk"));
+        assert!(detail(Desk::CableClub).contains("Cable Club desk"));
+    }
+
+    #[test]
+    fn a_finished_trade_shows_until_the_next_pick() {
+        let traded = status(Stage::Choosing, Desk::Trade, true, "CELEBI");
+        assert_eq!(traded.headline, "Traded");
+        assert_eq!(traded.detail.as_deref(), Some("Another CELEBI is ready."));
+        assert_eq!(
+            status(Stage::Choosing, Desk::Trade, false, "CELEBI").headline,
+            "Pick a Pokémon to trade"
+        );
+    }
+
+    #[test]
+    fn confirming_wins_over_an_earlier_trade() {
+        assert_eq!(
+            status(Stage::Confirming, Desk::Trade, true, "CELEBI").headline,
+            "Confirm the trade"
+        );
+    }
+
+    #[test]
+    fn red_and_blue_pick_the_trade_center_after_linking() {
+        let linked = status(Stage::Linked, Desk::CableClub, false, "MEW");
+        assert!(linked.detail.unwrap().starts_with("Pick Trade Center"));
     }
 }

@@ -5,24 +5,35 @@ use std::cell::{Cell, RefCell};
 use web_sys::wasm_bindgen::{JsCast, JsValue};
 
 const DB_NAME: &str = "citrine-saves";
+const CACHE_DB_NAME: &str = "citrine-cache";
 const DB_VERSION: u32 = 1;
 const FILES: &str = "files";
 const CRASH_KEY: &str = "citrine-crash";
 
 thread_local! {
     static SAVES: RefCell<Mirror> = RefCell::default();
+    static CACHE: RefCell<Mirror> = RefCell::default();
+    static CACHE_OPENED: Cell<bool> = const { Cell::new(false) };
     static OPENED: Cell<bool> = const { Cell::new(false) };
     static WITHOUT_DATABASE: Cell<bool> = const { Cell::new(false) };
 }
 
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Kind {
+    #[default]
+    Saves,
+    Settings,
+    Cache,
+}
+
 #[derive(Default, Clone)]
 pub struct Backend {
-    settings: bool,
+    kind: Kind,
 }
 
 pub async fn open_saves() {
     SAVES.with_borrow_mut(|saves| saves.adopt_local(local_entries()));
-    match load().await {
+    match load(DB_NAME).await {
         Ok(stored) => SAVES.with_borrow_mut(|saves| saves.fill(stored)),
         Err(err) => {
             log::error!("couldn't open the saves database, saves stay in local storage: {err:?}");
@@ -33,6 +44,34 @@ pub async fn open_saves() {
     take_crash_save();
     OPENED.set(true);
     flush();
+    open_cache().await;
+}
+
+async fn open_cache() {
+    match load(CACHE_DB_NAME).await {
+        Ok(stored) => {
+            CACHE.with_borrow_mut(|cache| cache.fill(stored));
+            CACHE_OPENED.set(true);
+            flush_cache();
+        }
+        Err(err) => log::error!("couldn't open the cache database, covers stay in memory: {err:?}"),
+    }
+}
+
+fn flush_cache() {
+    let batch = CACHE.with_borrow_mut(Mirror::take_pending);
+    if !CACHE_OPENED.get() {
+        return;
+    }
+    if batch.is_empty() {
+        return;
+    }
+    citrine_gb_threads::spawn_local(async move {
+        if let Err(err) = store(CACHE_DB_NAME, &batch).await {
+            log::error!("couldn't write to the cache database, trying again later: {err:?}");
+            CACHE.with_borrow_mut(|cache| cache.retry(batch));
+        }
+    });
 }
 
 fn take_crash_save() {
@@ -52,6 +91,9 @@ fn take_crash_save() {
 
 pub fn keep_crash_save(raw: &str) {
     if WITHOUT_DATABASE.get() {
+        return;
+    }
+    if !mirror::fits_local(raw) {
         return;
     }
     let Some(storage) = storage() else {
@@ -92,6 +134,9 @@ fn local_read(namespace: &str, name: &str) -> Option<Vec<u8>> {
 
 fn local_write(namespace: &str, name: &str, data: &[u8]) -> std::io::Result<()> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+    if !mirror::fits_local(&encoded) {
+        return Err(std::io::Error::other("too big for local storage"));
+    }
     storage()
         .ok_or_else(|| std::io::Error::other("local storage unavailable"))?
         .set_item(&mirror::local_key(namespace, name), &encoded)
@@ -112,8 +157,8 @@ fn flush() {
     if batch.is_empty() {
         return;
     }
-    wasm_bindgen_futures::spawn_local(async move {
-        match store(&batch).await {
+    citrine_gb_threads::spawn_local(async move {
+        match store(DB_NAME, &batch).await {
             Ok(()) => {
                 if let Some(storage) = storage() {
                     for key in &batch.moved {
@@ -129,16 +174,18 @@ fn flush() {
     });
 }
 
-async fn database() -> Result<web_sys::IdbDatabase, JsValue> {
-    crate::utils::idb::open(DB_NAME, DB_VERSION, &[FILES]).await
+async fn database(name: &str) -> Result<web_sys::IdbDatabase, JsValue> {
+    crate::utils::idb::open(name, DB_VERSION, &[FILES]).await
 }
 
-async fn load() -> Result<Vec<(String, Vec<u8>)>, JsValue> {
-    let db = database().await?;
+async fn load(name: &str) -> Result<Vec<(String, Vec<u8>)>, JsValue> {
+    let db = database(name).await?;
     let tx = db.transaction_with_str(FILES)?;
     let store = tx.object_store(FILES)?;
-    let keys: js_sys::Array = wait(&store.get_all_keys()?).await?.unchecked_into();
-    let values: js_sys::Array = wait(&store.get_all()?).await?.unchecked_into();
+    let keys = wait(&store.get_all_keys()?);
+    let values = wait(&store.get_all()?);
+    let keys: js_sys::Array = keys.await?.unchecked_into();
+    let values: js_sys::Array = values.await?.unchecked_into();
     Ok(keys
         .iter()
         .zip(values.iter())
@@ -150,8 +197,8 @@ async fn load() -> Result<Vec<(String, Vec<u8>)>, JsValue> {
         .collect())
 }
 
-async fn store(batch: &Batch) -> Result<(), JsValue> {
-    let db = database().await?;
+async fn store(name: &str, batch: &Batch) -> Result<(), JsValue> {
+    let db = database(name).await?;
     let tx = db.transaction_with_str_and_mode(FILES, web_sys::IdbTransactionMode::Readwrite)?;
     let store = tx.object_store(FILES)?;
     for op in &batch.ops {
@@ -169,19 +216,39 @@ async fn store(batch: &Batch) -> Result<(), JsValue> {
 
 impl Backend {
     pub fn settings() -> Self {
-        Self { settings: true }
+        Self {
+            kind: Kind::Settings,
+        }
+    }
+
+    pub fn cache() -> Self {
+        Self { kind: Kind::Cache }
     }
 
     fn local(&self) -> bool {
-        self.settings || WITHOUT_DATABASE.get()
+        self.kind == Kind::Settings || (self.kind == Kind::Saves && WITHOUT_DATABASE.get())
+    }
+
+    fn mirror(&self) -> &'static std::thread::LocalKey<RefCell<Mirror>> {
+        match self.kind {
+            Kind::Cache => &CACHE,
+            Kind::Saves | Kind::Settings => &SAVES,
+        }
+    }
+
+    fn flush(&self) {
+        match self.kind {
+            Kind::Cache => flush_cache(),
+            Kind::Saves | Kind::Settings => flush(),
+        }
     }
 
     pub fn read(&self, namespace: &str, name: &str) -> Option<Vec<u8>> {
         if self.local() {
             return local_read(namespace, name);
         }
-        SAVES.with_borrow(|saves| {
-            saves
+        self.mirror().with_borrow(|files| {
+            files
                 .read(&mirror::key(namespace, name))
                 .map(<[u8]>::to_vec)
         })
@@ -191,8 +258,9 @@ impl Backend {
         if self.local() {
             return local_write(namespace, name, data);
         }
-        SAVES.with_borrow_mut(|saves| saves.write(mirror::key(namespace, name), data));
-        flush();
+        self.mirror()
+            .with_borrow_mut(|files| files.write(mirror::key(namespace, name), data));
+        self.flush();
         Ok(())
     }
 
@@ -201,8 +269,9 @@ impl Backend {
             local_delete(namespace, name);
             return Ok(());
         }
-        SAVES.with_borrow_mut(|saves| saves.delete(mirror::key(namespace, name)));
-        flush();
+        self.mirror()
+            .with_borrow_mut(|files| files.delete(mirror::key(namespace, name)));
+        self.flush();
         Ok(())
     }
 
@@ -210,15 +279,16 @@ impl Backend {
         if self.local() {
             return local_read(namespace, name).is_some();
         }
-        SAVES.with_borrow(|saves| saves.read(&mirror::key(namespace, name)).is_some())
+        self.mirror()
+            .with_borrow(|files| files.read(&mirror::key(namespace, name)).is_some())
     }
 
     pub fn size(&self, namespace: &str, name: &str) -> u64 {
         if self.local() {
             return local_read(namespace, name).map_or(0, |data| data.len() as u64);
         }
-        SAVES.with_borrow(|saves| {
-            saves
+        self.mirror().with_borrow(|files| {
+            files
                 .read(&mirror::key(namespace, name))
                 .map_or(0, |data| data.len() as u64)
         })
@@ -239,7 +309,7 @@ impl Backend {
                 .filter_map(|(key, _)| key.strip_prefix(&prefix).map(str::to_owned))
                 .collect();
         }
-        SAVES.with_borrow(|saves| saves.list(namespace))
+        self.mirror().with_borrow(|files| files.list(namespace))
     }
 
     pub fn namespaces(&self) -> Vec<String> {
@@ -255,7 +325,7 @@ impl Backend {
             found.dedup();
             return found;
         }
-        SAVES.with_borrow(Mirror::namespaces)
+        self.mirror().with_borrow(Mirror::namespaces)
     }
 
     pub fn location(&self) -> String {

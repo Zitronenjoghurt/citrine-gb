@@ -1,13 +1,14 @@
 use crate::audio::Audio;
-use crate::autosave::LastGood;
+use crate::autosave::CrashCopy;
 use jni::JNIEnv;
 use jni::objects::{JObject, JValue};
 use jni::sys::{jboolean, jint};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 
-static LAST_GOOD: OnceLock<LastGood> = OnceLock::new();
+static LAST_GOOD: OnceLock<CrashCopy> = OnceLock::new();
 static HIDDEN: AtomicBool = AtomicBool::new(false);
+static SHOWN: AtomicBool = AtomicBool::new(false);
 static BACKS: AtomicUsize = AtomicUsize::new(0);
 static AT_ROOT: AtomicBool = AtomicBool::new(false);
 static SAFE_AREA: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
@@ -15,7 +16,7 @@ static KEYBOARD: AtomicI32 = AtomicI32::new(0);
 static BARS: AtomicU8 = AtomicU8::new(0);
 static IMMERSIVE: AtomicU8 = AtomicU8::new(0);
 
-pub fn save_on_pause(last_good: LastGood) {
+pub fn save_on_pause(last_good: CrashCopy) {
     let _ = LAST_GOOD.set(last_good);
 }
 
@@ -25,6 +26,14 @@ pub fn follow_visibility(audio: &mut Audio) {
     } else {
         audio.resume();
     }
+}
+
+pub fn visible() -> bool {
+    !HIDDEN.load(Ordering::Relaxed)
+}
+
+pub fn take_shown() -> bool {
+    SHOWN.swap(false, Ordering::Relaxed)
 }
 
 pub fn at_root(root: bool) {
@@ -148,9 +157,15 @@ extern "system" fn Java_io_github_zitronenjoghurt_citrine_MainActivity_nativeVis
     visible: jboolean,
 ) {
     HIDDEN.store(visible == 0, Ordering::Relaxed);
+    if visible == 0 {
+        super::push::went_hidden();
+    } else {
+        SHOWN.store(true, Ordering::Relaxed);
+    }
     if visible != 0 {
         BARS.store(0, Ordering::Relaxed);
         IMMERSIVE.store(0, Ordering::Relaxed);
+        super::repaint();
     }
 }
 

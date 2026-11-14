@@ -2,6 +2,7 @@ use crate::platform::ime::{self, ImeText};
 use jni::JNIEnv;
 use jni::objects::{JObject, JString, JValue};
 use jni::sys::jint;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 struct Typing {
@@ -54,8 +55,14 @@ fn reseed() {
     });
 }
 
+static PAD_KEYBOARD: AtomicBool = AtomicBool::new(false);
+
+pub fn pad_keyboard(on: bool) {
+    PAD_KEYBOARD.store(on, Ordering::Relaxed);
+}
+
 pub fn follow(ctx: &egui::Context) {
-    let wants = ctx.output(|o| o.ime.is_some());
+    let wants = ctx.output(|o| o.ime.is_some()) && !PAD_KEYBOARD.load(Ordering::Relaxed);
     let field = ctx.memory(|m| m.focused());
     let mut typing = typing();
     if std::mem::take(&mut typing.dismissed) && wants {

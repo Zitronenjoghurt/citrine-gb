@@ -6,10 +6,11 @@ import java.io.File
 class CitrineApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        if (PushService.AVAILABLE) Notifications.channels(this)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             runCatching {
-                File(filesDir, CrashReport.JAVA_FILE)
+                File(cacheDir, CrashReport.JAVA_FILE)
                     .writeText("Thread ${thread.name}\n\n${error.stackTraceToString()}")
             }
             previous?.uncaughtException(thread, error)

@@ -119,7 +119,7 @@ pub struct Frame {
 }
 
 impl Frame {
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         self.width > 0
             && self.height > 0
             && self.rgba.len() == self.width as usize * self.height as usize * 4
@@ -147,7 +147,7 @@ pub struct NewMedia {
 }
 
 impl NewMedia {
-    pub fn current(kind: MediaKind, emulator: &crate::emulator::Emulator) -> Self {
+    pub fn current(kind: MediaKind, emulator: &mut crate::emulator::Emulator) -> Self {
         let video = emulator.video();
         Self {
             kind,
@@ -182,7 +182,7 @@ impl NewMedia {
 }
 
 pub fn save_screenshot(
-    emulator: &crate::emulator::Emulator,
+    emulator: &mut crate::emulator::Emulator,
     store: &mut MediaStore,
     scale: usize,
 ) -> Result<MediaItem, String> {
@@ -201,7 +201,7 @@ pub fn save_screenshot(
 }
 
 pub fn save_print(
-    emulator: &crate::emulator::Emulator,
+    emulator: &mut crate::emulator::Emulator,
     store: &mut MediaStore,
     print: &citrine_gb::gb::printer::PrintedImage,
 ) -> Result<MediaItem, String> {
@@ -221,11 +221,8 @@ pub fn save_print(
         .map_err(|err| format!("Could not save the print: {err}"))
 }
 
-pub fn export(
-    store: &MediaStore,
-    id: &MediaId,
-    tx: std::sync::mpsc::Sender<crate::utils::file_saver::SaveOutcome>,
-) {
+pub fn export(store: &MediaStore, id: &MediaId, files: &crate::utils::file_channels::FileChannels) {
+    let tx = files.save_tx.clone();
     let kind = id.kind().unwrap_or(MediaKind::Screenshot);
     let filter = match kind {
         MediaKind::Screenshot | MediaKind::Print => "PNG image",
@@ -234,10 +231,12 @@ pub fn export(
     let saver = crate::utils::file_saver::FileSaver::new(id.file_name())
         .add_filter(filter, &[kind.extension()]);
     #[cfg(not(target_arch = "wasm32"))]
-    saver.dispatch_copy(store.path(id), tx);
+    saver.dispatch_copy(&files.spawner, store.path(id), tx);
+    #[cfg(target_arch = "wasm32")]
+    let spawner = files.spawner.clone();
     #[cfg(target_arch = "wasm32")]
     store.read(id, move |blob| match blob {
-        Some(blob) => saver.dispatch_blob(&blob, tx),
+        Some(blob) => saver.dispatch_blob(&spawner, &blob, tx),
         None => {
             let _ = tx.send(crate::utils::file_saver::SaveOutcome::Failed(
                 "the file is missing".to_string(),

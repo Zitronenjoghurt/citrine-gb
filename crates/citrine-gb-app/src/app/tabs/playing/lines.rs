@@ -3,7 +3,7 @@ use crate::app::widgets::avatar;
 use crate::icons;
 use crate::online::Online;
 use crate::play::{Ending, IncomingInvite, Play, PlaySession, Stage};
-use citrine_gb_net::{GameCard, Mode, OnlineId};
+use citrine_gb_net::{GameCard, Mode, OnlineId, Refusal};
 use egui::Color32;
 
 const GOOD_MS: u32 = 80;
@@ -44,16 +44,42 @@ pub fn member_name(play: &Play, online: &Online, who: OnlineId) -> String {
     short_name(&full_name(play, online, who)).to_owned()
 }
 
-pub fn ending_line(name: &str, ending: Ending, played: bool) -> Option<String> {
+pub fn ending_line(name: &str, title: &str, ending: Ending, played: bool) -> Option<String> {
     match ending {
         Ending::Left => None,
         Ending::Declined => Some(format!("{name} declined your invite.")),
+        Ending::NoCopy => Some(format!(
+            "{name} doesn't have {title}. This relay doesn't share games, so {name} needs their own copy."
+        )),
+        Ending::OtherCopy => Some(other_copy_line(name, title)),
+        Ending::NoAnswer => Some(format!("{name} didn't answer your invite.")),
         Ending::FriendLeft => Some(format!("{name} left.")),
         Ending::Dropped => Some(format!("Lost the connection to {name}.")),
         Ending::Failed if played => Some(format!("Playing with {name} stopped.")),
         Ending::Failed => Some(format!("Couldn't start playing with {name}.")),
         Ending::Moved => Some("You joined from another device.".into()),
     }
+}
+
+pub fn failed_line(name: &str, why: &str) -> String {
+    format!("Couldn't start playing with {name}. {why}.")
+}
+
+pub fn ds_line(title: &str) -> String {
+    format!("{title} is a DS game, and DS games can't be played together yet.")
+}
+
+pub fn refused_line(name: &str, title: &str, why: Refusal) -> String {
+    match why {
+        Refusal::NoCopy => format!(
+            "You don't have {title}. This relay doesn't share games, so you need your own copy."
+        ),
+        Refusal::OtherCopy => other_copy_line(name, title),
+    }
+}
+
+fn other_copy_line(name: &str, title: &str) -> String {
+    format!("Your copy of {title} differs from {name}'s, so you can't play together.")
 }
 
 const NO_SHARING: &str = " This relay doesn't share games.";
@@ -105,10 +131,14 @@ pub fn play_subtitle(play: &Play, friend: OnlineId) -> Option<String> {
     play.invites()
         .iter()
         .find(|i| i.from == friend)
-        .map(|i| match &i.game {
-            Some(game) => format!("Wants to play {}", card_name(game)),
-            None => "Wants to join you".into(),
-        })
+        .map(invite_line)
+}
+
+pub fn invite_line(invite: &IncomingInvite) -> String {
+    match &invite.game {
+        Some(game) => format!("Wants to play {}", card_name(game)),
+        None => "Wants to join you".into(),
+    }
 }
 
 pub fn card_name(card: &GameCard) -> &str {
@@ -127,7 +157,7 @@ pub fn friend_tab_line(name: &str, session: &PlaySession) -> String {
     if session.stage() != Stage::Playing {
         return format!("{name}'s screen shows here once the game starts.");
     }
-    if session.console(false).is_none() {
+    if session.friend_picture().is_none() {
         let cable = session.mode() == Some(Mode::Cable);
         return other_game_line(
             name,
@@ -194,5 +224,73 @@ pub fn ask_line(name: &str, invite: &IncomingInvite) -> String {
     match &invite.game {
         Some(game) => format!("{name} wants to play {}", card_name(game)),
         None => format!("{name} wants to join you"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::{other_game_line, quality, short_name};
+    use crate::play::Ending;
+    use citrine_gb_net::Refusal;
+
+    #[test]
+    fn connection_quality_has_three_words() {
+        assert_eq!(quality(42, true).0, "Good");
+        assert_eq!(quality(80, true).0, "OK");
+        assert_eq!(quality(149, true).0, "OK");
+        assert_eq!(quality(150, true).0, "Slow");
+    }
+
+    #[test]
+    fn the_short_name_is_the_first_word() {
+        assert_eq!(short_name("Mia Sommer"), "Mia");
+        assert_eq!(short_name("Jonas"), "Jonas");
+        assert_eq!(short_name(""), "");
+    }
+
+    #[test]
+    fn a_ds_game_without_the_same_copy_says_why_on_both_sides() {
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::NoCopy, false).as_deref(),
+            Some(
+                "Mia doesn't have Pong. This relay doesn't share games, so Mia needs their own copy."
+            )
+        );
+        assert_eq!(
+            super::refused_line("Mia", "Pong", Refusal::NoCopy),
+            "You don't have Pong. This relay doesn't share games, so you need your own copy."
+        );
+        let differs = "Your copy of Pong differs from Mia's, so you can't play together.";
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::OtherCopy, false).as_deref(),
+            Some(differs)
+        );
+        assert_eq!(
+            super::refused_line("Mia", "Pong", Refusal::OtherCopy),
+            differs
+        );
+        assert_eq!(
+            ending_line("Mia", "Pong", Ending::NoAnswer, false).as_deref(),
+            Some("Mia didn't answer your invite.")
+        );
+    }
+
+    #[test]
+    fn the_other_game_line_gives_the_reason_and_a_number() {
+        assert_eq!(
+            other_game_line("Mia", false, "Petris", "Petris DX", true, Some(238)),
+            "You don't have Petris DX, so you can't watch Mia's screen. \
+         Each link cable exchange takes 238 ms."
+        );
+        assert_eq!(
+            other_game_line("Mia", true, "Petris", "Petris DX", true, None),
+            "Mia doesn't have Petris, so you can't watch each other's screens."
+        );
+        assert_eq!(
+            other_game_line("Mia", false, "Petris", "Petris DX", false, None),
+            "You don't have Petris DX, so you can't watch Mia's screen. \
+         This relay doesn't share games."
+        );
     }
 }

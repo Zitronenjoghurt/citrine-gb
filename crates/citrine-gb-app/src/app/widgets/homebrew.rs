@@ -1,8 +1,22 @@
+use crate::app::big_screen::scroll::Following;
 use crate::app::events::AppEventQueue;
 use crate::app::ui_state::settings::{Settings, console_name, other_console, plays_on_both};
 use crate::homebrew::{HomebrewGame, ShelfConsole, shelves};
 use crate::icons;
+
 use egui::{Response, ScrollArea, Ui, Widget};
+
+const SHELF_ICON: f32 = 32.0;
+
+#[cfg(feature = "nds")]
+fn shelf_icon_rect(ctx: &egui::Context, center: egui::Pos2) -> egui::Rect {
+    crate::ds_banner::icon_rect(ctx, center, SHELF_ICON)
+}
+
+#[cfg(not(feature = "nds"))]
+fn shelf_icon_rect(_ctx: &egui::Context, center: egui::Pos2) -> egui::Rect {
+    egui::Rect::from_center_size(center, egui::Vec2::splat(SHELF_ICON))
+}
 
 pub struct HomebrewList<'a> {
     events: &'a mut AppEventQueue,
@@ -105,6 +119,16 @@ impl<'a> HomebrewList<'a> {
                         self.events.prefetch_shelf_game(game);
                     }
                 }
+                if let Some(picture) = game.icon_texture(ui.ctx()) {
+                    let (space, _) =
+                        ui.allocate_exact_size(egui::Vec2::splat(SHELF_ICON), egui::Sense::hover());
+                    ui.painter().image(
+                        picture,
+                        shelf_icon_rect(ui.ctx(), space.center()),
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
                 let load_width = action_width(ui, &[action]).max(self.button_width);
                 let title_width = ui.available_width() - load_width - ui.spacing().item_spacing.x;
                 ui.vertical(|ui| {
@@ -125,7 +149,8 @@ impl<'a> HomebrewList<'a> {
                         if !self.link {
                             self.events.play_shelf_game(game);
                         } else if let Some(data) = game.embedded() {
-                            self.events.link_game(data, Some(game.title.to_owned()));
+                            self.events
+                                .link_game(data.into(), Some(game.title.to_owned()));
                         }
                     }
                 });
@@ -161,7 +186,9 @@ impl<'a> HomebrewList<'a> {
 
 impl Widget for HomebrewList<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        ScrollArea::vertical().show(ui, |ui| self.rows(ui)).inner
+        ScrollArea::vertical()
+            .show_following(ui, |ui| self.rows(ui))
+            .inner
     }
 }
 

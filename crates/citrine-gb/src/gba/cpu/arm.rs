@@ -1,92 +1,123 @@
 mod alu;
+mod decode;
 pub(super) mod multiply;
 mod transfer;
+mod v5;
 
 use super::exception::Exception;
 use super::psr::FLAG_T;
-use super::{Cpu, CpuBus};
-use crate::gba::wait::Access;
+use super::{Core, CpuBus};
+use crate::gba::wait::{Access, Width};
+use decode::ArmHandler;
 
 const PSR_FLAGS: u32 = 0xFF00_0000;
 const PSR_FLAGS_NZCV: u32 = 0xF000_0000;
 const MODE_BIT_4: u32 = 0x10;
-const DEBUG_COPROCESSOR: u32 = 14;
 
-impl Cpu {
-    pub(super) fn execute_arm(&mut self, bus: &mut impl CpuBus, op: u32) {
-        match (op >> 25) & 7 {
-            0b000 => {
-                if op & 0x0FFF_FFF0 == 0x012F_FF10 {
-                    self.arm_bx(bus, op);
-                } else if op & 0x0FB0_0FF0 == 0x0100_0090 {
-                    self.arm_swap(bus, op);
-                } else if op & 0x0FC0_00F0 == 0x0000_0090 {
-                    self.arm_multiply(bus, op);
-                } else if op & 0x0F80_00F0 == 0x0080_0090 {
-                    self.arm_multiply_long(bus, op);
-                } else if op & 0x0000_0090 == 0x0000_0090 {
-                    self.arm_halfword_transfer(bus, op);
-                } else if op & 0x0190_0000 == 0x0100_0000 {
-                    self.arm_psr_transfer(bus, op);
-                } else {
-                    self.arm_data_processing(bus, op);
-                }
-            }
-            0b001 => {
-                if op & 0x0190_0000 == 0x0100_0000 {
-                    self.arm_psr_transfer(bus, op);
-                } else {
-                    self.arm_data_processing(bus, op);
-                }
-            }
-            0b010 => self.arm_single_transfer(bus, op),
-            0b011 if op & 0x10 == 0 => self.arm_single_transfer(bus, op),
-            0b100 => self.arm_block_transfer(bus, op),
-            0b101 => self.arm_branch(bus, op),
-            0b111 if op & (1 << 24) != 0 => self.arm_software_interrupt(bus),
-            0b111 if op & 0x10 != 0 && (op >> 8) & 0xF == DEBUG_COPROCESSOR => {
-                self.arm_debug_transfer(bus, op)
-            }
-            _ => self.arm_undefined(bus),
-        }
+impl<const V5: bool> Core<V5> {
+    #[inline(always)]
+    pub(super) fn execute_arm<B: CpuBus>(&mut self, bus: &mut B, op: u32) {
+        let table: &[ArmHandler<V5, B>; decode::ENTRIES] = const { &Self::arm_table::<B>() };
+        table[decode::index(op)](self, bus, op);
+    }
+
+    fn execute_arm_decoded<B: CpuBus>(&mut self, bus: &mut B, op: u32) {
+        Self::arm_handler::<B>(Self::arm_kind(op))(self, bus, op);
     }
 
     fn arm_branch(&mut self, bus: &mut impl CpuBus, op: u32) {
+        if !V5 && !bus.near_jumps() {
+            return self.plain_branch(bus, op);
+        }
         let offset = (((op << 8) as i32) >> 6) as u32;
         let pc = self.regs.r[15];
-        self.prefetch(bus);
+        let target = pc.wrapping_add(offset);
+        let near = if V5 {
+            self.jump_arm_nearby(bus, pc, target)
+        } else {
+            self.jump_v4_nearby(bus, pc, Width::Word, target, Width::Word)
+        };
+        if !near {
+            return self.arm_branch_elsewhere(bus, op);
+        }
+        if op & (1 << 24) != 0 {
+            self.regs.r[14] = pc.wrapping_sub(4);
+        }
+    }
+
+    #[inline(never)]
+    fn arm_branch_elsewhere(&mut self, bus: &mut impl CpuBus, op: u32) {
+        self.plain_branch(bus, op);
+    }
+
+    #[inline(always)]
+    fn plain_branch(&mut self, bus: &mut impl CpuBus, op: u32) {
+        let offset = (((op << 8) as i32) >> 6) as u32;
+        let pc = self.regs.r[15];
+        self.prefetch_arm_before_jump(bus);
         if op & (1 << 24) != 0 {
             self.regs.r[14] = pc.wrapping_sub(4);
         }
         self.regs.r[15] = pc.wrapping_add(offset);
-        self.reload(bus);
+        self.jump_arm_inlined(bus);
+    }
+
+    fn arm_bx_slot<B: CpuBus>(&mut self, bus: &mut B, op: u32) {
+        if op & 0x000F_FF00 == 0x000F_FF00 {
+            self.arm_bx(bus, op);
+        } else {
+            self.execute_arm_decoded(bus, op);
+        }
     }
 
     fn arm_bx(&mut self, bus: &mut impl CpuBus, op: u32) {
+        if !V5 && !bus.near_jumps() {
+            return self.plain_bx(bus, op);
+        }
         let target = self.operand((op & 0xF) as usize);
+        let near = if V5 {
+            self.exchange_nearby(bus, self.regs.r[15], target)
+        } else {
+            self.exchange_v4_nearby(bus, self.regs.r[15], target)
+        };
+        if !near {
+            self.arm_bx_elsewhere(bus, op);
+        }
+    }
+
+    #[inline(never)]
+    fn arm_bx_elsewhere(&mut self, bus: &mut impl CpuBus, op: u32) {
+        self.plain_bx(bus, op);
+    }
+
+    #[inline(always)]
+    fn plain_bx(&mut self, bus: &mut impl CpuBus, op: u32) {
+        let target = self.operand((op & 0xF) as usize);
+        self.prefetch_arm_before_jump(bus);
         self.branch_exchange(bus, target);
     }
 
+    #[inline(always)]
     pub(super) fn branch_exchange(&mut self, bus: &mut impl CpuBus, target: u32) {
-        self.prefetch(bus);
         let cpsr = self.regs.cpsr();
+        self.regs.r[15] = target;
         if target & 1 != 0 {
             self.regs.set_cpsr(cpsr | FLAG_T);
+            self.jump_thumb_inlined(bus);
         } else {
             self.regs.set_cpsr(cpsr & !FLAG_T);
+            self.jump_arm_inlined(bus);
         }
-        self.regs.r[15] = target;
-        self.reload(bus);
     }
 
-    fn arm_software_interrupt(&mut self, bus: &mut impl CpuBus) {
+    fn arm_software_interrupt(&mut self, bus: &mut impl CpuBus, _op: u32) {
         let link = self.regs.r[15].wrapping_sub(4);
-        self.prefetch(bus);
+        self.prefetch_arm(bus);
         self.enter(bus, Exception::SoftwareInterrupt, link);
     }
 
     fn arm_debug_transfer(&mut self, bus: &mut impl CpuBus, op: u32) {
-        self.prefetch(bus);
+        self.prefetch_arm(bus);
         self.cycles += 1;
         self.next_fetch = Access::NonSequential;
         bus.idle();
@@ -106,9 +137,13 @@ impl Cpu {
         self.idle(bus);
     }
 
-    fn arm_undefined(&mut self, bus: &mut impl CpuBus) {
+    fn arm_undefined_word(&mut self, bus: &mut impl CpuBus, _op: u32) {
+        self.arm_undefined(bus);
+    }
+
+    pub(super) fn arm_undefined(&mut self, bus: &mut impl CpuBus) {
         let link = self.regs.r[15].wrapping_sub(4);
-        self.prefetch(bus);
+        self.prefetch_arm(bus);
         self.enter(bus, Exception::Undefined, link);
     }
 
@@ -120,7 +155,7 @@ impl Cpu {
             } else {
                 self.regs.cpsr()
             };
-            self.prefetch(bus);
+            self.prefetch_arm(bus);
             let rd = ((op >> 12) & 0xF) as usize;
             self.regs.r[rd] = if rd == 15 {
                 value.wrapping_add(4)
@@ -140,7 +175,7 @@ impl Cpu {
         if !spsr && self.regs.user_mode() {
             mask &= PSR_FLAGS;
         }
-        self.prefetch(bus);
+        self.prefetch_arm(bus);
         if spsr {
             if let Some(old) = self.regs.spsr() {
                 self.regs.set_spsr((old & !mask) | (value & mask));

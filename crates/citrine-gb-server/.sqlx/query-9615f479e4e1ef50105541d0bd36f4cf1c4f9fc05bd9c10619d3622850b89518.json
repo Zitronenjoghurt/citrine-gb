@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"open!: i64\" FROM gts_sim_records WHERE traded_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "open!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9615f479e4e1ef50105541d0bd36f4cf1c4f9fc05bd9c10619d3622850b89518"
+}

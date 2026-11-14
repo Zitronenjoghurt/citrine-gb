@@ -4,12 +4,23 @@ const EMOJI_CREDIT: &str = "### Emoji\nThe emoji are by RhosGFX, dedicated to th
 
 const EMOJI_FONT: &str = include_str!("../../../../assets/fonts/LICENSE-noto-emoji.txt");
 
+#[cfg(feature = "gba")]
+const MULTIPLY: &str = include_str!(
+    "../../../../../citrine-gb/src/gba/cpu/arm/multiply/LICENSE-zaydlang-multiply.txt"
+);
+
 pub fn build() -> String {
-    format!(
+    let page = format!(
         "{}\n{EMOJI_CREDIT}\nEmoji that have no picture use the Noto Emoji font by Google, under this license:\n\n{}",
         markdown(LICENSE),
         markdown(EMOJI_FONT)
-    )
+    );
+    #[cfg(feature = "gba")]
+    let page = format!(
+        "{page}\n### GBA multiply\nUsed under the zlib license:\n\n{}",
+        markdown(MULTIPLY)
+    );
+    page
 }
 
 fn markdown(text: &str) -> String {
@@ -54,5 +65,15 @@ mod tests {
         assert!(!page.contains("Fluent"));
         assert!(page.contains("Noto Emoji"));
         assert!(page.contains("SIL Open Font License, Version 1.1"));
+    }
+
+    #[cfg(feature = "gba")]
+    #[test]
+    fn the_zaydlang_multiply_license_is_on_the_page() {
+        let page = build();
+        assert!(page.contains("### GBA multiply\n"));
+        assert!(page.contains("Copyright (c) 2024 zaydlang"));
+        assert!(page.contains("1. The origin of this software must not be misrepresented"));
+        assert!(page.contains("3. This notice may not be removed or altered"));
     }
 }

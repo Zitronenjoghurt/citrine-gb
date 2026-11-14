@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.pid AS \"pid!\", r.generation AS \"generation!\", r.record AS \"record!\",\n                      r.received, r.deposited_at AS \"deposited_at!\", r.traded_at, r.traded_with,\n                      r.traded_with_sim AS \"traded_with_sim!\"\n                 FROM gts_records r JOIN gts_profiles p ON p.pid = r.pid\n                WHERE p.account_id = ?1\n                ORDER BY r.deposited_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "pid!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "name": "generation!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "generation"
+          }
+        }
+      },
+      {
+        "name": "record!",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "record"
+          }
+        }
+      },
+      {
+        "name": "received",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "received"
+          }
+        }
+      },
+      {
+        "name": "deposited_at!",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "deposited_at"
+          }
+        }
+      },
+      {
+        "name": "traded_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "traded_at"
+          }
+        }
+      },
+      {
+        "name": "traded_with",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "traded_with"
+          }
+        }
+      },
+      {
+        "name": "traded_with_sim!",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "traded_with_sim"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "1b0fc356882710b4ae4e9bad54f55256e96cf58d70484d43e78a5a7429635b65"
+}

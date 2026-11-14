@@ -5,6 +5,8 @@ use citrine_gb::console::Keys;
 pub enum InputSource {
     Keyboard,
     Touch,
+    Surface,
+    Lid,
     PadButtons(usize),
     PadAxis(usize, PadAxis),
 }
@@ -13,7 +15,7 @@ impl InputSource {
     fn pad(self) -> Option<usize> {
         match self {
             Self::PadButtons(pad) | Self::PadAxis(pad, _) => Some(pad),
-            Self::Keyboard | Self::Touch => None,
+            Self::Keyboard | Self::Touch | Self::Surface | Self::Lid => None,
         }
     }
 }

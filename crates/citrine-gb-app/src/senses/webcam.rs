@@ -1,36 +1,34 @@
 use crate::emulator::gimmicks::camera::Feed;
+use citrine_gb_threads::{Publisher, Reader};
 use nokhwa::Camera;
 use nokhwa::pixel_format::LumaFormat;
 use nokhwa::utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
-type Shared = Arc<Mutex<Option<Result<Feed, String>>>>;
+type Frame = Option<Result<Feed, String>>;
 
 pub struct Webcam {
-    latest: Shared,
+    latest: Reader<Frame>,
     stop: Arc<AtomicBool>,
 }
 
 impl Webcam {
-    pub fn open() -> Result<Self, String> {
-        let latest: Shared = Arc::default();
+    pub fn open(spawner: &citrine_gb_threads::Spawner) -> Self {
+        let (mut publisher, latest) = citrine_gb_threads::latest();
         let stop = Arc::new(AtomicBool::new(false));
-        let (shared, stopped) = (latest.clone(), stop.clone());
-        std::thread::Builder::new()
-            .name("webcam".into())
-            .spawn(move || {
-                if let Err(err) = capture(&shared, &stopped) {
-                    log::warn!("webcam stopped: {err}");
-                    *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(err));
-                }
-            })
-            .map_err(|err| err.to_string())?;
-        Ok(Self { latest, stop })
+        let stopped = stop.clone();
+        spawner.thread("webcam", move || {
+            if let Err(err) = capture(&mut publisher, &stopped) {
+                log::warn!("webcam stopped: {err}");
+                publisher.publish(|frame| *frame = Some(Err(err)));
+            }
+        });
+        Self { latest, stop }
     }
 
     pub fn take_frame(&mut self) -> Option<Result<Feed, String>> {
-        self.latest.lock().ok()?.take()
+        self.latest.read().cloned().flatten()
     }
 }
 
@@ -45,7 +43,7 @@ const MIN_WIDTH: u32 = 128;
 const MIN_HEIGHT: u32 = 112;
 const SMOOTH_FPS: u32 = 15;
 
-fn capture(shared: &Shared, stop: &AtomicBool) -> Result<(), String> {
+fn capture(publisher: &mut Publisher<Frame>, stop: &AtomicBool) -> Result<(), String> {
     allowed()?;
     let mut camera = open_any()?;
     let mut modes = camera
@@ -61,7 +59,7 @@ fn capture(shared: &Shared, stop: &AtomicBool) -> Result<(), String> {
             return Ok(());
         }
         let mut delivered = false;
-        match stream(&mut camera, mode, shared, stop, &mut delivered) {
+        match stream(&mut camera, mode, publisher, stop, &mut delivered) {
             Ok(()) => return Ok(()),
             Err(err) if delivered => return Err(err),
             Err(err) => {
@@ -95,7 +93,7 @@ fn any_of(request: RequestedFormatType) -> RequestedFormat<'static> {
 fn stream(
     camera: &mut Camera,
     mode: CameraFormat,
-    shared: &Shared,
+    publisher: &mut Publisher<Frame>,
     stop: &AtomicBool,
     delivered: &mut bool,
 ) -> Result<(), String> {
@@ -103,14 +101,14 @@ fn stream(
         .set_camera_requset(any_of(RequestedFormatType::Exact(mode)))
         .map_err(|err| err.to_string())?;
     camera.open_stream().map_err(|err| err.to_string())?;
-    let result = frames(camera, shared, stop, delivered);
+    let result = frames(camera, publisher, stop, delivered);
     let _ = camera.stop_stream();
     result
 }
 
 fn frames(
     camera: &mut Camera,
-    shared: &Shared,
+    publisher: &mut Publisher<Frame>,
     stop: &AtomicBool,
     delivered: &mut bool,
 ) -> Result<(), String> {
@@ -131,7 +129,7 @@ fn frames(
         };
         misses = 0;
         *delivered = true;
-        *shared.lock().map_err(|err| err.to_string())? = Some(Ok(frame));
+        publisher.publish(|latest| *latest = Some(Ok(frame)));
     }
     Ok(())
 }

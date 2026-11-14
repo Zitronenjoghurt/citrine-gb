@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pid FROM gts_sims WHERE pid = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "pid",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "pid"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62c2a95915d3570a85549963e9ce36f4ef741b1d5bb0e75dce1fa424a031e51e"
+}

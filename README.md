@@ -52,16 +52,23 @@ alyosha-tas on GBA.
 [tests/ledger/manifest.toml](tests/ledger/manifest.toml) pins every archive and ROM by SHA-256
 with the consoles it has to pass on, and [tests/ledger/passing.txt](tests/ledger/passing.txt) lists
 every ROM and console that passes. The archives are downloaded on the first run into
-`~/.cache/citrine-gb/ledger` (or `$LEDGER_CACHE`) and never committed.
+`~/.cache/citrine-gb/ledger` (or `$LEDGER_CACHE`) and never committed. The DS suites whose
+upstream ships only source (arm7wrestler, nds-interp and the BlocksDS examples) are built by
+`make ledger-nds` from the pinned archives in docker images pinned by digest, which `make ledger`
+and `make ledger-check` run first. A cached build whose ROMs no longer match the manifest is built
+again. Without docker those suites are skipped.
 
 Each ROM is judged the way its suite says: the Fibonacci registers at `LD B, B` for mooneye,
 SameSuite and AGE, the serial text or the result code at `$A000` for blargg, the reference image
 at `LD B, B` for acid2 and Mealybug Tearoom, and the reference image after pressing the subtest's
 buttons and waiting a fixed time for rtc3test. A GBA test ends in a one-instruction loop with the
 number of its first failed test in a register (`r12` for most, 0 when all passed). Images are
-compared as DMG shades or 15-bit colours on CGB and GBA. The GBA lines run with the `gba` feature,
-which `make ledger` turns on; without it they fail with "no GBA core to run it on". With no BIOS
-yet, a GBA test that calls the BIOS stops at its first SWI.
+compared as DMG shades or 15-bit colours on CGB and GBA. The GBA lines run with the `gba` feature
+and the DS lines with `nds`, which `make ledger` turns on; without them they fail with "no GBA core
+to run it on" or "no DS core to run it on". With no BIOS yet, a GBA test that calls the BIOS stops
+at its first SWI. A DS test that prints its results is read through the 8x8 font inside its ROM:
+it passes when its screen shows OK and no line with BAD, FAIL or TIMEOUT, and fails with those
+lines.
 
 `make ledger-bios GBA_BIOS=<file>` runs the GBA lines again on a BIOS dump of your own, booting
 through its intro, and keeps the passes in

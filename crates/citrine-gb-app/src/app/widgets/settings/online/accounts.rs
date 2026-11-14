@@ -2,6 +2,7 @@ use super::JoinForm;
 use crate::app::mobile::kit;
 use crate::app::ui_state::settings::Settings;
 use crate::app::ui_state::ui_theme;
+use crate::app::widgets::text::one_line;
 use crate::app::widgets::{avatar, confirm};
 use crate::icons;
 use crate::online::settings::SavedAccount;
@@ -141,8 +142,8 @@ pub fn account_row(
     let strong = visuals.strong_text_color();
     let weak = visuals.weak_text_color();
     let (name_size, detail_size) = look.sizes(ui);
-    let label = kit::one_line(ui, name, name_size, strong, width);
-    let second = kit::one_line(ui, detail, detail_size, weak, width);
+    let label = one_line(ui, name, name_size, strong, width);
+    let second = one_line(ui, detail, detail_size, weak, width);
     let top = rect.center().y - (label.size().y + second.size().y + 2.0) / 2.0;
     let second_top = top + label.size().y + 2.0;
     ui.painter().galley(pos2(text_left, top), label, strong);
@@ -187,7 +188,7 @@ pub fn action_row(ui: &mut Ui, icon: &str, label: &str, look: Look) -> bool {
         FontId::proportional(size + 2.0),
         color,
     );
-    let text = kit::one_line(ui, label, size, color, rect.width() - AVATAR_COLUMN);
+    let text = one_line(ui, label, size, color, rect.width() - AVATAR_COLUMN);
     let top = rect.center().y - text.size().y / 2.0;
     ui.painter()
         .galley(pos2(left + AVATAR_COLUMN, top), text, color);
@@ -266,7 +267,7 @@ pub fn remove_dialog(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &
         name => name.to_owned(),
     };
     let question = format!(
-        "Remove {who} from this device? You can sign in again only with its sign-in key from another device. Chats stay on the server."
+        "Remove {who} from this device? To sign in again you need its relay ID, which you can copy on another device that is signed in. Chats stay on the server."
     );
     if let Some(yes) = confirm::confirm(ui.ctx(), "online_forget", &question, "Remove") {
         form.forget = None;

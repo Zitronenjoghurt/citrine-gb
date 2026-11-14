@@ -21,10 +21,12 @@ object CrashReport {
     fun find(context: Context): String? {
         val parts = mutableListOf<String>()
         for (name in listOf(RUST_FILE, JAVA_FILE)) {
-            val file = File(context.filesDir, name)
-            if (file.exists()) {
-                runCatching { parts += "== $name\n${file.readText()}" }
-                file.delete()
+            for (dir in listOf(context.cacheDir, context.filesDir)) {
+                val file = File(dir, name)
+                if (file.exists()) {
+                    runCatching { parts += "== $name\n${file.readText()}" }
+                    file.delete()
+                }
             }
         }
         exitInfo(context)?.let { parts += it }

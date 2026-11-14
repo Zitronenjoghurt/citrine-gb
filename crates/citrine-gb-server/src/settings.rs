@@ -15,6 +15,9 @@ pub const PASSWORD: &str = "relay_password";
 pub const SIGN_UPS: &str = "sign_ups";
 pub const INVITES: &str = "invites";
 pub const PICTURES: &str = "discord_pictures";
+pub const GTS: &str = "gts";
+pub const GTS_SIMS: &str = "gts_sims";
+pub const DS_NET: &str = "ds_online";
 pub const QUOTA: &str = "default_quota_mb";
 pub const STORAGE_TOTAL: &str = "storage_total_mb";
 pub const MAX_MESSAGE: &str = "max_message_kb";
@@ -43,6 +46,9 @@ pub struct Effective {
     pub sign_ups: bool,
     pub invites: bool,
     pub pictures: bool,
+    pub gts: bool,
+    pub gts_sims: bool,
+    pub ds_net: bool,
     pub quota_bytes: u64,
     pub storage_total_bytes: u64,
     pub max_message_bytes: u64,
@@ -181,6 +187,9 @@ impl Settings {
             sign_ups: self.panel_flag(SIGN_UPS).unwrap_or(true),
             invites,
             pictures: self.panel_flag(PICTURES).unwrap_or(true),
+            gts: self.panel_flag(GTS).unwrap_or(true),
+            gts_sims: self.panel_flag(GTS_SIMS).unwrap_or(false),
+            ds_net: self.panel_flag(DS_NET).unwrap_or(true),
             quota_bytes: self
                 .panel_number(QUOTA)
                 .or(self.config.storage_mb)

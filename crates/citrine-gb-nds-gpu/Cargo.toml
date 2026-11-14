@@ -1,0 +1,16 @@
+[package]
+name = "citrine-gb-nds-gpu"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+citrine-gb = { workspace = true, features = ["nds"] }
+bytemuck = "1.25.0"
+wgpu = "27.0.1"
+
+[dev-dependencies]
+naga = { version = "27.0.3", features = ["glsl-out", "wgsl-in"] }
+png = "0.18.1"
+pollster = "0.4.0"

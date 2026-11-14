@@ -67,7 +67,7 @@ impl WildTables {
                 ..Self::default()
             },
             Generation::Two => gen2(rom).unwrap_or_default(),
-            Generation::Three => Self::default(),
+            Generation::Three | Generation::Four | Generation::Five => Self::default(),
         }
     }
 
@@ -248,4 +248,74 @@ fn gen2(rom: &[u8]) -> Option<WildTables> {
         water,
         ..WildTables::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::{crystal_world, location, red_world};
+    use crate::{Encounter, Method, TimeOfDay, WildList};
+
+    fn encounter(species: u16, min_level: u8, max_level: u8, percent: u8) -> Encounter {
+        Encounter {
+            species,
+            min_level,
+            max_level,
+            percent,
+        }
+    }
+
+    #[test]
+    fn gen1_wild_pokemon_come_from_the_map_table() {
+        let tables = red_world();
+        assert_eq!(
+            tables.wild(&location(0, 0x0C, None), None),
+            vec![WildList {
+                method: Method::Grass,
+                encounters: vec![encounter(0x24, 2, 7, 55), encounter(0xA5, 3, 6, 45)],
+            }]
+        );
+        assert!(tables.wild(&location(0, 0x00, None), None).is_empty());
+        assert!(tables.wild(&location(0, 0x80, None), None).is_empty());
+    }
+
+    #[test]
+    fn gen2_wild_pokemon_follow_the_time_of_day() {
+        let tables = crystal_world();
+        let here = location(24, 2, None);
+        let water = WildList {
+            method: Method::Water,
+            encounters: vec![encounter(0x81, 15, 20, 90), encounter(0x48, 20, 20, 10)],
+        };
+        assert_eq!(
+            tables.wild(&here, Some(TimeOfDay::Day)),
+            vec![
+                WildList {
+                    method: Method::Grass,
+                    encounters: vec![
+                        encounter(0x10, 3, 6, 59),
+                        encounter(0x13, 3, 5, 40),
+                        encounter(0xA1, 7, 7, 1)
+                    ],
+                },
+                water.clone()
+            ]
+        );
+        assert_eq!(
+            tables.wild(&here, Some(TimeOfDay::Night))[0].encounters,
+            vec![encounter(0xA3, 3, 9, 100)]
+        );
+        assert_eq!(
+            tables.wild(&here, Some(TimeOfDay::Morning))[0].encounters,
+            vec![encounter(0x10, 2, 2, 100)]
+        );
+        assert_eq!(
+            tables.wild(&here, None),
+            tables.wild(&here, Some(TimeOfDay::Day))
+        );
+        assert_eq!(
+            tables.wild(&location(1, 1, None), None)[0].encounters,
+            vec![encounter(0x13, 5, 5, 100)]
+        );
+        assert!(tables.wild(&location(2, 1, None), None).is_empty());
+    }
 }

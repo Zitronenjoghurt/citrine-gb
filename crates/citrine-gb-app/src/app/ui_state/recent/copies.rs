@@ -10,7 +10,7 @@ pub fn copy_name(key: &str, name: &str) -> String {
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
-        .filter(|e| e == "gbc" || e == "gba")
+        .filter(|e| matches!(e.as_str(), "gbc" | "gba" | "nds"))
         .unwrap_or_else(|| "gb".to_owned());
     format!("{key}.{extension}")
 }
@@ -29,11 +29,7 @@ mod native {
 
     impl Default for RomCopies {
         fn default() -> Self {
-            #[cfg(test)]
-            let root = std::env::temp_dir().join(format!("citrine-test-{}", std::process::id()));
-            #[cfg(not(test))]
-            let root = crate::storage::data_dir();
-            Self::at(root.join("roms"))
+            Self::at(crate::storage::data_dir().join("roms"))
         }
     }
 
@@ -55,7 +51,7 @@ mod native {
         }
 
         pub fn is_gone(&self, path: &Path) -> bool {
-            !path.is_file()
+            !crate::utils::zip_games::on_disk(path)
         }
 
         pub fn drop_copies<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) {
@@ -96,7 +92,7 @@ mod web {
         fn default() -> Self {
             let keys = Rc::new(RefCell::new(None));
             let loading = keys.clone();
-            wasm_bindgen_futures::spawn_local(async move {
+            citrine_gb_threads::spawn_local(async move {
                 match all_keys().await {
                     Ok(found) => *loading.borrow_mut() = Some(found),
                     Err(err) => log::warn!("couldn't list the kept ROMs: {err:?}"),
@@ -120,7 +116,7 @@ mod web {
                 }
                 let key = key.to_owned();
                 let bytes = js_sys::Uint8Array::from(data);
-                wasm_bindgen_futures::spawn_local(async move {
+                citrine_gb_threads::spawn_local(async move {
                     if let Err(err) = put(&key, bytes.into()).await {
                         log::warn!("couldn't keep a ROM copy: {err:?}");
                     }
@@ -147,17 +143,21 @@ mod web {
                 if let Some(keys) = self.keys.borrow_mut().as_mut() {
                     keys.remove(&key);
                 }
-                wasm_bindgen_futures::spawn_local(async move {
+                citrine_gb_threads::spawn_local(async move {
                     let _ = remove(&key).await;
                 });
             }
+        }
+
+        pub fn count(&self) -> usize {
+            self.keys.borrow().as_ref().map_or(0, |keys| keys.len())
         }
 
         pub fn clear(&self) {
             if let Some(keys) = self.keys.borrow_mut().as_mut() {
                 keys.clear();
             }
-            wasm_bindgen_futures::spawn_local(async move {
+            citrine_gb_threads::spawn_local(async move {
                 let _ = clear().await;
             });
         }
@@ -166,10 +166,12 @@ mod web {
             let Some(key) = key_of(path).map(str::to_owned) else {
                 return;
             };
-            wasm_bindgen_futures::spawn_local(async move {
+            let path = path.to_path_buf();
+            citrine_gb_threads::spawn_local(async move {
                 match get(&key).await {
                     Ok(Some(data)) => {
-                        let _ = tx.send(PickedFile { name, data });
+                        let seen = crate::rom_ids::Seen::kept(&path, data.len());
+                        let _ = tx.send(PickedFile { name, data, seen });
                     }
                     Ok(None) => log::warn!("the kept ROM {key} is gone"),
                     Err(err) => log::warn!("couldn't read a kept ROM: {err:?}"),
@@ -213,14 +215,14 @@ mod web {
         finished(&tx).await
     }
 
-    async fn get(key: &str) -> Result<Option<Vec<u8>>, JsValue> {
+    async fn get(key: &str) -> Result<Option<std::sync::Arc<[u8]>>, JsValue> {
         let db = open().await?;
         let tx = db.transaction_with_str(ROMS)?;
         let value = wait(&tx.object_store(ROMS)?.get(&key.into())?).await?;
         Ok(value
             .dyn_into::<js_sys::Uint8Array>()
             .ok()
-            .map(|bytes| bytes.to_vec()))
+            .map(|bytes| crate::utils::file_loader::shared_bytes(&bytes)))
     }
 }
 
@@ -233,6 +235,7 @@ mod tests {
         assert_eq!(copy_name("KEY", "Game.GBA"), "KEY.gba");
         assert_eq!(copy_name("KEY", "Game.gbc"), "KEY.gbc");
         assert_eq!(copy_name("KEY", "Game.gb"), "KEY.gb");
+        assert_eq!(copy_name("KEY", "Game.nds"), "KEY.nds");
         assert_eq!(copy_name("KEY", "Game"), "KEY.gb");
     }
 }

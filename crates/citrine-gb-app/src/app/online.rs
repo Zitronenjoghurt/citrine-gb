@@ -2,11 +2,64 @@ use super::Citrine;
 use super::tabs;
 use crate::app::tabs::Tab;
 use crate::app::ui_state::synced;
-use crate::play::{MyGame, Stage};
-use crate::utils::save_files::ROM_FILTER;
+use crate::app::widgets::snapshots::{FailedStep, failed_message};
+use crate::play::{Ending, MyGame, Stage};
+use crate::utils::save_files::LINK_ROM_FILTER;
 use egui::Context;
 
 impl Citrine {
+    fn tell_gts_trades(&mut self) {
+        let traded = self.online.take_gts_traded();
+        #[cfg(feature = "nds")]
+        if !traded.is_empty() {
+            self.ui
+                .gts
+                .learn_names(&self.game_info, &self.emulator.store);
+        }
+        #[cfg(feature = "nds")]
+        for deposit in traded {
+            if let Some(note) = self.ui.gts.traded_note(&deposit) {
+                self.toasts
+                    .success(note)
+                    .button("Open", super::events::AppEvent::OpenTab { tab: Tab::Gts });
+            }
+        }
+        let sim_notes = self.online.take_gts_sim_notes();
+        #[cfg(feature = "nds")]
+        for note in sim_notes {
+            let text = tabs::gts::sim_note(&note);
+            self.toasts
+                .info(text)
+                .button("Open", super::events::AppEvent::OpenTab { tab: Tab::Gts });
+        }
+        #[cfg(not(feature = "nds"))]
+        drop((traded, sim_notes));
+    }
+
+    #[cfg(ds_wifi)]
+    fn tell_ds_net_refusal(&mut self) {
+        if let Some(refusal) = self.emulator.ds_wifi.take_refusal() {
+            self.show_ds_net_refusal(refusal);
+        }
+    }
+
+    #[cfg(ds_wifi)]
+    fn show_ds_net_refusal(&mut self, refusal: crate::ds_wifi::Refusal) {
+        use crate::ds_wifi::Refusal;
+        let text = match refusal {
+            Refusal::SignedOut => {
+                "DS online play goes through your relay. Sign in, or turn on Direct connection."
+            }
+            Refusal::RelayOff => {
+                "This relay doesn't offer DS online play. Turn on Direct connection to play without it."
+            }
+        };
+        self.toasts
+            .error(text)
+            .button("Settings", super::events::AppEvent::FindDsDirect)
+            .needs_action();
+    }
+
     pub(super) fn update_online(&mut self, ctx: &Context) {
         let now = web_time::Instant::now();
         let touched = ctx.input(|i| !i.events.is_empty() || i.pointer.any_down());
@@ -15,7 +68,16 @@ impl Citrine {
             self.activity.last_input = now;
         }
         self.activity.held = held;
-        let away = now.duration_since(self.activity.last_input) >= crate::online::AWAY_AFTER;
+        #[cfg(target_os = "android")]
+        if crate::platform::android::lifecycle::take_shown() {
+            self.activity.last_input = now;
+        }
+        #[cfg(target_os = "android")]
+        let gone = !crate::platform::android::lifecycle::visible();
+        #[cfg(not(target_os = "android"))]
+        let gone = false;
+        let away =
+            gone || now.duration_since(self.activity.last_input) >= crate::online::AWAY_AFTER;
         let game = self
             .emulator
             .open_game()
@@ -32,9 +94,31 @@ impl Citrine {
         self.online
             .set_cloud(settings.cloud_owner(), settings.cloud_saves);
         let sync = settings.cloud_saves && settings.sync_settings;
+        let typing = settings.typing_indicators;
+        self.update_push();
         self.online.update(now);
-        self.online
-            .set_typing_indicators(settings.typing_indicators, now);
+        #[cfg(ds_wifi)]
+        self.emulator.ds_wifi.pump(&mut self.online);
+        #[cfg(ds_wifi)]
+        self.tell_ds_net_refusal();
+        if cfg!(feature = "nds") && self.ui.settings.ds_online.gts_here() {
+            self.online.gts_want_mine();
+        }
+        self.tell_gts_trades();
+        #[cfg(ds_wifi)]
+        {
+            let deposits = self.online.gts_mine().map_or(0, <[_]>::len);
+            if self
+                .ui
+                .gts
+                .switch
+                .guard(ctx, &mut self.ui.settings.ds_online, deposits)
+            {
+                self.ui.settings.dirty = true;
+            }
+        }
+        self.follow_push(now);
+        self.online.set_typing_indicators(typing, now);
         self.online.compose(self.ui.friends.chat.composing(), now);
         if self
             .online
@@ -47,7 +131,21 @@ impl Citrine {
         self.settle_cloud_game(now);
         self.play
             .set_input_delay(self.ui.settings.online.input_delay.frames());
-        self.play.update(&mut self.online, now);
+        #[cfg(feature = "nds")]
+        self.play
+            .set_ds_user(self.emulator.ds_user(self.play.ds_mac()));
+        tabs::playing::refresh_shelf(&mut self.play, &mut self.ui.playing, &self.ui.recent);
+        self.play.update(&mut self.online, &self.threads, now);
+        self.follow_opened_invite(now);
+        if let Some(invite) = self.ui.playing.join_looking.take()
+            && self
+                .play
+                .invites()
+                .iter()
+                .any(|i| i.session == invite.session)
+        {
+            self.answer_ask(&invite);
+        }
 
         if let Some(joined) = self.online.take_joined() {
             let online = &mut self.ui.settings.online;
@@ -120,7 +218,9 @@ impl Citrine {
             }
             Some(session) => {
                 let friend = session.friend();
+                let title = tabs::playing::game_title(session);
                 let played = session.mode().is_some();
+                let failure = session.failure().map(str::to_owned);
                 let ending = match session.stage() {
                     Stage::Ended(ending) => Some(ending),
                     _ => None,
@@ -136,14 +236,17 @@ impl Citrine {
                 }
                 if let Some(ending) = ending {
                     let name = tabs::playing::member_name(&self.play, &self.online, friend);
-                    self.ui.playing.ended =
-                        tabs::playing::ending_line(&name, ending, played).map(|line| {
-                            tabs::playing::Ended {
-                                friend,
-                                line,
-                                paused,
-                            }
-                        });
+                    let line = match failure {
+                        Some(why) if ending == Ending::Failed => {
+                            Some(tabs::playing::failed_line(&name, &why))
+                        }
+                        _ => tabs::playing::ending_line(&name, &title, ending, played),
+                    };
+                    self.ui.playing.ended = line.map(|line| tabs::playing::Ended {
+                        friend,
+                        line,
+                        paused,
+                    });
                 }
                 self.ui.playing.asking_stop = false;
                 self.ui.playing.shown = false;
@@ -195,8 +298,8 @@ impl Citrine {
             self.try_start_audio();
             crate::utils::file_loader::FileLoader::new()
                 .title("Open your copy of the game")
-                .add_filter(ROM_FILTER.0, ROM_FILTER.1)
-                .dispatch(self.files.play_rom_tx.clone());
+                .add_filter(LINK_ROM_FILTER.0, LINK_ROM_FILTER.1)
+                .dispatch(&self.files.spawner, self.files.play_rom_tx.clone());
         }
         let Some((target, pick)) = tabs::playing::picker(
             ctx,
@@ -220,12 +323,17 @@ impl Citrine {
                 self.try_start_audio();
                 crate::utils::file_loader::FileLoader::new()
                     .title("Open a game to play together")
-                    .add_filter(ROM_FILTER.0, ROM_FILTER.1)
-                    .dispatch(self.files.play_rom_tx.clone());
+                    .add_filter(LINK_ROM_FILTER.0, LINK_ROM_FILTER.1)
+                    .dispatch(&self.files.spawner, self.files.play_rom_tx.clone());
             }
             tabs::playing::Pick::Theirs => {
                 if let tabs::playing::PickFor::Join(invite) = target {
-                    self.answer_ask(&invite);
+                    self.join_theirs(&invite);
+                }
+            }
+            tabs::playing::Pick::Download => {
+                if let tabs::playing::PickFor::Join(invite) = target {
+                    self.join_with(&invite, MyGame::Download);
                 }
             }
             tabs::playing::Pick::Nothing => match target {
@@ -295,9 +403,10 @@ impl Citrine {
         let name = self.emulator.snapshot_name(slot);
         match self.emulator.load_snapshot(slot) {
             Ok(_) => self.toasts.success(format!("Loaded {name}")),
-            Err(err) => self
-                .toasts
-                .error(format!("Couldn't load the state: {err:?}")),
+            Err(err) => {
+                self.toasts
+                    .error(failed_message(FailedStep::Load, &format!("'{name}'"), &err))
+            }
         };
         self.ui.snapshots.invalidate();
     }
@@ -329,6 +438,20 @@ impl Citrine {
 
     pub(super) fn answer_ask(&mut self, invite: &crate::play::IncomingInvite) {
         let joined = tabs::playing::join(
+            &mut self.play,
+            &mut self.online,
+            &mut self.emulator,
+            &mut self.ui.playing,
+            &self.ui.recent,
+            invite,
+        );
+        if !joined {
+            self.toasts.error("Couldn't answer the invite");
+        }
+    }
+
+    fn join_theirs(&mut self, invite: &crate::play::IncomingInvite) {
+        let joined = tabs::playing::join_theirs(
             &mut self.play,
             &mut self.online,
             &mut self.emulator,

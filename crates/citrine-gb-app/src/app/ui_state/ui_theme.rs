@@ -165,21 +165,21 @@ const CODE_DARK: [Color32; 15] = [
 ];
 
 const CODE_LIGHT: [Color32; 15] = [
-    Color32::from_rgb(0, 150, 0),
+    Color32::from_rgb(0, 105, 0),
     Color32::from_rgb(0, 0, 200),
-    Color32::from_rgb(200, 0, 0),
+    Color32::from_rgb(187, 0, 0),
     Color32::from_rgb(120, 0, 150),
-    Color32::from_rgb(0, 120, 120),
-    Color32::from_rgb(160, 80, 0),
+    Color32::from_rgb(0, 103, 104),
+    Color32::from_rgb(146, 68, 0),
     Color32::from_rgb(180, 0, 120),
     Color32::from_rgb(100, 100, 100),
-    Color32::RED,
-    Color32::from_rgb(180, 100, 30),
-    Color32::from_rgb(130, 130, 0),
-    Color32::from_rgb(0, 120, 180),
-    Color32::from_rgb(30, 130, 30),
+    Color32::from_rgb(214, 0, 0),
+    Color32::from_rgb(163, 85, 1),
+    Color32::from_rgb(110, 109, 0),
+    Color32::from_rgb(0, 111, 170),
+    Color32::from_rgb(19, 123, 21),
     Color32::from_rgb(140, 30, 160),
-    Color32::from_rgb(0, 140, 120),
+    Color32::from_rgb(0, 120, 101),
 ];
 
 fn catppuccin_code(theme: catppuccin_egui::Theme) -> CodeColours {
@@ -215,6 +215,7 @@ fn dark() -> egui::Visuals {
 
 const DARK_TEXT: Color32 = Color32::from_gray(170);
 const WEAK_CONTRAST: f32 = 4.5;
+const EDGE_CONTRAST: f32 = 3.0;
 
 fn luminance(c: Color32) -> f32 {
     let channel = |v: u8| {
@@ -228,10 +229,72 @@ fn luminance(c: Color32) -> f32 {
     0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
 }
 
-fn contrast(a: Color32, b: Color32) -> f32 {
+pub fn box_edge(visuals: &egui::Visuals) -> Color32 {
+    let ground = visuals.panel_fill;
+    let ink = visuals.text_color();
+    (0..=100)
+        .map(|step| ground.lerp_to_gamma(ink, step as f32 / 100.0))
+        .find(|edge| contrast(*edge, ground) >= EDGE_CONTRAST)
+        .unwrap_or(ink)
+}
+
+pub(crate) fn contrast(a: Color32, b: Color32) -> f32 {
     let (a, b) = (luminance(a), luminance(b));
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
+
+pub fn pc_fill(visuals: &egui::Visuals, colours: &CodeColours) -> Color32 {
+    let ground = visuals.panel_fill;
+    let inks: Vec<Color32> = colours
+        .0
+        .iter()
+        .copied()
+        .chain([visuals.text_color(), visuals.weak_text_color()])
+        .collect();
+    (0..=PC_TINT_STEPS)
+        .rev()
+        .map(|step| ground.lerp_to_gamma(brand(visuals), step as f32 / 100.0))
+        .find(|fill| {
+            inks.iter().all(|ink| {
+                contrast(*ink, *fill) >= (PC_KEEP * contrast(*ink, ground)).min(WEAK_CONTRAST)
+            })
+        })
+        .unwrap_or(ground)
+}
+
+pub fn weak_on(visuals: &egui::Visuals, fill: Color32) -> Color32 {
+    let weak = visuals.weak_text_color();
+    if fill.a() < u8::MAX {
+        return weak;
+    }
+    (0..=50)
+        .map(|step| weak.lerp_to_gamma(visuals.text_color(), step as f32 / 50.0))
+        .find(|ink| contrast(*ink, fill) >= WEAK_CONTRAST)
+        .unwrap_or(visuals.text_color())
+}
+
+pub fn hover_fill(visuals: &egui::Visuals, colours: &CodeColours) -> Color32 {
+    let ground = visuals.panel_fill;
+    let hover = visuals.widgets.hovered.weak_bg_fill;
+    let inks: Vec<Color32> = colours
+        .0
+        .iter()
+        .copied()
+        .chain([visuals.text_color()])
+        .collect();
+    (0..=HOVER_STEPS)
+        .map(|step| hover.lerp_to_gamma(ground, f32::from(step) / f32::from(HOVER_STEPS)))
+        .find(|fill| {
+            inks.iter().all(|ink| {
+                contrast(*ink, *fill) >= (PC_KEEP * contrast(*ink, ground)).min(WEAK_CONTRAST)
+            })
+        })
+        .unwrap_or(ground)
+}
+
+const HOVER_STEPS: u8 = 20;
+const PC_TINT_STEPS: u8 = 25;
+const PC_KEEP: f32 = 0.9;
 
 fn stripe(visuals: &egui::Visuals) -> Color32 {
     let faint = visuals.faint_bg_color;
@@ -277,4 +340,209 @@ impl Display for UiTheme {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::{
+        BRAND, BRAND_DARK, BRAND_MARK, DARK_ERROR, ON_BRAND, ON_DANGER, UiTheme, brand, contrast,
+        danger, dark, focus_ring, hover_fill, pc_fill, text_grounds, weak_on,
+    };
+    use citrine_gb::debug::code::{InstrClass, OperandKind};
+    use egui::Color32;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn red_text_reads_on_dark_buttons() {
+        let visuals = dark();
+        assert_eq!(visuals.error_fg_color, DARK_ERROR);
+        for fill in [
+            visuals.panel_fill,
+            visuals.widgets.inactive.weak_bg_fill,
+            visuals.widgets.hovered.weak_bg_fill,
+        ] {
+            assert!(contrast(DARK_ERROR, fill) >= 4.5, "{fill:?}");
+        }
+    }
+
+    #[test]
+    fn the_dark_red_keeps_the_red_hue() {
+        assert_eq!(DARK_ERROR.r(), 255);
+        assert_eq!(DARK_ERROR.g(), DARK_ERROR.b());
+    }
+
+    #[test]
+    fn every_theme_tells_code_classes_and_operands_apart() {
+        for theme in UiTheme::iter() {
+            let colours = theme.code_colours();
+            let classes: Vec<_> = InstrClass::ALL.map(|c| colours.class(c)).into();
+            let operands: Vec<_> = OperandKind::ALL.map(|k| colours.operand(k)).into();
+            for list in [classes, operands] {
+                for (i, a) in list.iter().enumerate() {
+                    assert!(!list[i + 1..].contains(a), "{theme} repeats {a:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn weak_text_reads_in_every_theme() {
+        for theme in UiTheme::iter() {
+            let visuals = themed(theme);
+            let weak = visuals.weak_text_color();
+            for ground in text_grounds(&visuals) {
+                let ratio = contrast(weak, ground);
+                assert!(ratio >= 4.5, "{theme} weak {weak:?} on {ground:?}: {ratio}");
+            }
+            assert!(
+                contrast(visuals.text_color(), visuals.panel_fill)
+                    > contrast(weak, visuals.panel_fill) + 0.5,
+                "{theme} weak text looks like body text"
+            );
+        }
+    }
+
+    fn themed(theme: UiTheme) -> egui::Visuals {
+        let ctx = egui::Context::default();
+        theme.apply(&ctx);
+        ctx.style().visuals.clone()
+    }
+
+    #[test]
+    fn every_theme_selects_slides_and_toggles_in_the_brand_colour() {
+        for theme in UiTheme::iter() {
+            let visuals = themed(theme);
+            let wanted = if visuals.dark_mode { BRAND_DARK } else { BRAND };
+            assert_eq!(visuals.selection.bg_fill, wanted, "{theme} selection");
+            assert_eq!(brand(&visuals), wanted, "{theme} buttons");
+            assert!(visuals.slider_trailing_fill, "{theme} slider fill");
+        }
+    }
+
+    #[test]
+    fn selected_text_and_the_focus_ring_read_in_every_theme() {
+        for theme in UiTheme::iter() {
+            let visuals = themed(theme);
+            let ink = visuals.selection.stroke.color;
+            assert_eq!(ink, ON_BRAND, "{theme}");
+            let ratio = contrast(ink, visuals.selection.bg_fill);
+            assert!(ratio >= 4.5, "{theme} selected text: {ratio}");
+            let field = visuals.text_edit_bg_color();
+            let wanted = if visuals.dark_mode {
+                BRAND_DARK
+            } else {
+                BRAND_MARK
+            };
+            assert_eq!(focus_ring(&visuals), wanted, "{theme} focus ring colour");
+            let ring = contrast(focus_ring(&visuals), field);
+            assert!(ring >= 3.0, "{theme} focus ring: {ring}");
+        }
+    }
+
+    #[test]
+    fn phone_row_values_read_on_cards() {
+        for (theme, least) in [(super::UiTheme::Dark, 4.5), (super::UiTheme::Light, 3.0)] {
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let visuals = ctx.style().visuals.clone();
+            let card = crate::app::mobile::kit::card_fill(&visuals);
+            let value = crate::app::mobile::kit::value_color(&visuals);
+            assert!(
+                contrast(value, card) >= least,
+                "{theme}: {value:?} on {card:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_buttons_read_in_every_theme() {
+        for theme in UiTheme::iter() {
+            let visuals = themed(theme);
+            let ratio = contrast(ON_DANGER, danger(&visuals));
+            assert!(ratio >= 4.5, "{theme} danger label: {ratio}");
+        }
+    }
+
+    #[test]
+    fn the_pc_row_keeps_every_code_colour_readable_and_still_shows() {
+        for theme in UiTheme::iter() {
+            let visuals = themed(theme);
+            let colours = theme.code_colours();
+            let fill = pc_fill(&visuals, &colours);
+            assert_ne!(fill, visuals.panel_fill, "{theme} PC row has no tint");
+            let inks = InstrClass::ALL
+                .map(|c| colours.class(c))
+                .into_iter()
+                .chain(OperandKind::ALL.map(|k| colours.operand(k)))
+                .chain([visuals.text_color(), visuals.weak_text_color()]);
+            for ink in inks {
+                let plain = contrast(ink, visuals.panel_fill);
+                let on_pc = contrast(ink, fill);
+                assert!(
+                    on_pc >= (0.9 * plain).min(4.5),
+                    "{theme} {ink:?} on the PC row {fill:?}: {on_pc} from {plain}"
+                );
+            }
+            assert!(
+                contrast(super::brand_mark(&visuals), visuals.panel_fill) >= 3.0,
+                "{theme} PC outline fades"
+            );
+        }
+    }
+
+    #[test]
+    fn light_code_reads_on_plain_pc_and_hovered_rows() {
+        let theme = UiTheme::Light;
+        let visuals = themed(theme);
+        let colours = theme.code_colours();
+        let code: Vec<_> = InstrClass::ALL
+            .map(|c| colours.class(c))
+            .into_iter()
+            .chain(OperandKind::ALL.map(|k| colours.operand(k)))
+            .chain([visuals.text_color()])
+            .collect();
+        let grounds = text_grounds(&visuals)
+            .into_iter()
+            .chain([pc_fill(&visuals, &colours), hover_fill(&visuals, &colours)]);
+        for ground in grounds {
+            let inks = code.iter().copied().chain([weak_on(&visuals, ground)]);
+            for ink in inks {
+                let ratio = contrast(ink, ground);
+                assert!(ratio >= 4.5, "{ink:?} on {ground:?}: {ratio}");
+            }
+        }
+    }
+
+    #[test]
+    fn weak_text_on_a_plain_row_is_the_theme_weak_text() {
+        for theme in UiTheme::iter() {
+            let visuals = themed(theme);
+            let weak = visuals.weak_text_color();
+            assert_eq!(weak_on(&visuals, visuals.panel_fill), weak, "{theme}");
+            assert_eq!(weak_on(&visuals, Color32::TRANSPARENT), weak, "{theme}");
+        }
+    }
+
+    #[test]
+    fn the_hovered_row_keeps_code_readable_and_still_shows() {
+        for theme in UiTheme::iter() {
+            let visuals = themed(theme);
+            let colours = theme.code_colours();
+            let fill = hover_fill(&visuals, &colours);
+            assert!(
+                contrast(fill, visuals.panel_fill) >= 1.05,
+                "{theme} hovered row {fill:?} fades into the panel"
+            );
+            let inks = InstrClass::ALL
+                .map(|c| colours.class(c))
+                .into_iter()
+                .chain(OperandKind::ALL.map(|k| colours.operand(k)))
+                .chain([visuals.text_color(), weak_on(&visuals, fill)]);
+            for ink in inks {
+                let plain = contrast(ink, visuals.panel_fill);
+                let hovered = contrast(ink, fill);
+                assert!(
+                    hovered >= (0.9 * plain).min(4.5),
+                    "{theme} {ink:?} on the hovered row {fill:?}: {hovered} from {plain}"
+                );
+            }
+        }
+    }
+}

@@ -3,7 +3,7 @@ mod room;
 pub use room::{Out, Person, ROOM_PROTOCOL, To};
 
 use citrine_gb_net::{
-    EndReason, ErrorCode, Notice, OnlineId, Presence, Sealed, ServerMsg, SessionId,
+    EndReason, ErrorCode, Notice, OnlineId, Presence, Refusal, Sealed, ServerMsg, SessionId,
 };
 use room::{Member, Room, is_room_msg};
 use std::collections::{HashMap, HashSet};
@@ -93,7 +93,20 @@ impl Conn {
     }
 
     fn push(&self, msg: ServerMsg) {
-        if !self.outbox.try_push(msg) {
+        let msg = match msg {
+            ServerMsg::SessionEnded { session, reason } => ServerMsg::SessionEnded {
+                session,
+                reason: reason.for_protocol(self.protocol),
+            },
+            ServerMsg::MemberGone { room, who, reason } => ServerMsg::MemberGone {
+                room,
+                who,
+                reason: reason.for_protocol(self.protocol),
+            },
+            msg => msg,
+        };
+        if !self.outbox.try_push(msg) && self.close.borrow().is_none() {
+            log::info!("relay connection {}: its send queue is full", self.conn_id);
             self.close(Notice::Disconnected);
         }
     }
@@ -126,6 +139,19 @@ fn merged(conns: &[Conn]) -> Option<Presence> {
 struct State {
     conns: HashMap<i64, Vec<Conn>>,
     rooms: HashMap<SessionId, Room>,
+    open: HashMap<SessionId, Open>,
+}
+
+struct Open {
+    from: OnlineId,
+    to: i64,
+    sealed: Sealed,
+}
+
+fn still_open(rooms: &HashMap<SessionId, Room>, id: SessionId, to: i64) -> bool {
+    rooms
+        .get(&id)
+        .is_some_and(|r| !r.started && r.invites.iter().any(|i| i.to == to && !i.room))
 }
 
 pub struct Hub {
@@ -200,25 +226,7 @@ impl Hub {
             }
             if last {
                 let before = room.invites.len();
-                let gone: Vec<_> = room
-                    .invites
-                    .iter()
-                    .filter(|i| i.to == user)
-                    .copied()
-                    .collect();
-                room.invites.retain(|i| i.to != user);
-                for invite in gone {
-                    if !invite.room && !room.started && room.invites.is_empty() {
-                        out.push((
-                            To::Conn(invite.from, invite.from_conn),
-                            ServerMsg::SessionEnded {
-                                session: id,
-                                reason: EndReason::Disconnected,
-                            },
-                        ));
-                        room.members.clear();
-                    }
-                }
+                room.invites.retain(|i| i.to != user || !i.room);
                 if before != room.invites.len() && !room.started && room.invites.is_empty() {
                     room.members.clear();
                 }
@@ -277,6 +285,10 @@ impl Hub {
 
     pub fn is_online(&self, user: i64) -> bool {
         self.state().conns.contains_key(&user)
+    }
+
+    pub fn active(&self, user: i64) -> bool {
+        self.presence(user) == Some(Presence::Online { away: false })
     }
 
     pub fn presence(&self, user: i64) -> Option<Presence> {
@@ -423,6 +435,58 @@ impl Hub {
         Some((id, replaced))
     }
 
+    pub fn keep_open(&self, id: SessionId, from: OnlineId, to: i64, sealed: Sealed) {
+        let mut guard = self.state();
+        let state = &mut *guard;
+        state
+            .open
+            .retain(|&id, open| still_open(&state.rooms, id, open.to));
+        state.open.insert(id, Open { from, to, sealed });
+    }
+
+    pub fn open_invites(&self, user: i64) -> Vec<ServerMsg> {
+        let state = self.state();
+        state
+            .open
+            .iter()
+            .filter(|(id, open)| open.to == user && still_open(&state.rooms, **id, user))
+            .map(|(&session, open)| ServerMsg::Invite {
+                session,
+                from: open.from,
+                sealed: open.sealed.clone(),
+            })
+            .collect()
+    }
+
+    pub fn end_unanswered(&self, id: SessionId) -> Out {
+        let mut state = self.state();
+        let Some(open) = state.open.remove(&id) else {
+            return Vec::new();
+        };
+        if !still_open(&state.rooms, id, open.to) {
+            return Vec::new();
+        }
+        let Some(room) = state.rooms.remove(&id) else {
+            return Vec::new();
+        };
+        let ended = ServerMsg::SessionEnded {
+            session: id,
+            reason: EndReason::NoAnswer,
+        };
+        let mut out: Out = room
+            .invites
+            .iter()
+            .filter(|i| !i.room)
+            .map(|i| (To::Conn(i.from, i.from_conn), ended.clone()))
+            .collect();
+        out.push((To::User(open.to), ended));
+        out
+    }
+
+    pub fn refuse(&self, id: SessionId, guest: i64, why: Refusal) -> Result<Out, ErrorCode> {
+        self.reply(id, guest, 0, false, why.reason(), false, 0)
+    }
+
     pub fn room_users(&self, id: SessionId) -> Vec<i64> {
         let state = self.state();
         state
@@ -496,6 +560,28 @@ impl Hub {
         guest: i64,
         guest_conn: u64,
         accept: bool,
+        blocked: bool,
+        max: usize,
+    ) -> Result<Out, ErrorCode> {
+        self.reply(
+            id,
+            guest,
+            guest_conn,
+            accept,
+            EndReason::Declined,
+            blocked,
+            max,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "answer and refuse share it")]
+    fn reply(
+        &self,
+        id: SessionId,
+        guest: i64,
+        guest_conn: u64,
+        accept: bool,
+        declined: EndReason,
         blocked: bool,
         max: usize,
     ) -> Result<Out, ErrorCode> {
@@ -573,7 +659,7 @@ impl Hub {
                     To::Conn(invite.from, invite.from_conn),
                     ServerMsg::SessionEnded {
                         session: id,
-                        reason: EndReason::Declined,
+                        reason: declined,
                     },
                 ));
             }
@@ -1041,8 +1127,15 @@ mod tests {
         assert_eq!(hub.session_count(), 0);
     }
 
+    fn sealed() -> Sealed {
+        Sealed {
+            nonce: Default::default(),
+            ciphertext: vec![1, 2, 3],
+        }
+    }
+
     #[test]
-    fn an_open_invite_ends_when_the_guests_last_device_leaves() {
+    fn an_open_invite_waits_for_the_guest_to_come_back() {
         let hub = Hub::default();
         let (host, _rh, _ch) = conn(&hub);
         let (phone, _rp, _cp) = conn(&hub);
@@ -1050,11 +1143,61 @@ mod tests {
         let (host_id, phone_id, pc_id) = (host.conn_id, phone.conn_id, pc.conn_id);
         hub.join(1, host);
         hub.join(2, phone);
-        hub.join(2, pc);
         let (id, _) = hub.invite(1, host_id, 2, 5).unwrap();
+        let from = OnlineId::new(1).unwrap();
+        hub.keep_open(id, from, 2, sealed());
         assert!(hub.leave(2, phone_id).unwrap().out.is_empty());
-        assert_eq!(hub.leave(2, pc_id).unwrap().out.len(), 1);
-        assert_eq!(hub.answer(id, 2, pc_id, true, false, 16).ok(), None);
+        assert_eq!(hub.open_invites(3), vec![]);
+        assert_eq!(
+            hub.open_invites(2),
+            vec![ServerMsg::Invite {
+                session: id,
+                from,
+                sealed: sealed(),
+            }]
+        );
+        hub.join(2, pc);
+        assert!(hub.answer(id, 2, pc_id, true, false, 16).is_ok());
+        assert_eq!(hub.open_invites(2), vec![]);
+        assert!(hub.end_unanswered(id).is_empty());
+    }
+
+    #[test]
+    fn an_unanswered_invite_ends_for_both() {
+        let hub = Hub::default();
+        let (id, _) = hub.invite(1, 10, 2, 5).unwrap();
+        hub.keep_open(id, OnlineId::new(1).unwrap(), 2, sealed());
+        let ended = ServerMsg::SessionEnded {
+            session: id,
+            reason: EndReason::NoAnswer,
+        };
+        assert_eq!(
+            hub.end_unanswered(id),
+            vec![(To::Conn(1, 10), ended.clone()), (To::User(2), ended)]
+        );
+        assert_eq!(hub.session_count(), 0);
+        assert_eq!(hub.open_invites(2), vec![]);
+        assert!(hub.answer(id, 2, 20, true, false, 16).is_err());
+    }
+
+    #[test]
+    fn a_refused_invite_tells_the_host_why() {
+        let hub = Hub::default();
+        let (id, _) = hub.invite(1, 10, 2, 5).unwrap();
+        assert_eq!(
+            hub.refuse(id, 2, Refusal::OtherCopy),
+            Ok(vec![(
+                To::Conn(1, 10),
+                ServerMsg::SessionEnded {
+                    session: id,
+                    reason: EndReason::OtherCopy,
+                },
+            )])
+        );
+        assert_eq!(
+            hub.refuse(id, 2, Refusal::NoCopy),
+            Err(ErrorCode::UnknownSession)
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
+    citrine_gb_app::game_report::log_ring::install(None, log::LevelFilter::Info);
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -11,6 +12,7 @@ fn main() {
             .with_app_id("io.github.zitronenjoghurt.citrine")
             .with_icon(load_icon()),
         persist_window: true,
+        wgpu_options: citrine_gb_app::wgpu_options(),
         ..Default::default()
     };
 
@@ -42,9 +44,12 @@ fn main() {
     use eframe::wasm_bindgen::JsCast as _;
     let web_options = eframe::WebOptions::default();
 
-    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+    citrine_gb_app::game_report::log_ring::install(
+        Some(Box::new(eframe::WebLogger::new(log::LevelFilter::Debug))),
+        log::LevelFilter::Debug,
+    );
 
-    wasm_bindgen_futures::spawn_local(async {
+    citrine_gb_threads::spawn_local(async {
         let document = web_sys::window()
             .expect("No window")
             .document()

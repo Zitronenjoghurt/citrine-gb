@@ -1,5 +1,6 @@
 mod base;
 mod battle;
+mod ds;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixtures;
 mod game;
@@ -20,11 +21,14 @@ mod scan;
 mod sprite;
 mod state;
 mod tables;
+#[cfg(test)]
+mod test_support;
 mod text;
 mod wild;
 
 pub use base::{BaseStats, GrowthRate};
 pub use battle::{Battle, BattleKind, Clock, Fighter};
+pub use ds::DsTables;
 pub use game::{Game, Generation, Language, Version, identify};
 pub use matchups::Effect;
 pub use moves::MoveData;
@@ -64,7 +68,7 @@ pub fn read_save(game: Game, sram: &[u8]) -> Result<GameState, ReadError> {
     match game.generation() {
         Generation::One => gen1::read_save(game, sram),
         Generation::Two => gen2::read_save(game, sram),
-        Generation::Three => Err(ReadError::NeedsRom),
+        Generation::Three | Generation::Four | Generation::Five => Err(ReadError::NeedsRom),
     }
 }
 
@@ -91,12 +95,9 @@ pub fn read_live(tables: &RomTables, wram: &[u8], sram: &[u8]) -> Result<GameSta
     let mut state = match game.generation() {
         Generation::One => gen1::read_live(game, &image),
         Generation::Two => gen2::read_live(game, &image),
-        Generation::Three => Err(ReadError::NeedsRom),
+        Generation::Three | Generation::Four | Generation::Five => Err(ReadError::NeedsRom),
     }?;
     state.battle = battle::read_battle(tables, wram);
     state.clock = battle::read_clock(tables, wram);
     Ok(state)
 }
-
-#[cfg(test)]
-mod tests;

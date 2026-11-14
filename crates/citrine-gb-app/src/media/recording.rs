@@ -13,6 +13,8 @@ pub mod h264;
 pub(crate) mod headless;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+mod sharp;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
@@ -21,10 +23,14 @@ use native::{Output, Pending, Worker};
 #[cfg(target_arch = "wasm32")]
 use web::{Output, Pending, Worker};
 
+use crate::emulator::layout::ScreenLayout;
 use crate::media::NewMedia;
 use citrine_gb::console::{Console, ConsoleKind, Timing, VideoSpec};
 use std::time::Duration;
 use thumbnail::Thumbnails;
+
+#[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+pub use sharp::Sharp;
 
 pub const DEFAULT_SCALE: usize = 4;
 pub const MAX_SCALE: usize = 8;
@@ -48,6 +54,15 @@ impl Source {
             height: video.height,
             timescale: timing.clock_hz / CYCLES_PER_TICK,
             frame_ticks: timing.cycles_per_frame / CYCLES_PER_TICK,
+        }
+    }
+
+    pub fn laid_out(layout: ScreenLayout, timing: Timing) -> Self {
+        let (width, height) = layout.frame_size(1);
+        Self {
+            width,
+            height,
+            ..Self::new(layout.video(), timing)
         }
     }
 
@@ -131,12 +146,12 @@ pub fn availability(_source: Source, _sample_rate: u32, _scale: usize) -> Availa
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
-pub fn download_codec(download: bool) -> bool {
-    codec::shared().answer(download, codec::from_cisco()) == codec::Answer::Downloading
+pub fn download_codec(spawner: &citrine_gb_threads::Spawner, download: bool) -> bool {
+    codec::shared().answer(spawner, download, codec::from_cisco()) == codec::Answer::Downloading
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "openh264-source"))]
-pub fn download_codec(_download: bool) -> bool {
+pub fn download_codec(_spawner: &citrine_gb_threads::Spawner, _download: bool) -> bool {
     false
 }
 
@@ -210,11 +225,25 @@ struct Session {
     worker: Worker,
     info: RecordingInfo,
     source: Source,
+    layout: Option<ScreenLayout>,
+    arranged: Vec<u8>,
     scale: usize,
     sample_rate: u32,
     audio_frames: u64,
     video_frames: u64,
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    held: u64,
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    in_flight: u64,
     thumbnails: Thumbnails,
+}
+
+#[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ticket {
+    session: u64,
+    first: u64,
+    repeat: u64,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -254,9 +283,18 @@ pub struct ScreenRecorder {
     session: Option<Session>,
     finishing: Vec<Finishing>,
     stopped: Option<StopReason>,
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    sessions: u64,
 }
 
 impl ScreenRecorder {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn pictures_waiting(&self) -> usize {
+        self.session
+            .as_ref()
+            .map_or(0, |session| session.worker.pictures_waiting())
+    }
+
     pub fn is_recording(&self) -> bool {
         self.session.is_some()
     }
@@ -277,6 +315,7 @@ impl ScreenRecorder {
 
     pub fn start(
         &mut self,
+        spawner: &citrine_gb_threads::Spawner,
         info: RecordingInfo,
         source: Source,
         sample_rate: u32,
@@ -285,20 +324,34 @@ impl ScreenRecorder {
         let scale = even_scale(scale);
         #[cfg(not(target_arch = "wasm32"))]
         let worker = Worker::start(
+            spawner,
             crate::media::recording_temp_path()?,
             source,
             sample_rate,
             scale,
         )?;
         #[cfg(target_arch = "wasm32")]
-        let worker = Worker::start(source, sample_rate, scale)?;
+        let worker = {
+            let _ = spawner;
+            Worker::start(source, sample_rate, scale)?
+        };
         self.begin(worker, info, source, sample_rate, scale);
         Ok(())
+    }
+
+    pub fn lay_out(&mut self, layout: ScreenLayout) {
+        if let Some(session) = &mut self.session
+            && layout.video().screens.len() > 1
+            && layout.frame_size(1) == (session.source.width, session.source.height)
+        {
+            session.layout = Some(layout);
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn start_into(
         &mut self,
+        spawner: &citrine_gb_threads::Spawner,
         path: std::path::PathBuf,
         info: RecordingInfo,
         source: Source,
@@ -306,7 +359,7 @@ impl ScreenRecorder {
         scale: usize,
     ) -> anyhow::Result<()> {
         let scale = even_scale(scale);
-        let worker = Worker::start(path, source, sample_rate, scale)?;
+        let worker = Worker::start(spawner, path, source, sample_rate, scale)?;
         self.begin(worker, info, source, sample_rate, scale);
         Ok(())
     }
@@ -314,13 +367,14 @@ impl ScreenRecorder {
     #[cfg(test)]
     pub fn start_with(
         &mut self,
+        spawner: &citrine_gb_threads::Spawner,
         api: openh264::OpenH264API,
         path: std::path::PathBuf,
         info: RecordingInfo,
         source: Source,
         sample_rate: u32,
     ) -> anyhow::Result<()> {
-        let worker = Worker::start_with(api, path, source, sample_rate, DEFAULT_SCALE)?;
+        let worker = Worker::start_with(spawner, api, path, source, sample_rate, DEFAULT_SCALE)?;
         self.begin(worker, info, source, sample_rate, DEFAULT_SCALE);
         Ok(())
     }
@@ -335,25 +389,56 @@ impl ScreenRecorder {
     ) {
         self.finish(StopReason::Asked);
         self.stopped = None;
+        #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+        {
+            self.sessions += 1;
+        }
         self.session = Some(Session {
             worker,
             info,
             source,
+            layout: None,
+            arranged: Vec::new(),
             scale,
             sample_rate,
             audio_frames: 0,
             video_frames: 0,
+            #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+            held: 0,
+            #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+            in_flight: 0,
             thumbnails: Thumbnails::new(source),
         });
     }
 
     pub fn capture(&mut self, rgba: &[u8], audio: &[f32], sample_rate: u32) {
+        let repeat = self.hear(audio, sample_rate);
+        if let Some(session) = &mut self.session
+            && repeat > 0
+        {
+            let rgba = match session.layout {
+                Some(layout) => {
+                    layout.compose(rgba, 1, &mut session.arranged);
+                    session.arranged.as_slice()
+                }
+                None => rgba,
+            };
+            session.worker.frame(rgba, repeat as u32);
+            for _ in 0..repeat {
+                session.thumbnails.push(session.video_frames, rgba);
+                session.video_frames += 1;
+            }
+        }
+        self.check();
+    }
+
+    fn hear(&mut self, audio: &[f32], sample_rate: u32) -> u64 {
         let Some(session) = &mut self.session else {
-            return;
+            return 0;
         };
         if sample_rate != session.sample_rate {
             self.finish(StopReason::SoundChanged);
-            return;
+            return 0;
         }
         if !audio.is_empty() {
             session.audio_frames += (audio.len() / CHANNELS) as u64;
@@ -362,14 +447,13 @@ impl ScreenRecorder {
         let target = session
             .source
             .frames_for_audio(session.audio_frames, session.sample_rate);
-        let repeat = target.saturating_sub(session.video_frames);
-        if repeat > 0 {
-            session.worker.frame(rgba, repeat as u32);
-            for _ in 0..repeat {
-                session.thumbnails.push(session.video_frames, rgba);
-                session.video_frames += 1;
-            }
-        }
+        target.saturating_sub(session.video_frames)
+    }
+
+    fn check(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
         if let Some(reason) = session.worker.failed_or_full() {
             self.finish(reason);
         } else if MAX_LENGTH
@@ -377,6 +461,71 @@ impl ScreenRecorder {
         {
             self.finish(StopReason::TooLong);
         }
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    pub fn hold(&mut self, audio: &[f32], sample_rate: u32) {
+        let repeat = self.hear(audio, sample_rate);
+        if let Some(session) = &mut self.session {
+            session.held += repeat;
+            session.video_frames += repeat;
+        }
+        self.check();
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    pub fn take_held(&mut self) -> Option<Ticket> {
+        let session = self.session.as_mut().filter(|session| session.held > 0)?;
+        let repeat = std::mem::take(&mut session.held);
+        session.in_flight += repeat;
+        Some(Ticket {
+            session: self.sessions,
+            first: session.video_frames - repeat,
+            repeat,
+        })
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    pub fn fill_held(&mut self, rgba: &[u8]) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let held = std::mem::take(&mut session.held);
+        if held > 0 {
+            session.video_frames -= held;
+            let rate = session.sample_rate;
+            self.capture(rgba, &[], rate);
+        }
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    pub fn sharp(&mut self, ticket: Ticket, sharp: Sharp) {
+        let Some(session) = self
+            .session
+            .as_mut()
+            .filter(|_| ticket.session == self.sessions)
+        else {
+            return;
+        };
+        session.in_flight -= ticket.repeat;
+        let mut flat = Vec::new();
+        for frame in ticket.first..ticket.first + ticket.repeat {
+            if !session.thumbnails.wants(frame) {
+                continue;
+            }
+            if flat.is_empty() {
+                sharp.draw(1, &mut flat);
+                if let Some(layout) = session.layout {
+                    layout.compose(&flat, 1, &mut session.arranged);
+                    std::mem::swap(&mut flat, &mut session.arranged);
+                }
+            }
+            session.thumbnails.push(frame, &flat);
+        }
+        session
+            .worker
+            .sharp(sharp, session.layout, ticket.repeat as u32);
+        self.check();
     }
 
     pub fn stop(&mut self) {
@@ -388,6 +537,12 @@ impl ScreenRecorder {
             return;
         };
         self.stopped = Some(reason);
+        #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+        let mut session = session;
+        #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+        session
+            .worker
+            .again((session.held + session.in_flight) as u32);
         let thumbnail = session.thumbnails.pick(session.video_frames);
         self.finishing.push(Finishing {
             pending: session.worker.finish(),

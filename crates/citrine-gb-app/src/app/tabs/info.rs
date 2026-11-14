@@ -3,7 +3,7 @@ use crate::app::widgets::info::{Controls, InfoPanel};
 use egui::Widget;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
-    crate::app::widgets::update::card(ui, &mut viewer.ui.update);
+    crate::app::widgets::update::card(ui, &mut viewer.ui.update, &viewer.files.spawner);
     let settings = &viewer.ui.settings;
     let touch = settings.layout.is_touch(ui.ctx());
     let controls = if touch {

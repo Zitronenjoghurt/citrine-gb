@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO gts_sims (pid, name, language, version, country, region, tid, sid, female,\n                                   avatar, utc_offset, seed, started_at, days, next_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)\n             ON CONFLICT (pid) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 15
+    },
+    "nullable": []
+  },
+  "hash": "0ce51bec69f0f15aeee132ab911a9c8b13272be4f26f710c81b0b24705a761da"
+}

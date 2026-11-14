@@ -21,7 +21,7 @@ fn unown_letter(mon: &Mon) -> char {
 
 pub(super) type SpriteCache = HashMap<(String, u16, bool, char), Option<TextureHandle>>;
 
-pub(super) fn sprite_texture(
+pub(crate) fn sprite_texture(
     ctx: &egui::Context,
     key: &str,
     game: &Game,
@@ -59,6 +59,13 @@ pub fn sprite_image(
     shiny: bool,
     letter: char,
 ) -> Option<egui::ColorImage> {
+    if let Some(tables) = game.tables.ds() {
+        let picture = tables.front_picture(&game.rom, species, false, shiny)?;
+        return Some(egui::ColorImage::from_rgba_unmultiplied(
+            [picture.width, picture.height],
+            &picture.rgba,
+        ));
+    }
     let Some(tables) = game.tables.gb() else {
         let picture = game.tables.front_picture(&game.rom, species, shiny)?;
         let side = citrine_gb_gamedata::gen3::PICTURE_SIDE;
@@ -129,4 +136,25 @@ pub(super) fn cut_out(
         }
     }
     egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cut_out;
+
+    #[test]
+    fn a_sprite_is_clear_outside_its_outline_and_solid_inside() {
+        let ring = |x: usize, y: usize| -> u8 {
+            let edge = (1..=4).contains(&x) && (1..=4).contains(&y);
+            let inner = (2..=3).contains(&x) && (2..=3).contains(&y);
+            if edge && !inner { 3 } else { 0 }
+        };
+        let image = cut_out(6, 6, ring, |value| [value, value, value]);
+        let alpha = |x: usize, y: usize| image.pixels[y * 6 + x].a();
+        assert_eq!(alpha(0, 0), 0);
+        assert_eq!(alpha(5, 3), 0);
+        assert_eq!(alpha(1, 1), 0xFF);
+        assert_eq!(alpha(2, 2), 0xFF);
+        assert_eq!(alpha(3, 3), 0xFF);
+    }
 }

@@ -1,4 +1,6 @@
 pub mod battery_save;
+#[cfg(feature = "nds")]
+pub mod desmume_footer;
 pub mod full_dump;
 pub mod rtc_footer;
 #[cfg(feature = "gba")]

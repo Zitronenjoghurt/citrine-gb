@@ -86,7 +86,7 @@ pub fn bar(ui: &mut Ui, progress: f32) {
     ui.add(ProgressBar::new(progress).desired_height(6.0));
 }
 
-pub fn card(ui: &mut Ui, updater: &mut Updater) {
+pub fn card(ui: &mut Ui, updater: &mut Updater, spawner: &citrine_gb_threads::Spawner) {
     let Some(texts) = texts_now(updater) else {
         return;
     };
@@ -99,7 +99,7 @@ pub fn card(ui: &mut Ui, updater: &mut Updater) {
                 if let Some(action) = texts.action
                     && ui.button(action).clicked()
                 {
-                    tap = updater.tap();
+                    tap = updater.tap(spawner);
                 }
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     ui.label(RichText::new(&texts.title).strong());

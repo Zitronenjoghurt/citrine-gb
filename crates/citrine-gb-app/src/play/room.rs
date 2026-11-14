@@ -2,12 +2,14 @@ mod group;
 mod watch;
 
 use super::links::Links;
-use super::{Ending, GameFile, MyGame, PlaySession, Returned, Role, Shelf, Stage};
+use super::shelf::Finder;
+use super::{Ending, GameFile, MyGame, PlaySession, Returned, Role, Stage};
 use crate::online::Online;
 use citrine_gb_net::{
     Body, ClientMsg, Console, EndReason, Envelope, ErrorCode, GameCard, Member, MemberState,
-    OnlineId, PROTOCOL_VERSION, PlayMsg, PublicKey, Sealed, SessionId,
+    OnlineId, PlayMsg, PublicKey, ROOMS_PROTOCOL, Sealed, SessionId,
 };
+use citrine_gb_threads::Threads;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -88,6 +90,7 @@ pub struct Room {
     status_told: Vec<OnlineId>,
     watch_asks: Vec<OnlineId>,
     watch: Option<watch::GroupWatch>,
+    lanes: usize,
 }
 
 impl Room {
@@ -119,6 +122,7 @@ impl Room {
             status_told: Vec::new(),
             watch_asks: Vec::new(),
             watch: None,
+            lanes: 1,
         }
     }
 
@@ -295,7 +299,13 @@ impl Room {
         self.told.is_some() && self.id.is_some()
     }
 
-    pub(super) fn joined(&mut self, me: OnlineId, list: Vec<Member>, sharing: bool, now: Instant) {
+    pub(super) fn joined(
+        &mut self,
+        me: OnlineId,
+        list: Vec<Member>,
+        sharing: Option<u32>,
+        now: Instant,
+    ) {
         let back = self.lost.take().is_some();
         let mine = list.iter().position(|m| m.who == me).unwrap_or(list.len());
         let others: Vec<(usize, RoomMember)> = list
@@ -338,6 +348,7 @@ impl Room {
                     pair.apart = true;
                     pair.round.my_card = card.clone();
                     pair.let_watch = shows;
+                    pair.ds_user = self.ds_user();
                     pair.begin(now);
                     self.pairs.push(pair);
                 }
@@ -347,7 +358,7 @@ impl Room {
         self.tidy();
     }
 
-    pub(super) fn update_member(&mut self, member: Member, sharing: bool, now: Instant) {
+    pub(super) fn update_member(&mut self, member: Member, sharing: Option<u32>, now: Instant) {
         let member: RoomMember = member.into();
         self.inviting.retain(|w| *w != member.who);
         if member.state.old_client && !self.aware(member.who) {
@@ -377,6 +388,7 @@ impl Room {
         pair.apart = true;
         pair.round.my_card = self.my_card();
         pair.let_watch = self.shows();
+        pair.ds_user = self.ds_user();
         pair.begin(now);
         self.pairs.push(pair);
     }
@@ -401,6 +413,9 @@ impl Room {
                 EndReason::Declined => Ending::Declined,
                 EndReason::Left => Ending::FriendLeft,
                 EndReason::Disconnected => Ending::Dropped,
+                EndReason::NoCopy => Ending::NoCopy,
+                EndReason::OtherCopy => Ending::OtherCopy,
+                EndReason::NoAnswer => Ending::NoAnswer,
             });
         }
         if !self.is_live() {
@@ -542,6 +557,20 @@ impl Room {
         }
     }
 
+    pub(super) fn set_ds_user(&mut self, user: &citrine_gb_net::DsUser) {
+        for pair in &mut self.pairs {
+            if pair.ds_user != *user {
+                pair.ds_user = user.clone();
+            }
+        }
+    }
+
+    fn ds_user(&self) -> citrine_gb_net::DsUser {
+        self.pairs
+            .first()
+            .map_or_else(super::random_ds_user, |pair| pair.ds_user.clone())
+    }
+
     pub(super) fn set_input_delay(&mut self, frames: Option<u32>) {
         for pair in &mut self.pairs {
             pair.input_delay = frames;
@@ -550,8 +579,9 @@ impl Room {
 
     pub(super) fn step(
         &mut self,
-        shelf: &dyn Shelf,
-        sharing: bool,
+        finder: &mut Finder,
+        threads: &Threads,
+        sharing: Option<u32>,
         me: Option<OnlineId>,
         now: Instant,
     ) {
@@ -561,10 +591,10 @@ impl Room {
         self.me = me;
         if let Some(me) = me {
             self.relink(me, now);
-            self.step_group(me, now);
+            self.step_group(me, threads, now);
             self.share_group_state();
             self.serve_watchers(me);
-            self.step_watch(shelf);
+            self.step_watch(finder);
         }
         for pair in &mut self.pairs {
             pair.sharing = sharing;
@@ -576,12 +606,15 @@ impl Room {
                 pair.heard_at = now;
                 continue;
             }
-            pair.step(shelf, now);
+            pair.step(finder, threads, now);
+            if let Some(game) = pair.friend_game() {
+                finder.look(&game.hash);
+            }
         }
     }
 
     pub(super) fn tell(&mut self, online: &mut Online) {
-        if online.protocol() < PROTOCOL_VERSION || self.lost.is_some() {
+        if online.protocol() < ROOMS_PROTOCOL || self.lost.is_some() {
             return;
         }
         let Some(id) = self.id else {
@@ -679,8 +712,8 @@ impl Room {
         };
         let fits = match &game {
             MyGame::Own(file) => file.card().is_some_and(|c| c.hash == card.hash),
-            MyGame::Borrow { .. } => pair.sharing,
-            MyGame::Nothing => false,
+            MyGame::Borrow { .. } => pair.sharing.is_some(),
+            MyGame::Download | MyGame::Nothing => false,
         };
         if !fits || self.shelved.is_some() || !self.link(who) {
             return false;
@@ -929,7 +962,7 @@ impl Room {
                             pair.borrowed_save = save;
                             (None, Some(theirs.card))
                         }
-                        MyGame::Nothing => (None, None),
+                        MyGame::Download | MyGame::Nothing => (None, None),
                     }
                 }
                 None => (mine, card),
@@ -940,7 +973,7 @@ impl Room {
             } else {
                 Role::Guest
             };
-            pair.sync = group.sync();
+            pair.sync = group.sync(self.lanes);
             if returned.is_some() {
                 pair.returned = returned;
             }

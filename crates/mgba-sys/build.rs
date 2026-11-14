@@ -185,10 +185,15 @@ fn main() {
     if os == "linux" || os == "macos" {
         build
             .define("HAVE_LOCALE", None)
-            .define("HAVE_STRTOF_L", None);
+            .define("HAVE_STRTOF_L", None)
+            .define("HAVE_LOCALTIME_R", None);
     }
     if os == "macos" {
-        build.define("HAVE_XLOCALE", None);
+        build
+            .define("HAVE_XLOCALE", None)
+            .define("HAVE_STRLCPY", None)
+            .define("HAVE_STRDUP", None)
+            .define("HAVE_STRNDUP", None);
     }
     build.warnings(false);
     build.compile("mgba");

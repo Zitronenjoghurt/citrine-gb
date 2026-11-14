@@ -1,16 +1,15 @@
 use super::{Emulator, PLAYING_AFTER, SAVE_COOLDOWN, SaveImport, SaveStatus};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::SaveStore;
-use crate::storage::now_unix;
-use citrine_gb::console::Console;
+use crate::storage::{Write, now_unix};
+use citrine_gb::console::{Console, ConsoleKind};
 use citrine_gb::error::GbResult;
 use citrine_gb::persistence::rtc_footer::RtcFooter;
-use citrine_gb::rom::Rom;
 
 impl Emulator {
     pub fn handle_save(&mut self) -> GbResult<()> {
-        if let Some(link) = &mut self.link {
-            link.handle_save(&self.store)?;
+        if let Some(link) = &mut self.seat.core_mut().link {
+            link.handle_save(&self.store, &mut self.writes)?;
         }
         if let Some(last_save) = self.last_save
             && last_save.elapsed() < SAVE_COOLDOWN
@@ -21,25 +20,39 @@ impl Emulator {
     }
 
     pub fn flush_save(&mut self) -> GbResult<()> {
-        if let Some(link) = &mut self.link {
-            link.flush_save(&self.store)?;
+        if let Some(link) = &mut self.seat.core_mut().link {
+            link.flush_save(&self.store, &mut self.writes)?;
         }
         let Some(key) = self.rom_key.clone() else {
             return Ok(());
         };
-        let Some(save) = self.machine.battery(false, now_unix()) else {
+        let Some(save) = self.seat.core_mut().machine.battery(false, now_unix()) else {
             return Ok(());
         };
-        self.store.store_battery_save(&key, &save)?;
+        self.writes.send(Write::Battery {
+            store: self.store.clone(),
+            key,
+            save,
+        });
         self.last_save = Some(web_time::Instant::now());
         Ok(())
     }
 
     pub fn name_game(&mut self, file_name: Option<&str>) {
+        #[cfg(feature = "nds")]
+        if self.kind() == citrine_gb::console::ConsoleKind::Nds {
+            let machine = &self.seat.core().machine;
+            if let Some(title) =
+                crate::ds_banner::game_name(&machine.rom_bytes(), &machine.rom_id().sha1, file_name)
+            {
+                self.game_name = title;
+                return;
+            }
+        }
         self.game_name = crate::game_name::game_name(
-            &self.machine.rom_id().sha1,
+            &self.seat.core_mut().machine.rom_id().sha1,
             file_name,
-            &self.machine.title(),
+            &self.seat.core_mut().machine.title(),
         );
     }
 
@@ -57,6 +70,7 @@ impl Emulator {
 
     pub fn rename_battery(&mut self, name: &str) -> GbResult<()> {
         if let Some(key) = self.rom_key.clone() {
+            self.writes.settle();
             self.store
                 .set_battery_name(&key, name, &self.default_battery_name())?;
         }
@@ -68,14 +82,15 @@ impl Emulator {
             return Ok(());
         }
         let running = self.running;
-        let rom = Rom::new(&self.machine.rom_bytes());
+        let rom = self.seat.core().machine.rom();
         let name = self.game_name.clone();
         let launched = self.stat_events.launched;
         #[cfg(not(target_arch = "wasm32"))]
         let path = self.rom_path.clone();
+        let kind = self.kind();
         self.load_game(
             &rom,
-            self.machine.kind(),
+            kind,
             #[cfg(not(target_arch = "wasm32"))]
             path.as_deref(),
         )?;
@@ -90,6 +105,7 @@ impl Emulator {
             return Ok(());
         };
         self.flush_save()?;
+        self.writes.settle();
         self.store.swap_battery(&key, token)?;
         self.reload_battery()
     }
@@ -104,11 +120,15 @@ impl Emulator {
         let (Some(key), Some(path)) = (self.rom_key.clone(), self.rom_path.clone()) else {
             return false;
         };
+        self.writes.settle();
         if !self.store.import_legacy_save(&key, &path) {
             return false;
         }
-        if let Some(save) = self.store.load_battery_save(&key, &self.machine) {
-            self.machine.put_battery(save, now_unix());
+        if let Some(save) = self
+            .store
+            .load_battery_save(&key, &self.seat.core_mut().machine)
+        {
+            self.seat.core_mut().machine.put_battery(save, now_unix());
             self.save_loaded = true;
             return true;
         }
@@ -129,16 +149,28 @@ impl Emulator {
         let now = now_unix();
         match (ram, clock) {
             (Some(ram), None) => {
-                self.store.store_battery(&key, ram)?;
-                let save = self.machine.battery_from_file(ram);
-                self.machine.put_battery(save, now);
+                self.writes.send(Write::BatteryFile {
+                    store: self.store.clone(),
+                    key,
+                    ram: ram.to_vec(),
+                });
+                let save = self.seat.core_mut().machine.battery_from_file(ram);
+                self.seat.core_mut().machine.put_battery(save, now);
             }
             (ram, Some(footer)) => {
-                let mut save = self.machine.battery_from_file(ram.unwrap_or_default());
+                let mut save = self
+                    .seat
+                    .core_mut()
+                    .machine
+                    .battery_from_file(ram.unwrap_or_default());
                 save.clock = Some(footer);
-                self.machine.put_battery(save, now);
-                if let Some(save) = self.machine.battery(true, now) {
-                    self.store.store_battery_save(&key, &save)?;
+                self.seat.core_mut().machine.put_battery(save, now);
+                if let Some(save) = self.seat.core_mut().machine.battery(true, now) {
+                    self.writes.send(Write::Battery {
+                        store: self.store.clone(),
+                        key,
+                        save,
+                    });
                 }
             }
             (None, None) => return Ok(SaveImport::Nothing),
@@ -151,8 +183,10 @@ impl Emulator {
     pub fn import_blocker(&self, with_clock: bool) -> Option<SaveImport> {
         if self.rom_key.is_none() {
             Some(SaveImport::NoRom)
-        } else if with_clock && !self.machine.has_clock() {
+        } else if with_clock && !self.seat.core().machine.has_clock() {
             Some(SaveImport::NoClock)
+        } else if with_clock && self.kind() == ConsoleKind::Gba {
+            Some(SaveImport::ClockInSave)
         } else {
             None
         }
@@ -164,19 +198,21 @@ impl Emulator {
     }
 
     pub fn restart(&mut self) {
-        self.machine.soft_reset();
+        self.seat.core_mut().machine.soft_reset();
         self.running = true;
         self.started_at = Some(web_time::Instant::now());
     }
 
     pub fn export_rtc_files(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
-        let save = self.machine.battery(true, now_unix())?;
+        let save = self.seat.core_mut().machine.battery(true, now_unix())?;
         let clock = save.clock?;
         Some((save.ram, clock.encode_rtc_file().to_vec()))
     }
 
     pub fn export_save_bytes(&mut self) -> Option<Vec<u8>> {
-        self.machine
+        self.seat
+            .core_mut()
+            .machine
             .battery(true, now_unix())
             .map(|save| save.to_file())
     }
@@ -187,11 +223,11 @@ impl Emulator {
             name: key
                 .and_then(|k| self.store.battery_name(k))
                 .unwrap_or_else(|| self.default_battery_name()),
-            battery_backed: self.machine.has_battery(),
+            battery_backed: self.seat.core().machine.has_battery(),
             stored: key.is_some_and(|k| self.store.has_battery(k)),
             saved_at: key.and_then(|k| self.store.battery_saved_at(k)),
             location: self.store.location(),
-            has_clock: self.machine.has_clock(),
+            has_clock: self.seat.core().machine.has_clock(),
             #[cfg(not(target_arch = "wasm32"))]
             legacy_path: self
                 .rom_path

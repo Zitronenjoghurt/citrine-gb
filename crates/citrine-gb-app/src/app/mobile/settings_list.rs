@@ -3,6 +3,7 @@ use super::nav::Place;
 use crate::app::Citrine;
 use crate::app::tabs::Tab;
 use crate::app::ui_state::settings::{GbaScreen, Settings, SettingsTab};
+use crate::app::widgets::settings::page::Page;
 use crate::icons;
 use citrine_gb::console::ConsoleKind;
 use egui::{RichText, Ui};
@@ -65,9 +66,9 @@ impl Citrine {
         let mut update_tapped = false;
         kit::place(ui, "settings_place", |ui| {
             kit::place_title(ui, Place::Settings.label(), |_| {});
+            let mut page = Page::begin(ui);
             if let Some(update) = &update {
-                update_tapped = update_row(ui, update);
-                ui.add_space(14.0);
+                update_tapped = page.plain(|ui| update_row(ui, update));
             }
             let rows = entries
                 .iter()
@@ -78,18 +79,20 @@ impl Citrine {
                     Entry::About => kit::Row::new("About").icon(icons::INFO),
                 })
                 .collect();
-            picked = kit::rows(ui, rows).map(|index| entries[index]);
-            ui.add_space(14.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new(format!("Citrine {}", env!("CARGO_PKG_VERSION")))
-                        .size(13.0)
-                        .weak(),
-                );
+            picked = page.plain(|ui| kit::rows(ui, rows).map(|index| entries[index]));
+            page.plain(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(format!("Citrine {}", env!("CARGO_PKG_VERSION")))
+                            .size(13.0)
+                            .weak(),
+                    );
+                })
             });
+            page.end();
         });
         if update_tapped {
-            let tap = self.ui.update.tap();
+            let tap = self.ui.update.tap(&self.files.spawner);
             crate::app::widgets::update::follow(ui.ctx(), tap);
         }
         match picked {
@@ -139,4 +142,53 @@ pub(super) fn update_row(ui: &mut Ui, update: &crate::app::widgets::update::Text
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[test]
+    fn about_follows_your_data_and_developer_shows_only_in_dev_mode() {
+        let plain = entries(false);
+        assert_eq!(plain.last(), Some(&Entry::About));
+        assert!(!plain.contains(&Entry::Page(SettingsTab::Developer)));
+        assert_eq!(
+            entries(true).last(),
+            Some(&Entry::Page(SettingsTab::Developer))
+        );
+    }
+
+    #[test]
+    fn rows_show_the_value_each_page_holds() {
+        let settings = Settings {
+            volume: 0.8,
+            ..Settings::default()
+        };
+        assert_eq!(value(&settings, SettingsTab::Sound, ConsoleKind::Gb), "80%");
+        let muted = Settings {
+            muted: true,
+            ..Settings::default()
+        };
+        assert_eq!(value(&muted, SettingsTab::Sound, ConsoleKind::Gb), "Muted");
+        assert_eq!(
+            value(&settings, SettingsTab::Online, ConsoleKind::Gb),
+            "Signed out"
+        );
+        assert_eq!(value(&settings, SettingsTab::YourData, ConsoleKind::Gb), "");
+    }
+
+    #[test]
+    fn a_gba_game_names_the_style_page_after_its_console_and_shows_the_screen() {
+        let settings = Settings::default();
+        assert_eq!(SettingsTab::Style.title_for(ConsoleKind::Gb), "GB style");
+        assert_eq!(SettingsTab::Style.title_for(ConsoleKind::Gba), "GBA style");
+        assert_eq!(SettingsTab::Style.title_for(ConsoleKind::Nds), "DS style");
+        assert_eq!(SettingsTab::Sound.title_for(ConsoleKind::Gba), "Sound");
+        assert_eq!(
+            value(&settings, SettingsTab::Style, ConsoleKind::Gba),
+            GbaScreen(settings.color_correction).to_string()
+        );
+        assert_eq!(
+            value(&settings, SettingsTab::Style, ConsoleKind::Gb),
+            settings.dmg_theme.to_string()
+        );
+    }
+}

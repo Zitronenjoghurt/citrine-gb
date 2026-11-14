@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 const RATE: u32 = 48_000;
 
-fn temp_file(name: &str) -> PathBuf {
+pub(crate) fn temp_file(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("citrine-recording-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(name)
@@ -41,6 +41,12 @@ fn game(rom: &[u8]) -> GameBoy {
     gb
 }
 
+fn encoder_keeps_up(recorder: &ScreenRecorder) {
+    while recorder.pictures_waiting() > 2 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 fn play(gb: &mut GameBoy, frame: usize) {
     gb.set_keys(if (frame / 30) % 4 == 1 {
         Keys::START
@@ -59,6 +65,7 @@ pub(crate) struct Recorded {
 pub(crate) fn record(rom: &[u8], name: &str, frames: usize) -> Recorded {
     record_with(rom, frames, |recorder, gb| {
         recorder.start_into(
+            &spawner(),
             temp_file(name),
             new_media(gb),
             Source::of(gb),
@@ -82,6 +89,7 @@ fn record_with(
         play(&mut gb, frame);
         sound_frames += gb.apu.audio_buffer.len() as u64 / 2;
         recorder.capture(gb.frame().as_slice(), &gb.apu.audio_buffer, RATE);
+        encoder_keeps_up(&recorder);
         gb.apu.audio_buffer.clear();
         shown.push(gb.frame().as_slice().to_vec());
     }
@@ -99,7 +107,7 @@ fn record_with(
     }
 }
 
-fn psnr(a: &[u8], b: &[u8]) -> f64 {
+pub(crate) fn psnr(a: &[u8], b: &[u8]) -> f64 {
     let se: f64 = a
         .iter()
         .zip(b)
@@ -243,6 +251,7 @@ fn a_paused_stretch_is_left_out() {
     let mut recorder = ScreenRecorder::default();
     recorder
         .start_into(
+            &spawner(),
             temp_file("paused.mp4"),
             new_media(&gb),
             Source::of(&gb),
@@ -253,6 +262,7 @@ fn a_paused_stretch_is_left_out() {
     for frame in 0..60 {
         play(&mut gb, frame);
         recorder.capture(gb.frame().as_slice(), &gb.apu.audio_buffer, RATE);
+        encoder_keeps_up(&recorder);
         gb.apu.audio_buffer.clear();
     }
     let before = recorder.elapsed();
@@ -265,6 +275,7 @@ fn a_paused_stretch_is_left_out() {
     for frame in 60..120 {
         play(&mut gb, frame);
         recorder.capture(gb.frame().as_slice(), &gb.apu.audio_buffer, RATE);
+        encoder_keeps_up(&recorder);
         gb.apu.audio_buffer.clear();
     }
     recorder.stop();
@@ -282,6 +293,7 @@ fn a_recording_stopped_while_paused_is_not_kept() {
     let path = temp_file("empty.mp4");
     recorder
         .start_into(
+            &spawner(),
             path.clone(),
             new_media(&gb),
             Source::of(&gb),
@@ -300,6 +312,7 @@ fn a_new_sound_rate_ends_the_recording() {
     let mut recorder = ScreenRecorder::default();
     recorder
         .start_into(
+            &spawner(),
             temp_file("rate.mp4"),
             new_media(&gb),
             Source::of(&gb),
@@ -310,6 +323,7 @@ fn a_new_sound_rate_ends_the_recording() {
     for frame in 0..30 {
         play(&mut gb, frame);
         recorder.capture(gb.frame().as_slice(), &gb.apu.audio_buffer, RATE);
+        encoder_keeps_up(&recorder);
         gb.apu.audio_buffer.clear();
     }
     recorder.capture(gb.frame().as_slice(), &[], 44_100);
@@ -329,7 +343,7 @@ fn cisco_s_downloaded_codec_records_an_mp4() {
     let binary = codec::binary_for(std::env::consts::OS, std::env::consts::ARCH)
         .expect("Cisco has no build for this system");
     let codec = Codec::new(dir.clone(), Some(binary));
-    codec.download(codec::from_cisco());
+    codec.download(&spawner(), codec::from_cisco());
     codec.wait();
     assert_eq!(codec.take_failure(), None);
     assert_eq!(codec.status(), Status::Ready);
@@ -337,6 +351,7 @@ fn cisco_s_downloaded_codec_records_an_mp4() {
     assert!(matches!(api, openh264::OpenH264API::Libloading(_)));
     let rec = record_with(include_bytes!("../../../homebrew/tobu.gb"), 300, |r, gb| {
         r.start_with(
+            &spawner(),
             api,
             temp_file("cisco.mp4"),
             new_media(gb),
@@ -371,6 +386,7 @@ fn recording_cost_per_frame() {
     let path = temp_file("cost.mp4");
     recorder
         .start_into(
+            &spawner(),
             path.clone(),
             new_media(&gb),
             Source::of(&gb),
@@ -415,4 +431,88 @@ fn recording_cost_per_frame() {
 
 fn gb_fps() -> f64 {
     Source::from(citrine_gb::console::ConsoleKind::Gb).fps()
+}
+
+pub(crate) fn spawner() -> citrine_gb_threads::Spawner {
+    citrine_gb_threads::Threads::new(citrine_gb_threads::Mode::Threads).spawner()
+}
+
+#[cfg(feature = "nds")]
+pub(crate) struct Decoded {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) seconds: f64,
+    pub(crate) level: u8,
+    pub(crate) last_luma: Vec<u8>,
+}
+
+#[cfg(feature = "nds")]
+pub(crate) fn level_fits(level: u8, width: usize, height: usize, fps: f64) -> bool {
+    let (most_per_second, most_per_frame) = match level {
+        40 | 41 => (245_760.0, 8_192),
+        42 => (522_240.0, 8_704),
+        50 => (589_824.0, 22_080),
+        51 => (983_040.0, 36_864),
+        52 => (2_073_600.0, 36_864),
+        _ => (0.0, 0),
+    };
+    let blocks = width.div_ceil(16) * height.div_ceil(16);
+    let side = ((8 * most_per_frame) as f64).sqrt();
+    blocks <= most_per_frame
+        && blocks as f64 * fps <= most_per_second
+        && (width.div_ceil(16) as f64) <= side
+        && (height.div_ceil(16) as f64) <= side
+}
+
+#[cfg(feature = "nds")]
+pub(crate) fn decode(path: &std::path::Path) -> Decoded {
+    use openh264::formats::YUVSource;
+    let size = std::fs::metadata(path).unwrap().len();
+    let file = std::fs::File::open(path).unwrap();
+    let mut mp4 = mp4::Mp4Reader::read_header(BufReader::new(file), size).unwrap();
+    let video = &mp4.tracks()[&1];
+    let (width, height) = (video.width() as usize, video.height() as usize);
+    let frames = video.sample_count();
+    let seconds = video.duration().as_secs_f64();
+    let sps = video.sequence_parameter_set().unwrap();
+    assert_eq!(sps[0] & 0x1F, 7, "a sequence parameter set");
+    let level = sps[3];
+    let mut annex_b = Vec::new();
+    for unit in [
+        video.sequence_parameter_set().unwrap().to_vec(),
+        video.picture_parameter_set().unwrap().to_vec(),
+    ] {
+        annex_b.extend_from_slice(&[0, 0, 0, 1]);
+        annex_b.extend_from_slice(&unit);
+    }
+    let mut decoder = openh264::decoder::Decoder::new().unwrap();
+    let mut last_luma = Vec::new();
+    for id in 1..=frames {
+        let sample = mp4.read_sample(1, id).unwrap().unwrap();
+        let mut rest = &sample.bytes[..];
+        while rest.len() >= 4 {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            annex_b.extend_from_slice(&[0, 0, 0, 1]);
+            annex_b.extend_from_slice(&rest[4..4 + len]);
+            rest = &rest[4 + len..];
+        }
+        if let Some(image) = decoder.decode(&annex_b).unwrap() {
+            let (stride, _, _) = image.strides();
+            last_luma = image
+                .y()
+                .chunks(stride)
+                .take(height)
+                .flat_map(|row| &row[..width])
+                .copied()
+                .collect();
+        }
+        annex_b.clear();
+    }
+    Decoded {
+        width,
+        height,
+        seconds,
+        level,
+        last_luma,
+    }
 }

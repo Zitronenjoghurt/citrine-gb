@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.pid AS \"pid!\", p.account_id AS \"account!\", r.record AS \"record!\",\n                      r.deposited_at AS \"deposited_at!\"\n                 FROM gts_records r JOIN gts_profiles p ON p.pid = r.pid\n                WHERE r.generation = ?1 AND r.traded_at IS NULL AND r.deposited_at <= ?2\n                ORDER BY r.deposited_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "pid!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "name": "account!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_profiles",
+            "name": "account_id"
+          }
+        }
+      },
+      {
+        "name": "record!",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "record"
+          }
+        }
+      },
+      {
+        "name": "deposited_at!",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_records",
+            "name": "deposited_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b0159a0367c9eab3346a1c27b1a1c8b7b375c39ac308b3b42e74d7be88df0bf8"
+}

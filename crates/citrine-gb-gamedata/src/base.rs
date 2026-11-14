@@ -70,7 +70,7 @@ impl BaseStats {
         match generation {
             Generation::One => record.get(..GEN1_RECORD).and_then(parse_gen1),
             Generation::Two => record.get(..GEN2_RECORD).and_then(parse_gen2),
-            Generation::Three => None,
+            Generation::Three | Generation::Four | Generation::Five => None,
         }
     }
 
@@ -117,7 +117,7 @@ pub(crate) fn load(game: Game, rom: &[u8]) -> Vec<BaseStats> {
         Generation::Two => find_table(rom, GEN2_RECORD, GEN2_DEX)
             .map(|at| records(rom, at, GEN2_RECORD, GEN2_DEX, parse_gen2))
             .unwrap_or_default(),
-        Generation::Three => Vec::new(),
+        Generation::Three | Generation::Four | Generation::Five => Vec::new(),
     }
 }
 

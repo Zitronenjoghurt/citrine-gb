@@ -1,16 +1,22 @@
 use super::{Client, db, screen_size};
 use crate::hub::Side;
+use crate::push::Event;
 use crate::screens::PNG_SIGNATURE;
 use crate::stats::Refused;
-use citrine_gb_net::{ErrorCode, MAX_SCREEN_BYTES, OnlineId, Sealed, ServerMsg, SessionId};
+use citrine_gb_net::{
+    ErrorCode, MAX_SCREEN_BYTES, OnlineId, Refusal, Sealed, ServerMsg, SessionId,
+};
+use std::sync::Arc;
 
 impl Client {
-    pub(super) fn session_room(&self, session: SessionId, sealed: &Sealed) -> bool {
+    pub(super) fn session_room(&self, session: SessionId, sealed: &Sealed, game: bool) -> bool {
         let Some(me) = self.me.as_ref() else {
             return false;
         };
         let bytes = sealed.ciphertext.len() as f64;
-        self.app.rates.sessions.take((session, me.id), bytes)
+        let rates = &self.app.rates;
+        let bucket = if game { &rates.games } else { &rates.sessions };
+        bucket.take((session, me.id), bytes)
     }
 
     pub(super) fn peer(&self, session: SessionId) -> Result<Side, ErrorCode> {
@@ -27,7 +33,11 @@ impl Client {
         if !db(self.app.db.are_friends(me_id, other.id).await)? {
             return Err(ErrorCode::NotFriends);
         }
-        if !self.app.hub.is_online(other.id) {
+        let ring = Event::Invite {
+            from: me_id,
+            session: 0,
+        };
+        if !self.app.hub.is_online(other.id) && !self.app.rings(other.id, ring).await {
             return Err(ErrorCode::Offline);
         }
         let max = self.app.config.limits.max_invites;
@@ -46,12 +56,31 @@ impl Client {
             );
         }
         self.send(ServerMsg::Invited { session, to }).await;
+        self.app
+            .hub
+            .keep_open(session, me_online, other.id, sealed.clone());
         self.app.hub.send(
             other.id,
             ServerMsg::Invite {
                 session,
                 from: me_online,
                 sealed,
+            },
+        );
+        let open = self.app.config.limits.invite_open;
+        let app = Arc::downgrade(&self.app);
+        tokio::spawn(async move {
+            tokio::time::sleep(open).await;
+            if let Some(app) = app.upgrade() {
+                let out = app.hub.end_unanswered(session);
+                app.hub.deliver(out);
+            }
+        });
+        self.app.notify(
+            other.id,
+            Event::Invite {
+                from: me_id,
+                session,
             },
         );
         Ok(())
@@ -95,6 +124,25 @@ impl Client {
         Ok(())
     }
 
+    pub(super) async fn refuse_invite(
+        &mut self,
+        session: SessionId,
+        why: Refusal,
+    ) -> Result<(), ErrorCode> {
+        let me_id = self.me()?.id;
+        let out = self.app.hub.refuse(session, me_id, why)?;
+        self.app.hub.send_others(
+            me_id,
+            self.conn_id,
+            ServerMsg::SessionEnded {
+                session,
+                reason: citrine_gb_net::EndReason::Left,
+            },
+        );
+        self.app.hub.deliver(out);
+        Ok(())
+    }
+
     pub(super) async fn room_invite(
         &mut self,
         room: SessionId,
@@ -125,6 +173,13 @@ impl Client {
         )?;
         self.send(ServerMsg::Invited { session: room, to }).await;
         self.app.hub.deliver(out);
+        self.app.notify(
+            other.id,
+            Event::Invite {
+                from: me_id,
+                session: room,
+            },
+        );
         Ok(())
     }
 
@@ -140,7 +195,7 @@ impl Client {
         }
         let me = self.me()?.id;
         let (from, target) = self.app.hub.route(room, me, self.conn_id, to)?;
-        if !self.session_room(room, &sealed) {
+        if !self.session_room(room, &sealed, game) {
             self.refused(Refused::Play);
             self.rate_limited().await;
             return Ok(());

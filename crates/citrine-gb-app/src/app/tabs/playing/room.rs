@@ -2,7 +2,7 @@ use super::bar::{Switch, bar_switches, switch_missing};
 use super::lines::{card_name, short_name};
 use crate::online::Online;
 use crate::play::{Play, PlaySession, Stage, UNLINK_AFTER};
-use citrine_gb_net::{Console, ErrorCode, FriendState, OnlineId, PROTOCOL_VERSION, ROOM_MEMBERS};
+use citrine_gb_net::{Console, ErrorCode, FriendState, OnlineId, ROOM_MEMBERS, ROOMS_PROTOCOL};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Person {
@@ -112,7 +112,8 @@ impl RoomFacts {
                 game: theirs.map(|g| card_name(g).to_owned()),
                 console: theirs.map(|g| g.console),
                 can_play_theirs: theirs.is_some_and(|g| {
-                    play.holds(&g.hash) || room.pair(who).is_some_and(PlaySession::shares_games)
+                    play.holds(&g.hash) == Some(true)
+                        || room.pair(who).is_some_and(PlaySession::shares_games)
                 }),
                 friend: online.friend(who).map(|f| f.state),
             }
@@ -401,7 +402,7 @@ pub fn status_text(status: &Status) -> String {
 }
 
 pub fn adds_to_room(play: &Play, online: &Online) -> bool {
-    online.protocol() >= PROTOCOL_VERSION
+    online.protocol() >= ROOMS_PROTOCOL
         && play
             .room()
             .is_some_and(|r| r.is_live() && r.id().is_some() && !r.rejoining())

@@ -16,12 +16,12 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    pub fn show(&mut self, presence: Option<Presence>) {
+    pub fn show(&mut self, spawner: &citrine_gb_threads::Spawner, presence: Option<Presence>) {
         if self.sent.as_ref() == Some(&presence) {
             return;
         }
         if presence.is_some() && self.tx.is_none() {
-            self.tx = spawn(APP_ID);
+            self.tx = Some(start(spawner, APP_ID));
         }
         if let Some(tx) = &self.tx
             && tx.send(presence.clone()).is_err()
@@ -32,18 +32,10 @@ impl Rpc {
     }
 }
 
-fn spawn(id: &'static str) -> Option<Sender<Option<Presence>>> {
+fn start(spawner: &citrine_gb_threads::Spawner, id: &'static str) -> Sender<Option<Presence>> {
     let (tx, rx) = mpsc::channel();
-    match std::thread::Builder::new()
-        .name("discord".into())
-        .spawn(move || run(id, rx))
-    {
-        Ok(_) => Some(tx),
-        Err(err) => {
-            log::warn!("could not start the Discord thread: {err}");
-            None
-        }
-    }
+    spawner.thread("discord", move || run(id, rx));
+    tx
 }
 
 fn run(id: &str, rx: Receiver<Option<Presence>>) {

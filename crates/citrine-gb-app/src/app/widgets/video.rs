@@ -570,7 +570,7 @@ fn picker_width(ui: &Ui, text: &str) -> f32 {
     text + spacing.icon_width + spacing.icon_spacing + spacing.button_padding.x * 2.0
 }
 
-fn checker(painter: &egui::Painter, rect: Rect, cell: f32) {
+pub(crate) fn checker(painter: &egui::Painter, rect: Rect, cell: f32) {
     painter.rect_filled(rect, 0.0, CHECKER_LIGHT);
     let columns = (rect.width() / cell).ceil() as usize;
     let rows = (rect.height() / cell).ceil() as usize;

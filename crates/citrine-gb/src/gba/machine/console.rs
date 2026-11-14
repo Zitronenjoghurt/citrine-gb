@@ -12,9 +12,10 @@ use crate::persistence::battery_save::BatterySave;
 #[cfg(feature = "persistence")]
 use crate::persistence::seiko_footer::{SEIKO_FOOTER_LEN, SeikoFooter};
 #[cfg(feature = "persistence")]
-use crate::persistence::state::{GBA_SAVE_QUALITY, StateBody};
+use crate::persistence::state::StateBody;
 #[cfg(feature = "rom-id")]
 use crate::rom::id::RomId;
+use std::sync::Arc;
 
 const TITLE: std::ops::Range<usize> = 0xA0..0xAC;
 #[cfg(feature = "persistence")]
@@ -73,8 +74,8 @@ impl Console for Gba {
         self.bus.sound_mut().set_channel_enabled(index, enabled);
     }
 
-    fn rom_bytes(&self) -> Vec<u8> {
-        self.bus.rom().to_vec()
+    fn rom_bytes(&self) -> Arc<[u8]> {
+        self.bus.shared_rom()
     }
 
     fn title(&self) -> String {
@@ -147,7 +148,8 @@ impl Console for Gba {
 
     #[cfg(feature = "persistence")]
     fn save_state(&mut self, now: u64) -> GbResult<Vec<u8>> {
-        self.state_body(now)?.pack(GBA_SAVE_QUALITY)
+        let body = self.state_body(now)?;
+        body.pack(body.quality(false))
     }
 
     #[cfg(feature = "persistence")]

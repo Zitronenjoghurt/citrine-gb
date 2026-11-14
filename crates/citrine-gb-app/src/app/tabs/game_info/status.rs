@@ -65,3 +65,50 @@ pub fn status_line(game: &Game, clock: &Clock) -> (Status, String) {
         (false, _, false, _) => (Status::File, "No saved game yet".to_owned()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{NOON, clock, crystal};
+    use super::{Status, status_line};
+    use citrine_gb_gamedata::Ram;
+    use citrine_gb_gamedata::fixtures::{crystal_live_wram, crystal_save, set_crystal_live_money};
+
+    #[test]
+    fn the_line_says_whether_the_live_game_is_saved() {
+        let save = crystal_save();
+        let mut wram = crystal_live_wram(&save);
+        let mut info = crystal(Some(NOON as u64 - 3600));
+        info.read(&save, Ram::Gb(&wram), NOON as u64);
+        assert_eq!(
+            status_line(info.game().unwrap(), &clock()),
+            (Status::Saved, "Playing, saved in game at 11:00".to_owned())
+        );
+
+        set_crystal_live_money(&mut wram, 4815);
+        info.read(&save, Ram::Gb(&wram), NOON as u64);
+        assert_eq!(
+            status_line(info.game().unwrap(), &clock()),
+            (
+                Status::Behind,
+                "Playing, not saved in game since 11:00".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn the_line_shows_the_save_file_and_its_day_when_the_game_is_not_running() {
+        let mut info = crystal(Some(NOON as u64 - 3 * 86_400));
+        info.read(&crystal_save(), Ram::Gb(&[0u8; 0x2000]), NOON as u64);
+        assert_eq!(
+            status_line(info.game().unwrap(), &clock()),
+            (Status::File, "Save file from 28 Oct, 12:00".to_owned())
+        );
+
+        let mut empty = crystal(None);
+        empty.read(&vec![0u8; 0x8000], Ram::Gb(&[0u8; 0x2000]), NOON as u64);
+        assert_eq!(
+            status_line(empty.game().unwrap(), &clock()),
+            (Status::File, "No saved game yet".to_owned())
+        );
+    }
+}

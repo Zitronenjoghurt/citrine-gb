@@ -26,6 +26,11 @@ impl Bucket {
         self.take_at(amount, Instant::now())
     }
 
+    pub fn has(&mut self, amount: f64) -> bool {
+        self.refill(Instant::now());
+        self.tokens >= amount
+    }
+
     pub fn full(&mut self) -> bool {
         self.refill(Instant::now());
         self.tokens >= self.capacity
@@ -166,6 +171,7 @@ pub struct Rates {
     pub friend_requests: Buckets<i64>,
     pub downloads: Buckets<i64>,
     pub sessions: Buckets<(u64, i64)>,
+    pub games: Buckets<(u64, i64)>,
     pub sign_ups: Buckets<IpAddr>,
     pub all_sign_ups: Buckets<()>,
 }
@@ -189,6 +195,10 @@ impl Rates {
             sessions: Buckets::new(
                 limits.session_bytes_per_second as f64,
                 limits.session_burst_bytes as f64,
+            ),
+            games: Buckets::new(
+                limits.game_bytes_per_second as f64,
+                limits.game_burst_bytes as f64,
             ),
             sign_ups: Buckets::new(per_ip / 3600.0, per_ip),
             all_sign_ups: Buckets::new(all / 3600.0, all),

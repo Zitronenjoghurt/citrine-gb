@@ -7,13 +7,6 @@ use citrine_gb_net::FileInfo;
 use egui::{RichText, Ui};
 use web_time::Instant;
 
-pub(super) fn storage(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: Instant) {
-    if has_storage(online) {
-        ui.add_space(ui.spacing().interact_size.y.max(20.0));
-        storage_body(ui, online, form, now);
-    }
-}
-
 pub fn has_storage(online: &Online) -> bool {
     online
         .account()
@@ -26,7 +19,7 @@ pub fn storage_body(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: 
     };
     let (used, quota) = (account.storage_used, account.quota_bytes);
     Form::show(ui, "online_storage", |f| {
-        f.text_row("Storage", |ui| {
+        f.text_row("Used", |ui| {
             ui.label(if quota == 0 {
                 format!("{} used", crate::media::format_size(used))
             } else {
@@ -326,7 +319,7 @@ pub fn storage_list(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: 
         list.custom(|ui| {
             kit::padded(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Storage").size(16.0).strong());
+                    ui.label(RichText::new("Used").size(16.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(&summary).size(15.0).weak());
                     });
@@ -384,4 +377,42 @@ pub fn storage_list(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: 
         }
     });
     cloud_confirm(ui, online, form);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::storage_row;
+
+    #[test]
+    fn a_storage_header_opens_from_its_label() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let mut clicked = false;
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut at = egui::Pos2::ZERO;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    at = ui.cursor().min + egui::vec2(40.0, ui.spacing().interact_size.y / 2.0);
+                    clicked |= storage_row(ui, Some(false), "Cloud saves (1)", Some(4096));
+                });
+            });
+            at
+        };
+        let at = frame(Vec::new());
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(at)]);
+        frame(vec![button(true)]);
+        frame(vec![button(false)]);
+        assert!(clicked, "a click on the row's label at {at:?} did nothing");
+    }
 }

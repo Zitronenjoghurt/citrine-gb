@@ -1,6 +1,6 @@
 use crate::console::Keys;
 
-const KEY_MASK: u16 = 0x03FF;
+pub const KEY_MASK: u16 = 0x03FF;
 const IRQ_ENABLE: u16 = 1 << 14;
 const IRQ_ALL_KEYS: u16 = 1 << 15;
 const KEYCNT_MASK: u16 = KEY_MASK | IRQ_ENABLE | IRQ_ALL_KEYS;

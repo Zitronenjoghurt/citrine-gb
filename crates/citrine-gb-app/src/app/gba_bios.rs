@@ -20,7 +20,7 @@ impl Citrine {
         FileLoader::new()
             .title("Pick a GBA BIOS")
             .add_filter("GBA BIOS", &["bin", "rom"])
-            .dispatch(self.files.gba_bios_tx.clone());
+            .dispatch(&self.files.spawner, self.files.gba_bios_tx.clone());
     }
 
     pub(super) fn handle_load_gba_bios(&mut self, file: PickedFile) {
@@ -132,8 +132,9 @@ mod tests {
     fn bios_file(size: usize) -> PickedFile {
         PickedFile {
             name: "gba_bios.bin".to_owned(),
-            data: vec![0x5A; size],
+            data: vec![0x5A; size].into(),
             path: None,
+            seen: None,
         }
     }
 

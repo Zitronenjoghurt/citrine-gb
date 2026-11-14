@@ -1,4 +1,5 @@
 use super::ROW_HEIGHT;
+use crate::app::big_screen::scroll::Following;
 use crate::app::tabs::TabViewer;
 use crate::app::widgets::action::action_height;
 use crate::app::widgets::field::row_field;
@@ -295,7 +296,7 @@ fn list_body(ui: &mut Ui, cache: &mut EventCache, touch: bool) -> (bool, Option<
     let mut chosen = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             if shown.is_empty() {
                 ui.label(RichText::new("No events match").weak());
             }
@@ -345,7 +346,7 @@ fn heading(ui: &mut Ui, generation: Generation) {
             ui.label(RichText::new("Red, Blue and Yellow events").strong());
             info_mark(ui, CAPSULE_HINT);
         }
-        Generation::Three => {}
+        Generation::Three | Generation::Four | Generation::Five => {}
     });
 }
 
@@ -380,7 +381,7 @@ struct PanelPicks {
 }
 
 pub fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
-    let Some(partner) = viewer.emulator.partner.as_ref() else {
+    let Some(partner) = viewer.emulator.partner() else {
         return;
     };
     viewer.ui.linked.events.refresh(ui.ctx(), viewer.emulator);
@@ -396,7 +397,7 @@ pub fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
     }
     let picks = egui::ScrollArea::vertical()
         .auto_shrink([false, true])
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             panel_body(
                 ui,
                 &Card::of(partner),
@@ -408,7 +409,7 @@ pub fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
         })
         .inner;
     if let Some(plugged) = picks.plugged
-        && let Some(partner) = viewer.emulator.partner.as_mut()
+        && let Some(partner) = viewer.emulator.partner_mut()
     {
         partner.set_plugged(plugged);
     }

@@ -36,6 +36,19 @@ impl<'de> Visitor<'de> for Bytes {
     }
 }
 
+pub mod shared {
+    use serde::{Deserializer, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        super::serialize(bytes, serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<[u8]>, D::Error> {
+        super::deserialize(deserializer).map(Arc::from)
+    }
+}
+
 pub mod array {
     use serde::de::Error;
     use serde::{Deserializer, Serializer};

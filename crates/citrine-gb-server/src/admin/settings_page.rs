@@ -111,6 +111,48 @@ pub(super) async fn settings_page(
     ));
     form.push_str(&row(
         &format!(
+            r#"<label for="gts">GTS</label>{}"#,
+            hint(
+                "hint-gts",
+                "Players who pick this server's GTS in a DS Pokémon game deposit and trade Pokémon here. When off, the game can't reach the GTS through this server."
+            )
+        ),
+        &source_chip(&app, settings::GTS),
+        &format!(
+            r#"<input id="gts" name="gts" type="checkbox" class="switch" value="on"{}>"#,
+            if s.gts { " checked" } else { "" }
+        ),
+    ));
+    form.push_str(&row(
+        &format!(
+            r#"<label for="gts_sims">Simulated trainers</label>{}"#,
+            hint(
+                "hint-gts-sims",
+                "Simulated trainers deposit legal Pokémon on this server's GTS and now and then trade for players' deposits, so searches find something. The app marks them. Turning this off removes them and their deposits."
+            )
+        ),
+        &source_chip(&app, settings::GTS_SIMS),
+        &format!(
+            r#"<input id="gts_sims" name="gts_sims" type="checkbox" class="switch" value="on"{}>"#,
+            if s.gts_sims { " checked" } else { "" }
+        ),
+    ));
+    form.push_str(&row(
+        &format!(
+            r#"<label for="ds_online">DS online play</label>{}"#,
+            hint(
+                "hint-ds-online",
+                "A DS game's own online play, such as Mario Kart DS races, goes out through this server, so other players see this server's address instead of the player's. When off, DS games can't go online through the app."
+            )
+        ),
+        &source_chip(&app, settings::DS_NET),
+        &format!(
+            r#"<input id="ds_online" name="ds_online" type="checkbox" class="switch" value="on"{}>"#,
+            if s.ds_net { " checked" } else { "" }
+        ),
+    ));
+    form.push_str(&row(
+        &format!(
             r#"<label for="quota">Storage per user, MB</label>{}"#,
             hint(
                 "hint-quota",
@@ -204,6 +246,9 @@ pub(super) struct SettingsForm {
     sign_ups: Option<String>,
     invites: Option<String>,
     pictures: Option<String>,
+    gts: Option<String>,
+    gts_sims: Option<String>,
+    ds_online: Option<String>,
     delete_empty: Option<String>,
     quota_mb: String,
     storage_total_mb: Option<String>,
@@ -239,7 +284,7 @@ pub(super) async fn settings_save(
             None => return back("/admin/settings", "bad-number"),
         },
     };
-    let changes: [(&str, bool, String); 9] = [
+    let changes: [(&str, bool, String); 12] = [
         (settings::NAME, name != s.name, name.to_string()),
         (
             settings::SIGN_UPS,
@@ -255,6 +300,26 @@ pub(super) async fn settings_save(
             settings::PICTURES,
             form.pictures.is_some() != s.pictures,
             if form.pictures.is_some() { "on" } else { "off" }.to_string(),
+        ),
+        (
+            settings::GTS,
+            form.gts.is_some() != s.gts,
+            if form.gts.is_some() { "on" } else { "off" }.to_string(),
+        ),
+        (
+            settings::GTS_SIMS,
+            form.gts_sims.is_some() != s.gts_sims,
+            if form.gts_sims.is_some() { "on" } else { "off" }.to_string(),
+        ),
+        (
+            settings::DS_NET,
+            form.ds_online.is_some() != s.ds_net,
+            if form.ds_online.is_some() {
+                "on"
+            } else {
+                "off"
+            }
+            .to_string(),
         ),
         (
             settings::DELETE_EMPTY,
@@ -292,6 +357,9 @@ pub(super) async fn settings_save(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
+    if !app.settings.get().gts_sims && app.db.gts_sims_clear().await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     back("/admin/settings", "saved")
 }
 
@@ -313,6 +381,9 @@ pub(super) async fn settings_reset(
         settings::SIGN_UPS,
         settings::INVITES,
         settings::PICTURES,
+        settings::GTS,
+        settings::GTS_SIMS,
+        settings::DS_NET,
         settings::DELETE_EMPTY,
         settings::QUOTA,
         settings::STORAGE_TOTAL,
@@ -330,6 +401,9 @@ pub(super) async fn settings_reset(
         return back("/admin/settings", "needs-password");
     }
     if app.settings.reset(&form.key).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if !app.settings.get().gts_sims && app.db.gts_sims_clear().await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     back("/admin/settings", "reset")

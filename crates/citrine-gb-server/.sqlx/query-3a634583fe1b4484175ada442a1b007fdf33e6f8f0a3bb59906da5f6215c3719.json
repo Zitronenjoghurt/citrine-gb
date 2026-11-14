@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gts_records WHERE pid = ?1 AND (traded_at IS NOT NULL) = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3a634583fe1b4484175ada442a1b007fdf33e6f8f0a3bb59906da5f6215c3719"
+}

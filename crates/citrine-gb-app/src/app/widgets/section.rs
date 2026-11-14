@@ -44,8 +44,7 @@ fn section_with(
     ui.add_space(14.0);
 }
 
-fn phone_section(ui: &mut Ui, title: &str, hint: Option<&str>, body: impl FnOnce(&mut Ui)) {
-    use crate::app::mobile::kit;
+pub fn phone_label(ui: &mut Ui, title: &str, hint: Option<&str>) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.add_space(6.0);
@@ -59,6 +58,11 @@ fn phone_section(ui: &mut Ui, title: &str, hint: Option<&str>, body: impl FnOnce
         }
     });
     ui.add_space(2.0);
+}
+
+fn phone_section(ui: &mut Ui, title: &str, hint: Option<&str>, body: impl FnOnce(&mut Ui)) {
+    use crate::app::mobile::kit;
+    phone_label(ui, title, hint);
     egui::Frame::new()
         .fill(kit::card_fill(ui.visuals()))
         .corner_radius(egui::CornerRadius::same(kit::RADIUS))
@@ -68,4 +72,13 @@ fn phone_section(ui: &mut Ui, title: &str, hint: Option<&str>, body: impl FnOnce
             body(ui);
         });
     ui.add_space(6.0);
+}
+
+pub fn section_note(ui: &mut Ui, note: &str) {
+    if crate::app::mobile::touch_square(ui) > 0.0 {
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(RichText::new(note).size(14.0).weak()).wrap());
+    } else {
+        ui.label(crate::app::widgets::text::faint(note));
+    }
 }

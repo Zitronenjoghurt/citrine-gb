@@ -283,3 +283,87 @@ pub(super) fn picker(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::texts;
+    use super::super::*;
+    use super::{draft_field, enter_sends, icon_button};
+
+    #[test]
+    fn an_icon_button_in_the_message_row_has_its_icon_in_the_middle() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(412.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let mut button = None;
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    button = Some(icon_button(ui, egui::Button::new(icons::SMILEY), 44.0).rect);
+                });
+            });
+        });
+        let button = button.expect("the button");
+        let icon = texts(&output.shapes)
+            .into_iter()
+            .find(|(text, _)| text == icons::SMILEY)
+            .expect("the icon")
+            .1;
+        assert!(
+            (icon.center().y - button.center().y).abs() < 2.0,
+            "{icon:?} {button:?}"
+        );
+    }
+
+    #[test]
+    fn enter_sends_and_shift_enter_starts_a_new_line() {
+        for (modifiers, sends) in [(Modifiers::NONE, true), (Modifiers::SHIFT, false)] {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                modifiers,
+                events: vec![egui::Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            };
+            let mut sent = None;
+            let _ = ctx.run(input, |ctx| sent = Some(ctx.input_mut(enter_sends)));
+            assert_eq!(sent, Some(sends), "{modifiers:?}");
+        }
+    }
+
+    #[test]
+    fn the_empty_field_is_one_row_tall_and_grows_with_lines() {
+        for (draft, grows) in [("", false), ("one\ntwo\nthree", true)] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(2.0);
+            let mut draft = draft.to_owned();
+            let mut side = 0.0;
+            let mut shown = 0.0;
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let row = ui.text_style_height(&egui::TextStyle::Body);
+                        side = ui.spacing().interact_size.y.max(row + FIELD_MARGIN.sum().y);
+                        let id = egui::Id::new("draft");
+                        shown = draft_field(ui, &mut draft, id, 200.0, side, "Message").1;
+                    });
+                });
+            }
+            if grows {
+                assert!(shown > side + 10.0, "{shown} grows past {side}");
+            } else {
+                assert!((shown - side).abs() < 1.0, "{shown} is one row of {side}");
+            }
+        }
+    }
+}

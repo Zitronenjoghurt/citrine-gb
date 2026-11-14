@@ -64,7 +64,7 @@ pub(super) fn apply(
             }
         }
         Act::DownloadCodec => {
-            if crate::media::recording::download_codec(true) {
+            if crate::media::recording::download_codec(&viewer.files.spawner, true) {
                 viewer.events.notify("Downloading the video codec");
                 if let Some(shown) = viewer.ui.viewer.shown.as_mut() {
                     shown.status = Status::Loading(None);
@@ -78,13 +78,14 @@ pub(super) fn apply(
         }
         Act::Export => {
             if let ItemKey::Media(id) = key {
-                crate::media::export(viewer.media, id, viewer.files.save_tx.clone());
+                crate::media::export(viewer.media, id, viewer.files);
             }
         }
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         Act::Reveal => {
             if let ItemKey::Media(id) = key
-                && let Err(err) = crate::media::reveal::reveal(&viewer.media.path(id))
+                && let Err(err) =
+                    crate::media::reveal::reveal(&viewer.files.spawner, &viewer.media.path(id))
             {
                 viewer
                     .events

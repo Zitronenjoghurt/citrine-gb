@@ -1,14 +1,17 @@
-use crate::app::ui_state::ui_theme::CodeColours;
+use crate::app::ui_state::ui_theme::{CodeColours, brand_mark, hover_fill, pc_fill, weak_on};
 use crate::icons;
 use citrine_gb::debug::Debug;
 use citrine_gb::debug::code::{Address, Line};
 use citrine_gb::debug::disassembly::Confidence;
-use egui::{Align2, Color32, FontId, Pos2, Rect, ScrollArea, Sense, Stroke, TextStyle, Ui, vec2};
+use egui::{
+    Align2, Color32, FontId, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, vec2,
+};
 
 const GUTTER: f32 = 16.0;
 const GAP: f32 = 8.0;
 const MARK_RADIUS: f32 = 3.5;
 const MARK_SLOT: f32 = 14.0;
+const PC_BAR: f32 = 3.0;
 
 pub enum CodeAction {
     ToggleBreakpoint(Address),
@@ -131,16 +134,26 @@ impl Row<'_> {
 
         let visuals = ui.visuals();
         let fill = if self.is_pc {
-            visuals.selection.bg_fill
+            pc_fill(visuals, self.colours)
         } else if response.hovered() && !on_gutter {
-            visuals.widgets.hovered.weak_bg_fill
+            hover_fill(visuals, self.colours)
         } else if self.index.is_multiple_of(2) {
             visuals.faint_bg_color
         } else {
             Color32::TRANSPARENT
         };
+        let weak = weak_on(visuals, fill);
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, fill);
+        if self.is_pc {
+            let mark = brand_mark(visuals);
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, mark), StrokeKind::Inside);
+            painter.rect_filled(
+                Rect::from_min_size(rect.min, vec2(PC_BAR, rect.height())),
+                0.0,
+                mark,
+            );
+        }
 
         let dot = Pos2::new(rect.left() + GUTTER / 2.0, rect.center().y);
         if self.is_breakpoint {
@@ -166,7 +179,7 @@ impl Row<'_> {
                 )
                 .width()
         };
-        text(x, &line.at.to_string(), visuals.weak_text_color());
+        text(x, &line.at.to_string(), weak);
         x += columns.address + GAP / 2.0;
 
         let ram_slot = Rect::from_center_size(
@@ -179,7 +192,7 @@ impl Row<'_> {
                 Align2::CENTER_CENTER,
                 icons::MEMORY,
                 FontId::proportional(columns.font.size),
-                visuals.weak_text_color(),
+                weak,
             );
             ui.interact(ram_slot, ui.id().with(("ram", line.at)), Sense::hover())
                 .on_hover_text("Code in RAM, read again each frame");
@@ -192,7 +205,7 @@ impl Row<'_> {
         let mut pieces = Vec::new();
         for (position, operand) in line.operands.iter().enumerate() {
             if position > 0 {
-                pieces.push((", ", visuals.weak_text_color()));
+                pieces.push((", ", weak));
             }
             pieces.push((operand.text.as_str(), self.colours.operand(operand.kind)));
         }
@@ -209,7 +222,7 @@ impl Row<'_> {
             x += text(x, &shown, *colour);
         }
         if cut {
-            text(x, "…", visuals.weak_text_color());
+            text(x, "…", weak);
             let operands: String = pieces.iter().map(|(piece, _)| *piece).collect();
             response
                 .clone()
@@ -217,7 +230,7 @@ impl Row<'_> {
         }
 
         let mark = Pos2::new(rect.right() - MARK_SLOT / 2.0, y);
-        let colour = visuals.weak_text_color();
+        let colour = weak;
         match line.confidence {
             Confidence::Fetched => {
                 painter.circle_filled(mark, MARK_RADIUS, colour);

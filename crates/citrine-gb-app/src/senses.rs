@@ -42,7 +42,7 @@ pub struct Senses {
 }
 
 impl Senses {
-    pub fn follow(&mut self, wanted: Wanted) {
+    pub fn follow(&mut self, spawner: &citrine_gb_threads::Spawner, wanted: Wanted) {
         if wanted == self.wanted {
             return;
         }
@@ -55,15 +55,14 @@ impl Senses {
             self.feed = None;
         }
         self.wanted = wanted;
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        let _ = spawner;
         #[cfg(target_os = "android")]
         crate::platform::android::sensors::want(wanted);
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         if wanted.camera {
             if self.webcam.is_none() {
-                match webcam::Webcam::open() {
-                    Ok(webcam) => self.webcam = Some(webcam),
-                    Err(err) => self.camera_error = Some(err),
-                }
+                self.webcam = Some(webcam::Webcam::open(spawner));
             }
         } else {
             self.webcam = None;

@@ -76,6 +76,10 @@ impl<V: Numeric> Widget for ResetSlider<'_, V> {
                 + 2.0 * ui.spacing().button_padding.x;
 
             let reset_width = reset_width(ui);
+            super::settings::form::need(
+                ui,
+                SLIDER_MIN + value_width + reset_width + 2.0 * RESET_GAP,
+            );
             ui.spacing_mut().slider_width =
                 (ui.available_width() - value_width - reset_width - 2.0 * RESET_GAP)
                     .max(ui.spacing().interact_size.y);
@@ -107,6 +111,8 @@ impl<V: Numeric> Widget for ResetSlider<'_, V> {
 }
 
 pub const RESET_GAP: f32 = 4.0;
+
+const SLIDER_MIN: f32 = 48.0;
 
 pub fn reset_width(ui: &Ui) -> f32 {
     let icon = WidgetText::from(icons::ARROW_COUNTER_CLOCKWISE).into_galley(

@@ -1,14 +1,16 @@
 use super::Room;
 use super::group::is_group_round;
-use crate::play::Shelf;
-use crate::play::engine::{GROUP_UNITS, Rollback, Setup};
-use citrine_gb::console::{Console, ConsoleKind, Keys};
+use crate::play::Picture;
+use crate::play::engine::{GROUP_UNITS, Rollback, Setup, Ticks};
+use crate::play::pace::Pace;
+use crate::play::seen::Still;
+use crate::play::shelf::{Finder, Look};
+use citrine_gb::console::{ConsoleKind, Keys};
 use citrine_gb::netplay::Player;
 use citrine_gb_net::{GameHash, OnlineId, Origin, PlayMsg, Start};
+use citrine_gb_threads::{Lent, Threads};
 use web_time::Instant;
 
-const WATCH_FPS: f64 = 59.7275;
-const MOST_FRAMES: u32 = 4;
 const KEPT_EARLY: usize = 1024;
 const SAMPLE_RATE: u32 = 48_000;
 
@@ -27,9 +29,10 @@ pub(in crate::play) struct GroupWatch {
     from: Option<WatchFrom>,
     states: Vec<(u8, Vec<u8>)>,
     early: Vec<(OnlineId, PlayMsg)>,
-    engine: Option<Box<Rollback>>,
+    engine: Option<Lent<Rollback>>,
+    seen: Still,
     missing: bool,
-    due: f64,
+    pace: Pace,
     last: Option<Instant>,
     audio: Vec<f32>,
 }
@@ -50,19 +53,20 @@ impl GroupWatch {
         let Some(unit) = self.unit_of(from) else {
             return;
         };
-        let Some(r) = self.engine.as_deref_mut() else {
+        let Some(r) = self.engine.as_mut().map(Lent::get_mut) else {
             return;
         };
         match msg {
             PlayMsg::MemberLeft { unit, at_frame, .. } => {
-                let at = at_frame.max(r.confirmed_frame());
-                r.leave_unit(unit, at);
+                if from == self.authority {
+                    r.follow_leave(unit, at_frame);
+                }
             }
             msg => r.receive_from(unit, msg),
         }
     }
 
-    fn launch(&mut self, shelf: &dyn Shelf) {
+    fn launch(&mut self, finder: &mut Finder, lanes: usize) {
         if self.engine.is_some() || self.missing {
             return;
         }
@@ -77,9 +81,13 @@ impl GroupWatch {
             let Some((_, state)) = self.states.iter().find(|(u, _)| u == unit) else {
                 return;
             };
-            let Some(rom) = shelf.find(hash) else {
-                self.missing = true;
-                return;
+            let rom = match finder.look(hash) {
+                Look::Found(rom) => rom,
+                Look::Missing => {
+                    self.missing = true;
+                    return;
+                }
+                Look::Looking => return,
             };
             *slot = Some((rom, ConsoleKind::Gba, Origin::Resume(state.clone())));
         }
@@ -92,18 +100,27 @@ impl GroupWatch {
             start_frame: from.frame,
             ..start.clone()
         };
-        let sync =
-            crate::play::links::sync_for(Some(citrine_gb_net::Console::Gba), from.members.len());
-        let Ok(mut r) =
-            Rollback::group(Player::ALL[local], start, games, SAMPLE_RATE, sync, u8::MAX)
-        else {
+        let sync = crate::play::links::sync_for(
+            Some(citrine_gb_net::Console::Gba),
+            from.members.len(),
+            lanes,
+        );
+        let Ok(mut r) = Rollback::group(
+            Player::ALL[local],
+            start,
+            games,
+            Default::default(),
+            SAMPLE_RATE,
+            sync,
+            u8::MAX,
+        ) else {
             return;
         };
         if !r.restore_cable(&from.cable) {
             return;
         }
         r.watch(true);
-        self.engine = Some(Box::new(r));
+        self.engine = Some(Lent::new(Box::new(r)));
         self.states.clear();
         for (from, msg) in std::mem::take(&mut self.early) {
             self.deliver(from, msg);
@@ -115,17 +132,45 @@ impl GroupWatch {
             .last
             .map_or(0.0, |last| now.duration_since(last).as_secs_f64());
         self.last = Some(now);
-        let Some(r) = self.engine.as_deref_mut() else {
+        let unit = self.unit_of(self.of);
+        let Some(lent) = self.engine.as_mut() else {
             return;
         };
-        self.due = (self.due + dt * WATCH_FPS).min(f64::from(MOST_FRAMES));
-        while self.due >= 1.0 {
-            self.due -= 1.0;
-            r.tick(Keys::empty(), 0, now, &mut Vec::new());
-        }
+        let away = lent.has_worker();
+        let r = lent.get_mut();
         let mut friend = Vec::new();
         r.drain_audio(&mut self.audio, &mut friend);
         self.audio.clear();
+        r.take_ticked();
+        let frames = self.pace.frames(dt, r.timing()) as usize;
+        if frames == 0 {
+            return;
+        }
+        if away {
+            self.seen.keep(unit.and_then(|u| r.unit_console(u)), true);
+        }
+        lent.lend(Ticks {
+            pads: vec![Keys::empty(); frames],
+            touch: None,
+            cable: None,
+            saves: false,
+            round_trip_ms: 0,
+            now,
+        });
+    }
+
+    fn place(&mut self, threads: Option<&Threads>) {
+        let Some(lent) = self.engine.as_mut() else {
+            return;
+        };
+        match threads {
+            Some(threads) if !lent.has_worker() => {
+                lent.run_on(threads, format!("watch: {}", self.of))
+            }
+            Some(_) => {}
+            None if lent.has_worker() => lent.park(),
+            None => {}
+        }
     }
 }
 
@@ -175,8 +220,9 @@ impl Room {
             states: Vec::new(),
             early: Vec::new(),
             engine: None,
+            seen: Still::default(),
             missing: false,
-            due: 0.0,
+            pace: Pace::default(),
             last: None,
             audio: Vec::new(),
         });
@@ -251,7 +297,7 @@ impl Room {
         None
     }
 
-    pub(in crate::play) fn step_watch(&mut self, shelf: &dyn Shelf) {
+    pub(in crate::play) fn step_watch(&mut self, finder: &mut Finder) {
         let Some(watch) = &self.watch else {
             return;
         };
@@ -264,13 +310,25 @@ impl Room {
             return;
         }
         if let Some(watch) = &mut self.watch {
-            watch.launch(shelf);
+            watch.launch(finder, self.lanes);
         }
     }
 
     pub(in crate::play) fn tick_watch(&mut self, now: Instant) {
         if let Some(watch) = &mut self.watch {
             watch.tick(now);
+        }
+    }
+
+    pub(in crate::play) fn place_engines(&mut self, threads: Option<&Threads>) {
+        if let Some(threads) = threads {
+            self.lanes = threads.pool_size();
+        }
+        if let Some(watch) = &mut self.watch {
+            watch.place(threads);
+        }
+        for pair in &mut self.pairs {
+            pair.place_engine(threads);
         }
     }
 
@@ -291,15 +349,26 @@ impl Room {
         self.watch.as_ref().is_some_and(|w| w.missing)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "gba"))]
     pub(in crate::play) fn watch_engine(&self) -> Option<&Rollback> {
-        self.watch.as_ref()?.engine.as_deref()
+        self.watch.as_ref()?.engine.as_ref().map(Lent::get)
     }
 
-    pub fn watched_console(&self) -> Option<&dyn Console> {
+    pub fn watched_picture(&self) -> Option<Picture<'_>> {
         let watch = self.watch.as_ref()?;
         let unit = watch.unit_of(watch.of)?;
-        watch.engine.as_deref()?.unit_console(unit)
+        match watch.engine.as_ref()?.home() {
+            Some(r) => r.unit_console(unit).map(Picture::of),
+            None => watch.seen.picture(),
+        }
+    }
+
+    #[cfg(all(test, feature = "gba"))]
+    pub(in crate::play) fn watch_home(&self) -> bool {
+        self.watch
+            .as_ref()
+            .and_then(|w| w.engine.as_ref())
+            .is_none_or(Lent::is_home)
     }
 
     pub(in crate::play) fn serve_watchers(&mut self, me: OnlineId) {
@@ -383,6 +452,7 @@ impl Room {
                     frame: point.frame,
                     unit: *unit,
                     data: data.clone(),
+                    cable: None,
                 });
             }
             pair.outbox.push(PlayMsg::WatchFrom {

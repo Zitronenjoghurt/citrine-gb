@@ -1,11 +1,25 @@
 use crate::config::Limits;
 use crate::limit::Bucket;
+use axum::serve::{ListenerExt, TapIo};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use tokio::net::{TcpListener, TcpStream};
 
 const PRUNE_AT: usize = 4096;
+
+pub type Nodelay = TapIo<TcpListener, fn(&mut TcpStream)>;
+
+pub fn without_nagle(listener: TcpListener) -> Nodelay {
+    listener.tap_io(nodelay)
+}
+
+fn nodelay(tcp: &mut TcpStream) {
+    if let Err(err) = tcp.set_nodelay(true) {
+        log::warn!("Could not turn off Nagle's algorithm: {err}");
+    }
+}
 
 pub fn address_key(ip: IpAddr) -> IpAddr {
     match ip {
@@ -180,6 +194,19 @@ mod tests {
 
     fn ip(last: u8) -> IpAddr {
         IpAddr::from([10, 0, 0, last])
+    }
+
+    #[tokio::test]
+    async fn accepted_streams_send_without_nagle() {
+        let bound = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = bound.local_addr().unwrap();
+        let mut listener = without_nagle(bound);
+        let (accepted, client) = tokio::join!(
+            axum::serve::Listener::accept(&mut listener),
+            tokio::net::TcpStream::connect(addr)
+        );
+        client.unwrap();
+        assert!(accepted.0.nodelay().unwrap());
     }
 
     #[test]

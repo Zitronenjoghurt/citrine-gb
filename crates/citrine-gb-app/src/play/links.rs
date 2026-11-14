@@ -1,17 +1,21 @@
-use super::{SLOW_DELAY, SLOW_ROUND_TRIP_MS};
+use super::pace::frame_us;
+use super::{SLOW_DELAY, SLOW_ROUND_TRIP_MS, kind_of};
+use citrine_gb::console::ConsoleKind;
 use citrine_gb::netplay::{MAX_ROLLBACK_FRAMES, Sync};
 use citrine_gb_net::{Console, OnlineId};
 
 pub const MAX_INPUT_DELAY: u32 = 4;
-const FRAME_US: u32 = 16_743;
+pub const MAX_DS_INPUT_DELAY: u32 = 8;
+pub const MAX_JITTER_FRAMES: u32 = 2;
 const DRAW_US: u32 = 4_000;
+const SPLIT_COST_PERCENT: u32 = 35;
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn replay_us(console: Option<Console>) -> u32 {
     match console {
         Some(Console::Gb) | None => 1_750,
         Some(Console::Gbc) => 1_850,
-        Some(Console::Gba) => 15_000,
+        Some(Console::Gba | Console::Nds { .. }) => 15_000,
     }
 }
 
@@ -20,7 +24,7 @@ fn replay_us(console: Option<Console>) -> u32 {
     match console {
         Some(Console::Gb) | None => 2_400,
         Some(Console::Gbc) => 2_650,
-        Some(Console::Gba) => 19_500,
+        Some(Console::Gba | Console::Nds { .. }) => 19_500,
     }
 }
 
@@ -29,65 +33,116 @@ fn replay_us(console: Option<Console>) -> u32 {
     match console {
         Some(Console::Gb) | None => 4_400,
         Some(Console::Gbc) => 4_650,
-        Some(Console::Gba) => 37_500,
+        Some(Console::Gba | Console::Nds { .. }) => 37_500,
     }
+}
+
+fn frame_us_of(console: Option<Console>) -> u32 {
+    frame_us(console.map_or(ConsoleKind::Gb, kind_of).timing())
 }
 
 fn least_budget(console: Option<Console>) -> u32 {
     match console {
         Some(Console::Gb | Console::Gbc) | None => MAX_ROLLBACK_FRAMES,
-        Some(Console::Gba) => 0,
+        Some(Console::Gba | Console::Nds { .. }) => 0,
     }
 }
 
 pub fn capacity(console: Option<Console>) -> usize {
     match console {
         Some(Console::Gb | Console::Gbc) | None => 2,
-        Some(Console::Gba) => 4,
+        Some(Console::Gba | Console::Nds { .. }) => 4,
     }
 }
 
-pub fn budget(console: Option<Console>, units: usize) -> u32 {
+fn replay_frame_us(console: Option<Console>, units: u32, lanes: u32) -> u32 {
+    let alone = units * replay_us(console);
+    if lanes <= 1 {
+        return alone;
+    }
+    let split = units.div_ceil(lanes) * replay_us(console) * (100 + SPLIT_COST_PERCENT) / 100;
+    split.min(alone)
+}
+
+pub fn budget(console: Option<Console>, units: usize, lanes: usize) -> u32 {
     let units = units.clamp(2, citrine_gb_net::MAX_UNITS) as u32;
-    ((FRAME_US - DRAW_US) / (units * replay_us(console)))
+    let lanes = lanes.clamp(1, citrine_gb_net::MAX_UNITS) as u32;
+    ((frame_us_of(console) - DRAW_US) / replay_frame_us(console, units, lanes))
         .max(least_budget(console))
         .min(MAX_ROLLBACK_FRAMES)
 }
 
-pub fn sync_for(console: Option<Console>, units: usize) -> Sync {
-    Sync::new(budget(console, units), 0)
+pub fn sync_for(console: Option<Console>, units: usize, lanes: usize) -> Sync {
+    Sync::new(budget(console, units, lanes), 0)
 }
 
-pub fn delay_for(choice: Option<u32>, round_trip_ms: Option<u32>, budget: u32) -> u32 {
+pub fn delay_for(
+    console: Option<Console>,
+    choice: Option<u32>,
+    round_trip_ms: Option<u32>,
+    budget: u32,
+) -> u32 {
+    let most = match console {
+        Some(Console::Nds { .. }) => MAX_DS_INPUT_DELAY,
+        _ => MAX_INPUT_DELAY,
+    };
     if let Some(frames) = choice {
-        return frames.min(MAX_INPUT_DELAY);
+        return frames.min(most);
     }
     let Some(ms) = round_trip_ms else {
         return 0;
     };
-    let late = (ms * 1_000 / 2).div_ceil(FRAME_US) + 1;
+    let late = (ms * 1_000 / 2).div_ceil(frame_us_of(console)) + 1;
     let floor = if ms > SLOW_ROUND_TRIP_MS {
         u32::from(SLOW_DELAY)
     } else {
         0
     };
-    late.saturating_sub(budget).max(floor).min(MAX_INPUT_DELAY)
+    late.saturating_sub(budget).max(floor).min(most)
 }
 
-pub fn group_delay(choice: Option<u32>, round_trips: &[Option<u32>], budget: u32) -> u32 {
+pub fn jitter_margin(console: Option<Console>, choice: Option<u32>, spread_ms: Option<u32>) -> u32 {
+    if !matches!(console, Some(Console::Nds { .. })) || choice.is_some() {
+        return 0;
+    }
+    let Some(ms) = spread_ms else {
+        return 0;
+    };
+    (ms * 1_000)
+        .div_ceil(frame_us_of(console))
+        .min(MAX_JITTER_FRAMES)
+}
+
+pub fn delay_room(console: Option<Console>, choice: Option<u32>, spread_ms: Option<u32>) -> u32 {
+    if !matches!(console, Some(Console::Nds { .. })) || choice.is_some() {
+        return 0;
+    }
+    MAX_JITTER_FRAMES - jitter_margin(console, choice, spread_ms)
+}
+
+pub fn group_delay(
+    console: Option<Console>,
+    choice: Option<u32>,
+    round_trips: &[Option<u32>],
+    budget: u32,
+) -> u32 {
     round_trips
         .iter()
-        .map(|&ms| delay_for(choice, ms, budget))
+        .map(|&ms| delay_for(console, choice, ms, budget))
         .max()
-        .unwrap_or_else(|| delay_for(choice, None, budget))
+        .unwrap_or_else(|| delay_for(console, choice, None, budget))
 }
 
 pub fn fits(group: Option<Console>, asker: Option<Console>) -> bool {
-    let gba = |c: Console| c == Console::Gba;
+    let family = |c: Console| match c {
+        Console::Gb | Console::Gbc => 0,
+        Console::Gba => 1,
+        Console::Nds { .. } => 2,
+    };
     match (group, asker) {
         (_, None) => false,
         (None, Some(_)) => true,
-        (Some(group), Some(asker)) => gba(group) == gba(asker),
+        (Some(group), Some(asker)) => family(group) == family(asker),
     }
 }
 
@@ -128,8 +183,8 @@ impl LinkGroup {
         self.members.len() >= capacity(self.console)
     }
 
-    pub fn sync(&self) -> Sync {
-        sync_for(self.console, self.members.len())
+    pub fn sync(&self, lanes: usize) -> Sync {
+        sync_for(self.console, self.members.len(), lanes)
     }
 }
 
@@ -343,9 +398,12 @@ mod tests {
     #[test]
     fn the_group_delay_follows_the_slowest_member() {
         let trips = [Some(20), Some(150), Some(40)];
-        assert_eq!(group_delay(None, &trips, 0), delay_for(None, Some(150), 0));
-        assert!(group_delay(None, &trips, 0) > delay_for(None, Some(40), 0));
-        assert_eq!(group_delay(Some(1), &trips, 0), 1);
+        assert_eq!(
+            group_delay(None, None, &trips, 0),
+            delay_for(None, None, Some(150), 0)
+        );
+        assert!(group_delay(None, None, &trips, 0) > delay_for(None, None, Some(40), 0));
+        assert_eq!(group_delay(None, Some(1), &trips, 0), 1);
     }
 
     #[test]
@@ -389,27 +447,75 @@ mod tests {
     #[test]
     fn every_console_gets_the_same_kind_of_sync_with_a_budget_that_shrinks_with_units() {
         for console in [Console::Gb, Console::Gbc, Console::Gba] {
-            let two = sync_for(Some(console), 2);
-            let four = sync_for(Some(console), 4);
+            let two = sync_for(Some(console), 2, 1);
+            let four = sync_for(Some(console), 4, 1);
             assert_eq!(two.delay, 0);
             assert!(four.budget <= two.budget);
             assert!(two.budget <= MAX_ROLLBACK_FRAMES);
         }
-        assert!(budget(Some(Console::Gba), 2) <= budget(Some(Console::Gb), 2));
-        assert_eq!(budget(Some(Console::Gba), 2), 0);
-        assert_eq!(delay_for(None, Some(20), 0), 2);
+        assert!(budget(Some(Console::Gba), 2, 1) <= budget(Some(Console::Gb), 2, 1));
+        assert_eq!(budget(Some(Console::Gba), 2, 1), 0);
+        assert_eq!(delay_for(None, None, Some(20), 0), 2);
+    }
+
+    #[test]
+    fn split_replays_cost_a_lane_share_plus_the_join_and_leave_todays_budgets_as_they_were() {
+        let gba = Some(Console::Gba);
+        assert_eq!(replay_frame_us(gba, 4, 1), 60_000);
+        assert_eq!(replay_frame_us(gba, 4, 3), 40_500);
+        assert_eq!(replay_frame_us(gba, 2, 3), 20_250);
+        assert_eq!(replay_frame_us(gba, 2, 2), 20_250);
+        assert_eq!(replay_frame_us(None, 3, 2), 4_725);
+        for console in [Console::Gb, Console::Gbc, Console::Gba] {
+            for units in 2..=4 {
+                for lanes in 1..=4 {
+                    let split = budget(Some(console), units, lanes);
+                    assert_eq!(split, budget(Some(console), units, 1));
+                }
+            }
+        }
     }
 
     #[test]
     fn a_chosen_delay_wins_and_auto_covers_what_the_budget_cannot() {
-        assert_eq!(delay_for(Some(3), Some(400), 0), 3);
-        assert_eq!(delay_for(Some(9), None, 0), MAX_INPUT_DELAY);
-        assert_eq!(delay_for(None, None, 0), 0);
-        assert_eq!(delay_for(None, Some(20), 4), 0);
-        assert_eq!(delay_for(None, Some(100), 1), 3);
-        assert_eq!(delay_for(None, Some(100), 0), 4);
-        assert_eq!(delay_for(None, Some(130), 30), u32::from(SLOW_DELAY));
-        assert_eq!(delay_for(None, Some(1_000), 2), MAX_INPUT_DELAY);
+        assert_eq!(delay_for(None, Some(3), Some(400), 0), 3);
+        assert_eq!(delay_for(None, Some(9), None, 0), MAX_INPUT_DELAY);
+        assert_eq!(delay_for(None, None, None, 0), 0);
+        assert_eq!(delay_for(None, None, Some(20), 4), 0);
+        assert_eq!(delay_for(None, None, Some(100), 1), 3);
+        assert_eq!(delay_for(None, None, Some(100), 0), 4);
+        assert_eq!(delay_for(None, None, Some(130), 30), u32::from(SLOW_DELAY));
+        assert_eq!(delay_for(None, None, Some(1_000), 2), MAX_INPUT_DELAY);
+    }
+
+    #[test]
+    fn ds_jitter_adds_up_to_two_frames_and_a_steady_link_keeps_its_delay() {
+        let ds = Some(Console::Nds { code: *b"AMCE" });
+        assert_eq!(jitter_margin(ds, None, None), 0);
+        assert_eq!(jitter_margin(ds, None, Some(0)), 0);
+        assert_eq!(jitter_margin(ds, None, Some(8)), 1);
+        assert_eq!(jitter_margin(ds, None, Some(16)), 1);
+        assert_eq!(jitter_margin(ds, None, Some(17)), 2);
+        assert_eq!(jitter_margin(ds, None, Some(90)), 2);
+        assert_eq!(jitter_margin(ds, None, Some(1_000)), MAX_JITTER_FRAMES);
+        assert_eq!(jitter_margin(ds, Some(4), Some(90)), 0);
+        assert_eq!(delay_room(ds, None, Some(0)), 2);
+        assert_eq!(delay_room(ds, None, Some(16)), 1);
+        assert_eq!(delay_room(ds, None, Some(90)), 0);
+        assert_eq!(delay_room(ds, Some(4), Some(0)), 0);
+        for console in [
+            None,
+            Some(Console::Gb),
+            Some(Console::Gbc),
+            Some(Console::Gba),
+        ] {
+            assert_eq!(jitter_margin(console, None, Some(90)), 0);
+        }
+        assert_eq!(delay_for(ds, None, Some(150), 0), 6);
+        assert_eq!(
+            delay_for(ds, None, Some(1_000), 0) + jitter_margin(ds, None, Some(1_000)),
+            MAX_DS_INPUT_DELAY + MAX_JITTER_FRAMES
+        );
     }
 
     #[test]
@@ -417,14 +523,17 @@ mod tests {
         for console in [Console::Gb, Console::Gbc] {
             for units in [2, 4] {
                 assert_eq!(
-                    sync_for(Some(console), units),
+                    sync_for(Some(console), units, 1),
                     Sync::new(MAX_ROLLBACK_FRAMES, 0)
                 );
             }
         }
-        let budget = budget(Some(Console::Gb), 2);
-        assert_eq!(delay_for(None, Some(80), budget), 0);
-        assert_eq!(delay_for(None, Some(150), budget), u32::from(SLOW_DELAY));
+        let budget = budget(Some(Console::Gb), 2, 1);
+        assert_eq!(delay_for(None, None, Some(80), budget), 0);
+        assert_eq!(
+            delay_for(None, None, Some(150), budget),
+            u32::from(SLOW_DELAY)
+        );
     }
 
     #[test]
@@ -433,7 +542,7 @@ mod tests {
         links.set(vec![id(1), id(2), id(3), id(4)], Some(Console::Gba));
         let group = links.group_of(id(1)).unwrap();
         assert!(group.is_full());
-        assert_eq!(group.sync(), sync_for(Some(Console::Gba), 4));
+        assert_eq!(group.sync(3), sync_for(Some(Console::Gba), 4, 3));
     }
 
     #[test]

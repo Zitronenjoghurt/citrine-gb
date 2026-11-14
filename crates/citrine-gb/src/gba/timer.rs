@@ -172,17 +172,76 @@ impl Overflows {
     }
 }
 
+const NO_OVERFLOW: u32 = u32::MAX;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Timers {
+#[cfg_attr(feature = "serde", serde(rename = "Timers"))]
+struct Counted {
     timers: [Timer; TIMERS],
     #[cfg_attr(feature = "serde", serde(default))]
     phase: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "Counted", into = "Counted"))]
+pub struct Timers {
+    timers: [Timer; TIMERS],
+    phase: u32,
+    owed: u32,
+    due: u32,
+}
+
+impl From<Counted> for Timers {
+    fn from(counted: Counted) -> Self {
+        let mut timers = Self {
+            timers: counted.timers,
+            phase: counted.phase,
+            owed: 0,
+            due: NO_OVERFLOW,
+        };
+        timers.refresh_due();
+        timers
+    }
+}
+
+impl From<Timers> for Counted {
+    fn from(timers: Timers) -> Self {
+        let timers = timers.settled();
+        Self {
+            timers: timers.timers,
+            phase: timers.phase,
+        }
+    }
+}
+
+impl Default for Timers {
+    fn default() -> Self {
+        Counted::default().into()
+    }
+}
+
+impl PartialEq for Timers {
+    fn eq(&self, other: &Self) -> bool {
+        Counted::from(*self) == Counted::from(*other)
+    }
+}
+
+impl Eq for Timers {}
+
+impl std::hash::Hash for Timers {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Counted::from(*self).hash(state);
+    }
+}
+
 impl Timers {
     pub fn counter(&self, timer: usize) -> u16 {
-        self.timers[timer].counter
+        if self.owed == 0 {
+            return self.timers[timer].counter;
+        }
+        self.settled().timers[timer].counter
     }
 
     pub fn reload(&self, timer: usize) -> u16 {
@@ -198,6 +257,30 @@ impl Timers {
     }
 
     pub fn until_overflow(&self) -> Option<u32> {
+        match self.due {
+            NO_OVERFLOW => None,
+            due => Some(due),
+        }
+    }
+
+    fn refresh_due(&mut self) {
+        self.due = self.find_overflow().unwrap_or(NO_OVERFLOW);
+    }
+
+    fn settled(mut self) -> Self {
+        self.settle();
+        self
+    }
+
+    fn settle(&mut self) {
+        let owed = std::mem::take(&mut self.owed);
+        if owed > 0 {
+            self.elapse_pending(owed);
+            self.run(owed, 0, &mut Overflows::default());
+        }
+    }
+
+    fn find_overflow(&self) -> Option<u32> {
         self.timers
             .iter()
             .enumerate()
@@ -222,15 +305,15 @@ impl Timers {
     }
 
     pub fn read(&self, offset: usize) -> u16 {
-        let timer = self.timers[offset / 4];
         if offset & 2 == 0 {
-            timer.counter
+            self.counter(offset / 4)
         } else {
-            timer.control
+            self.timers[offset / 4].control
         }
     }
 
     pub fn write(&mut self, offset: usize, value: u16, mask: u16) {
+        self.settle();
         let timer = &mut self.timers[offset / 4];
         if offset & 2 == 0 {
             let reload = if timer.pending & PENDING_RELOAD != 0 {
@@ -250,29 +333,29 @@ impl Timers {
             timer.pending |= PENDING_CONTROL;
         }
         timer.apply_in = WRITE_DELAY;
+        self.refresh_due();
     }
 
     #[inline(always)]
     pub fn step(&mut self, cycles: u32) -> Overflows {
         let start = self.phase;
         self.phase = start.wrapping_add(cycles);
-        let (started, pending) = self
-            .timers
-            .iter()
-            .fold((0, 0), |(started, pending), timer| {
-                (started | timer.control & START, pending | timer.pending)
-            });
-        if started == 0 && pending == 0 {
+        if cycles < self.due {
+            if self.due != NO_OVERFLOW {
+                self.due -= cycles;
+                self.owed += cycles;
+            }
             return Overflows::default();
         }
-        self.step_active(start, cycles, pending != 0)
+        self.step_active(start, cycles)
     }
 
     #[inline(never)]
-    fn step_active(&mut self, start: u32, cycles: u32, pending: bool) -> Overflows {
+    fn step_active(&mut self, start: u32, cycles: u32) -> Overflows {
+        self.settle();
         let mut overflows = Overflows::default();
         let mut done = 0;
-        if pending {
+        if self.timers.iter().any(|timer| timer.pending != 0) {
             while let Some(at) = self.next_apply().filter(|&at| at <= cycles - done) {
                 self.elapse_pending(at);
                 self.run(at, done, &mut overflows);
@@ -287,6 +370,7 @@ impl Timers {
             self.elapse_pending(cycles - done);
         }
         self.run(cycles - done, done, &mut overflows);
+        self.refresh_due();
         overflows
     }
 
@@ -632,5 +716,135 @@ mod tests {
         assert_eq!(timers.read(0), 0);
         timers.step(1);
         assert_eq!(timers.read(0), 0xFFE0);
+    }
+
+    fn eager_step(timers: &mut Timers, cycles: u32) -> Overflows {
+        let start = timers.phase;
+        timers.phase = start.wrapping_add(cycles);
+        timers.step_active(start, cycles)
+    }
+
+    fn assert_same(lazy: &Timers, eager: &Timers, round: usize) {
+        assert_eq!(eager.owed, 0, "round {round}");
+        assert_eq!(lazy, eager, "round {round}");
+        assert_eq!(
+            lazy.until_overflow(),
+            eager.find_overflow(),
+            "round {round}"
+        );
+        for offset in (0..4 * TIMERS).step_by(2) {
+            assert_eq!(lazy.read(offset), eager.read(offset), "round {round}");
+        }
+    }
+
+    #[test]
+    fn a_lazy_step_matches_counting_every_step() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut lazy_steps = 0;
+        let mut overflow_steps = 0;
+        for round in 0..20_000 {
+            let mut lazy = Timers::default();
+            for timer in 0..TIMERS {
+                if next() % 3 == 0 {
+                    continue;
+                }
+                let reload = match next() % 3 {
+                    0 => 0xFFFF - (next() % 8) as u16,
+                    1 => 0xFF00 | next() as u16,
+                    _ => next() as u16,
+                };
+                let control = next() as u16 & (CASCADE | IRQ_ENABLE | 0b11);
+                lazy.write(offset(timer), reload, 0xFFFF);
+                lazy.write(offset(timer) + CONTROL, control | START, 0xFFFF);
+            }
+            let mut eager = lazy;
+            for _ in 0..(1 + next() % 40) {
+                let cycles = match next() % 3 {
+                    0 => (next() % 8) as u32,
+                    1 => (next() % 2000) as u32,
+                    _ => (next() % 300_000) as u32,
+                };
+                let overflows = lazy.step(cycles);
+                assert_eq!(overflows, eager_step(&mut eager, cycles), "round {round}");
+                lazy_steps += usize::from(lazy.owed > 0);
+                overflow_steps += usize::from(!overflows.is_empty());
+                assert_same(&lazy, &eager, round);
+            }
+        }
+        assert!(lazy_steps > 1_000, "{lazy_steps}");
+        assert!(overflow_steps > 1_000, "{overflow_steps}");
+    }
+
+    #[test]
+    fn lazy_timers_follow_every_write_and_step() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut lazy = Timers::default();
+        assert_eq!(lazy.until_overflow(), None);
+        lazy.write(0, 0, 0xFFFF);
+        let mut eager = lazy;
+        for round in 0..200_000 {
+            match next() % 8 {
+                0 => {
+                    let reload = match next() % 2 {
+                        0 => 0xFFFF - (next() % 16) as u16,
+                        _ => next() as u16,
+                    };
+                    let at = offset((next() % 4) as usize);
+                    lazy.write(at, reload, 0xFFFF);
+                    eager.write(at, reload, 0xFFFF);
+                }
+                1 => {
+                    let control = next() as u16 & (CASCADE | IRQ_ENABLE | START | 0b11);
+                    let at = offset((next() % 4) as usize) + CONTROL;
+                    lazy.write(at, control, 0xFFFF);
+                    eager.write(at, control, 0xFFFF);
+                }
+                _ => {
+                    let cycles = match next() % 3 {
+                        0 => (next() % 4) as u32,
+                        1 => (next() % 600) as u32,
+                        _ => (next() % 90_000) as u32,
+                    };
+                    assert_eq!(
+                        lazy.step(cycles),
+                        eager_step(&mut eager, cycles),
+                        "round {round}"
+                    );
+                }
+            }
+            assert_same(&lazy, &eager, round);
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn owed_cycles_save_as_if_counted() {
+        let mut lazy = Timers::default();
+        lazy.write(0, 0xFF00, 0xFFFF);
+        lazy.write(CONTROL, START | 1, 0xFFFF);
+        let mut eager = lazy;
+        for cycles in [500, 700] {
+            assert_eq!(lazy.step(cycles), eager_step(&mut eager, cycles));
+        }
+        assert_eq!(lazy.owed, 700);
+        let saved = serde_json::to_string(&lazy).expect("timers save");
+        assert_eq!(saved, serde_json::to_string(&eager).expect("timers save"));
+        let loaded: Timers = serde_json::from_str(&saved).expect("timers load");
+        assert_eq!(loaded, lazy);
+        assert_eq!(loaded.owed, 0);
+        assert_eq!(loaded.until_overflow(), lazy.until_overflow());
+        assert_eq!(loaded.read(0), lazy.read(0));
     }
 }

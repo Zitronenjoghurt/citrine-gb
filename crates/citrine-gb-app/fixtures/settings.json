@@ -382,7 +382,6 @@
   "recording_scale": 4,
   "randomized_ram": false,
   "dev_mode": false,
-  "focus_mode": false,
   "focus_place": {
     "x": 0.5,
     "y": 0.5

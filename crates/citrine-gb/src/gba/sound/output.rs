@@ -97,6 +97,8 @@ impl Output {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn flush(&mut self) {
         let time = self.cycles >> CLOCK_SHIFT;
         self.left.end_frame(time);

@@ -87,6 +87,72 @@ impl Default for Shoulders {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, serde::Serialize, serde::Deserialize,
+)]
+pub enum DsButton {
+    X,
+    Y,
+}
+
+impl DsButton {
+    pub fn key(self) -> Keys {
+        match self {
+            Self::X => Keys::X,
+            Self::Y => Keys::Y,
+        }
+    }
+
+    fn default_pad(self) -> (PadButton, GbButton) {
+        match self {
+            Self::X => (PadButton::North, GbButton::B),
+            Self::Y => (PadButton::West, GbButton::A),
+        }
+    }
+}
+
+impl Display for DsButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::X => "DS X",
+            Self::Y => "DS Y",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DsButtons {
+    keyboard: Vec<(egui::Key, DsButton)>,
+    gamepad: Vec<(PadButton, DsButton)>,
+    adopted: bool,
+}
+
+impl Default for DsButtons {
+    fn default() -> Self {
+        Self {
+            keyboard: Self::KEYS.to_vec(),
+            gamepad: DsButton::iter()
+                .map(|button| (button.default_pad().0, button))
+                .collect(),
+            adopted: true,
+        }
+    }
+}
+
+impl DsButtons {
+    const KEYS: [(egui::Key, DsButton); 2] =
+        [(egui::Key::C, DsButton::X), (egui::Key::V, DsButton::Y)];
+
+    fn missing() -> Self {
+        Self {
+            keyboard: Vec::new(),
+            gamepad: Vec::new(),
+            adopted: false,
+        }
+    }
+}
+
 impl Display for GbButton {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
@@ -186,6 +252,7 @@ pub enum BindingKind {
 pub enum BindingTarget {
     Button(GbButton),
     Shoulder(Shoulder),
+    Ds(DsButton),
     Shortcut(crate::app::ui_state::hotkeys::HotkeyAction),
     LinkKey(crate::local_link::Half, GbButton),
 }
@@ -195,6 +262,8 @@ impl BindingTarget {
         let buttons = GbButton::iter().map(Self::Button);
         #[cfg(feature = "gba")]
         let buttons = buttons.chain(Shoulder::iter().map(Self::Shoulder));
+        #[cfg(feature = "nds")]
+        let buttons = buttons.chain(DsButton::iter().map(Self::Ds));
         buttons
     }
 
@@ -202,6 +271,7 @@ impl BindingTarget {
         match self {
             Self::Button(button) => Some(button.to_string()),
             Self::Shoulder(shoulder) => Some(shoulder.to_string()),
+            Self::Ds(button) => Some(button.to_string()),
             Self::Shortcut(_) | Self::LinkKey(..) => None,
         }
     }
@@ -213,6 +283,8 @@ pub struct KeyBindings {
     keyboard: Vec<(egui::Key, GbButton)>,
     gamepad: Vec<(PadButton, GbButton)>,
     shoulders: Shoulders,
+    #[serde(default = "DsButtons::missing")]
+    ds: DsButtons,
     pub stick_as_dpad: bool,
     pub stick_deadzone: u8,
 }
@@ -238,7 +310,6 @@ impl Default for KeyBindings {
                 (K::X, GbButton::B),
                 (K::P, GbButton::B),
                 (K::Enter, GbButton::Start),
-                (K::Space, GbButton::Start),
                 (K::Backspace, GbButton::Select),
             ],
             gamepad: vec![
@@ -254,6 +325,7 @@ impl Default for KeyBindings {
                 (PadButton::Select, GbButton::Select),
             ],
             shoulders: Shoulders::default(),
+            ds: DsButtons::default(),
             stick_as_dpad: true,
             stick_deadzone: Self::DEFAULT_DEADZONE,
         }
@@ -303,10 +375,106 @@ impl KeyBindings {
             .collect()
     }
 
-    pub fn input_for_key(&self, key: egui::Key) -> Option<Keys> {
+    pub fn input_for_key(&self, key: egui::Key, ds: bool) -> Option<Keys> {
+        if ds && let Some(button) = self.ds_for_key(key) {
+            return Some(button.key());
+        }
         self.button_for_key(key)
             .map(GbButton::key)
             .or_else(|| self.shoulder_for_key(key).map(Shoulder::key))
+    }
+
+    pub fn ds_for_key(&self, key: egui::Key) -> Option<DsButton> {
+        self.ds
+            .keyboard
+            .iter()
+            .find(|(bound, _)| *bound == key)
+            .map(|(_, button)| *button)
+    }
+
+    pub fn ds_for_pad(&self, pad: PadButton) -> Option<DsButton> {
+        self.ds
+            .gamepad
+            .iter()
+            .find(|(bound, _)| *bound == pad)
+            .map(|(_, button)| *button)
+    }
+
+    pub fn ds_keys(&self, button: DsButton) -> Vec<egui::Key> {
+        self.ds
+            .keyboard
+            .iter()
+            .filter(|(_, bound)| *bound == button)
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    pub fn ds_pads(&self, button: DsButton) -> Vec<PadButton> {
+        self.ds
+            .gamepad
+            .iter()
+            .filter(|(_, bound)| *bound == button)
+            .map(|(pad, _)| *pad)
+            .collect()
+    }
+
+    pub fn bind_ds_key(&mut self, key: egui::Key, button: DsButton) {
+        self.ds.keyboard.retain(|(bound, _)| *bound != key);
+        self.shoulders.keyboard.retain(|(bound, _)| *bound != key);
+        self.ds.keyboard.push((key, button));
+    }
+
+    pub fn bind_ds_pad(&mut self, pad: PadButton, button: DsButton) {
+        self.ds.gamepad.retain(|(bound, _)| *bound != pad);
+        self.shoulders.gamepad.retain(|(bound, _)| *bound != pad);
+        self.ds.gamepad.push((pad, button));
+    }
+
+    pub fn remove_key(&mut self, target: BindingTarget, key: egui::Key) {
+        match target {
+            BindingTarget::Ds(_) => self.ds.keyboard.retain(|(bound, _)| *bound != key),
+            _ => {
+                self.keyboard.retain(|(bound, _)| *bound != key);
+                self.shoulders.keyboard.retain(|(bound, _)| *bound != key);
+            }
+        }
+    }
+
+    pub fn remove_pad(&mut self, target: BindingTarget, pad: PadButton) {
+        match target {
+            BindingTarget::Ds(_) => self.ds.gamepad.retain(|(bound, _)| *bound != pad),
+            _ => {
+                self.gamepad.retain(|(bound, _)| *bound != pad);
+                self.shoulders.gamepad.retain(|(bound, _)| *bound != pad);
+            }
+        }
+    }
+
+    pub fn adopt_ds(&mut self) -> bool {
+        if self.ds.adopted {
+            return false;
+        }
+        self.ds.adopted = true;
+        for (key, button) in DsButtons::KEYS {
+            let taken = self.button_for_key(key).is_some()
+                || self.shoulder_for_key(key).is_some()
+                || self.ds_for_key(key).is_some();
+            if !taken {
+                self.ds.keyboard.push((key, button));
+            }
+        }
+        for button in DsButton::iter() {
+            let (pad, shared) = button.default_pad();
+            let taken = self
+                .button_for_pad(pad)
+                .is_some_and(|bound| bound != shared)
+                || self.shoulder_for_pad(pad).is_some()
+                || self.ds_for_pad(pad).is_some();
+            if !taken {
+                self.ds.gamepad.push((pad, button));
+            }
+        }
+        true
     }
 
     pub fn shoulder_for_key(&self, key: egui::Key) -> Option<Shoulder> {
@@ -359,6 +527,7 @@ impl KeyBindings {
             BindingTarget::Shoulder(shoulder) => {
                 (self.shoulder_keys(shoulder), self.shoulder_pads(shoulder))
             }
+            BindingTarget::Ds(button) => (self.ds_keys(button), self.ds_pads(button)),
             BindingTarget::Shortcut(_) | BindingTarget::LinkKey(..) => (Vec::new(), Vec::new()),
         }
     }
@@ -404,11 +573,21 @@ impl KeyBindings {
     pub fn unbind_key(&mut self, key: egui::Key) {
         self.keyboard.retain(|(bound, _)| *bound != key);
         self.shoulders.keyboard.retain(|(bound, _)| *bound != key);
+        self.ds.keyboard.retain(|(bound, _)| *bound != key);
     }
 
     pub fn unbind_pad(&mut self, pad: PadButton) {
         self.gamepad.retain(|(bound, _)| *bound != pad);
         self.shoulders.gamepad.retain(|(bound, _)| *bound != pad);
+        self.ds.gamepad.retain(|(bound, _)| *bound != pad);
+    }
+
+    pub fn binds_key(&self, key: egui::Key) -> bool {
+        self.input_for_key(key, true).is_some()
+    }
+
+    pub fn drop_old_default(&mut self, key: egui::Key, button: GbButton) {
+        self.keyboard.retain(|bound| *bound != (key, button));
     }
 
     pub fn unbound(&self) -> Vec<GbButton> {
@@ -655,9 +834,9 @@ mod tests {
             bindings.shoulder_pads(Shoulder::R),
             [PadButton::RightTrigger, PadButton::RightTrigger2]
         );
-        assert_eq!(bindings.input_for_key(Key::Num1), Some(Keys::L));
-        assert_eq!(bindings.input_for_key(Key::Num3), Some(Keys::R));
-        assert_eq!(bindings.input_for_key(Key::Q), Some(Keys::A));
+        assert_eq!(bindings.input_for_key(Key::Num1, false), Some(Keys::L));
+        assert_eq!(bindings.input_for_key(Key::Num3, false), Some(Keys::R));
+        assert_eq!(bindings.input_for_key(Key::Q, false), Some(Keys::A));
     }
 
     #[test]
@@ -702,11 +881,11 @@ mod tests {
         let mut bindings = KeyBindings::default();
         bindings.bind_shoulder_key(Key::Q, Shoulder::L);
         assert_eq!(bindings.button_for_key(Key::Q), None);
-        assert_eq!(bindings.input_for_key(Key::Q), Some(Keys::L));
+        assert_eq!(bindings.input_for_key(Key::Q, false), Some(Keys::L));
 
         bindings.bind_key(Key::Num1, GbButton::B);
         assert_eq!(bindings.shoulder_keys(Shoulder::L), [Key::Q]);
-        assert_eq!(bindings.input_for_key(Key::Num1), Some(Keys::B));
+        assert_eq!(bindings.input_for_key(Key::Num1, false), Some(Keys::B));
 
         bindings.bind_shoulder_pad(PadButton::East, Shoulder::R);
         assert_eq!(bindings.button_for_pad(PadButton::East), None);
@@ -723,7 +902,7 @@ mod tests {
     fn old_settings_keep_their_binds_and_get_l_and_r() {
         let saved = r#"{"keyboard":[["Num1","Select"],["W","Up"]],"gamepad":[["LeftTrigger","Start"]],"stick_as_dpad":true}"#;
         let bindings: KeyBindings = serde_json::from_str(saved).expect("loads");
-        assert_eq!(bindings.input_for_key(Key::Num1), Some(Keys::SELECT));
+        assert_eq!(bindings.input_for_key(Key::Num1, false), Some(Keys::SELECT));
         assert!(bindings.shoulder_keys(Shoulder::L).is_empty());
         assert_eq!(bindings.shoulder_keys(Shoulder::R), [Key::Num3]);
         assert_eq!(
@@ -774,5 +953,101 @@ mod tests {
         );
         assert_eq!(old.gamepad.len(), KeyBindings::default().gamepad.len());
         assert!(old.stick_as_dpad);
+    }
+
+    #[test]
+    fn x_and_y_have_their_own_defaults_on_the_ds_only() {
+        let bindings = KeyBindings::default();
+        assert_eq!(bindings.ds_keys(DsButton::X), [Key::C]);
+        assert_eq!(bindings.ds_keys(DsButton::Y), [Key::V]);
+        assert_eq!(bindings.ds_pads(DsButton::X), [PadButton::North]);
+        assert_eq!(bindings.ds_pads(DsButton::Y), [PadButton::West]);
+        assert_eq!(bindings.input_for_key(Key::C, true), Some(Keys::X));
+        assert_eq!(bindings.input_for_key(Key::V, true), Some(Keys::Y));
+        assert_eq!(bindings.input_for_key(Key::C, false), None);
+        assert_eq!(bindings.input_for_key(Key::Q, true), Some(Keys::A));
+        assert_eq!(
+            bindings.button_for_pad(PadButton::North),
+            Some(GbButton::B),
+            "north stays B off the ds"
+        );
+        assert_eq!(bindings.button_for_pad(PadButton::West), Some(GbButton::A));
+        let hotkeys = crate::app::ui_state::hotkeys::Hotkeys::default();
+        for key in [Key::C, Key::V] {
+            for modifiers in [
+                egui::Modifiers::NONE,
+                egui::Modifiers::SHIFT,
+                egui::Modifiers::CTRL,
+            ] {
+                assert_eq!(hotkeys.action_for(key, modifiers), None, "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_ds_binding_keeps_the_game_boy_one_and_a_game_boy_binding_takes_it() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind_ds_pad(PadButton::South, DsButton::Y);
+        assert_eq!(bindings.ds_for_pad(PadButton::South), Some(DsButton::Y));
+        assert_eq!(bindings.button_for_pad(PadButton::South), Some(GbButton::B));
+
+        bindings.remove_pad(BindingTarget::Ds(DsButton::Y), PadButton::South);
+        assert_eq!(bindings.ds_for_pad(PadButton::South), None);
+        assert_eq!(bindings.button_for_pad(PadButton::South), Some(GbButton::B));
+
+        bindings.remove_pad(BindingTarget::Button(GbButton::B), PadButton::North);
+        assert_eq!(bindings.button_for_pad(PadButton::North), None);
+        assert_eq!(bindings.ds_for_pad(PadButton::North), Some(DsButton::X));
+
+        bindings.bind_key(Key::C, GbButton::Start);
+        assert_eq!(bindings.input_for_key(Key::C, true), Some(Keys::START));
+        assert!(bindings.ds_keys(DsButton::X).is_empty());
+
+        bindings.bind_shoulder_key(Key::V, Shoulder::L);
+        assert_eq!(bindings.input_for_key(Key::V, true), Some(Keys::L));
+    }
+
+    #[test]
+    fn old_settings_keep_their_binds_and_get_x_and_y_where_free() {
+        let saved = r#"{"keyboard":[["C","Start"],["W","Up"]],"gamepad":[["North","Select"],["West","A"]],"stick_as_dpad":true}"#;
+        let mut bindings: KeyBindings = serde_json::from_str(saved).expect("loads");
+        let before = bindings.clone();
+        assert!(bindings.adopt_ds());
+        assert_eq!(bindings.keyboard, before.keyboard);
+        assert_eq!(bindings.gamepad, before.gamepad);
+        assert_eq!(bindings.shoulders, before.shoulders);
+        assert_eq!(bindings.input_for_key(Key::C, true), Some(Keys::START));
+        assert!(bindings.ds_keys(DsButton::X).is_empty());
+        assert_eq!(bindings.ds_keys(DsButton::Y), [Key::V]);
+        assert!(bindings.ds_pads(DsButton::X).is_empty());
+        assert_eq!(bindings.ds_pads(DsButton::Y), [PadButton::West]);
+        assert_eq!(
+            bindings.button_for_pad(PadButton::North),
+            Some(GbButton::Select)
+        );
+
+        bindings.unbind_key(Key::V);
+        assert!(!bindings.adopt_ds());
+        assert!(bindings.ds_keys(DsButton::Y).is_empty());
+        let mut fresh = KeyBindings::default();
+        assert!(!fresh.adopt_ds());
+        assert_eq!(fresh, KeyBindings::default());
+    }
+
+    #[test]
+    fn a_build_without_ds_buttons_loads_binds_saved_with_x_and_y() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind_ds_key(Key::K, DsButton::X);
+        bindings.bind_key(Key::J, GbButton::A);
+        let saved = serde_json::to_string(&bindings).expect("saves");
+        assert!(saved.contains(r#""ds":"#));
+
+        let old: BindingsBeforeShoulders = serde_json::from_str(&saved).expect("loads");
+        assert!(old.keyboard.contains(&(Key::J, GbButton::A)));
+        assert!(old.keyboard.iter().all(|(key, _)| *key != Key::K));
+        assert_eq!(old.gamepad.len(), KeyBindings::default().gamepad.len());
+
+        let loaded: KeyBindings = serde_json::from_str(&saved).expect("loads");
+        assert_eq!(loaded, bindings);
     }
 }

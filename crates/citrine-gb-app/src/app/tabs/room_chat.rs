@@ -1,3 +1,4 @@
+use crate::app::big_screen::scroll::Following;
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::ui_theme::ink_on;
 use crate::app::widgets::avatar;
@@ -124,7 +125,7 @@ pub fn body(ui: &mut Ui, lines: &[ChatLine], draft: &mut String, touch: bool) ->
                 .id_salt("room_chat_lines")
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show_following(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     let mut last = None;
                     for line in lines {

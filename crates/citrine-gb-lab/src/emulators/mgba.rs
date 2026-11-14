@@ -67,16 +67,16 @@ impl FrameEmulator for MgbaEmulator {
         self.emu =
             unsafe { sys::citrine_mgba_new(rom.as_ptr().cast(), rom.len(), bios, bios_size) };
         anyhow::ensure!(!self.emu.is_null(), "mgba could not load the ROM");
-        let video = unsafe {
-            VideoSpec {
-                width: sys::citrine_mgba_width(self.emu) as usize,
-                height: sys::citrine_mgba_height(self.emu) as usize,
-            }
+        let size = unsafe {
+            (
+                sys::citrine_mgba_width(self.emu) as usize,
+                sys::citrine_mgba_height(self.emu) as usize,
+            )
         };
+        let video = console.video();
         anyhow::ensure!(
-            video == console.video(),
-            "mgba reports a {video:?} screen, the GBA has {:?}",
-            console.video()
+            size == (video.width, video.height),
+            "mgba reports a {size:?} screen, the GBA has {video:?}"
         );
         self.video = video;
         self.keys = 0;
@@ -105,7 +105,7 @@ impl FrameEmulator for MgbaEmulator {
     }
 
     fn render_into(&self, out: &mut Vec<u8>) {
-        let VideoSpec { width, height } = self.video;
+        let VideoSpec { width, height, .. } = self.video;
         let pixels = unsafe {
             std::slice::from_raw_parts(sys::citrine_mgba_pixels(self.emu), width * height)
         };

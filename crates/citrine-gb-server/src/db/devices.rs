@@ -200,6 +200,9 @@ impl Db {
         )
         .execute(&mut *tx)
         .await?;
+        sqlx::query!("DELETE FROM push_tokens WHERE device_id = ?1", device)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(true)
     }

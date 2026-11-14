@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_types,
+    reason = "the download job and the settings row both write the codec state, and citrine-gb-threads has no type for two writers yet"
+)]
+
 use crate::progress::{Counter, Progress, read_counted};
 use openh264::OpenH264API;
 use sha2::{Digest, Sha256};
@@ -149,15 +154,20 @@ impl Codec {
         }
     }
 
-    pub fn answer(&self, download: bool, fetch: Fetch) -> Answer {
+    pub fn answer(
+        &self,
+        spawner: &citrine_gb_threads::Spawner,
+        download: bool,
+        fetch: Fetch,
+    ) -> Answer {
         if !download {
             return Answer::Declined;
         }
-        self.download(fetch);
+        self.download(spawner, fetch);
         Answer::Downloading
     }
 
-    pub fn download(&self, fetch: Fetch) {
+    pub fn download(&self, spawner: &citrine_gb_threads::Spawner, fetch: Fetch) {
         let Some(binary) = self.binary else {
             return;
         };
@@ -173,20 +183,13 @@ impl Codec {
         let dir = self.dir.clone();
         let state = self.state.clone();
         let counter = self.lock().counter.clone();
-        let spawned = std::thread::Builder::new()
-            .name("codec download".into())
-            .spawn(move || {
-                let result = install(binary, &dir, fetch, &counter);
-                let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-                state.downloading = false;
-                state.verified = Some(result.is_ok());
-                state.failure = result.err().map(|err| err.to_string());
-            });
-        if let Err(err) = spawned {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        spawner.run("codec download", move || {
+            let result = install(binary, &dir, fetch, &counter);
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
             state.downloading = false;
-            state.failure = Some(err.to_string());
-        }
+            state.verified = Some(result.is_ok());
+            state.failure = result.err().map(|err| err.to_string());
+        });
     }
 
     #[cfg(test)]
@@ -260,7 +263,7 @@ fn install(binary: Binary, dir: &Path, fetch: Fetch, counter: &Counter) -> anyho
 pub fn shared() -> &'static Codec {
     static CODEC: std::sync::LazyLock<Codec> = std::sync::LazyLock::new(|| {
         Codec::new(
-            crate::storage::data_dir().join("codecs"),
+            crate::storage::cache_dir().join(crate::storage::CODECS),
             binary_for(std::env::consts::OS, std::env::consts::ARCH),
         )
     });
@@ -364,7 +367,7 @@ mod tests {
         let codec = Codec::new(dir.clone(), Some(real_fake()));
         assert_eq!(codec.status(), Status::Missing);
         assert_eq!(
-            codec.answer(true, serve(packed(&library()))),
+            codec.answer(&spawner(), true, serve(packed(&library()))),
             Answer::Downloading
         );
         codec.wait();
@@ -384,7 +387,7 @@ mod tests {
     fn a_bad_download_leaves_nothing_behind() {
         let dir = folder("bad");
         let codec = Codec::new(dir.clone(), Some(real_fake()));
-        codec.download(serve(packed(b"something else")));
+        codec.download(&spawner(), serve(packed(b"something else")));
         codec.wait();
         assert_eq!(codec.status(), Status::Missing);
         assert!(codec.take_failure().unwrap().contains("checksum"));
@@ -401,14 +404,17 @@ mod tests {
         let total = body.len() as u64;
         let (go, wait) = std::sync::mpsc::channel::<()>();
         let (half, halfway) = std::sync::mpsc::channel::<()>();
-        codec.download(Box::new(move |_, counter| {
-            counter.set_total(total);
-            counter.add(total / 2);
-            half.send(()).unwrap();
-            wait.recv().unwrap();
-            counter.add(total - total / 2);
-            Ok(body)
-        }));
+        codec.download(
+            &spawner(),
+            Box::new(move |_, counter| {
+                counter.set_total(total);
+                counter.add(total / 2);
+                half.send(()).unwrap();
+                wait.recv().unwrap();
+                counter.add(total - total / 2);
+                Ok(body)
+            }),
+        );
         halfway.recv().unwrap();
         assert_eq!(codec.progress(), Some(Progress::bytes(total / 2, total)));
         go.send(()).unwrap();
@@ -422,7 +428,7 @@ mod tests {
     fn a_failed_connection_is_reported() {
         let dir = folder("offline");
         let codec = Codec::new(dir.clone(), Some(real_fake()));
-        codec.download(Box::new(|_, _| anyhow::bail!("no connection")));
+        codec.download(&spawner(), Box::new(|_, _| anyhow::bail!("no connection")));
         codec.wait();
         assert_eq!(codec.status(), Status::Missing);
         assert_eq!(codec.take_failure().as_deref(), Some("no connection"));
@@ -433,7 +439,11 @@ mod tests {
     fn declining_downloads_nothing() {
         let dir = folder("declined");
         let codec = Codec::new(dir.clone(), Some(real_fake()));
-        let answer = codec.answer(false, Box::new(|_, _| panic!("fetched after a decline")));
+        let answer = codec.answer(
+            &spawner(),
+            false,
+            Box::new(|_, _| panic!("fetched after a decline")),
+        );
         assert_eq!(answer, Answer::Declined);
         assert_eq!(codec.status(), Status::Missing);
         assert_eq!(codec.take_failure(), None);
@@ -445,7 +455,7 @@ mod tests {
     fn a_changed_file_is_not_loaded() {
         let dir = folder("changed");
         let codec = Codec::new(dir.clone(), Some(real_fake()));
-        codec.download(serve(packed(&library())));
+        codec.download(&spawner(), serve(packed(&library())));
         codec.wait();
         assert_eq!(codec.status(), Status::Ready);
         std::fs::write(dir.join(FAKE.file), b"swapped").unwrap();
@@ -468,5 +478,9 @@ mod tests {
     fn the_license_carries_the_notice() {
         assert!(LICENSE.contains(super::super::CODEC_NOTICE));
         assert!(LICENSE.contains("separately downloaded"));
+    }
+
+    fn spawner() -> citrine_gb_threads::Spawner {
+        citrine_gb_threads::Threads::new(citrine_gb_threads::Mode::Threads).spawner()
     }
 }

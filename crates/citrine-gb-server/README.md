@@ -13,7 +13,21 @@ docker compose up -d --build
 
 To run it from source, use `cargo run --release` in `crates/citrine-gb-server/`. It serves the web app from
 `./static`, which Docker builds for you; without Docker, build it first in `crates/citrine-gb-app/` with
-`trunk build --release --dist ../citrine-gb-server/static`.
+`trunk build --release --dist ../citrine-gb-server/static`, or run `make web` at the top for both web
+builds in `crates/citrine-gb-app/dist`.
+
+## Threads in the browser
+
+The web app comes in two builds. The threaded one, in `threaded/`, runs the console on a Web Worker
+and needs a cross-origin isolated page; the page loads it when it can and the plain build when it
+can't. `CITRINE_ISOLATION` sets the headers on the web app's files:
+
+- `report` (the default) sends `Cross-Origin-Opener-Policy-Report-Only` and
+  `Cross-Origin-Embedder-Policy-Report-Only`. Browsers keep loading the plain build and send what
+  isolation would block to `/isolation-reports`, which the server logs once per kind and address.
+- `on` sends `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`
+  and `Cross-Origin-Resource-Policy: same-origin`, so browsers load the threaded build.
+- `off` sends none of them.
 
 ## The four setups
 
@@ -135,11 +149,19 @@ relay open to anyone; each one has a variable to change it, listed with its defa
 | `CITRINE_FRIEND_REQUEST_BURST` | 10 | New friend requests one account may send at once |
 | `CITRINE_DOWNLOAD_MB_PER_DAY` | 1024 | MB of files one account may download per day |
 | `CITRINE_SESSION_KB_PER_SECOND` | 256 | KB per second each player may send in a play session |
-| `CITRINE_SESSION_BURST_MB` | 12 | MB a player may send at once in a play session, enough for a game and a saved state |
+| `CITRINE_SESSION_BURST_MB` | 12 | MB a player may send at once in a play session, enough for a saved state |
+| `CITRINE_GAME_KB_PER_SECOND` | 1024 | KB per second each player may send of a shared game |
+| `CITRINE_GAME_BURST_MB` | 40 | MB of a shared game a player may send at once, enough for a 32 MB GBA game |
 | `CITRINE_MAX_INVITES` | 5 | Play invites one host may have waiting for an answer. A new invite to the same friend replaces the old one |
 | `CITRINE_ROOM_MEMBERS` | 16 | People in one room, 2 to 64 |
 | `CITRINE_ROOM_PLAYERS` | 8 | Members of one room who may run a game at once, 2 to 64 |
 | `CITRINE_ROOM_GRACE_SECS` | 60 | Seconds a member whose connection dropped keeps their place in the room |
+| `CITRINE_DS_NET_PORTS` | 8 | UDP ports one player's DS may hold open on the server for DS online play |
+| `CITRINE_DS_NET_STREAMS` | 8 | TCP connections one player's DS may hold open on the server for DS online play |
+| `CITRINE_DS_NET_KB_PER_SECOND` | 64 | KB per second each player's DS may send through the server for DS online play |
+| `CITRINE_DS_NET_PACKETS_PER_SECOND` | 100 | Datagrams per second each player's DS may send through the server; each one also counts 28 bytes against the KB limit |
+| `CITRINE_DS_NET_ACCOUNT_KB_PER_SECOND` | 256 | KB per second all of one account's connections together may send through the server for DS online play |
+| `CITRINE_DS_NET_ACCOUNT_PACKETS_PER_SECOND` | 200 | Datagrams per second all of one account's connections together may send through the server |
 | `CITRINE_PASSWORD_CHECKS` | 2 | Relay password checks that run at once. Each takes about 19 MB of memory |
 | `CITRINE_PASSWORD_QUEUE` | 16 | Password checks that may wait their turn. More get "too many tries" |
 | `CITRINE_SIGN_UPS_PER_IP` | 3 | New accounts per hour from one address. More get "too many tries" |
@@ -180,6 +202,38 @@ from the proxy's address, so one person's wrong guesses lock everyone out for a 
 `CITRINE_TRUSTED_PROXY_HOPS` to the number of proxies of your own in front of the server, usually
 1: the server then takes the visitor's address from `X-Forwarded-For`, that many entries from the
 right, or from `X-Real-IP`. Leave it at 0 without a proxy, since anyone can send those headers.
+
+DS online play (a DS game's own internet mode, such as Mario Kart DS races) goes out through the
+server: the app hands the DS's connections to the relay, and the server opens them from its own
+address, so other players and online services see the server's address instead of the player's.
+It reaches public addresses only, TCP only on the ports DS online services use. Set
+`CITRINE_DS_NET_PUBLIC_IP` to the server's public IPv4 address so two players on the same server
+reach each other: a datagram to that address and one of the server's own DS ports goes straight
+to the player holding the port. Without it, players on the same server can't meet, since a
+datagram sent from inside Docker to the host's own public address doesn't come back in. `CITRINE_DS_NET_PRIVATE`
+lets DS traffic reach private and loopback addresses; it is for tests only.
+
+DS traffic never reaches the server's own addresses (`CITRINE_DS_NET_PUBLIC_IP` and the address
+of the server's default route), except for the player-to-player datagrams above. A DS hears a
+datagram from the internet or another player's DS port only from an address it sent one to
+first, as behind a home router. Datagrams between players' LAN addresses always go through,
+since a game may answer another player only on that path. Each datagram
+counts against the per-connection and per-account limits below, and a TCP upload faster than the
+KB limit slows down instead of closing.
+
+When the server sits behind a NAT that changes source ports (a home router, or Docker on some
+hosts), the port other players see differs from the one the server opened, and that lookup misses.
+Set `CITRINE_DS_NET_STUN` to a STUN server (`stun.l.google.com:19302`) and the server asks it for
+each new DS port's public port and uses that one instead. It costs one round trip to the STUN
+server for each new port. Leave it empty when the server has its own public address.
+
+## Push notifications
+
+The Android app gets friend requests, play invites and chat messages as push notifications through Firebase Cloud
+Messaging while it is closed or in the background. Set `CITRINE_FCM_KEY_FILE` to the path of a service account key
+(the JSON file from the Firebase console under Project settings, Service accounts, Generate new private key). Without
+it the server takes the phones' tokens and sends nothing; it says so once at start. Nothing is pushed while one of
+the account's devices is in use, and a chat updates one notification per friend.
 
 ## Changing the database
 

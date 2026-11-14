@@ -6,22 +6,28 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+publish = false
 exclude = [".DS_Store"]
 
 [features]
 default = []
 gba = []
+nds = ["gba"]
 serde = ["dep:serde", "bitflags/serde"]
 debug = ["png", "rom-id", "serde", "serde_json"]
-persistence = ["serde", "rmp-serde"]
+persistence = ["serde", "rmp-serde", "dep:xxhash-rust"]
 recording = ["serde", "serde_json"]
 rom-id = ["dep:crc32fast", "dep:sha1", "dep:sha2"]
 strum = ["dep:strum", "strum_macros"]
+jit = ["nds", "dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-native", "dep:libc", "dep:windows-sys"]
+jit-lockstep = ["jit"]
 
 [dependencies]
 bitflags = "2.11.0"
 base64 = { version = "0.22.1", optional = true }
 blip_buf = "0.1.6"
+citrine-gb-blip = { workspace = true }
+citrine-gb-threads = { workspace = true }
 brotli = { version = "8.0.2", optional = true }
 crc32fast = { version = "1.5.0", optional = true }
 png = { version = "0.18.1", optional = true }
@@ -33,8 +39,22 @@ sha1 = { version = "0.11.0-rc.5", optional = true }
 sha2 = { version = "0.11.0-rc.5", optional = true }
 strum = { version = "0.28.0", optional = true }
 strum_macros = { version = "0.28.0", optional = true }
+xxhash-rust = { version = "0.8.19", features = ["xxh3"], optional = true }
+
+[target.'cfg(any(all(unix, any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios")), all(windows, target_arch = "x86_64")))'.dependencies]
+cranelift-codegen = { version = "0.137.1", default-features = false, features = ["std", "host-arch"], optional = true }
+cranelift-frontend = { version = "0.137.1", optional = true }
+cranelift-native = { version = "0.137.1", optional = true }
+
+[target.'cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios")))'.dependencies]
+libc = { version = "0.2.191", optional = true }
+
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+citrine-gb-test-roms = { workspace = true }
+citrine-gb-threads = { workspace = true, features = ["testing"] }
 citrine-gb = { path = ".", features = ["debug", "persistence"] }
 datatest-stable = "0.3.3"
 png = "0.18.1"
@@ -58,3 +78,23 @@ name = "arm7tdmi"
 harness = false
 test = false
 required-features = ["gba", "debug"]
+
+[[test]]
+name = "armv5te"
+required-features = ["gba"]
+
+[[test]]
+name = "cp15"
+required-features = ["nds"]
+
+[[test]]
+name = "jit_lockstep"
+required-features = ["jit-lockstep"]
+
+[[example]]
+name = "threads_bench"
+required-features = ["gba", "persistence", "brotli"]
+
+[[example]]
+name = "ds_raster_bench"
+required-features = ["jit", "persistence"]

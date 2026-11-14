@@ -51,3 +51,16 @@ pub(super) fn browser_on(agent: &str) -> String {
     };
     format!("{browser} on {system}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::browser_on;
+
+    #[test]
+    fn devices_read_as_browser_and_system() {
+        let firefox = "Mozilla/5.0 (Android 14; Mobile; rv:131.0) Gecko/131.0 Firefox/131.0";
+        assert_eq!(browser_on(firefox), "Firefox on Android");
+        let chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+        assert_eq!(browser_on(chrome), "Chrome on Mac");
+    }
+}

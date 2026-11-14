@@ -1,4 +1,4 @@
-use super::journey::milestone_name;
+use super::journey::step_name;
 use super::parts::{card, chip, paint_caught_mark, text_width};
 use super::region_map::place_card;
 use super::{HERE_TWO_COLUMNS, Pages, TILE};
@@ -30,7 +30,7 @@ impl Pages<'_> {
     pub(super) fn place_name(&self, state: &GameState) -> Option<String> {
         let position = state.location.as_ref()?;
         let Some(location) = position.gb() else {
-            return Some(self.game.tables.marker(position)?.name.to_owned());
+            return Some(self.game.tables.position_name(position)?.to_owned());
         };
         let spot = self.game.tables.gb()?.spot(location)?;
         let time = state.clock.and_then(|clock| time_name(clock.time));
@@ -41,7 +41,9 @@ impl Pages<'_> {
     }
 
     pub(super) fn goal_text(&self, state: &GameState) -> Option<String> {
-        let (name, place) = milestone_name(self.game.tables.game(), state.next_goal()?);
+        let journey = self.reached_steps(state);
+        let next = journey.iter().position(|step| !step.done)?;
+        let (name, place) = step_name(self.game.tables.game(), journey, next);
         Some(match place {
             Some(place) => format!("{name}, {place}"),
             None => name,
@@ -56,6 +58,15 @@ impl Pages<'_> {
             Some(location) => self.place_card(ui, state, location),
             None => self.gba_place_card(ui, position),
         };
+        if self
+            .game
+            .tables
+            .ds()
+            .is_some_and(|tables| !tables.has_wild_lists())
+        {
+            place(ui);
+            return;
+        }
         if !self.mobile && ui.available_width() >= HERE_TWO_COLUMNS {
             ui.columns(2, |columns| {
                 place(&mut columns[0]);
@@ -69,7 +80,11 @@ impl Pages<'_> {
 
     fn gba_place_card(&self, ui: &mut Ui, position: &Position) {
         let marker = self.game.tables.marker(position);
-        let name = marker.map_or("Unknown place", |marker| marker.name);
+        let name = self
+            .game
+            .tables
+            .position_name(position)
+            .unwrap_or("Unknown place");
         let key = marker.map(|marker| format!("{}_{:p}", self.key, marker.map));
         place_card(ui, name, "", key.as_deref().zip(marker.as_ref()));
     }

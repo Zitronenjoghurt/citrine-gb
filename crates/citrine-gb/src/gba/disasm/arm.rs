@@ -44,11 +44,11 @@ const CDP: usize = 6;
 const MCR: usize = 7;
 const MRC: usize = 8;
 
-fn bit(op: u32, at: u32) -> bool {
+pub(super) fn bit(op: u32, at: u32) -> bool {
     op & (1 << at) != 0
 }
 
-fn field(op: u32, at: u32) -> u32 {
+pub(super) fn field(op: u32, at: u32) -> u32 {
     (op >> at) & 0xF
 }
 
@@ -56,7 +56,7 @@ fn arm_pc(addr: u32) -> Pc {
     Pc { addr, thumb: false }
 }
 
-fn done(
+pub(super) fn done(
     mnemonic: &'static str,
     operands: Vec<Operand>,
     class: InstrClass,
@@ -200,7 +200,7 @@ fn shift(op: u32) -> Option<Operand> {
     Some(operand(text, OperandKind::Immediate))
 }
 
-fn address(op: u32, offset: Option<String>) -> Operand {
+pub(super) fn address(op: u32, offset: Option<String>) -> Operand {
     let rn = name(field(op, 16));
     let pre = bit(op, 24);
     let writeback = if bit(op, 21) { "!" } else { "" };
@@ -212,13 +212,13 @@ fn address(op: u32, offset: Option<String>) -> Operand {
     memory(text)
 }
 
-fn immediate_offset(op: u32, value: u32) -> Option<String> {
+pub(super) fn immediate_offset(op: u32, value: u32) -> Option<String> {
     let up = bit(op, 23);
     let bare = value == 0 && up && bit(op, 24) && !bit(op, 21);
     (!bare).then(|| signed(up, value))
 }
 
-fn register_offset(op: u32) -> String {
+pub(super) fn register_offset(op: u32) -> String {
     let sign = if bit(op, 23) { "" } else { "-" };
     let rm = name(op & 0xF);
     match shift(op) {
@@ -272,14 +272,18 @@ fn halfword(op: u32, cond: usize) -> Decoded {
             );
         }
     };
-    let offset = if bit(op, 22) {
+    let offset = halfword_offset(op);
+    let (class, flow) = load_class(load, rd, false);
+    done(mnemonic, vec![reg(rd), address(op, offset)], class, flow)
+}
+
+pub(super) fn halfword_offset(op: u32) -> Option<String> {
+    if bit(op, 22) {
         immediate_offset(op, ((op >> 4) & 0xF0) | (op & 0xF))
     } else {
         let sign = if bit(op, 23) { "" } else { "-" };
         Some(format!("{sign}{}", name(op & 0xF)))
-    };
-    let (class, flow) = load_class(load, rd, false);
-    done(mnemonic, vec![reg(rd), address(op, offset)], class, flow)
+    }
 }
 
 fn block(op: u32, cond: usize) -> Decoded {
@@ -394,15 +398,15 @@ fn psr_transfer(op: u32, cond: usize) -> Decoded {
     )
 }
 
-fn coprocessor_register(index: u32) -> Operand {
+pub(super) fn coprocessor_register(index: u32) -> Operand {
     operand(format!("c{index}"), OperandKind::Register)
 }
 
-fn number(value: u32) -> Operand {
+pub(super) fn number(value: u32) -> Operand {
     operand(value.to_string(), OperandKind::Immediate)
 }
 
-fn processor(op: u32) -> Operand {
+pub(super) fn processor(op: u32) -> Operand {
     operand(format!("p{}", field(op, 8)), OperandKind::Register)
 }
 
@@ -412,17 +416,21 @@ fn coprocessor_transfer(op: u32, cond: usize) -> Decoded {
     } else {
         COPROCESSOR
     };
-    let offset = immediate_offset(op, (op & 0xFF) << 2);
     done(
         table[usize::from(bit(op, 20))][cond],
-        vec![
-            processor(op),
-            coprocessor_register(field(op, 12)),
-            address(op, offset),
-        ],
+        coprocessor_transfer_operands(op),
         InstrClass::Control,
         FlowControl::Continue,
     )
+}
+
+pub(super) fn coprocessor_transfer_operands(op: u32) -> Vec<Operand> {
+    let offset = immediate_offset(op, (op & 0xFF) << 2);
+    vec![
+        processor(op),
+        coprocessor_register(field(op, 12)),
+        address(op, offset),
+    ]
 }
 
 fn coprocessor(op: u32, cond: usize) -> Decoded {

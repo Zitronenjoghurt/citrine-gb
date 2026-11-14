@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM push_tokens WHERE device_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2daf8a7c44dc261470f8c3f950e18b3e50b1bc466e8f014f6393322903dec2df"
+}

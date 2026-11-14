@@ -1,6 +1,7 @@
 use super::widgets;
 use super::{Citrine, PendingConsole};
 use crate::app::ui_state::settings::{console_name, plays_on_both};
+use crate::app::widgets::snapshots::{FailedStep, failed_message, named};
 use citrine_gb::gb::GbModel;
 use egui::Context;
 
@@ -71,8 +72,13 @@ impl Citrine {
                     .success(format!("Restarted on {}", console_name(model)));
             }
             Err(err) => {
+                let what = format!(
+                    "{} to {}",
+                    named(self.emulator.game_name(), "the game"),
+                    console_name(model)
+                );
                 self.toasts
-                    .error(format!("Could not restart the game: {err:?}"));
+                    .error(failed_message(FailedStep::SwitchConsole, &what, &err));
             }
         }
         self.ui.settings.dirty = true;

@@ -12,7 +12,10 @@ publish = false
 fixtures = []
 
 [dependencies]
+citrine-gb-nds-files.workspace = true
+citrine-gb-pkm.workspace = true
 thiserror = "2.0.18"
 
 [dev-dependencies]
+citrine-gb-test-roms = { workspace = true }
 citrine-gb = { workspace = true, features = ["persistence"] }

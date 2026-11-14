@@ -311,7 +311,8 @@ fn last_error() -> String {
 mod tests {
     use super::*;
     use crate::app::ui_state::keybinds::KeyBindings;
-    use crate::controller_debug::{Report, SystemInfo};
+    use crate::controller_debug::{ButtonsHeld, Report, SystemInfo};
+    use citrine_gb::console::{ConsoleKind, Keys};
 
     #[test]
     fn sdl_starts_without_a_window() {
@@ -328,7 +329,10 @@ mod tests {
             pads: &found,
             bindings: &KeyBindings::default(),
             capture: None,
-            held: &[],
+            held: ButtonsHeld {
+                console: ConsoleKind::Gb,
+                keys: Keys::empty(),
+            },
             log: None,
         }
         .to_string();

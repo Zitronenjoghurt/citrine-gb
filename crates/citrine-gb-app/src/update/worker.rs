@@ -152,13 +152,6 @@ pub fn fetch_verified(
     Ok((bytes, asset.clone()))
 }
 
-fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> bool {
-    std::thread::Builder::new()
-        .name(name.into())
-        .spawn(work)
-        .is_ok()
-}
-
 impl Updater {
     pub fn with_backend(backend: Backend) -> Self {
         Self {
@@ -167,7 +160,7 @@ impl Updater {
         }
     }
 
-    pub fn tick(&mut self, enabled: bool) {
+    pub fn tick(&mut self, spawner: &citrine_gb_threads::Spawner, enabled: bool) {
         let Some(backend) = self.backend.clone().filter(|_| enabled) else {
             return;
         };
@@ -183,13 +176,10 @@ impl Updater {
         }
         self.last_check = Some(Instant::now());
         let shared = self.shared.clone();
-        let started = spawn("update check", move || check(&backend, &shared));
-        if !started {
-            self.lock().checking = false;
-        }
+        spawner.run("update check", move || check(&backend, &shared));
     }
 
-    pub(super) fn download(&mut self, offer: Offer) {
+    pub(super) fn download(&mut self, spawner: &citrine_gb_threads::Spawner, offer: Offer) {
         let Some(backend) = self.backend.clone() else {
             return;
         };
@@ -208,8 +198,7 @@ impl Updater {
             release
         };
         let shared = self.shared.clone();
-        let failed = offer.clone();
-        let started = spawn("update download", move || {
+        spawner.run("update download", move || {
             let phase = match install(&backend, &release, &shared) {
                 Ok(()) => Phase::Ready(offer),
                 Err(Failure { reason, retry }) => Phase::Failed {
@@ -220,13 +209,6 @@ impl Updater {
             };
             shared.lock().unwrap_or_else(|e| e.into_inner()).phase = phase;
         });
-        if !started {
-            self.lock().phase = Phase::Failed {
-                offer: failed,
-                reason: "The download didn't start".into(),
-                retry: true,
-            };
-        }
     }
 
     #[cfg(test)]
@@ -274,4 +256,33 @@ fn install(backend: &Backend, release: &Release, shared: &Mutex<Shared>) -> Resu
     };
     let (bytes, asset) = fetch_verified(backend, release, &mut progress)?;
     (backend.install)(&bytes, &asset).map_err(|err| refuse(&err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{keys, sign};
+    use super::{PUBLIC_KEY, verify};
+
+    #[test]
+    fn a_signature_verifies_only_with_its_key_and_its_data() {
+        let keys = keys();
+        let key = keys.pk.to_base64();
+        let signature = sign(&keys, b"sums");
+        assert!(verify(&key, b"sums", &signature));
+        assert!(verify(
+            &keys.pk.to_box().unwrap().to_string(),
+            b"sums",
+            &signature
+        ));
+        assert!(!verify(&key, b"sumz", &signature));
+        assert!(!verify(&self::keys().pk.to_base64(), b"sums", &signature));
+        assert!(!verify(&key, b"sums", b"untrusted comment: nothing\n"));
+        assert!(!verify("not a key", b"sums", &signature));
+    }
+
+    #[test]
+    fn the_built_in_key_decodes() {
+        let key = PUBLIC_KEY.unwrap();
+        assert!(minisign_verify::PublicKey::from_base64(key).is_ok());
+    }
 }

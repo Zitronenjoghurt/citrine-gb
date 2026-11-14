@@ -1,5 +1,5 @@
 use crate::app::ui_state::keybinds::{
-    BindingKind, BindingTarget, GbButton, KeyBindings, PendingBinding, Shoulder,
+    BindingKind, BindingTarget, DsButton, GbButton, KeyBindings, PendingBinding, Shoulder,
 };
 use crate::pad_input::{PadAction, PadAxis, PadInput};
 use citrine_gb::console::{ConsoleKind, Keys};
@@ -392,6 +392,7 @@ pub fn capture_text(pending: Option<PendingBinding>) -> String {
     let target = match pending.target {
         BindingTarget::Button(button) => format!("Game Boy {button}"),
         BindingTarget::Shoulder(shoulder) => shoulder.to_string(),
+        BindingTarget::Ds(button) => button.to_string(),
         BindingTarget::Shortcut(action) => action.label().to_string(),
         BindingTarget::LinkKey(half, button) => format!("{} {button}", half.label()),
     };
@@ -413,6 +414,7 @@ impl ButtonsHeld {
     pub fn title(self) -> &'static str {
         match self.console {
             ConsoleKind::Gba => "Game Boy Advance buttons held",
+            ConsoleKind::Nds => "Nintendo DS buttons held",
             ConsoleKind::Gb | ConsoleKind::Gbc => "Game Boy buttons held",
         }
     }
@@ -421,8 +423,11 @@ impl ButtonsHeld {
         let mut shown: Vec<(String, Keys)> = GbButton::iter()
             .map(|button| (button.to_string(), button.key()))
             .collect();
-        if self.console == ConsoleKind::Gba {
+        if matches!(self.console, ConsoleKind::Gba | ConsoleKind::Nds) {
             shown.extend(Shoulder::iter().map(|shoulder| (shoulder.to_string(), shoulder.key())));
+        }
+        if self.console == ConsoleKind::Nds {
+            shown.extend(DsButton::iter().map(|button| (button.to_string(), button.key())));
         }
         shown
             .into_iter()
@@ -575,6 +580,18 @@ impl Display for Report<'_> {
             writeln!(
                 out,
                 "{shoulder}: keys {}; controller {}",
+                names_or_none(keys),
+                names_or_none(pads)
+            )?;
+        }
+        for button in DsButton::iter() {
+            let keys = self.bindings.ds_keys(button);
+            let pads = self.bindings.ds_pads(button);
+            let keys: Vec<&str> = keys.iter().map(|k| k.name()).collect();
+            let pads: Vec<&str> = pads.iter().map(|p| p.short_name()).collect();
+            writeln!(
+                out,
+                "{button}: keys {}; controller {}",
                 names_or_none(keys),
                 names_or_none(pads)
             )?;

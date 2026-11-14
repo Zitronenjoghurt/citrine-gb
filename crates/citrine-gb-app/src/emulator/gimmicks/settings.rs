@@ -130,3 +130,22 @@ pub fn lux_to_light(lux: f32) -> f32 {
     }
     (lux.log10() / 5.0).clamp(0.0, 1.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::{LightSource, lux_to_light};
+
+    #[test]
+    fn light_comes_from_the_sensor_or_the_slider() {
+        let mut settings = GimmickSettings::default();
+        assert_eq!(settings.light_level(Some(0.9)), 0.9);
+        assert_eq!(settings.light_level(None), settings.light);
+        settings.light_source = LightSource::Slider;
+        settings.light = 0.25;
+        assert_eq!(settings.light_level(Some(0.9)), 0.25);
+        assert_eq!(lux_to_light(0.0), 0.0);
+        assert_eq!(lux_to_light(100_000.0), 1.0);
+        assert!(lux_to_light(1000.0) > 0.5);
+    }
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*) AS \"count!: i64\" FROM message_deliveries d\n                 JOIN messages m ON m.id = d.message_id\n                WHERE d.device_id = ?1 AND m.from_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "count!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "65aa3347718f9ffc641b13fe4d7b7c963d4bce08a98bad8a1b11d23098514133"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO gts_sim_records (pid, generation, record, species, gender, level,\n                                          wanted_species, wanted_gender, wanted_min, wanted_max,\n                                          country, deposited_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)\n             ON CONFLICT (pid) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "c7dcbc05153b7cb75a99fce5e89e16ba95c8d26dacce3873b85d0e38ba1bfa24"
+}

@@ -54,6 +54,10 @@ pub trait Debug: Console {
     fn sprites(&self, out: &mut Vec<Sprite>);
     fn palettes(&self, out: &mut Vec<Palette>);
     fn print_log(&mut self) -> Option<&mut PrintLog>;
+    fn cpu(&self) -> usize {
+        0
+    }
+    fn select_cpu(&mut self, _cpu: usize) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +65,7 @@ pub struct Features {
     pub pc_digits: u8,
     pub thumb: bool,
     pub vectors: &'static [(&'static str, u32)],
+    pub cpus: &'static [&'static str],
     pub cpu_groups: &'static [&'static str],
     pub watchpoints: bool,
     pub cycle: &'static str,

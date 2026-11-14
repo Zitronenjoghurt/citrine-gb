@@ -1,0 +1,22 @@
+[package]
+name = "citrine-gb-report"
+description = "Game reports: one zip with a game's state, inputs, save, screens, log and device traffic, and a reader that replays it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = ["nds"]
+gba = ["citrine-gb/gba"]
+nds = ["gba", "citrine-gb/nds"]
+
+[dependencies]
+citrine-gb = { workspace = true, features = ["persistence", "brotli", "rom-id", "serde"] }
+png = "0.18.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2"] }

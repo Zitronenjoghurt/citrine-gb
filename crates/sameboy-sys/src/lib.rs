@@ -44,6 +44,7 @@ pub struct GB_palette_t {
 
 /// The C type is a union; its 16-bit view is laid out exactly as these fields.
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GB_registers_t {
     pub af: u16,
     pub bc: u16,
@@ -85,6 +86,9 @@ unsafe extern "C" {
     pub static GB_PALETTE_GREY: GB_palette_t;
 
     pub fn GB_get_registers(gb: *mut GB_gameboy_t) -> *mut GB_registers_t;
+
+    pub fn GB_safe_read_memory(gb: *mut GB_gameboy_t, addr: u16) -> u8;
+    pub fn GB_write_memory(gb: *mut GB_gameboy_t, addr: u16, value: u8);
 
     pub fn GB_set_user_data(gb: *mut GB_gameboy_t, data: *mut c_void);
     pub fn GB_get_user_data(gb: *mut GB_gameboy_t) -> *mut c_void;

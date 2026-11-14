@@ -6,6 +6,7 @@ use citrine_gb_gamedata::{
     Effect, Game, Generation, Language, Location, Palette, Place, Pokemon, Position, Region,
     RomTables, SaveCopy, Side, Sprite, Version, identify, read_live, read_save,
 };
+use citrine_gb_test_roms as test_roms;
 use common::{map_picture, png};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,12 @@ fn pokemon_roms() -> Vec<(PathBuf, Vec<u8>, Game)> {
         })
         .collect();
     roms.sort_by(|a, b| a.0.cmp(&b.0));
+    if roms.is_empty() {
+        test_roms::missing(
+            "real_roms",
+            format_args!("a Pokémon ROM in {}", rom_dir().display()),
+        );
+    }
     roms
 }
 
@@ -68,7 +75,16 @@ fn expected_live(game: Game) -> Vec<(u16, usize)> {
         | Version::Sapphire
         | Version::Emerald
         | Version::FireRed
-        | Version::LeafGreen => Vec::new(),
+        | Version::LeafGreen
+        | Version::Diamond
+        | Version::Pearl
+        | Version::Platinum
+        | Version::HeartGold
+        | Version::SoulSilver
+        | Version::Black
+        | Version::White
+        | Version::Black2
+        | Version::White2 => Vec::new(),
     }
 }
 
@@ -123,7 +139,7 @@ fn every_pokemon_rom_loads_its_tables() {
                     .collect(),
                 0xF3,
             ),
-            Generation::Three => continue,
+            Generation::Three | Generation::Four | Generation::Five => continue,
         };
         for id in machines {
             assert!(tables.machine_move(id).is_some(), "{name}: machine {id:x}");
@@ -178,7 +194,7 @@ fn moves_matchups_places_and_wild_read_in_every_pokemon_rom() {
             Generation::Two => (1..=26)
                 .flat_map(|group| (1..=40).map(move |map| location(group, map)))
                 .collect(),
-            Generation::Three => continue,
+            Generation::Three | Generation::Four | Generation::Five => continue,
         };
         let mut places = std::collections::BTreeSet::new();
         let mut wild = std::collections::BTreeSet::new();
@@ -230,20 +246,19 @@ fn moves_matchups_places_and_wild_read_in_every_pokemon_rom() {
                 assert!(places.contains("NEW BARK TOWN") && places.contains("ROUTE 29"));
                 assert!(wild.contains("SENTRET") && wild.contains("PIDGEY"));
             }
-            Generation::Three => {}
+            Generation::Three | Generation::Four | Generation::Five => {}
         }
     }
 }
 
-fn silver_save() -> Option<Vec<u8>> {
-    let path = std::env::var_os("CITRINE_SILVER_SAVE").map(PathBuf::from)?;
-    std::fs::read(path).ok()
+fn silver_save(test: &str) -> Option<Vec<u8>> {
+    test_roms::read(test, test_roms::env_path(test, "CITRINE_SILVER_SAVE")?)
 }
 
 #[test]
 #[ignore]
 fn silver_save_reads_and_matches_the_live_game() {
-    let Some(save) = silver_save() else {
+    let Some(save) = silver_save("silver_save_reads_and_matches_the_live_game") else {
         return;
     };
     let (_, data, game) = pokemon_roms()
@@ -434,7 +449,7 @@ fn every_sprite_decodes_in_every_pokemon_rom() {
         }
         let mut places = 0;
         if game.version == Version::Crystal {
-            for location in 1..0x60u8 {
+            for location in 1..0x60u16 {
                 let caught = citrine_gb_gamedata::Caught {
                     time_of_day: citrine_gb_gamedata::TimeOfDay::Day,
                     level: 5,
@@ -497,7 +512,7 @@ fn region_maps_decode_and_mark_known_places() {
         let regions: &[Region] = match game.generation() {
             Generation::One => &[Region::Kanto],
             Generation::Two => &[Region::Johto, Region::Kanto],
-            Generation::Three => continue,
+            Generation::Three | Generation::Four | Generation::Five => continue,
         };
         let known: Vec<(Location, &str, Region, (u16, u16))> = match game.generation() {
             Generation::One => vec![
@@ -509,7 +524,7 @@ fn region_maps_decode_and_mark_known_places() {
                 (location(22, 3), "CIANWOOD CITY", Region::Johto, (12, 84)),
                 (location(13, 2), "PALLET TOWN", Region::Kanto, (44, 92)),
             ],
-            Generation::Three => continue,
+            Generation::Three | Generation::Four | Generation::Five => continue,
         };
         for &region in regions {
             let map = tables.region_map(region).expect("region map");
@@ -552,7 +567,7 @@ fn region_maps_decode_and_mark_known_places() {
             assert_eq!((marker.x, marker.y), point, "{path:?} {name}");
         }
     }
-    let Some(save) = silver_save() else {
+    let Some(save) = silver_save("region_maps_decode_and_mark_known_places") else {
         return;
     };
     let (_, data, game) = pokemon_roms()

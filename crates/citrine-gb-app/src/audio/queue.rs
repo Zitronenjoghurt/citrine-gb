@@ -12,8 +12,10 @@ pub struct QueueStats {
     underrun_frames: AtomicU64,
     overruns: AtomicU64,
     overrun_frames: AtomicU64,
+    left_frames: AtomicU64,
     playing: AtomicBool,
     paused: AtomicBool,
+    quick_resume: AtomicBool,
     min_sample: AtomicU32,
     max_sample: AtomicU32,
 }
@@ -25,8 +27,10 @@ impl Default for QueueStats {
             underrun_frames: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
             overrun_frames: AtomicU64::new(0),
+            left_frames: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             paused: AtomicBool::new(false),
+            quick_resume: AtomicBool::new(false),
             min_sample: AtomicU32::new(f32::INFINITY.to_bits()),
             max_sample: AtomicU32::new(f32::NEG_INFINITY.to_bits()),
         }
@@ -48,6 +52,10 @@ impl QueueStats {
 
     pub fn overrun_frames(&self) -> u64 {
         self.overrun_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn left_frames(&self) -> u64 {
+        self.left_frames.load(Ordering::Relaxed)
     }
 
     pub fn is_playing(&self) -> bool {
@@ -81,7 +89,7 @@ impl QueueStats {
             .fetch_add(frames as u64, Ordering::Relaxed);
     }
 
-    fn add_overrun(&self, frames: usize) {
+    pub(super) fn add_overrun(&self, frames: usize) {
         self.overruns.fetch_add(1, Ordering::Relaxed);
         self.overrun_frames
             .fetch_add(frames as u64, Ordering::Relaxed);
@@ -153,6 +161,10 @@ impl QueueWriter {
         self.stats.paused.store(paused, Ordering::Relaxed);
     }
 
+    pub fn set_quick_resume(&self, quick: bool) {
+        self.stats.quick_resume.store(quick, Ordering::Relaxed);
+    }
+
     pub fn stats(&self) -> &Arc<QueueStats> {
         &self.stats
     }
@@ -184,11 +196,19 @@ impl QueueReader {
         let frames = out.len() / channels;
 
         if !self.playing {
-            if self.queued_frames() < self.start_frames {
+            let start = if self.started && self.stats.quick_resume.load(Ordering::Relaxed) {
+                self.start_frames.min(frames + self.fade_frames)
+            } else {
+                self.start_frames
+            };
+            if self.queued_frames() < start {
                 out.fill(0.0);
                 if self.started && !self.stats.paused.load(Ordering::Relaxed) {
                     self.stats.add_underrun(frames, false);
                 }
+                self.stats
+                    .left_frames
+                    .store(self.queued_frames() as u64, Ordering::Relaxed);
                 return;
             }
             self.playing = true;
@@ -247,6 +267,10 @@ impl QueueReader {
         if play > 0 {
             self.stats.note_range(min, max);
         }
+
+        self.stats
+            .left_frames
+            .store(self.queued_frames() as u64, Ordering::Relaxed);
 
         if starving {
             self.playing = false;
@@ -412,6 +436,39 @@ mod tests {
         assert!(out[0] < 0.01);
         assert!(out[out.len() - 1] > 0.49);
         assert_eq!(writer.stats().underruns(), 0);
+    }
+
+    #[test]
+    fn a_session_resumes_after_one_read_of_sound_not_the_full_target() {
+        for session in [false, true] {
+            let (mut writer, mut reader) = queue(4000);
+            writer.set_quick_resume(session);
+            let mut out = vec![0.0; 960];
+            writer.write(&constant(4000, 0.5));
+            reader.read(&mut out, 2);
+            assert!(writer.is_playing());
+            while writer.is_playing() {
+                reader.read(&mut out, 2);
+            }
+            assert!(reader.queued_frames() < 720);
+
+            writer.write(&constant(800, 0.5));
+            reader.read(&mut out, 2);
+            assert_eq!(writer.is_playing(), session, "session {session}");
+        }
+    }
+
+    #[test]
+    fn each_read_leaves_what_is_still_queued_in_the_stats() {
+        let (mut writer, mut reader) = queue(1000);
+        let mut out = vec![0.0; 960];
+        writer.write(&constant(600, 0.5));
+        reader.read(&mut out, 2);
+        assert_eq!(writer.stats().left_frames(), reader.queued_frames() as u64);
+        writer.write(&constant(1200, 0.5));
+        reader.read(&mut out, 2);
+        assert!(writer.stats().left_frames() > 0);
+        assert_eq!(writer.stats().left_frames(), reader.queued_frames() as u64);
     }
 
     #[test]

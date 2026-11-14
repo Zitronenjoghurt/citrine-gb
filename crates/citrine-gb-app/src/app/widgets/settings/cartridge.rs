@@ -4,8 +4,8 @@ use crate::app::widgets::camera_view;
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::reset_slider::ResetSlider;
 use crate::app::widgets::reset_slider::reset_width;
-use crate::app::widgets::section::section;
 use crate::app::widgets::settings::form::Form;
+use crate::app::widgets::settings::page::{Heading, Page};
 use crate::app::widgets::tilt::TiltIndicator;
 use crate::emulator::gimmicks::camera::{CameraView, Feed};
 use crate::emulator::gimmicks::clock::hours_label;
@@ -33,68 +33,65 @@ pub struct CartridgeState<'a> {
 }
 
 pub fn show(
-    ui: &mut Ui,
+    page: &mut Page,
     s: &mut Settings,
     state: CartridgeState,
-    mut events: Option<&mut AppEventQueue>,
+    events: &mut Option<&mut AppEventQueue>,
 ) {
     let cart = state.cart;
-    section(ui, crate::icons::GAME_CONTROLLER, "Cartridge", |ui| {
-        Form::show(ui, "general", |form| {
-            if cart.clock {
-                clock_row(form, s, &state);
-            }
-            if cart.rumble {
-                form.row("Rumble", |ui| {
-                    s.dirty |= crate::app::widgets::check::checkbox(ui, &mut s.gimmicks.rumble, "")
-                        .changed();
-                });
-            }
-            if cart.motion() {
-                let label = if cart.tilt { "Tilt" } else { "Rotate" };
-                let row = |ui: &mut Ui| {
-                    ui.horizontal(|ui| {
-                        let side = ui.spacing().interact_size.y;
-                        let level = (state.touch
-                            && TiltIndicator::new(state.motion).side(side).ui(ui).clicked())
-                            | ui.button(RECENTER).clicked();
-                        if level && let Some(events) = events.as_deref_mut() {
-                            events.centre_tilt();
-                        }
-                    });
-                };
-                if state.touch {
-                    form.row(label, row);
-                } else {
-                    form.row_with_hint(label, TILT_HINT, row);
+    page.section(
+        Heading::new(crate::icons::GAME_CONTROLLER, "Cartridge"),
+        |ui| {
+            Form::show(ui, "general", |form| {
+                if cart.clock {
+                    clock_row(form, s, &state);
                 }
-            }
-            if cart.light {
-                light_rows(form, s, state.light_sensor);
-            }
-            if cart.camera {
-                camera_rows(form, s, &state, events.take());
-            }
-            if cart.printer {
-                form.row_with_hint("Printer", PRINTER_HINT, |ui| {
+                if cart.rumble {
+                    form.row("Rumble", |ui| {
+                        s.dirty |=
+                            crate::app::widgets::check::checkbox(ui, &mut s.gimmicks.rumble, "")
+                                .changed();
+                    });
+                }
+                if cart.motion() {
+                    let label = if cart.tilt { "Tilt" } else { "Rotate" };
+                    let row = |ui: &mut Ui| {
+                        ui.horizontal(|ui| {
+                            let side = ui.spacing().interact_size.y;
+                            let level = (state.touch
+                                && TiltIndicator::new(state.motion).side(side).ui(ui).clicked())
+                                | ui.button(RECENTER).clicked();
+                            if level && let Some(events) = events.as_deref_mut() {
+                                events.centre_tilt();
+                            }
+                        });
+                    };
+                    if state.touch {
+                        form.row(label, row);
+                    } else {
+                        form.row_with_hint(label, TILT_HINT, row);
+                    }
+                }
+                if cart.light {
+                    light_rows(form, s, state.light_sensor);
+                }
+                if cart.camera {
+                    camera_rows(form, s, &state, events.as_deref_mut());
+                }
+                if cart.printer {
                     let mut on = s.gimmicks.printer(state.rom_key);
-                    let changed = ui
-                        .add_enabled(
-                            state.printer_free,
-                            crate::app::widgets::check::Check::new(&mut on, ""),
-                        )
-                        .changed();
-                    if changed {
+                    if form.toggle_when("Printer", Some(PRINTER_HINT), state.printer_free, &mut on)
+                    {
                         s.gimmicks.set_printer(state.rom_key, on);
                         s.dirty = true;
                     }
-                });
-                if !state.printer_free {
-                    form.hint(PRINTER_LINKED);
+                    if !state.printer_free {
+                        form.hint(PRINTER_LINKED);
+                    }
                 }
-            }
-        });
-    });
+            });
+        },
+    );
 }
 
 fn clock_row(form: &mut Form, s: &mut Settings, state: &CartridgeState) {

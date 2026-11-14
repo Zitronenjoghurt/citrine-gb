@@ -1,17 +1,21 @@
 pub mod clipboard;
+pub mod display;
 pub mod files;
 pub mod keyboard;
 pub mod lifecycle;
 pub mod pads;
+pub mod push;
 pub mod sensors;
+#[cfg(feature = "nds")]
+pub mod steps;
 
 use android_activity::AndroidApp;
-use jni::objects::JObject;
+use jni::objects::{JObject, JString};
 use jni::{JNIEnv, JavaVM};
 use std::backtrace::Backtrace;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 static APP: OnceLock<AndroidApp> = OnceLock::new();
 static VM: OnceLock<JavaVM> = OnceLock::new();
@@ -20,10 +24,13 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
-            .with_tag("citrine"),
+    crate::game_report::log_ring::install(
+        Some(Box::new(android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag("citrine"),
+        ))),
+        log::LevelFilter::Info,
     );
     if STARTED.swap(true, Ordering::Relaxed) {
         write_crash("Citrine started a second time in one process, so it closed to start fresh");
@@ -37,6 +44,7 @@ fn android_main(app: AndroidApp) {
         android_app: Some(app),
         persistence_path: data_dir().map(|dir| dir.join("app.ron")),
         persist_window: false,
+        wgpu_options: crate::platform::wgpu_options(),
         ..Default::default()
     };
     if let Err(err) = eframe::run_native(
@@ -66,7 +74,7 @@ fn install_crash_hook() {
 
 fn write_crash(report: &str) {
     log::error!("{report}");
-    if let Some(dir) = data_dir()
+    if let Some(dir) = CACHE.get().cloned().flatten().or_else(fallback_cache_dir)
         && let Err(err) = std::fs::write(dir.join("crash-rust.txt"), report)
     {
         log::error!("could not write the crash report: {err}");
@@ -75,6 +83,30 @@ fn write_crash(report: &str) {
 
 pub fn data_dir() -> Option<PathBuf> {
     APP.get()?.internal_data_path()
+}
+
+static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn fallback_cache_dir() -> Option<PathBuf> {
+    Some(data_dir()?.parent()?.join("cache"))
+}
+
+pub fn cache_dir() -> Option<PathBuf> {
+    CACHE
+        .get_or_init(|| {
+            java(|env, activity| {
+                let dir = env
+                    .call_method(activity, "getCacheDir", "()Ljava/io/File;", &[])?
+                    .l()?;
+                let path = env
+                    .call_method(&dir, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+                    .l()?;
+                let path: String = env.get_string(&JString::from(path))?.into();
+                Ok(PathBuf::from(path))
+            })
+            .or_else(fallback_cache_dir)
+        })
+        .clone()
 }
 
 fn repaint() {
@@ -104,6 +136,38 @@ pub fn java<T>(call: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<T
     result
         .map_err(|err| log::error!("a call into the activity failed: {err}"))
         .ok()
+}
+
+pub fn is_tv() -> bool {
+    static TV: AtomicU8 = AtomicU8::new(0);
+    match TV.load(Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    let found = java(|env, activity| {
+        let manager = env
+            .call_method(
+                activity,
+                "getPackageManager",
+                "()Landroid/content/pm/PackageManager;",
+                &[],
+            )?
+            .l()?;
+        let feature = env.new_string("android.software.leanback")?;
+        env.call_method(
+            &manager,
+            "hasSystemFeature",
+            "(Ljava/lang/String;)Z",
+            &[(&feature).into()],
+        )?
+        .z()
+    });
+    let Some(tv) = found else {
+        return false;
+    };
+    TV.store(if tv { 2 } else { 1 }, Ordering::Relaxed);
+    tv
 }
 
 pub fn haptic() {

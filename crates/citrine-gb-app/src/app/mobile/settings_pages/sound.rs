@@ -2,9 +2,10 @@ use super::{Sheet, settled, slide};
 use crate::app::Citrine;
 use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::mobile::sheet::{self, Amount};
-use crate::app::ui_state::settings::Settings;
+use crate::app::ui_state::settings::{SLOWDOWN_LABEL, Settings};
+use crate::app::widgets::settings::page::Page;
 use crate::audio::{DEFAULT_LATENCY_MS, MAX_LATENCY_MS, MIN_LATENCY_MS};
-use egui::{Context, RichText, Ui};
+use egui::{Context, Ui};
 
 const CHANNELS: [&str; 6] = [
     "Pulse with sweep",
@@ -39,52 +40,54 @@ impl Citrine {
         let s = &mut self.ui.settings;
         let mut open = None;
         let mut dirty = false;
-        ui.add_space(8.0);
-        kit::list(ui, |list| {
-            if list
-                .row(Row::new("Volume").value(sheet::percent(s.volume.into())))
-                .clicked()
-            {
-                open = Some(Sheet::Volume);
-            }
-            dirty |= list.switch(SwitchRow::new("Mute", &mut s.muted));
+        let mut page = Page::begin(ui);
+        page.plain(|ui| {
+            kit::list(ui, |list| {
+                if list
+                    .row(Row::new("Volume").value(sheet::percent(s.volume.into())))
+                    .clicked()
+                {
+                    open = Some(Sheet::Volume);
+                }
+                dirty |= list.switch(SwitchRow::new("Mute", &mut s.muted));
+            })
         });
-        ui.add_space(12.0);
-        kit::list(ui, |list| {
-            if list
-                .row(Row::new("Latency").value(milliseconds(s.audio_queue_ms.into())))
-                .clicked()
-            {
-                open = Some(Sheet::Latency);
-            }
-            if list
-                .row(Row::new("Channels").value(channels_value(s.channels_for(count))))
-                .clicked()
-            {
-                open = Some(Sheet::Channels);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if list.row(Row::new("Output").value(device_name(s))).clicked() {
-                open = Some(Sheet::Device);
-            }
+        page.plain(|ui| {
+            kit::list(ui, |list| {
+                if list
+                    .row(Row::new("Latency").value(milliseconds(s.audio_queue_ms.into())))
+                    .clicked()
+                {
+                    open = Some(Sheet::Latency);
+                }
+                if list
+                    .row(Row::new(SLOWDOWN_LABEL).value(s.slow_sound.to_string()))
+                    .clicked()
+                {
+                    open = Some(Sheet::Slowdown);
+                }
+                if list
+                    .row(Row::new("Channels").value(channels_value(s.channels_for(count))))
+                    .clicked()
+                {
+                    open = Some(Sheet::Channels);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if list
+                    .row(Row::new("Output device").value(device_name(s)))
+                    .clicked()
+                {
+                    open = Some(Sheet::Device);
+                }
+            })
         });
         s.dirty |= dirty;
         if let Some(audio) = self.audio.as_ref()
             && !audio.is_running()
         {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.add_space(6.0);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new("Sound starts when you load a game or tap the screen.")
-                            .size(13.0)
-                            .weak(),
-                    )
-                    .wrap(),
-                );
-            });
+            page.note("Sound starts when you load a game or tap the screen.");
         }
+        page.end();
         self.open_sheet(open);
     }
 
@@ -126,6 +129,11 @@ impl Citrine {
                 }
                 shown.closed
             }
+            Sheet::Slowdown => {
+                let (changed, done) = super::pick(ctx, SLOWDOWN_LABEL, None, &mut s.slow_sound);
+                s.dirty |= changed;
+                done
+            }
             #[cfg(not(target_arch = "wasm32"))]
             Sheet::Device => {
                 let names: Vec<Option<String>> = std::iter::once(None)
@@ -138,7 +146,7 @@ impl Citrine {
                 let mut index = current;
                 let (changed, done) = super::pick_from(
                     ctx,
-                    "Output",
+                    "Output device",
                     Some("Changing this reopens the sound device."),
                     0..names.len(),
                     &mut index,
@@ -181,6 +189,7 @@ fn device_name(s: &Settings) -> String {
 
 #[cfg(all(test, feature = "gba"))]
 mod tests {
+    use super::channels_value;
     use crate::app::files::tests::Opened;
     use crate::app::tests::{play_frame, text_rect};
     use crate::app::ui_state::settings::SettingsTab;
@@ -197,5 +206,23 @@ mod tests {
         play_frame(&mut opened.app, &ctx, Vec::new());
         let output = play_frame(&mut opened.app, &ctx, Vec::new());
         assert!(text_rect(&output, "1, 2, 3, 4, 6").is_some());
+    }
+
+    #[test]
+    fn the_phone_sound_page_says_how_slowdown_sounds() {
+        let mut opened = Opened::new("phone-slowdown");
+        opened.app.mobile.nav.open_settings(SettingsTab::Sound);
+        let ctx = Context::default();
+        play_frame(&mut opened.app, &ctx, Vec::new());
+        let output = play_frame(&mut opened.app, &ctx, Vec::new());
+        assert!(text_rect(&output, "Slowdown").is_some());
+        assert!(text_rect(&output, "Normal pitch").is_some());
+    }
+
+    #[test]
+    fn channels_name_the_ones_still_playing() {
+        assert_eq!(channels_value(&[true; 4]), "All");
+        assert_eq!(channels_value(&[false; 4]), "None");
+        assert_eq!(channels_value(&[true, false, true, true]), "1, 3, 4");
     }
 }

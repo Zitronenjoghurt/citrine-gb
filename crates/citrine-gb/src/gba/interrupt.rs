@@ -108,6 +108,8 @@ impl Hidden {
                 kept += 1;
             }
         }
+        self.bits[kept..len].fill(0);
+        self.waits[kept..len].fill(0);
         self.len = kept as u8;
     }
 }
@@ -154,6 +156,8 @@ impl Delayed {
                 kept += 1;
             }
         }
+        self.waits[kept..len].fill(0);
+        self.values[kept..len].fill(false);
         self.len = kept as u8;
     }
 
@@ -250,7 +254,9 @@ impl Interrupts {
     }
 
     pub fn elapse(&mut self, cycles: u32) {
-        self.stalls.len = 0;
+        if self.stalls.len > 0 {
+            self.stalls = Stalls::default();
+        }
         if self.line.len > 0 {
             self.line.elapse(cycles);
         }
@@ -264,6 +270,10 @@ impl Interrupts {
 
     pub fn asserted(self) -> bool {
         self.master && self.enable.intersects(self.flags)
+    }
+
+    pub fn idle(&self) -> bool {
+        self.line.len | self.wake.len | self.hidden.len | self.stalls.len == 0
     }
 
     pub fn pending(self) -> bool {
@@ -280,6 +290,10 @@ impl Interrupts {
 
     pub fn until_wake(self) -> Option<u32> {
         self.wake.until_change()
+    }
+
+    pub fn until_line(self) -> Option<u32> {
+        self.line.until_change()
     }
 
     pub fn ie(self) -> u16 {

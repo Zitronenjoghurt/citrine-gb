@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gts_sim_records WHERE pid = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "957043f8343891b31f451842add8b1bf557597e805b6ed58c083ebaa6b8ed8d8"
+}

@@ -10,7 +10,8 @@ impl Citrine {
         let cart = self.emulator.cart();
         let settings = &self.ui.settings.gimmicks;
         let running = self.emulator.is_running();
-        self.senses.follow(Wanted::of(cart, settings, running));
+        self.senses
+            .follow(&self.files.spawner, Wanted::of(cart, settings, running));
         if cart.motion() {
             self.emulator.gimmicks.sensed = self.senses.motion(self.pads.as_mut());
             let seconds = ctx.input(|i| i.stable_dt);
@@ -36,7 +37,7 @@ impl Citrine {
         };
         self.senses.rumble(self.pads.as_mut(), rumble_step(level));
         for print in self.emulator.gimmicks.take_prints() {
-            match crate::media::save_print(&self.emulator, &mut self.media, &print) {
+            match crate::media::save_print(&mut self.emulator, &mut self.media, &print) {
                 Ok(item) => self
                     .events
                     .push(super::events::AppEvent::MediaAdded { id: item.id }),
@@ -51,7 +52,7 @@ impl Citrine {
         FileLoader::new()
             .title("Choose a picture")
             .add_filter("Pictures", &PICTURE_TYPES)
-            .dispatch(self.files.picture_tx.clone());
+            .dispatch(&self.files.spawner, self.files.picture_tx.clone());
     }
 
     pub(super) fn picture_picked(&mut self, file: PickedFile) {

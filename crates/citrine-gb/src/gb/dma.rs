@@ -59,6 +59,14 @@ impl DmaController {
         Some((source, target))
     }
 
+    pub(crate) fn wram_burst(&self, cycles: u32) -> Option<u8> {
+        (self.active
+            && self.delay == 0
+            && matches!(self.source, 0xC0..=0xDF)
+            && u32::from(self.progress) + cycles <= 160)
+            .then_some(self.source)
+    }
+
     pub fn source_address(&self, source: u16) -> u16 {
         if source >= 0xE000 && self.model.is_dmg() {
             source & !0x2000

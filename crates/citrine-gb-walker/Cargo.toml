@@ -1,0 +1,15 @@
+[package]
+name = "citrine-gb-walker"
+description = "A Pokéwalker: its EEPROM, the IR packets and the session with the DS game."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+citrine-gb-pkm = { workspace = true }
+citrine-gb = { workspace = true, features = ["nds"] }

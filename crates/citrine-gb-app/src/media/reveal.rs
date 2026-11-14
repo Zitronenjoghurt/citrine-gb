@@ -8,7 +8,8 @@ pub const LABEL: &str = "Show in Explorer";
 pub const LABEL: &str = "Show in Files";
 
 #[cfg(target_os = "macos")]
-pub fn reveal(path: &Path) -> std::io::Result<()> {
+pub fn reveal(spawner: &citrine_gb_threads::Spawner, path: &Path) -> std::io::Result<()> {
+    let _ = spawner;
     std::process::Command::new("open")
         .arg("-R")
         .arg(path)
@@ -17,8 +18,9 @@ pub fn reveal(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn reveal(path: &Path) -> std::io::Result<()> {
+pub fn reveal(spawner: &citrine_gb_threads::Spawner, path: &Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
+    let _ = spawner;
     std::process::Command::new("explorer.exe")
         .raw_arg(format!("/select,\"{}\"", path.display()))
         .spawn()
@@ -26,9 +28,9 @@ pub fn reveal(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn reveal(path: &Path) -> std::io::Result<()> {
+pub fn reveal(spawner: &citrine_gb_threads::Spawner, path: &Path) -> std::io::Result<()> {
     let path = path.to_path_buf();
-    std::thread::spawn(move || {
+    spawner.run("reveal", move || {
         let shown = std::process::Command::new("dbus-send")
             .args([
                 "--session",

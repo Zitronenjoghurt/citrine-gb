@@ -2,10 +2,29 @@ pub const FLAG_N: u32 = 1 << 31;
 pub const FLAG_Z: u32 = 1 << 30;
 pub const FLAG_C: u32 = 1 << 29;
 pub const FLAG_V: u32 = 1 << 28;
+pub const FLAG_Q: u32 = 1 << 27;
 pub const FLAG_I: u32 = 1 << 7;
 pub const FLAG_F: u32 = 1 << 6;
 pub const FLAG_T: u32 = 1 << 5;
 pub const MODE_MASK: u32 = 0x1F;
+
+const CONDITIONS: [u16; 16] = conditions();
+
+const fn conditions() -> [u16; 16] {
+    let mut table = [0; 16];
+    let mut condition = 0;
+    while condition < 16 {
+        let mut flags = 0;
+        while flags < 16 {
+            if Psr(flags << 28).holds(condition) {
+                table[condition as usize] |= 1 << flags;
+            }
+            flags += 1;
+        }
+        condition += 1;
+    }
+    table
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -84,23 +103,28 @@ impl Bank {
 pub struct Psr(pub u32);
 
 impl Psr {
-    pub fn n(self) -> bool {
+    pub const fn n(self) -> bool {
         self.0 & FLAG_N != 0
     }
 
-    pub fn z(self) -> bool {
+    pub const fn z(self) -> bool {
         self.0 & FLAG_Z != 0
     }
 
-    pub fn c(self) -> bool {
+    pub const fn c(self) -> bool {
         self.0 & FLAG_C != 0
     }
 
-    pub fn v(self) -> bool {
+    pub const fn v(self) -> bool {
         self.0 & FLAG_V != 0
     }
 
+    #[inline(always)]
     pub fn passes(self, condition: u32) -> bool {
+        CONDITIONS[(condition & 0xF) as usize] >> (self.0 >> 28) & 1 != 0
+    }
+
+    const fn holds(self, condition: u32) -> bool {
         match condition & 0xF {
             0x0 => self.z(),
             0x1 => !self.z(),
@@ -118,6 +142,22 @@ impl Psr {
             0xD => self.z() || self.n() != self.v(),
             0xE => true,
             _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_condition_table_agrees_with_the_flags_for_every_condition() {
+        for flags in 0..16 {
+            for condition in 0..16 {
+                let psr = Psr(flags << 28 | 0xDF);
+                assert_eq!(psr.passes(condition), psr.holds(condition));
+                assert_eq!(psr.passes(condition | 0xF0), psr.holds(condition));
+            }
         }
     }
 }

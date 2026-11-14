@@ -1,7 +1,12 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the lab runs its emulators in parallel outside the app"
+)]
+
 use crate::emulator::{Frame, FrameEmulator};
 use crate::metric::{FrameMetric, Polarity};
 use crate::recording::{InputEvent, Recording};
-use citrine_gb::console::ConsoleKind;
+use citrine_gb::console::{ConsoleKind, VideoSpec};
 use std::sync::mpsc::{Receiver, SyncSender, channel, sync_channel};
 use std::thread;
 
@@ -227,9 +232,19 @@ pub fn run_alone<E: FrameEmulator>(
     recording: &Recording,
     console: ConsoleKind,
     max_frames: usize,
-    mut on_frame: impl FnMut(usize, &Frame) -> anyhow::Result<()>,
+    on_frame: impl FnMut(usize, &Frame) -> anyhow::Result<()>,
 ) -> anyhow::Result<usize> {
     let video = emu.load(rom, boot_rom, console)?;
+    run_loaded(emu, video, recording, max_frames, on_frame)
+}
+
+pub fn run_loaded<E: FrameEmulator>(
+    emu: &mut E,
+    video: VideoSpec,
+    recording: &Recording,
+    max_frames: usize,
+    mut on_frame: impl FnMut(usize, &Frame) -> anyhow::Result<()>,
+) -> anyhow::Result<usize> {
     let mut driver = FrameDriver::new(recording);
     for index in 0..max_frames {
         driver.advance(emu)?;
@@ -313,6 +328,51 @@ pub fn run_streaming<R, C>(
     normalize: bool,
     alignment: Alignment,
     tolerance: usize,
+    on_frame: impl FnMut(usize, &Frame, &Frame, bool) -> anyhow::Result<()>,
+) -> anyhow::Result<ComparisonReport>
+where
+    R: FrameEmulator + Send,
+    C: FrameEmulator + Send,
+{
+    let video = reference.load(rom, boot_rom, console)?;
+    let cand_video = candidate.load(rom, boot_rom, console)?;
+    anyhow::ensure!(
+        video == cand_video,
+        "{} reports a {video:?} screen and {} a {cand_video:?} screen",
+        reference.name(),
+        candidate.name()
+    );
+    let loaded = Loaded {
+        video,
+        frame_cycles: console.timing().cycles_per_frame as u64,
+        canonical: Frame::canonical_for(console),
+    };
+    compare_loaded(
+        reference, candidate, loaded, recording, metrics, max_frames, normalize, alignment,
+        tolerance, on_frame,
+    )
+}
+
+pub struct Loaded {
+    pub video: VideoSpec,
+    pub frame_cycles: u64,
+    pub canonical: fn(&Frame, &mut Frame),
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same knobs as run_streaming, for emulators loaded by the caller"
+)]
+pub fn compare_loaded<R, C>(
+    reference: R,
+    candidate: C,
+    loaded: Loaded,
+    recording: &Recording,
+    metrics: &[Box<dyn FrameMetric>],
+    max_frames: usize,
+    normalize: bool,
+    alignment: Alignment,
+    tolerance: usize,
     mut on_frame: impl FnMut(usize, &Frame, &Frame, bool) -> anyhow::Result<()>,
 ) -> anyhow::Result<ComparisonReport>
 where
@@ -321,15 +381,12 @@ where
 {
     let ref_name = reference.name().to_string();
     let cand_name = candidate.name().to_string();
-    let canonical = Frame::canonical_for(console);
-    let video = reference.load(rom, boot_rom, console)?;
-    let cand_video = candidate.load(rom, boot_rom, console)?;
-    anyhow::ensure!(
-        video == cand_video,
-        "{ref_name} reports a {video:?} screen and {cand_name} a {cand_video:?} screen"
-    );
+    let Loaded {
+        video,
+        frame_cycles,
+        canonical,
+    } = loaded;
     let frame_bytes = video.width * video.height * 4;
-    let frame_cycles = console.timing().cycles_per_frame as u64;
     let mut agg = Aggregator::new(metrics, max_frames);
 
     let cand_count = match alignment {
@@ -364,7 +421,7 @@ where
             )
         });
 
-        let empty = || Frame::new(video.width, video.height, Vec::new());
+        let empty = || Frame::new(video.width, video.height, vec![0; frame_bytes]);
         let mut ref_raw = empty();
         let mut cand_raw = empty();
         let mut ref_norm = empty();
@@ -532,4 +589,81 @@ where
     })?;
 
     Ok(agg.finish(metrics, &ref_name, &cand_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::ExactFrame;
+    use citrine_gb::console::Screen;
+    use citrine_gb::gb::GbModel;
+
+    const SCREENS: [Screen; 1] = [Screen::whole(4, 2)];
+
+    struct Counter {
+        frames: u8,
+    }
+
+    impl FrameEmulator for Counter {
+        fn name(&self) -> &str {
+            "counter"
+        }
+
+        fn load(
+            &mut self,
+            _rom: &[u8],
+            _boot_rom: Option<&[u8]>,
+            _console: ConsoleKind,
+        ) -> anyhow::Result<VideoSpec> {
+            Ok(VideoSpec::of(&SCREENS))
+        }
+
+        fn set_button(&mut self, _button: crate::emulator::Button, _pressed: bool) {}
+
+        fn total_cycles(&self) -> u64 {
+            u64::from(self.frames) * 70_224
+        }
+
+        fn step(&mut self) -> bool {
+            self.frames += 1;
+            true
+        }
+
+        fn render_into(&self, out: &mut Vec<u8>) {
+            out.clear();
+            out.resize(4 * 2 * 4, self.frames);
+        }
+    }
+
+    #[test]
+    fn streaming_compares_whole_frames_in_debug_builds() {
+        let recording = Recording::new("", GbModel::Dmg);
+        let metrics: Vec<Box<dyn FrameMetric>> = vec![Box::new(ExactFrame)];
+        for alignment in [Alignment::Emission, Alignment::Cycle] {
+            let mut seen = 0;
+            let report = run_streaming(
+                Counter { frames: 0 },
+                Counter { frames: 0 },
+                &[],
+                None,
+                &recording,
+                ConsoleKind::Gb,
+                &metrics,
+                5,
+                false,
+                alignment,
+                0,
+                |_, reference, candidate, diverged| {
+                    assert_eq!(reference.rgba.len(), 32);
+                    assert!(!diverged);
+                    assert_eq!(reference.rgba, candidate.rgba);
+                    seen += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(seen, 5);
+            assert_eq!(report.divergent_frame_count, 0);
+        }
+    }
 }

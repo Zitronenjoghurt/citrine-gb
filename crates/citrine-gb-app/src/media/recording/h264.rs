@@ -6,6 +6,7 @@ use openh264::encoder::{
 use openh264::formats::YUVSlices;
 
 const VIDEO_BITRATE: u32 = 2_500_000;
+const SLICE_BYTES: u32 = 150_000;
 
 pub struct EncodedFrame {
     pub sample: Vec<u8>,
@@ -40,6 +41,7 @@ impl H264Encoder {
             )))
             .max_frame_rate(FrameRate::from_hz(fps))
             .skip_frames(false)
+            .max_slice_len(SLICE_BYTES)
             .profile(Profile::Baseline)
             .complexity(Complexity::Low)
             .adaptive_quantization(false)
@@ -58,9 +60,17 @@ impl H264Encoder {
         })
     }
 
-    pub fn encode(&mut self, rgba: &[u8]) -> anyhow::Result<EncodedFrame> {
+    pub fn scale(&self) -> usize {
+        self.scale
+    }
+
+    pub fn encode_planes(&mut self, yuv: &mut Vec<u8>) -> anyhow::Result<EncodedFrame> {
+        std::mem::swap(&mut self.yuv, yuv);
+        self.encode_again()
+    }
+
+    pub fn encode_again(&mut self) -> anyhow::Result<EncodedFrame> {
         let (w, h) = (self.width * self.scale, self.height * self.scale);
-        upscale_to_i420(rgba, self.width, self.height, self.scale, &mut self.yuv);
         let (y, chroma) = self.yuv.split_at(w * h);
         let (u, v) = chroma.split_at(w * h / 4);
         let source = YUVSlices::new((y, u, v), (w, h), (w, w / 2, w / 2));
@@ -139,10 +149,8 @@ pub fn upscale_to_i420(rgba: &[u8], width: usize, height: usize, scale: usize, o
     for sy in 0..height {
         for sx in 0..width {
             let p = (sy * width + sx) * 4;
-            let (r, g, b) = (rgba[p] as i32, rgba[p + 1] as i32, rgba[p + 2] as i32);
-            let y = (16 + ((47 * r + 157 * g + 16 * b + 128) >> 8)) as u8;
-            let u = (128 + ((-26 * r - 86 * g + 112 * b + 128) >> 8)) as u8;
-            let v = (128 + ((112 * r - 102 * g - 10 * b + 128) >> 8)) as u8;
+            let [y, u, v] =
+                yuv(rgba[p] as i32, rgba[p + 1] as i32, rgba[p + 2] as i32).map(|c| c as u8);
             for dy in 0..scale {
                 let row = (sy * scale + dy) * out_w + sx * scale;
                 y_plane[row..row + scale].fill(y);
@@ -152,6 +160,45 @@ pub fn upscale_to_i420(rgba: &[u8], width: usize, height: usize, scale: usize, o
                 u_plane[row..row + half].fill(u);
                 v_plane[row..row + half].fill(v);
             }
+        }
+    }
+}
+
+fn yuv(r: i32, g: i32, b: i32) -> [i32; 3] {
+    [
+        16 + ((47 * r + 157 * g + 16 * b + 128) >> 8),
+        128 + ((-26 * r - 86 * g + 112 * b + 128) >> 8),
+        128 + ((112 * r - 102 * g - 10 * b + 128) >> 8),
+    ]
+}
+
+#[cfg(feature = "nds")]
+pub fn rgba_to_i420(rgba: &[u8], width: usize, height: usize, out: &mut [u8]) {
+    let chroma_w = width / 2;
+    let (y_plane, chroma) = out.split_at_mut(width * height);
+    let (u_plane, v_plane) = chroma.split_at_mut(chroma_w * (height / 2));
+    let rows = rgba
+        .chunks_exact(width * 8)
+        .zip(y_plane.chunks_exact_mut(width * 2));
+    let chroma_rows = u_plane
+        .chunks_exact_mut(chroma_w)
+        .zip(v_plane.chunks_exact_mut(chroma_w));
+    for ((pair, lumas), (us, vs)) in rows.zip(chroma_rows) {
+        let (top, bottom) = pair.split_at(width * 4);
+        let (top_y, bottom_y) = lumas.split_at_mut(width);
+        for x in 0..chroma_w {
+            let mut sum = [0; 2];
+            for (line, luma) in [(top, &mut *top_y), (bottom, &mut *bottom_y)] {
+                for dx in 0..2 {
+                    let p = (x * 2 + dx) * 4;
+                    let [y, u, v] = yuv(line[p] as i32, line[p + 1] as i32, line[p + 2] as i32);
+                    luma[x * 2 + dx] = y as u8;
+                    sum[0] += u;
+                    sum[1] += v;
+                }
+            }
+            us[x] = ((sum[0] + 2) >> 2) as u8;
+            vs[x] = ((sum[1] + 2) >> 2) as u8;
         }
     }
 }

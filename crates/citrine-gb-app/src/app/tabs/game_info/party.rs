@@ -117,6 +117,7 @@ impl Pages<'_> {
                             .truncate(),
                     );
                     self.gender_mark(ui, mon);
+                    super::legality::mark(ui, &self.game.tables, mon);
                 }
                 Pokemon::Egg => {
                     ui.label(RichText::new("Egg").size(16.0).strong());
@@ -501,6 +502,12 @@ impl Pages<'_> {
             facts.push((
                 "Original trainer",
                 Fact::Text(format!("{}, ID {:05}", mon.ot_name, mon.ot_id)),
+            ));
+        }
+        if let Some(legality) = super::legality::verdict(tables, mon) {
+            facts.push((
+                "Legality",
+                Fact::Text(super::legality::sentence(tables, mon, legality)),
             ));
         }
         fact_rows(ui, &facts, |ui, fact| match fact {

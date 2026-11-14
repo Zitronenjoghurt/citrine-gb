@@ -3,30 +3,44 @@ use super::lines::member_name;
 use crate::app::widgets::action::main_button;
 use crate::app::widgets::avatar;
 use crate::app::widgets::progress::ProgressBar;
+use crate::emulator::Emulator;
+use crate::held::InputSource;
 use crate::icons;
 use crate::online::Online;
-use crate::play::{Play, PlaySession, Room};
+use crate::play::fetch::{Fetch, Offered};
+use crate::play::{Picture, Play, PlaySession, Room};
 use crate::progress::Progress;
-use citrine_gb::console::Console;
+use citrine_gb::console::{ConsoleKind, Keys, VideoSpec};
 use citrine_gb_net::OnlineId;
 use egui::{Label, Ui};
 
-const SCREEN_WIDTH: usize = 160;
-const SCREEN_HEIGHT: usize = 144;
 const MAX_SCREEN_SCALE: f32 = 3.0;
 
-pub fn friend_console<'a>(play: &'a Play, session: &'a PlaySession) -> Option<&'a dyn Console> {
-    play.room().and_then(Room::watched_console).or_else(|| {
+pub fn friend_picture<'a>(play: &'a Play, session: &'a PlaySession) -> Option<Picture<'a>> {
+    play.room().and_then(Room::watched_picture).or_else(|| {
         session
             .sees_friend()
-            .then(|| session.console(false))
+            .then(|| session.friend_picture())
             .flatten()
     })
 }
 
+pub fn friend_video(play: &Play, session: &PlaySession) -> VideoSpec {
+    friend_picture(play, session).map_or_else(
+        || {
+            session
+                .friend_game()
+                .or(session.my_game())
+                .map_or(ConsoleKind::Gb, |game| crate::play::kind_of(game.console))
+                .video()
+        },
+        |picture| picture.video,
+    )
+}
+
 pub fn watched_friend(play: &Play, session: &PlaySession) -> OnlineId {
     play.room()
-        .filter(|r| r.watched_console().is_some())
+        .filter(|r| r.watched_picture().is_some())
         .and_then(Room::watching)
         .unwrap_or(session.friend())
 }
@@ -38,16 +52,14 @@ pub fn watched_name(play: &Play, online: &Online, session: &PlaySession) -> Stri
 fn friend_texture(
     playing: &mut PlayingUi,
     ctx: &egui::Context,
-    console: &dyn Console,
+    picture: Picture<'_>,
 ) -> Option<(egui::TextureId, egui::Vec2)> {
-    let video = console.video();
+    let video = picture.video;
     let pass = ctx.cumulative_pass_nr();
     if playing.painted_pass != pass || playing.friend_screen.is_none() {
         playing.painted_pass = pass;
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [video.width, video.height],
-            Console::frame(console),
-        );
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([video.width, video.height], picture.frame);
         match &mut playing.friend_screen {
             Some(texture) => texture.set(image, egui::TextureOptions::NEAREST),
             None => {
@@ -63,10 +75,10 @@ fn friend_texture(
 pub fn paint_friend_screen(
     playing: &mut PlayingUi,
     ui: &mut Ui,
-    console: Option<&dyn Console>,
+    picture: Option<Picture<'_>>,
     area: egui::Rect,
 ) -> Option<egui::Rect> {
-    let (texture, native) = friend_texture(playing, ui.ctx(), console?)?;
+    let (texture, native) = friend_texture(playing, ui.ctx(), picture?)?;
     let scale = (area.width() / native.x)
         .min(area.height() / native.y)
         .min(MAX_SCREEN_SCALE);
@@ -76,12 +88,21 @@ pub fn paint_friend_screen(
     Some(rect)
 }
 
-pub fn note_over(ui: &mut Ui, area: egui::Rect, line: &str, button: Option<&str>) -> bool {
-    let width = area
-        .width()
-        .min(area.height() * SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32);
-    let size = egui::vec2(width, width * SCREEN_HEIGHT as f32 / SCREEN_WIDTH as f32);
-    let rect = egui::Rect::from_center_size(area.center(), size);
+fn screen_rect(area: egui::Rect, video: VideoSpec) -> egui::Rect {
+    let (w, h) = (video.width as f32, video.height as f32);
+    let width = area.width().min(area.height() * w / h);
+    egui::Rect::from_center_size(area.center(), egui::vec2(width, width * h / w))
+}
+
+pub fn note_over(
+    ui: &mut Ui,
+    area: egui::Rect,
+    video: VideoSpec,
+    line: &str,
+    button: Option<&str>,
+) -> bool {
+    let rect = screen_rect(area, video);
+    let width = rect.width();
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
     let inner = rect.shrink2(egui::vec2(width * 0.12, 0.0));
@@ -105,12 +126,9 @@ pub fn note_over(ui: &mut Ui, area: egui::Rect, line: &str, button: Option<&str>
         .clicked()
 }
 
-pub fn arriving(ui: &mut Ui, area: egui::Rect, label: &str, progress: Progress) {
-    let width = area
-        .width()
-        .min(area.height() * SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32);
-    let size = egui::vec2(width, width * SCREEN_HEIGHT as f32 / SCREEN_WIDTH as f32);
-    let rect = egui::Rect::from_center_size(area.center(), size);
+pub fn arriving(ui: &mut Ui, area: egui::Rect, video: VideoSpec, label: &str, progress: Progress) {
+    let rect = screen_rect(area, video);
+    let width = rect.width();
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
     let inner = rect.shrink2(egui::vec2(width * 0.15, 0.0));
@@ -121,6 +139,134 @@ pub fn arriving(ui: &mut Ui, area: egui::Rect, label: &str, progress: Progress) 
     );
     child.add_space(inner.height() / 2.0 - 16.0);
     child.add(ProgressBar::new(label, progress));
+}
+
+const ICON_SIZE: f32 = 64.0;
+
+pub fn download_screen(
+    playing: &mut PlayingUi,
+    ui: &mut Ui,
+    area: egui::Rect,
+    play: &Play,
+    online: &Online,
+    emulator: &mut Emulator,
+) -> bool {
+    let session = play.session();
+    let fetch = session.and_then(PlaySession::fetch);
+    let host = session
+        .filter(|_| fetch.is_some())
+        .map(|s| member_name(play, online, s.friend()))
+        .unwrap_or_default();
+    fetch_screen(playing, ui, area, fetch.as_ref(), &host, emulator)
+}
+
+pub fn fetch_screen(
+    playing: &mut PlayingUi,
+    ui: &mut Ui,
+    area: egui::Rect,
+    fetch: Option<&Fetch>,
+    host: &str,
+    emulator: &mut Emulator,
+) -> bool {
+    if playing.fetch_pressed && !matches!(fetch, Some(Fetch::Offered(_) | Fetch::Failed(_))) {
+        playing.fetch_pressed = false;
+        emulator.release(InputSource::Touch, Keys::A);
+    }
+    let Some(fetch) = fetch else {
+        return false;
+    };
+    if fetch_over(playing, ui, area, ConsoleKind::Nds.video(), fetch, host) {
+        playing.fetch_pressed = true;
+        emulator.press(InputSource::Touch, Keys::A);
+    }
+    true
+}
+
+fn fetch_over(
+    playing: &mut PlayingUi,
+    ui: &mut Ui,
+    area: egui::Rect,
+    video: VideoSpec,
+    fetch: &Fetch,
+    host: &str,
+) -> bool {
+    let rect = screen_rect(area, video);
+    let width = rect.width();
+    ui.painter()
+        .rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
+    let inner = rect.shrink2(egui::vec2(width * 0.12, 0.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+    );
+    let Some(offer) = fetch.offer() else {
+        child.add_space(inner.height() / 2.0 - 12.0);
+        child.add(Label::new(format!("Waiting for {host} to start Download Play")).wrap());
+        return false;
+    };
+    child.add_space(inner.height() / 2.0 - ICON_SIZE);
+    if let Some(icon) = fetch_icon(playing, ui.ctx(), offer) {
+        child.add(egui::Image::new(egui::load::SizedTexture::new(
+            icon,
+            egui::vec2(ICON_SIZE, ICON_SIZE),
+        )));
+    }
+    let title = offer.title.lines().next().unwrap_or_default();
+    child.add(Label::new(egui::RichText::new(title).strong()).truncate());
+    child.add_space(10.0);
+    match fetch {
+        Fetch::Offered(_) => {
+            return child
+                .add(main_button(
+                    &child,
+                    format!("{}  Download", icons::DOWNLOAD_SIMPLE),
+                ))
+                .clicked();
+        }
+        Fetch::Failed(_) => {
+            child.add(Label::new("The download stopped").wrap());
+            child.add_space(6.0);
+            return child
+                .add(main_button(
+                    &child,
+                    format!("{}  Try again", icons::ARROW_CLOCKWISE),
+                ))
+                .clicked();
+        }
+        Fetch::Joining(_) | Fetch::Listening | Fetch::Receiving { got: 0, .. } => {
+            child.add(Label::new(format!("Waiting for {host} to start")).wrap());
+        }
+        Fetch::Receiving { got, total, .. } => {
+            let progress = match *total {
+                0 => Progress::unknown(),
+                total => Progress::bytes(*got as u64, total as u64),
+            };
+            child.add(ProgressBar::new("Downloading", progress));
+        }
+        Fetch::Ready(_) => {
+            child.add(ProgressBar::new("Starting", Progress::bytes(1, 1)));
+        }
+    }
+    false
+}
+
+fn fetch_icon(
+    playing: &mut PlayingUi,
+    ctx: &egui::Context,
+    offer: &Offered,
+) -> Option<egui::TextureId> {
+    let rgba = offer.icon.as_ref()?;
+    let stale = playing
+        .fetch_icon
+        .as_ref()
+        .is_none_or(|(shown, _)| shown != rgba);
+    if stale {
+        let image = egui::ColorImage::from_rgba_unmultiplied([32, 32], rgba);
+        let texture = ctx.load_texture("fetch_icon", image, egui::TextureOptions::NEAREST);
+        playing.fetch_icon = Some((rgba.clone(), texture));
+    }
+    playing.fetch_icon.as_ref().map(|(_, texture)| texture.id())
 }
 
 pub struct WatchCaption<'a> {

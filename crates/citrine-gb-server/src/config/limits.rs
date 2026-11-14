@@ -30,6 +30,8 @@ pub const VARS: &[&str] = &[
     "CITRINE_DOWNLOAD_MB_PER_DAY",
     "CITRINE_SESSION_KB_PER_SECOND",
     "CITRINE_SESSION_BURST_MB",
+    "CITRINE_GAME_KB_PER_SECOND",
+    "CITRINE_GAME_BURST_MB",
     "CITRINE_MAX_INVITES",
     "CITRINE_PASSWORD_CHECKS",
     "CITRINE_PASSWORD_QUEUE",
@@ -41,6 +43,12 @@ pub const VARS: &[&str] = &[
     "CITRINE_ROOM_MEMBERS",
     "CITRINE_ROOM_PLAYERS",
     "CITRINE_ROOM_GRACE_SECS",
+    "CITRINE_DS_NET_PORTS",
+    "CITRINE_DS_NET_STREAMS",
+    "CITRINE_DS_NET_KB_PER_SECOND",
+    "CITRINE_DS_NET_PACKETS_PER_SECOND",
+    "CITRINE_DS_NET_ACCOUNT_KB_PER_SECOND",
+    "CITRINE_DS_NET_ACCOUNT_PACKETS_PER_SECOND",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +81,8 @@ pub struct Limits {
     pub download_bytes_per_day: u64,
     pub session_bytes_per_second: u64,
     pub session_burst_bytes: u64,
+    pub game_bytes_per_second: u64,
+    pub game_burst_bytes: u64,
     pub max_invites: usize,
     pub password_checks: usize,
     pub password_queue: usize,
@@ -84,6 +94,13 @@ pub struct Limits {
     pub room_members: usize,
     pub room_players: usize,
     pub room_grace: Duration,
+    pub ds_net_ports: usize,
+    pub ds_net_streams: usize,
+    pub ds_net_bytes_per_second: u64,
+    pub ds_net_packets_per_second: u64,
+    pub ds_net_account_bytes_per_second: u64,
+    pub ds_net_account_packets_per_second: u64,
+    pub invite_open: Duration,
 }
 
 const MB: u64 = 1 << 20;
@@ -130,6 +147,10 @@ impl Limits {
             session_burst_bytes: get("CITRINE_SESSION_BURST_MB", 12)?
                 .max(1)
                 .saturating_mul(MB),
+            game_bytes_per_second: get("CITRINE_GAME_KB_PER_SECOND", 1024)?
+                .max(1)
+                .saturating_mul(1 << 10),
+            game_burst_bytes: get("CITRINE_GAME_BURST_MB", 40)?.max(1).saturating_mul(MB),
             max_invites: get("CITRINE_MAX_INVITES", 5)?.max(1) as usize,
             password_checks: get("CITRINE_PASSWORD_CHECKS", 2)?.clamp(1, 64) as usize,
             password_queue: get("CITRINE_PASSWORD_QUEUE", 16)?.min(4096) as usize,
@@ -146,6 +167,22 @@ impl Limits {
                 .clamp(2, 64) as usize,
             room_players: get("CITRINE_ROOM_PLAYERS", 8)?.clamp(2, 64) as usize,
             room_grace: Duration::from_secs(get("CITRINE_ROOM_GRACE_SECS", 60)?.clamp(1, 600)),
+            ds_net_ports: get("CITRINE_DS_NET_PORTS", 8)?.clamp(1, 64) as usize,
+            ds_net_streams: get("CITRINE_DS_NET_STREAMS", 8)?.clamp(1, 32) as usize,
+            ds_net_bytes_per_second: get("CITRINE_DS_NET_KB_PER_SECOND", 64)?
+                .clamp(16, 1 << 20)
+                .saturating_mul(1 << 10),
+            ds_net_packets_per_second: get("CITRINE_DS_NET_PACKETS_PER_SECOND", 100)?
+                .clamp(10, 100_000),
+            ds_net_account_bytes_per_second: get("CITRINE_DS_NET_ACCOUNT_KB_PER_SECOND", 256)?
+                .clamp(16, 1 << 20)
+                .saturating_mul(1 << 10),
+            ds_net_account_packets_per_second: get(
+                "CITRINE_DS_NET_ACCOUNT_PACKETS_PER_SECOND",
+                200,
+            )?
+            .clamp(10, 100_000),
+            invite_open: Duration::from_secs(get("CITRINE_INVITE_OPEN_SECS", 300)?.clamp(1, 3600)),
         })
     }
 }
@@ -240,7 +277,10 @@ mod tests {
         assert_eq!(l.download_bytes_per_day, 1 << 30);
         assert_eq!(l.session_bytes_per_second, 256 << 10);
         assert_eq!(l.session_burst_bytes, 12 << 20);
+        assert_eq!(l.game_bytes_per_second, 1024 << 10);
+        assert_eq!(l.game_burst_bytes, 40 << 20);
         assert_eq!(l.max_invites, 5);
+        assert_eq!(l.invite_open, Duration::from_secs(300));
         assert_eq!((l.password_checks, l.password_queue), (2, 16));
         let l = limits(&[
             ("CITRINE_CHAT_BURST", "3"),

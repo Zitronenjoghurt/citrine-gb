@@ -1,3 +1,4 @@
+use crate::app::big_screen::scroll::Following;
 use crate::app::events::AppEventQueue;
 use crate::app::tabs::TabViewer;
 use crate::app::ui_state::settings::{SettingsTab, kind_name};
@@ -7,7 +8,7 @@ use crate::emulator::Emulator;
 use crate::icons;
 use crate::local_link::{Controls, Game, Half, LocalLink};
 use crate::utils::file_loader::FileLoader;
-use crate::utils::save_files::ROM_FILTER;
+use crate::utils::save_files::LINK_ROM_FILTER;
 use citrine_gb::console::{Console, VideoSpec};
 use citrine_gb::machine::Machine;
 use egui::{Label, RichText, Ui};
@@ -33,9 +34,9 @@ pub struct LinkUi {
 }
 
 pub fn title(emulator: &Emulator, listing: bool) -> String {
-    match &emulator.link {
+    match emulator.link() {
         Some(link) => link.title().to_owned(),
-        None if listing || emulator.partner.is_some() => "Event partner".to_owned(),
+        None if listing || emulator.partnered() => "Event partner".to_owned(),
         None => "Link a second game".to_owned(),
     }
 }
@@ -113,11 +114,11 @@ pub fn fit(area: egui::Rect, max_scale: f32, video: VideoSpec) -> egui::Rect {
 }
 
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
-    if viewer.emulator.link.is_some() {
+    if viewer.emulator.linked() {
         panel(viewer, ui);
     } else if viewer.ui.linked.listing {
         partner::list(viewer, ui);
-    } else if viewer.emulator.partner.is_some() {
+    } else if viewer.emulator.partnered() {
         partner::panel(viewer, ui);
     } else {
         shelf(viewer, ui);
@@ -135,8 +136,8 @@ fn shelf(viewer: &mut TabViewer, ui: &mut Ui) {
     {
         FileLoader::new()
             .title("Link a second game")
-            .add_filter(ROM_FILTER.0, ROM_FILTER.1)
-            .dispatch(viewer.files.second_rom_tx.clone());
+            .add_filter(LINK_ROM_FILTER.0, LINK_ROM_FILTER.1)
+            .dispatch(&viewer.files.spawner, viewer.files.second_rom_tx.clone());
     }
     ui.add_space(8.0);
     let partnered = partner::has_events(viewer, ui.ctx());
@@ -152,7 +153,7 @@ fn shelf(viewer: &mut TabViewer, ui: &mut Ui) {
     }
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             #[cfg(not(target_arch = "wasm32"))]
             let titled = recent_rows(viewer, ui, button_width) || partnered;
             #[cfg(target_arch = "wasm32")]
@@ -199,7 +200,7 @@ fn recent_rows(viewer: &mut TabViewer, ui: &mut Ui, button_width: f32) -> bool {
         }
     }
     if let Some(path) = chosen {
-        match std::fs::read(&path) {
+        match crate::utils::zip_games::read_game(&path) {
             Ok(data) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                 viewer.events.link_game(data, name);
@@ -252,7 +253,7 @@ fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
     }
     let output = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| panel_body(viewer, ui, true));
+        .show_following(ui, |ui| panel_body(viewer, ui, true));
     let overflow = output.content_size.y - output.inner_rect.height();
     let linked = &mut viewer.ui.linked;
     linked.fitted_height = Some((linked.screen_height - overflow).max(MIN_SCREEN_HEIGHT));
@@ -260,7 +261,7 @@ fn panel(viewer: &mut TabViewer, ui: &mut Ui) {
 
 fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
     let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
-    let Some(link) = viewer.emulator.link.as_ref() else {
+    let Some(link) = viewer.emulator.link() else {
         return;
     };
     let title = link.title().to_owned();
@@ -307,7 +308,7 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
     ui.add_space(6.0);
 
     let settings = &mut viewer.ui.settings;
-    let Some(link) = viewer.emulator.link.as_mut() else {
+    let Some(link) = viewer.emulator.link_mut() else {
         return;
     };
     let mut plugged = link.plugged();

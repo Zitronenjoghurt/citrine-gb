@@ -9,6 +9,7 @@ use crate::persistence::battery_save::BatterySave;
 use crate::persistence::state::StateBody;
 #[cfg(feature = "rom-id")]
 use crate::rom::id::RomId;
+use std::sync::Arc;
 
 impl From<GbModel> for ConsoleKind {
     fn from(model: GbModel) -> Self {
@@ -27,6 +28,7 @@ impl TryFrom<ConsoleKind> for GbModel {
             ConsoleKind::Gb => Ok(GbModel::Dmg),
             ConsoleKind::Gbc => Ok(GbModel::Cgb),
             ConsoleKind::Gba => Err(GbError::GbaGame),
+            ConsoleKind::Nds => Err(GbError::NdsGame),
         }
     }
 }
@@ -84,7 +86,7 @@ impl Console for GameBoy {
         self.apu.set_channel_enabled(index, enabled);
     }
 
-    fn rom_bytes(&self) -> Vec<u8> {
+    fn rom_bytes(&self) -> Arc<[u8]> {
         self.cartridge.rom_bytes()
     }
 
@@ -160,6 +162,7 @@ mod debug {
             ("Serial", 0x58),
             ("Joypad", 0x60),
         ],
+        cpus: &["SM83"],
         cpu_groups: &["CPU"],
         watchpoints: true,
         cycle: "M-cycle",

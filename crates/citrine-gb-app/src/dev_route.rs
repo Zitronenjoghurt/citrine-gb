@@ -5,9 +5,11 @@ use base64::Engine;
 use citrine_gb::debug::Debug;
 use citrine_gb::debug::code::Address;
 use citrine_gb::debug::step::Step;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use wasm_bindgen::prelude::wasm_bindgen;
 
 const DEBUG_FRAMES: u32 = 60;
+const BENCH_UPDATES: usize = 4000;
 
 #[derive(Clone, Copy)]
 enum Target {
@@ -53,15 +55,67 @@ fn debug_tab() -> Option<Tab> {
         "registers" => Some(Tab::Registers),
         "rom-info" => Some(Tab::RomInfo),
         "sound" => Some(Tab::Apu),
+        "threads" => Some(Tab::Threads),
         _ => None,
     }
 }
 
 thread_local! {
     static PENDING: Cell<Option<(Target, web_time::Instant, u32)>> = const { Cell::new(None) };
+    static BENCH: RefCell<Bench> = RefCell::default();
+}
+
+#[derive(Default, serde::Serialize)]
+struct Bench {
+    #[serde(skip)]
+    started: Option<web_time::Instant>,
+    updates: Vec<f32>,
+    late: u64,
+    frames: u64,
+    worker: bool,
+    underruns: u64,
+    underrun_frames: u64,
+    overruns: u64,
+    playing: bool,
+}
+
+pub fn tock(app: &Citrine) {
+    BENCH.with_borrow_mut(|bench| {
+        if let Some(started) = bench.started.take() {
+            if bench.updates.len() >= BENCH_UPDATES {
+                bench.updates.remove(0);
+            }
+            bench.updates.push(started.elapsed().as_secs_f32() * 1000.0);
+        }
+        #[cfg(threaded)]
+        {
+            bench.late = app.emulator.late_frames();
+        }
+        bench.frames = app.emulator.total_frames as u64;
+        bench.worker = app.emulator.has_worker();
+        if let Some(audio) = &app.audio {
+            let stats = audio.stats();
+            bench.underruns = stats.underruns();
+            bench.underrun_frames = stats.underrun_frames();
+            bench.overruns = stats.overruns();
+            bench.playing = stats.is_playing();
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn citrine_dev_bench(reset: bool) -> String {
+    BENCH.with_borrow_mut(|bench| {
+        let text = serde_json::to_string(&*bench).unwrap_or_default();
+        if reset {
+            bench.updates.clear();
+        }
+        text
+    })
 }
 
 pub fn tick(app: &mut Citrine, ctx: &egui::Context) {
+    BENCH.with_borrow_mut(|bench| bench.started = Some(web_time::Instant::now()));
     let Some((target, due, frames)) = PENDING.get() else {
         return;
     };
@@ -86,7 +140,7 @@ pub fn tick(app: &mut Citrine, ctx: &egui::Context) {
             app.events.open_tab(Tab::Tool(Tool::Video));
         }
         Target::Debug(tab) => {
-            app.emulator.running = false;
+            app.emulator.running = tab == Tab::Threads;
             open_debug_views(app);
             app.events.open_tab(tab);
         }

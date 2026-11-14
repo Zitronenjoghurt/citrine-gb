@@ -1,0 +1,20 @@
+[package]
+name = "citrine-gb-walker-lab"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+name = "citrine_walker_lab"
+path = "src/lib.rs"
+
+[[bin]]
+name = "walker-lab"
+path = "src/bin/walker_lab.rs"
+
+[dependencies]
+png = "0.18"
+
+[dev-dependencies]
+citrine-gb-test-roms = { workspace = true }
+citrine-gb-walker = { workspace = true }

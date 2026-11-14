@@ -3,6 +3,8 @@ mod device;
 mod ledger;
 mod reconcile;
 mod server;
+mod walker;
+mod work;
 
 use super::{Online, Phase};
 pub use crate::storage::SaveStore;
@@ -11,10 +13,12 @@ use crate::storage::cloud::{SlotKind, battery_slot, is_game_key, random_token, s
 use crate::storage::{MAX_SAVE_NAME, default_slot_name};
 pub use account::AccountCopy;
 use citrine_gb_net::{ErrorCode, GameKey, SaveInfo, SaveLabel, SavePayload, Tag, storage_cost};
+use citrine_gb_threads::Spawner;
 pub(crate) use device::device_name;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
+pub use walker::{WalkerRemote, WalkerReply, WalkerRequest};
 use web_time::Instant;
 
 const SETTLE: Duration = Duration::from_secs(3);
@@ -161,7 +165,7 @@ pub enum Choice {
 pub struct ConflictSide {
     pub device: String,
     pub saved_at: u64,
-    pub thumb: Option<Vec<u8>>,
+    pub thumb: Option<crate::media::Frame>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +235,10 @@ enum Op {
         hash: [u8; 32],
         label: SaveLabel,
     },
+    WalkerPut {
+        tag: Tag,
+        label: SaveLabel,
+    },
 }
 
 enum Action {
@@ -240,6 +248,7 @@ enum Action {
         save: LocalSave,
         base: u64,
         payload: SavePayload,
+        hash: [u8; 32],
     },
     Get {
         slot: String,
@@ -278,6 +287,14 @@ pub struct CloudState {
     changed: bool,
     storage: Option<(u64, u64)>,
     account: account::AccountSlots,
+    walker: walker::WalkerSlot,
+    parts: Vec<u8>,
+    spawner: Option<Spawner>,
+    scan: Option<work::Scan>,
+    rescan: BTreeSet<String>,
+    sealing: Option<work::Sealing>,
+    sending: Option<(Tag, VecDeque<Vec<u8>>)>,
+    opening: Option<work::Opening>,
 }
 
 fn ledger_name(owner: &str) -> String {
@@ -359,6 +376,8 @@ impl CloudState {
         self.conflicts.clear();
         self.fetching.clear();
         self.unreadable.clear();
+        self.walker.reset();
+        self.drop_work();
         let roms: Vec<String> = self.states.keys().map(|(rom, _)| rom.clone()).collect();
         self.states.clear();
         let now = Instant::now();
@@ -409,22 +428,19 @@ impl CloudState {
         }
     }
 
-    fn offline_states(&mut self, rom: &str) {
-        let Some(store) = self.store.clone() else {
-            return;
-        };
-        let device = self.device();
+    fn offline_states(&mut self, rom: &str, items: &[work::Scanned]) {
         self.states.retain(|(r, _), _| r != rom);
-        for item in store.local_items(rom, &device) {
+        for work::Scanned { item, hash } in items {
             let state = match self.entry(rom, &item.slot) {
-                Some(entry) if entry.hash == item.payload.hash() => match entry.mark {
+                Some(entry) if entry.hash == *hash => match entry.mark {
                     Mark::Synced => SyncState::Synced,
                     Mark::CloudGone => SyncState::OnlyHere,
                     Mark::DeletedHere { .. } => SyncState::Waiting,
                 },
                 _ => SyncState::Waiting,
             };
-            self.states.insert((rom.to_string(), item.save), state);
+            self.states
+                .insert((rom.to_string(), item.save.clone()), state);
         }
         self.changed = true;
     }
@@ -433,6 +449,10 @@ impl CloudState {
 impl Online {
     pub fn cloud_attach(&mut self, store: SaveStore) {
         self.cloud.store = Some(store);
+    }
+
+    pub fn cloud_spawner(&mut self, spawner: Spawner) {
+        self.cloud.spawner = Some(spawner);
     }
 
     pub fn set_cloud(&mut self, owner: Option<String>, enabled: bool) {
@@ -634,7 +654,7 @@ impl Online {
                 };
                 if !self
                     .cloud
-                    .write_fetched(rom, slot, payload, conflict.version)
+                    .write_fetched(rom, slot, payload, payload.hash(), conflict.version)
                 {
                     return Err(std::io::Error::other("the cloud save could not be kept"));
                 }
@@ -797,4 +817,145 @@ impl Online {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    fn entry(version: u64, hash: u8, mark: Mark) -> Entry {
+        Entry {
+            version,
+            hash: [hash; 32],
+            mark,
+        }
+    }
+
+    #[test]
+    fn equal_copies_are_adopted() {
+        assert_eq!(
+            decide(Some([1; 32]), Some((3, [1; 32])), None, false, false),
+            Step::Adopt
+        );
+    }
+
+    #[test]
+    fn first_meeting_of_two_different_copies_is_a_conflict() {
+        assert_eq!(
+            decide(Some([1; 32]), Some((3, [2; 32])), None, false, false),
+            Step::Conflict
+        );
+        assert_eq!(
+            decide(Some([1; 32]), Some((3, [2; 32])), None, true, false),
+            Step::Upload(3)
+        );
+    }
+
+    #[test]
+    fn one_side_changed_moves_that_way() {
+        let synced = entry(3, 1, Mark::Synced);
+        assert_eq!(
+            decide(
+                Some([2; 32]),
+                Some((3, [1; 32])),
+                Some(&synced),
+                false,
+                false
+            ),
+            Step::Upload(3)
+        );
+        assert_eq!(
+            decide(
+                Some([1; 32]),
+                Some((4, [5; 32])),
+                Some(&synced),
+                false,
+                false
+            ),
+            Step::Fetch
+        );
+        assert_eq!(
+            decide(
+                Some([1; 32]),
+                Some((4, [5; 32])),
+                Some(&synced),
+                false,
+                true
+            ),
+            Step::Conflict
+        );
+        assert_eq!(
+            decide(
+                Some([2; 32]),
+                Some((4, [5; 32])),
+                Some(&synced),
+                false,
+                false
+            ),
+            Step::Conflict
+        );
+    }
+
+    #[test]
+    fn new_saves_upload_and_missing_ones_come_down() {
+        assert_eq!(
+            decide(Some([1; 32]), None, None, false, false),
+            Step::Upload(0)
+        );
+        assert_eq!(
+            decide(None, Some((2, [1; 32])), None, false, false),
+            Step::Fetch
+        );
+        assert_eq!(
+            decide(None, Some((2, [1; 32])), None, false, true),
+            Step::Conflict
+        );
+    }
+
+    #[test]
+    fn deletes_follow_the_ledger() {
+        let synced = entry(3, 1, Mark::Synced);
+        assert_eq!(
+            decide(Some([1; 32]), None, Some(&synced), false, false),
+            Step::CloudGone
+        );
+        let gone = entry(3, 1, Mark::CloudGone);
+        assert_eq!(
+            decide(Some([1; 32]), None, Some(&gone), false, false),
+            Step::Keep
+        );
+        assert_eq!(
+            decide(Some([2; 32]), None, Some(&gone), false, false),
+            Step::Upload(0)
+        );
+        let both = entry(3, 1, Mark::DeletedHere { cloud_too: true });
+        assert_eq!(
+            decide(None, Some((3, [1; 32])), Some(&both), false, false),
+            Step::DeleteCloud(3)
+        );
+        assert_eq!(
+            decide(None, Some((4, [1; 32])), Some(&both), false, false),
+            Step::Fetch
+        );
+        let here = entry(3, 1, Mark::DeletedHere { cloud_too: false });
+        assert_eq!(
+            decide(None, Some((3, [1; 32])), Some(&here), false, false),
+            Step::Keep
+        );
+        assert_eq!(
+            decide(None, Some((3, [1; 32])), Some(&synced), true, false),
+            Step::DeleteCloud(3)
+        );
+        assert_eq!(
+            decide(None, Some((3, [1; 32])), Some(&synced), false, false),
+            Step::Fetch
+        );
+        assert_eq!(
+            decide(None, None, Some(&synced), false, false),
+            Step::Forget
+        );
+    }
+
+    #[test]
+    fn copies_are_named_after_their_device() {
+        assert_eq!(copy_name("", "slot-2", "Mac"), "Slot 3 from Mac");
+        assert_eq!(copy_name("Boss", "battery", "Mac"), "Boss from Mac");
+    }
+}

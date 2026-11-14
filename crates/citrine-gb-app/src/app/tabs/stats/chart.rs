@@ -322,3 +322,19 @@ pub(super) fn legend(ui: &Ui, painter: &egui::Painter, top_left: egui::Pos2, sid
         color,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::day_bars;
+
+    #[test]
+    fn week_bars_run_monday_to_sunday() {
+        let saturday = Date::new(2026, 10, 31).unwrap();
+        let labels: Vec<String> = day_bars(&BTreeMap::new(), saturday, Range::Week)
+            .into_iter()
+            .map(|bar| bar.label)
+            .collect();
+        assert_eq!(labels, ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
+    }
+}

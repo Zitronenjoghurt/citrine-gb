@@ -10,7 +10,7 @@ use egui::Widget;
 const SIDEBAR_MIN_WIDTH: f32 = 420.0;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
-    crate::app::widgets::update::card(ui, &mut viewer.ui.update);
+    crate::app::widgets::update::card(ui, &mut viewer.ui.update, &viewer.files.spawner);
     if ui.available_width() < SIDEBAR_MIN_WIDTH {
         stacked(viewer, ui);
     } else {
@@ -81,7 +81,6 @@ pub(crate) fn content(viewer: &mut TabViewer, ui: &mut egui::Ui, top_space: f32)
         .zip(gb)
         .map(|(rom_key, gb)| LoadedGame {
             rom_key,
-            title: viewer.emulator.game_name(),
             model: viewer.emulator.console(),
             cgb_mode: gb.cartridge.header.cgb_mode,
             header: &header,
@@ -105,6 +104,11 @@ pub(crate) fn content(viewer: &mut TabViewer, ui: &mut egui::Ui, top_space: f32)
         live_camera: viewer.senses.has_live_camera(),
         touch: viewer.ui.settings.layout.is_touch(ui.ctx()),
     });
+    #[cfg(feature = "nds")]
+    let ds_account = viewer
+        .online
+        .account()
+        .map(|account| account.display_name.clone());
     let mut content = SettingsContent::new(
         &mut viewer.ui.settings,
         &mut viewer.ui.capture,
@@ -118,12 +122,22 @@ pub(crate) fn content(viewer: &mut TabViewer, ui: &mut egui::Ui, top_space: f32)
     .palettes(gb.is_some())
     .console(viewer.emulator.kind())
     .channels(viewer.emulator.channel_names())
+    .screen_match(viewer.emulator.screen_match())
     .top_space(top_space);
     if let Some(state) = cartridge {
         content = content.cartridge(state);
     }
     #[cfg(feature = "gba")]
     let content = content.gba_bios(viewer.emulator.gba_bios_name());
+    #[cfg(feature = "nds")]
+    let content = {
+        use crate::app::ds_firmware::DsFile;
+        content.ds(crate::app::widgets::settings::ds::DsState {
+            account: ds_account.as_deref(),
+            files: [DsFile::Arm9Bios, DsFile::Arm7Bios, DsFile::Firmware]
+                .map(|file| viewer.emulator.ds_file_name(file)),
+        })
+    };
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     let content = content.discord(discord.0, discord.1, discord.2);
     content.ui(ui);

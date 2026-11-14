@@ -31,6 +31,10 @@ pub trait MbcInterface {
         }
     }
 
+    fn rom_window_offsets(&self) -> [usize; 2] {
+        [self.rom_offset(0x0000), self.rom_offset(0x4000)]
+    }
+
     fn ram_offset(&self, addr: u16) -> Option<usize> {
         self.ram_bank()
             .map(|bank| bank * RAM_BANK_SIZE + (addr as usize & 0x1FFF))
@@ -160,6 +164,31 @@ impl Mbc {
         false
     }
 
+    pub fn advances_in_bulk(&self) -> bool {
+        matches!(self, Self::Mbc3(_) | Self::Mbc5(_))
+    }
+
+    pub fn advance(&mut self, cycles: u32) {
+        match self {
+            Self::Mbc3(mbc) => mbc.advance(cycles),
+            Self::Mbc5(mbc) => mbc.advance(cycles),
+            _ => {}
+        }
+    }
+
+    pub fn is_clocked(&self) -> bool {
+        match self {
+            Self::Mbc3(mbc) => mbc.has_rtc,
+            Self::Mbc5(mbc) => mbc.rumble,
+            Self::Huc3(_) | Self::Tama5(_) | Self::Camera(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn reads_rom_by_bank(&self) -> bool {
+        !matches!(self, Self::Mbc6(_))
+    }
+
     pub fn has_camera(&self) -> bool {
         matches!(self, Self::Camera(_))
     }
@@ -239,6 +268,10 @@ impl MbcInterface for Mbc {
 
     fn rom_offset(&self, addr: u16) -> usize {
         dispatch!(self, addr as usize & 0x7FFF, mbc => mbc.rom_offset(addr))
+    }
+
+    fn rom_window_offsets(&self) -> [usize; 2] {
+        dispatch!(self, [0x0000, 0x4000], mbc => mbc.rom_window_offsets())
     }
 
     fn ram_offset(&self, addr: u16) -> Option<usize> {

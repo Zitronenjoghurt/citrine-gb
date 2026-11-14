@@ -25,6 +25,23 @@ struct GameMeta {
     size: Option<usize>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Shelf {
+    GameBoy,
+    GameBoyAdvance,
+    NintendoDs,
+}
+
+impl Shelf {
+    fn folder(&self) -> &'static str {
+        match self {
+            Shelf::GameBoy => "",
+            Shelf::GameBoyAdvance => "gba",
+            Shelf::NintendoDs => "nds",
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct Link {
     url: String,
@@ -56,6 +73,23 @@ fn main() {
         res.compile().unwrap();
     }
 
+    println!("cargo::rustc-check-cfg=cfg(threaded)");
+    let wasm = env::var("CARGO_CFG_TARGET_ARCH").unwrap() == "wasm32";
+    let atomics = env::var("CARGO_CFG_TARGET_FEATURE")
+        .unwrap_or_default()
+        .split(',')
+        .any(|feature| feature == "atomics");
+    if !wasm || atomics {
+        println!("cargo::rustc-cfg=threaded");
+    }
+
+    println!("cargo::rustc-check-cfg=cfg(ds_wifi)");
+    if env::var_os("CARGO_FEATURE_NDS").is_some() && !wasm {
+        println!("cargo::rustc-cfg=ds_wifi");
+    }
+
+    build_facts();
+
     println!("cargo:rerun-if-changed=homebrew");
 
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -83,33 +117,39 @@ fn main() {
         let stem = path.file_stem().unwrap().to_str().unwrap().to_string();
         let meta = index.remove(&stem).unwrap();
 
-        games.push((path, stem, meta, false));
+        games.push((path, stem, meta, Shelf::GameBoy));
     }
-    if env::var_os("CARGO_FEATURE_GBA").is_some() {
-        for entry in fs::read_dir(homebrew_dir.join("gba")).unwrap() {
+    for (shelf, feature) in [
+        (Shelf::GameBoyAdvance, "CARGO_FEATURE_GBA"),
+        (Shelf::NintendoDs, "CARGO_FEATURE_NDS"),
+    ] {
+        if env::var_os(feature).is_none() {
+            continue;
+        }
+        let folder = homebrew_dir.join(shelf.folder());
+        for entry in fs::read_dir(&folder).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_str().unwrap();
-            let Some(stem) = name.strip_suffix(".gba.br") else {
+            let Some(stem) = name.strip_suffix(&format!(".{}.br", shelf.folder())) else {
                 continue;
             };
             let stem = stem.to_string();
             assert!(
-                homebrew_dir
-                    .join("gba")
-                    .join(format!("{stem}.LICENSE.txt"))
-                    .exists(),
+                folder.join(format!("{stem}.LICENSE.txt")).exists(),
                 "{stem} has no licence file"
             );
             let meta = index.remove(&stem).unwrap();
-            games.push((path, stem, meta, true));
+            games.push((path, stem, meta, shelf));
         }
     }
 
     games.sort_by_cached_key(|game| (game.3, sort_key(&game.2.title), game.2.title.clone()));
 
-    for (path, stem, meta, gba) in games {
+    for (path, stem, meta, shelf) in games {
+        let gba = shelf == Shelf::GameBoyAdvance;
+        let packed = shelf != Shelf::GameBoy;
         let stored = fs::read(&path).unwrap();
-        let raw_data = if gba {
+        let raw_data = if packed {
             let mut raw = Vec::new();
             std::io::Read::read_to_end(
                 &mut brotli::Decompressor::new(stored.as_slice(), 4096),
@@ -122,34 +162,54 @@ fn main() {
         };
         let sha1: [u8; 20] = sha1::Sha1::digest(&raw_data).into();
         let sha1_hex: String = sha1.iter().map(|b| format!("{b:02x}")).collect();
-        if gba {
+        if packed {
             assert_eq!(meta.sha1.as_deref(), Some(sha1_hex.as_str()), "{stem} sha1");
             assert_eq!(meta.size, Some(raw_data.len()), "{stem} size");
+        }
+        if gba {
             assert_eq!(raw_data[0xB2], 0x96, "{stem} is not a GBA game");
         }
+        if shelf == Shelf::NintendoDs {
+            assert_eq!(
+                raw_data[0x15C..0x15E],
+                [0x56, 0xCF],
+                "{stem} is not a DS game"
+            );
+        }
+        let ds_icon = if shelf == Shelf::NintendoDs {
+            let banner = u32::from_le_bytes(raw_data[0x68..0x6C].try_into().unwrap()) as usize;
+            let icon = raw_data
+                .get(banner + 0x20..banner + 0x240)
+                .filter(|_| banner != 0)
+                .unwrap_or_else(|| panic!("{stem} has no banner icon"));
+            let icon = icon.iter();
+            quote! { Some(&[ #(#icon),* ]) }
+        } else {
+            quote! { None }
+        };
         let rom_key: String = sha2::Sha256::digest(&raw_data)
             .iter()
             .map(|b| format!("{b:02X}"))
             .collect();
         let cgb_mode = match raw_data[0x143] {
-            _ if gba => quote! { citrine_gb::rom::header::RomCgbMode::None },
+            _ if packed => quote! { citrine_gb::rom::header::RomCgbMode::None },
             0xC0 => quote! { citrine_gb::rom::header::RomCgbMode::CgbOnly },
             flag if flag & 0x80 != 0 => quote! { citrine_gb::rom::header::RomCgbMode::CgbAndGb },
             _ => quote! { citrine_gb::rom::header::RomCgbMode::None },
         };
-        let console = if gba {
-            quote! { ShelfConsole::GameBoyAdvance }
-        } else {
-            quote! { ShelfConsole::GameBoy }
+        let console = match shelf {
+            Shelf::GameBoy => quote! { ShelfConsole::GameBoy },
+            Shelf::GameBoyAdvance => quote! { ShelfConsole::GameBoyAdvance },
+            Shelf::NintendoDs => quote! { ShelfConsole::NintendoDs },
         };
         let size = raw_data.len();
         let file_name = path.file_name().unwrap().to_str().unwrap();
         let rom = if storage::fetched(file_name, &target_arch) {
-            let fetch_path = format!("homebrew/gba/{file_name}");
+            let fetch_path = format!("homebrew/{}/{file_name}", shelf.folder());
             let bytes = stored.len() as u64;
             quote! { ShelfRom::Fetch { path: #fetch_path, bytes: #bytes } }
-        } else if gba {
-            let source = format!("/homebrew/gba/{file_name}");
+        } else if packed {
+            let source = format!("/homebrew/{}/{file_name}", shelf.folder());
             quote! { ShelfRom::Embedded(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), #source))) }
         } else {
             let mut compressed_data = Vec::new();
@@ -190,6 +250,7 @@ fn main() {
                 links: &[ #(#link_tokens),* ],
                 tags: &[ #(#tag_tokens),* ],
                 rom: #rom,
+                ds_icon: #ds_icon,
             }
         });
     }
@@ -212,6 +273,8 @@ fn main() {
         pub enum ShelfConsole {
             GameBoy,
             GameBoyAdvance,
+            #[cfg(feature = "nds")]
+            NintendoDs,
         }
 
         #[derive(Clone, Copy)]
@@ -235,6 +298,7 @@ fn main() {
             pub links: &'static [HomebrewLink],
             pub tags: &'static [&'static str],
             pub rom: ShelfRom,
+            pub ds_icon: Option<&'static [u8; 0x220]>,
         }
 
         impl HomebrewGame {
@@ -261,6 +325,7 @@ fn main() {
     fs::write(dest_path, final_code.to_string()).unwrap();
 
     game_names(Path::new(&out_dir));
+    ds_names(Path::new(&out_dir));
     emoji(Path::new(&out_dir));
 }
 
@@ -309,6 +374,52 @@ fn game_names(out_dir: &Path) {
         writer.write_all(&table).unwrap();
     }
     fs::write(out_dir.join("game_names.br"), compressed).unwrap();
+}
+
+fn ds_names(out_dir: &Path) {
+    let mut entries: Vec<([u8; 4], String)> = Vec::new();
+    if env::var_os("CARGO_FEATURE_NDS").is_some() {
+        let xml = without_comments(&fs::read_to_string("names/nds.xml").unwrap());
+        for software in xml.split("<software ").skip(1) {
+            let description = software
+                .split_once("<description>")
+                .and_then(|(_, rest)| rest.split_once("</description>"))
+                .unwrap()
+                .0;
+            let serial = software
+                .split_once("name=\"serial\" value=\"")
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .unwrap()
+                .0;
+            let name = tags::without_tags(&unescape(description)).to_string();
+            entries.push((ds_code(serial), name));
+        }
+        let list = fs::read_to_string("names/nds-wikidata.tsv").unwrap();
+        for line in list.lines().filter(|line| !line.starts_with('#')) {
+            let (code, name) = line.split_once('\t').unwrap();
+            let code: [u8; 4] = code.as_bytes().try_into().unwrap();
+            entries.push((code, tags::without_tags(name).to_string()));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|entry| seen.insert(entry.0));
+    entries.sort();
+    let tokens = entries.iter().map(|(code, name)| {
+        let code = code.iter();
+        quote! { ([ #(#code),* ], #name) }
+    });
+    let code = quote! {
+        static DS_NAMES: &[([u8; 4], &str)] = &[ #(#tokens),* ];
+    };
+    fs::write(out_dir.join("ds_names.rs"), code.to_string()).unwrap();
+}
+
+fn ds_code(serial: &str) -> [u8; 4] {
+    let rest = serial.strip_prefix("NTR").unwrap();
+    let rest = rest.trim_start_matches([' ', '-']);
+    let rest = rest.strip_prefix('P').unwrap();
+    let rest = rest.trim_start_matches([' ', '-']);
+    rest.as_bytes()[..4].try_into().unwrap()
 }
 
 fn emoji(out_dir: &Path) {
@@ -374,4 +485,31 @@ fn sort_key(title: &str) -> String {
         })
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !text.is_empty()).then_some(text)
+}
+
+fn build_facts() {
+    let commit = git(&["rev-parse", "--short=10", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=CITRINE_COMMIT={commit}");
+    let head = git(&["symbolic-ref", "-q", "HEAD"]);
+    for name in ["HEAD", "packed-refs"].into_iter().chain(head.as_deref()) {
+        if let Some(path) = git(&["rev-parse", "--git-path", name])
+            && Path::new(&path).exists()
+        {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let profile = Path::new(&out_dir)
+        .ancestors()
+        .nth(3)
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    println!("cargo:rustc-env=CITRINE_PROFILE={profile}");
 }

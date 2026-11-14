@@ -1,10 +1,20 @@
+#![expect(
+    clippy::disallowed_types,
+    reason = "the server's handlers hold short std locks, and citrine-gb-threads is for the emulator side"
+)]
+
 mod admin;
 mod client_ip;
 pub mod config;
 mod connections;
 mod db;
+mod doors;
+mod ds_net;
+mod gts;
 mod hub;
+mod isolation;
 mod limit;
+mod push;
 mod relay;
 mod screens;
 mod settings;
@@ -38,6 +48,7 @@ use tower_http::services::ServeDir;
 
 const EMPTY_ACCOUNT_SECS: u64 = 30 * 86_400;
 const KEEP_BACKUPS: usize = 14;
+const REPORT_BYTES: usize = 64 * 1024;
 
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -70,6 +81,7 @@ pub struct App {
     settings: Settings,
     hub: Hub,
     screens: Screens,
+    doors: doors::Doors,
     stats: Stats,
     wrong_tries: Attempts,
     unknown_tries: Attempts,
@@ -77,12 +89,16 @@ pub struct App {
     admin_attempts: Attempts,
     admin_hash: Option<[u8; 32]>,
     admin_sessions: Mutex<HashMap<[u8; 32], Instant>>,
+    reports: isolation::Reports,
     admin_setup: Mutex<Option<Vec<u8>>>,
     files_dir: PathBuf,
     storage: Arc<Storage>,
     connections: Arc<Connections>,
     rates: Rates,
     relay_secret: RelaySecret,
+    push: push::Push,
+    gts: gts::Gts,
+    ds_ports: Arc<ds_net::Ports>,
 }
 
 impl App {
@@ -113,6 +129,7 @@ pub struct Running {
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<std::io::Result<()>>,
     purge: JoinHandle<()>,
+    sims: JoinHandle<()>,
 }
 
 async fn delete_empty_accounts(app: &App, now: u64) {
@@ -221,6 +238,7 @@ impl Running {
     pub async fn stop(self) {
         self.app.hub.close_all(Notice::ShuttingDown);
         self.purge.abort();
+        self.sims.abort();
         let _ = self.shutdown.send(());
         let _ = tokio::time::timeout(Duration::from_secs(10), self.task).await;
     }
@@ -243,6 +261,13 @@ async fn not_found(axum::extract::State(app): axum::extract::State<Arc<App>>) ->
         )),
     )
         .into_response()
+}
+
+async fn isolation_reports(
+    axum::extract::State(app): axum::extract::State<Arc<App>>,
+    body: axum::body::Bytes,
+) -> StatusCode {
+    app.reports.take(&body)
 }
 
 async fn web_missing(axum::extract::State(app): axum::extract::State<Arc<App>>) -> Response {
@@ -293,6 +318,7 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         settings,
         hub: Hub::default(),
         screens: Screens::default(),
+        doors: doors::Doors::default(),
         stats: Stats::default(),
         wrong_tries: Attempts::new(
             config.limits.wrong_tries_per_minute,
@@ -308,26 +334,55 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         ),
         admin_attempts: Attempts::new(5, Duration::from_secs(60)),
         admin_sessions: Mutex::new(HashMap::new()),
+        reports: isolation::Reports::default(),
         admin_setup: Mutex::new(None),
         storage: Arc::new(Storage::new(config.data_dir.clone(), &config.limits)),
         connections: Arc::new(Connections::new(&config.limits)),
         rates: Rates::new(&config.limits),
         files_dir,
         relay_secret,
+        push: push::Push::start(config.fcm_key_file.as_deref(), &config.fcm_url, db.clone()),
+        gts: gts::Gts::default(),
+        ds_ports: Arc::new(ds_net::Ports::new(
+            config.limits.ds_net_account_bytes_per_second,
+            config.limits.ds_net_account_packets_per_second,
+            config
+                .ds_net_public_ip
+                .into_iter()
+                .chain(ds_net::route_ip())
+                .collect(),
+        )),
     });
 
     let mut router = Router::new()
         .route("/relay", get(relay::upgrade))
+        .route(citrine_gb_surface::relay::PATH, get(doors::upgrade))
         .route("/f/{token}", get(screens::serve));
     router = if app.admin_hash.is_some() {
         router.nest("/admin", admin::router())
     } else {
         router.route("/admin/icon.png", get(admin::icon_png))
     };
+    if config.web && config.isolation == config::Isolation::Report {
+        router = router.route(
+            isolation::REPORTS_PATH,
+            axum::routing::post(isolation_reports)
+                .layer(axum::extract::DefaultBodyLimit::max(REPORT_BYTES)),
+        );
+    }
     router = if config.web {
+        let isolation = config.isolation;
         router.fallback_service(
-            ServeDir::new(&config.static_dir)
-                .not_found_service(axum::handler::Handler::with_state(web_missing, app.clone())),
+            Router::new()
+                .fallback_service(ServeDir::new(&config.static_dir).not_found_service(
+                    axum::handler::Handler::with_state(web_missing, app.clone()),
+                ))
+                .layer(axum::middleware::map_response(
+                    move |mut response: Response| async move {
+                        isolation.add_headers(&mut response);
+                        response
+                    },
+                )),
         )
     } else {
         router.fallback(not_found)
@@ -366,10 +421,20 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         }
     });
 
+    let simulated = app.clone();
+    let sims = tokio::spawn(async move {
+        let period = Duration::from_secs(600);
+        let mut every = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        loop {
+            every.tick().await;
+            simulate(&simulated, now()).await;
+        }
+    });
+
     let (shutdown, shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         axum::serve(
-            listener,
+            connections::without_nagle(listener),
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async {
@@ -383,5 +448,21 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         shutdown,
         task,
         purge,
+        sims,
     })
+}
+
+async fn simulate(app: &App, now: u64) {
+    let settings = app.settings.get();
+    if !settings.gts || !settings.gts_sims {
+        return;
+    }
+    match app.gts.simulate(&app.db, now).await {
+        Ok(traded) => {
+            for (account, msg) in traded {
+                app.hub.send(account, msg);
+            }
+        }
+        Err(e) => log::warn!("gts sims: {e}"),
+    }
 }

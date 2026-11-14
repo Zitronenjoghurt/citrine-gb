@@ -1,4 +1,5 @@
 use super::device::device_name;
+use super::work::Scanned;
 use super::{
     Action, CloudState, Conflict, ConflictSide, Entry, Mark, Remote, Step, SyncState, UNKNOWN,
     copy_name, decide, default_name, name_of, slot_order,
@@ -9,10 +10,12 @@ use citrine_gb_net::{GameKey, SavePayload};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl CloudState {
-    pub(super) fn reconcile(&mut self, rom: &str, game: GameKey) -> Option<Action> {
-        let store = self.store.clone()?;
-        let device = self.device();
-        let items = store.local_items(rom, &device);
+    pub(super) fn reconcile(
+        &mut self,
+        rom: &str,
+        game: GameKey,
+        items: &[Scanned],
+    ) -> Option<Action> {
         let remote: BTreeMap<String, Remote> = self
             .listing
             .as_ref()?
@@ -28,7 +31,7 @@ impl CloudState {
             .unwrap_or_default();
         let mut slots: Vec<(u8, std::cmp::Reverse<u64>, String)> = Vec::new();
         let mut seen = BTreeSet::new();
-        for item in &items {
+        for Scanned { item, .. } in items {
             seen.insert(item.slot.clone());
             slots.push((
                 slot_order(&item.slot),
@@ -61,8 +64,9 @@ impl CloudState {
         let mut keep_conflicts = BTreeSet::new();
         let mut action = None;
         for (_, _, slot) in slots {
-            let item = items.iter().find(|i| i.slot == slot);
-            let local = item.map(|i| i.payload.hash());
+            let scanned = items.iter().find(|i| i.item.slot == slot);
+            let local = scanned.map(|i| i.hash);
+            let item = scanned.map(|i| &i.item);
             let cloud = remote.get(&slot);
             let entry = entries.get(&slot);
             let autosave = slot_kind(&slot) == Some(SlotKind::Autosave);
@@ -119,6 +123,7 @@ impl CloudState {
                                 save: item?.save.clone(),
                                 base: version,
                                 payload: item?.payload.clone(),
+                                hash,
                             });
                         }
                     }
@@ -143,6 +148,7 @@ impl CloudState {
                                     save: item.save.clone(),
                                     base,
                                     payload: item.payload.clone(),
+                                    hash: local?,
                                 });
                             }
                         }
@@ -236,6 +242,7 @@ impl CloudState {
         rom: &str,
         slot: &str,
         payload: &SavePayload,
+        hash: [u8; 32],
         version: u64,
     ) -> bool {
         let Some(store) = self.store.clone() else {
@@ -262,9 +269,11 @@ impl CloudState {
         if save == LocalSave::Battery && self.open.as_ref().is_some_and(|(r, _)| r == rom) {
             self.reload = true;
         }
-        let hash = store
-            .read_payload(rom, &save)
-            .map_or(UNKNOWN, |kept| kept.hash());
+        let hash = match store.read_payload(rom, &save) {
+            Some(kept) if kept == *payload => hash,
+            Some(kept) => kept.hash(),
+            None => UNKNOWN,
+        };
         self.set_entry(
             rom,
             slot,

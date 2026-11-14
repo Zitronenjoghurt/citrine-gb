@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE gts_profiles SET profile = ?2 WHERE pid = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3930eb0316ba57b80b6c662987f5c7976a45331683d739ede02c68d8a15a1c46"
+}

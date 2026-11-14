@@ -1,5 +1,6 @@
 use super::Gba;
-use crate::gba::cart::{DateTime, Devices};
+use crate::gba::cart::Devices;
+use crate::utils::date::DateTime;
 
 impl Gba {
     pub fn cart_devices(&self) -> Devices {
@@ -12,6 +13,10 @@ impl Gba {
 
     pub fn set_clock(&mut self, local_unix: i64) {
         self.bus.cart_mut().set_clock(local_unix);
+    }
+
+    pub fn hold_clock(&mut self, secs: f64) -> f64 {
+        self.bus.cart_mut().hold_clock(secs)
     }
 
     pub fn set_tilt(&mut self, x: f32, y: f32) {

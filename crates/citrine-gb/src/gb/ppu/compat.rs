@@ -232,6 +232,7 @@ impl Ppu {
         self.obj_palette_ram[0..8].copy_from_slice(&palette_bytes(obj0));
         self.obj_palette_ram[8..16].copy_from_slice(&palette_bytes(obj1));
         self.bg_palette_ram[0..8].copy_from_slice(&palette_bytes(bg));
+        self.colors.invalidate();
     }
 }
 

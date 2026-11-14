@@ -1,5 +1,6 @@
-use crate::app::ui_state::keybinds::{GbButton, PadButton, Shoulder};
+use crate::app::ui_state::keybinds::{DsButton, GbButton, PadButton, Shoulder};
 use crate::app::ui_state::settings::Settings;
+use crate::emulator::Emulator;
 use crate::media::{MediaKind, MediaStore};
 use crate::storage::{SaveStore, SettingsStore};
 use citrine_gb::console::{Console, ConsoleKind, Keys};
@@ -10,6 +11,7 @@ use citrine_gb::persistence::state::state_kind;
 use citrine_gb::recording::{Button, Recording};
 use citrine_gb::rom::Rom;
 use citrine_gb::{ReadMemory, WriteMemory};
+use citrine_gb_threads::{Mode, Threads};
 use std::path::Path;
 
 const TOBU: &[u8] = include_bytes!("../homebrew/tobu.gb");
@@ -25,7 +27,7 @@ const SIDECAR: &[u8] = include_bytes!("../fixtures/screenshot.png.json");
 const NOW: u64 = 1_790_000_000;
 const KEY: &str = "pins";
 const SNAPSHOT_SAVED_AT: u64 = 1_793_583_568;
-const FRAMES_AFTER_SNAPSHOT: u64 = 14_468_992_638_221_170_530;
+const FRAMES_AFTER_SNAPSHOT: u64 = 7_873_591_034_936_402_709;
 const FRAME_AFTER_600: u64 = 5_623_194_403_494_096_317;
 const RECORDED_EVENTS: usize = 26;
 
@@ -192,6 +194,12 @@ fn settings_from_today_keep_their_key_binds() {
         [PadButton::RightTrigger, PadButton::RightTrigger2]
     );
     assert_eq!(binds.shoulder_keys(Shoulder::L), [egui::Key::Num1]);
+    let mut binds = binds.clone();
+    assert!(binds.adopt_ds());
+    assert_eq!(binds.button_for_key(egui::Key::J), Some(GbButton::A));
+    assert_eq!(binds.button_for_pad(PadButton::North), Some(GbButton::B));
+    assert_eq!(binds.ds_pads(DsButton::X), [PadButton::North]);
+    assert_eq!(binds.ds_keys(DsButton::Y), [egui::Key::V]);
     assert_eq!(settings.channels, [true, false, true, true]);
     assert_eq!(settings.volume, 0.4);
 }
@@ -239,4 +247,54 @@ fn a_media_sidecar_from_today_names_its_game_and_console() {
     assert_eq!(info.model, Some(GbModel::Dmg));
     assert_eq!(info.created_at, NOW);
     assert_eq!((info.width, info.height), (160, 144));
+}
+
+fn frames_through_a_lent_core(mode: Mode, hidden_at: Option<u32>) -> (u64, u64) {
+    let threads = Threads::new(mode);
+    let mut emulator = Emulator::default();
+    emulator.run_on(&threads);
+    let gb = GameBoy::from_dump(SNAPSHOT, &Rom::new(TOBU), NOW).unwrap();
+    emulator.put_machine(Machine::Gb(Box::new(gb)));
+
+    let mut frames = 0xCBF2_9CE4_8422_2325u64;
+    for frame in 600..1200 {
+        if hidden_at == Some(frame) {
+            emulator.follow_visibility(false, &threads);
+            assert!(!emulator.has_worker(), "{mode:?}");
+            emulator.follow_visibility(false, &threads);
+            emulator.follow_visibility(true, &threads);
+            assert!(emulator.has_worker(), "{mode:?}");
+        }
+        emulator.debug_mut().set_keys(script(frame));
+        assert_eq!(emulator.lend_one_frame(), 1, "{mode:?} frame {frame}");
+        frames = (frames ^ fnv(emulator.frame())).wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    (frames, fnv(emulator.frame()))
+}
+
+#[test]
+fn a_snapshot_from_today_runs_to_the_same_pictures_on_a_worker_in_every_mode() {
+    for mode in [
+        Mode::Inline,
+        Mode::Threads,
+        Mode::Shuffled(1),
+        Mode::Shuffled(0x5EED),
+    ] {
+        assert_eq!(
+            frames_through_a_lent_core(mode, None),
+            (FRAMES_AFTER_SNAPSHOT, FRAME_AFTER_600),
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn hiding_the_app_stops_the_console_worker_and_showing_it_runs_on_to_the_same_pictures() {
+    for mode in [Mode::Inline, Mode::Threads, Mode::Shuffled(7)] {
+        assert_eq!(
+            frames_through_a_lent_core(mode, Some(900)),
+            (FRAMES_AFTER_SNAPSHOT, FRAME_AFTER_600),
+            "{mode:?}"
+        );
+    }
 }

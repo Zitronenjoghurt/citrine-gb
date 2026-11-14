@@ -3,16 +3,17 @@ use citrine_gb_gamedata::gen3::{
     guess_layout, identify, read_save,
 };
 use citrine_gb_gamedata::{Game, Generation, Language, Pokemon as FoldedPokemon, Tables, Version};
+use citrine_gb_test_roms as test_roms;
 use common::map_picture;
 use std::path::PathBuf;
 
 mod common;
 
-fn dir(var: &str, fallback: &str) -> Option<PathBuf> {
+fn dir(test: &str, var: &str, fallback: &str) -> Option<PathBuf> {
     let path = std::env::var_os(var)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").expect("home")).join(fallback));
-    path.is_dir().then_some(path)
+    test_roms::dir(test, path)
 }
 
 fn files(dir: &PathBuf) -> Vec<(String, Vec<u8>)> {
@@ -28,17 +29,21 @@ fn files(dir: &PathBuf) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-fn gba_roms() -> Vec<(String, Vec<u8>, Game)> {
-    let Some(dir) = dir("CITRINE_GBA_ROMS", "roms/gba") else {
+fn gba_roms(test: &str) -> Vec<(String, Vec<u8>, Game)> {
+    let Some(dir) = dir(test, "CITRINE_GBA_ROMS", "roms/gba") else {
         return Vec::new();
     };
-    files(&dir)
+    let roms: Vec<_> = files(&dir)
         .into_iter()
         .filter_map(|(name, data)| {
             let game = identify(&data)?;
             Some((name, data, game))
         })
-        .collect()
+        .collect();
+    if roms.is_empty() {
+        test_roms::missing(test, format_args!("a GBA Pokémon ROM in {}", dir.display()));
+    }
+    roms
 }
 
 fn exp_table(rom: &[u8]) -> Option<usize> {
@@ -52,7 +57,7 @@ fn exp_table(rom: &[u8]) -> Option<usize> {
 #[test]
 #[ignore]
 fn every_gba_pokemon_rom_loads_its_tables() {
-    let roms = gba_roms();
+    let roms = gba_roms("every_gba_pokemon_rom_loads_its_tables");
     if roms.is_empty() {
         return;
     }
@@ -150,10 +155,11 @@ fn describe(tables: &RomTables, mon: &Mon) -> String {
 #[test]
 #[ignore]
 fn every_gba_save_reads_with_the_rom_tables() {
-    let Some(saves) = dir("CITRINE_GBA_SAVES", "roms/gba/saves") else {
+    let test = "every_gba_save_reads_with_the_rom_tables";
+    let Some(saves) = dir(test, "CITRINE_GBA_SAVES", "roms/gba/saves") else {
         return;
     };
-    let roms = gba_roms();
+    let roms = gba_roms(test);
     if roms.is_empty() {
         return;
     }
@@ -287,10 +293,11 @@ fn standing(group: u8, map: u8, x: i16, y: i16) -> Whereabouts {
 #[ignore]
 fn gba_region_maps_decode_and_mark_known_places() {
     let sheets = std::env::var_os("CITRINE_SHEETS").map(PathBuf::from);
-    let saves = dir("CITRINE_GBA_SAVES", "roms/gba/saves")
+    let test = "gba_region_maps_decode_and_mark_known_places";
+    let saves = dir(test, "CITRINE_GBA_SAVES", "roms/gba/saves")
         .map(|dir| files(&dir))
         .unwrap_or_default();
-    for (name, rom, game) in gba_roms() {
+    for (name, rom, game) in gba_roms(test) {
         let maps = RegionMaps::load(&rom).unwrap_or_else(|| panic!("{name}: no region map"));
         let kanto = matches!(game.version, Version::FireRed | Version::LeafGreen);
         println!(
@@ -386,10 +393,11 @@ fn gba_region_maps_decode_and_mark_known_places() {
 #[test]
 #[ignore]
 fn every_gba_save_folds_through_the_tables() {
-    let Some(saves) = dir("CITRINE_GBA_SAVES", "roms/gba/saves") else {
+    let test = "every_gba_save_folds_through_the_tables";
+    let Some(saves) = dir(test, "CITRINE_GBA_SAVES", "roms/gba/saves") else {
         return;
     };
-    let roms = gba_roms();
+    let roms = gba_roms(test);
     if roms.is_empty() {
         return;
     }
@@ -521,11 +529,13 @@ fn wild_names(tables: &RomTables, group: u8, map: u8) -> Vec<String> {
         .collect()
 }
 
-fn lists_wild_pokemon(versions: &[Version]) {
-    for (name, rom, game) in gba_roms() {
+fn lists_wild_pokemon(test: &str, versions: &[Version]) {
+    let mut listed = 0;
+    for (name, rom, game) in gba_roms(test) {
         if !versions.contains(&game.version) {
             continue;
         }
+        listed += 1;
         let tables = RomTables::load(&rom).expect("tables");
         let mut methods = std::collections::BTreeSet::new();
         for group in 0..40 {
@@ -572,22 +582,31 @@ fn lists_wild_pokemon(versions: &[Version]) {
         assert!(tables.wild_maps() > 80, "{name}");
         assert_eq!(methods.len(), 6, "{name}: {methods:?}");
     }
+    if listed == 0 {
+        test_roms::missing(test, format_args!("a ROM of {versions:?}"));
+    }
 }
 
 #[test]
 #[ignore]
 fn emerald_lists_its_wild_pokemon() {
-    lists_wild_pokemon(&[Version::Emerald]);
+    lists_wild_pokemon("emerald_lists_its_wild_pokemon", &[Version::Emerald]);
 }
 
 #[test]
 #[ignore]
 fn ruby_and_sapphire_list_their_wild_pokemon() {
-    lists_wild_pokemon(&[Version::Ruby, Version::Sapphire]);
+    lists_wild_pokemon(
+        "ruby_and_sapphire_list_their_wild_pokemon",
+        &[Version::Ruby, Version::Sapphire],
+    );
 }
 
 #[test]
 #[ignore]
 fn firered_and_leafgreen_list_their_wild_pokemon() {
-    lists_wild_pokemon(&[Version::FireRed, Version::LeafGreen]);
+    lists_wild_pokemon(
+        "firered_and_leafgreen_list_their_wild_pokemon",
+        &[Version::FireRed, Version::LeafGreen],
+    );
 }

@@ -10,7 +10,7 @@ pub(crate) fn type_names(game: Game, rom: &[u8]) -> Vec<String> {
     let count = match game.generation() {
         Generation::One => 0x1B,
         Generation::Two => 0x1C,
-        Generation::Three => return Vec::new(),
+        Generation::Three | Generation::Four | Generation::Five => return Vec::new(),
     };
     Pattern::new("87 21 ?? ?? 5F 16 00 19 2A 5F 56")
         .find_all(rom)

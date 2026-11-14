@@ -4,16 +4,7 @@ pub mod file_loader;
 pub mod file_saver;
 pub mod save_files;
 pub mod screenshot;
-
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-pub fn spawn(future: impl std::future::Future<Output = ()> + Send + 'static) {
-    std::thread::spawn(|| pollster::block_on(future));
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
-    wasm_bindgen_futures::spawn_local(future);
-}
+pub mod zip_games;
 
 #[cfg(target_arch = "wasm32")]
 pub async fn next_tick() {

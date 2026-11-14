@@ -1,17 +1,22 @@
 use super::kit;
 use crate::app::Citrine;
+use crate::app::big_screen::scroll::Following;
 use crate::app::events::AppEvent;
 use crate::app::tabs::stats::Page;
 use crate::app::tabs::{Tab, playing};
 use crate::app::ui_state::hotkeys::HotkeyAction;
 use crate::app::ui_state::settings::{console_name, other_console, plays_on_both};
 use crate::app::widgets::avatar;
+use crate::app::widgets::snapshots::{FailedStep, failed_message, named};
+use crate::app::widgets::text::one_line;
 use crate::icons;
 use crate::online::Seen;
 use crate::play::Stage;
 use citrine_gb::gb::GbModel;
 use citrine_gb_net::OnlineId;
 use egui::{Align2, CornerRadius, Frame, Id, Margin, Order, Rect, RichText, Sense, Ui, pos2, vec2};
+
+mod panel;
 
 const SHEET_MAX_WIDTH: f32 = 560.0;
 const CLOSE_DRAG: f32 = 70.0;
@@ -40,6 +45,7 @@ enum MoreAction {
     AllStates,
     Screenshot,
     Record,
+    Hud,
     Reset,
     PlayOn(GbModel),
     LinkGame,
@@ -47,8 +53,12 @@ enum MoreAction {
     Invite(OnlineId),
     BackToActions,
     GameInfo,
+    Achievements,
+    Cheats,
     Stats,
+    GameReport,
     FullScreen,
+    BigScreen,
     CloseGame,
 }
 
@@ -56,13 +66,18 @@ enum MoreAction {
 pub enum Tile {
     Screenshot,
     Record,
+    Hud,
     Reset,
     PlayOn(GbModel),
     LinkGame,
     PlayTogether,
     GameInfo,
+    Achievements,
+    Cheats,
     Stats,
+    GameReport,
     FullScreen,
+    BigScreen,
     CloseGame,
 }
 
@@ -74,10 +89,11 @@ pub struct TileFacts {
     pub joined: bool,
     pub recognised: bool,
     pub web: bool,
+    pub tv: bool,
 }
 
 pub fn tiles(facts: &TileFacts) -> Vec<Tile> {
-    let mut tiles = vec![Tile::Screenshot, Tile::Record];
+    let mut tiles = vec![Tile::Screenshot, Tile::Record, Tile::Hud];
     if facts.recognised {
         tiles.push(Tile::GameInfo);
     }
@@ -93,11 +109,19 @@ pub fn tiles(facts: &TileFacts) -> Vec<Tile> {
     if facts.alone && facts.has_rom {
         tiles.push(Tile::LinkGame);
     }
+    if facts.has_rom && !facts.web {
+        tiles.push(Tile::Achievements);
+    }
     if facts.has_rom {
+        tiles.push(Tile::Cheats);
         tiles.push(Tile::Stats);
+        tiles.push(Tile::GameReport);
     }
     if facts.web {
         tiles.push(Tile::FullScreen);
+    }
+    if !facts.tv {
+        tiles.push(Tile::BigScreen);
     }
     if !facts.session {
         tiles.push(Tile::CloseGame);
@@ -110,13 +134,18 @@ fn tile_face(tile: Tile, recording: bool) -> (&'static str, String) {
         Tile::Screenshot => (icons::CAMERA, "Screenshot".into()),
         Tile::Record if recording => (icons::STOP, "Stop recording".into()),
         Tile::Record => (icons::RECORD, "Record video".into()),
+        Tile::Hud => (icons::GAUGE, "HUD".into()),
         Tile::Reset => (icons::ARROW_COUNTER_CLOCKWISE, "Reset".into()),
         Tile::PlayOn(model) => (icons::SWAP, format!("Play on\n{}", console_name(model))),
         Tile::LinkGame => (icons::LINK, "Link a game".into()),
         Tile::PlayTogether => (icons::USERS, "Play together".into()),
         Tile::GameInfo => (icons::IDENTIFICATION_CARD, "Game info".into()),
+        Tile::Achievements => (icons::TROPHY, "Achievements".into()),
+        Tile::Cheats => (icons::MAGIC_WAND, "Cheats".into()),
         Tile::Stats => (icons::CHART_BAR, "Stats".into()),
+        Tile::GameReport => (icons::BUG, "Game report".into()),
         Tile::FullScreen => (icons::FRAME_CORNERS, "Full screen".into()),
+        Tile::BigScreen => (icons::TELEVISION_SIMPLE, "Big screen".into()),
         Tile::CloseGame => (icons::X, "Close game".into()),
     }
 }
@@ -125,13 +154,18 @@ fn tile_action(tile: Tile) -> MoreAction {
     match tile {
         Tile::Screenshot => MoreAction::Screenshot,
         Tile::Record => MoreAction::Record,
+        Tile::Hud => MoreAction::Hud,
         Tile::Reset => MoreAction::Reset,
         Tile::PlayOn(model) => MoreAction::PlayOn(model),
         Tile::LinkGame => MoreAction::LinkGame,
         Tile::PlayTogether => MoreAction::PlayTogether,
         Tile::GameInfo => MoreAction::GameInfo,
+        Tile::Achievements => MoreAction::Achievements,
+        Tile::Cheats => MoreAction::Cheats,
         Tile::Stats => MoreAction::Stats,
+        Tile::GameReport => MoreAction::GameReport,
         Tile::FullScreen => MoreAction::FullScreen,
+        Tile::BigScreen => MoreAction::BigScreen,
         Tile::CloseGame => MoreAction::CloseGame,
     }
 }
@@ -152,7 +186,7 @@ impl Citrine {
         let Some(key) = self.emulator.rom_key().map(str::to_owned) else {
             return;
         };
-        let slot = self.emulator.store.next_free_slot(&key);
+        let slot = self.emulator.next_free_slot(&key);
         match self.emulator.save_snapshot(slot) {
             Ok(()) => {
                 self.toasts
@@ -161,7 +195,7 @@ impl Citrine {
             }
             Err(err) => {
                 self.toasts
-                    .error(format!("Couldn't save the state: {err:?}"));
+                    .error(failed_message(FailedStep::Save, "the state", &err));
             }
         }
         self.ui.snapshots.invalidate();
@@ -175,7 +209,7 @@ impl Citrine {
             Ok(()) => self.toasts.info("State removed"),
             Err(err) => self
                 .toasts
-                .error(format!("Couldn't remove the state: {err:?}")),
+                .error(failed_message(FailedStep::Delete, "the state", &err)),
         };
         self.ui.snapshots.invalidate();
     }
@@ -189,12 +223,13 @@ impl Citrine {
         let has_rom = self.emulator.rom_key().is_some();
         TileFacts {
             session,
-            alone: !session && self.emulator.link.is_none() && self.emulator.partner.is_none(),
+            alone: !session && !self.emulator.linked() && !self.emulator.partnered(),
             has_rom,
             other_console: (both && has_rom).then(|| other_console(self.emulator.console())),
             joined: self.ui.settings.online.is_joined(),
             recognised: self.game_info.recognised(),
             web: cfg!(target_arch = "wasm32"),
+            tv: crate::platform::is_tv(),
         }
     }
 
@@ -257,7 +292,7 @@ impl Citrine {
                         let output = egui::ScrollArea::vertical()
                             .id_salt("more_scroll")
                             .max_height(scroll_height)
-                            .show(ui, |ui| {
+                            .show_following(ui, |ui| {
                                 action = if self.mobile.more.friends {
                                     self.more_friends(ui)
                                 } else {
@@ -304,7 +339,7 @@ impl Citrine {
         let mut action = None;
         if self.play.session().is_some() {
             action = action.or(self.more_together(ui));
-        } else if self.emulator.link.is_some() {
+        } else if self.emulator.linked() {
             kit::section_label(ui, "Linked games");
             let picked = kit::rows(
                 ui,
@@ -320,7 +355,7 @@ impl Citrine {
             });
         }
         let watching_only = self.play.session().is_some_and(|s| s.watching_only());
-        if self.emulator.rom_key().is_some() && !watching_only && self.emulator.partner.is_none() {
+        if self.emulator.rom_key().is_some() && !watching_only && !self.emulator.partnered() {
             action = action.or(self.more_states(ui));
         }
         kit::section_label(ui, "This game");
@@ -356,7 +391,7 @@ impl Citrine {
                 let mut on = item.on;
                 let missing = item.switch == playing::Switch::Watch
                     && session.stage() == Stage::Playing
-                    && session.console(false).is_none();
+                    && session.friend_picture().is_none();
                 let changed = kit::SwitchRow::new(&item.label, &mut on)
                     .detail(item.why_off.as_deref())
                     .enabled(!missing)
@@ -573,6 +608,10 @@ impl Citrine {
                 self.leave_more();
                 self.mobile.open(Tab::Saves);
             }
+            MoreAction::Hud => {
+                self.leave_more();
+                self.mobile.hud_sheet = Some(super::hud::HudSheet::List);
+            }
             MoreAction::Screenshot => {
                 self.leave_more();
                 self.run_hotkey(HotkeyAction::Screenshot);
@@ -602,6 +641,14 @@ impl Citrine {
                 self.leave_more();
                 self.mobile.open(Tab::GameInfo);
             }
+            MoreAction::Achievements => {
+                self.leave_more();
+                self.mobile.open(Tab::Achievements);
+            }
+            MoreAction::Cheats => {
+                self.leave_more();
+                self.mobile.open(Tab::Cheats);
+            }
             MoreAction::Stats => {
                 self.leave_more();
                 if let Some(rom) = self.emulator.rom_key().map(str::to_owned) {
@@ -612,23 +659,41 @@ impl Citrine {
                 }
                 self.mobile.open(Tab::Stats);
             }
+            MoreAction::GameReport => {
+                self.leave_more();
+                self.save_game_report();
+            }
             MoreAction::FullScreen => {
                 self.leave_more();
                 #[cfg(target_arch = "wasm32")]
                 super::game::toggle_fullscreen();
             }
+            MoreAction::BigScreen => {
+                self.leave_more();
+                self.set_big_screen(true);
+            }
             MoreAction::CloseGame => {
                 self.leave_more();
-                self.close_game();
+                self.ask_close_game();
             }
         }
         self.release_touch();
     }
 
-    pub(super) fn close_game(&mut self) {
+    pub(in crate::app) fn ask_close_game(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.held_by_unsent(crate::achievements::Leaving::CloseGame) {
+            return;
+        }
+        self.close_game();
+    }
+
+    pub(in crate::app) fn close_game(&mut self) {
         if let Err(err) = self.emulator.flush_save() {
+            let what = named(self.emulator.game_name(), "the game");
             self.toasts
-                .error(format!("Couldn't save the game: {err:?}"));
+                .error(failed_message(FailedStep::Close, &what, &err))
+                .needs_action();
             return;
         }
         if let Err(err) = self.emulator.autosave_if_played() {
@@ -663,9 +728,11 @@ impl Citrine {
                 crate::app::tabs::playing::unlink_group(&mut self.play, &mut self.emulator);
                 match self.emulator.load_snapshot(slot) {
                     Ok(_) => self.toasts.success(format!("Loaded {name}")),
-                    Err(err) => self
-                        .toasts
-                        .error(format!("Couldn't load the state: {err:?}")),
+                    Err(err) => self.toasts.error(failed_message(
+                        FailedStep::Load,
+                        &format!("'{name}'"),
+                        &err,
+                    )),
                 };
             }
             Some(false) => self.mobile.more.loading = None,
@@ -675,7 +742,7 @@ impl Citrine {
 }
 
 fn caption(ui: &Ui, rect: Rect, text: &str) {
-    let galley = kit::one_line(ui, text, 12.0, ui.visuals().weak_text_color(), rect.width());
+    let galley = one_line(ui, text, 12.0, ui.visuals().weak_text_color(), rect.width());
     let pos = pos2(
         rect.center().x - galley.size().x / 2.0,
         rect.bottom() - 18.0,
@@ -723,4 +790,106 @@ fn action_tile(ui: &mut Ui, size: egui::Vec2, icon: &str, label: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    fn alone() -> TileFacts {
+        TileFacts {
+            session: false,
+            alone: true,
+            has_rom: true,
+            other_console: None,
+            joined: true,
+            recognised: false,
+            web: false,
+            tv: false,
+        }
+    }
+
+    #[test]
+    fn screenshot_is_the_first_tile() {
+        assert_eq!(tiles(&alone())[0], Tile::Screenshot);
+    }
+
+    #[test]
+    fn playing_alone_offers_play_together_reset_link_achievements_cheats_stats_report_and_close() {
+        assert_eq!(
+            tiles(&alone()),
+            [
+                Tile::Screenshot,
+                Tile::Record,
+                Tile::Hud,
+                Tile::PlayTogether,
+                Tile::Reset,
+                Tile::LinkGame,
+                Tile::Achievements,
+                Tile::Cheats,
+                Tile::Stats,
+                Tile::GameReport,
+                Tile::BigScreen,
+                Tile::CloseGame,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_friend_session_hides_what_would_end_or_reset_it() {
+        let tiles = tiles(&TileFacts {
+            session: true,
+            alone: false,
+            other_console: Some(GbModel::Cgb),
+            ..alone()
+        });
+        for tile in [
+            Tile::PlayTogether,
+            Tile::Reset,
+            Tile::PlayOn(GbModel::Cgb),
+            Tile::LinkGame,
+            Tile::CloseGame,
+        ] {
+            assert!(!tiles.contains(&tile), "{tile:?}");
+        }
+    }
+
+    #[test]
+    fn signed_out_has_no_play_together() {
+        let tiles = tiles(&TileFacts {
+            joined: false,
+            ..alone()
+        });
+        assert!(!tiles.contains(&Tile::PlayTogether));
+    }
+
+    #[test]
+    fn a_recognised_game_offers_game_info_and_the_web_full_screen() {
+        let tiles = tiles(&TileFacts {
+            recognised: true,
+            web: true,
+            other_console: Some(GbModel::Dmg),
+            ..alone()
+        });
+        assert!(tiles.contains(&Tile::GameInfo));
+        assert!(tiles.contains(&Tile::PlayOn(GbModel::Dmg)));
+        assert_eq!(tiles.last(), Some(&Tile::CloseGame));
+        assert!(tiles.contains(&Tile::FullScreen));
+    }
+
+    #[test]
+    fn a_friend_session_still_offers_the_game_report() {
+        let tiles = tiles(&TileFacts {
+            session: true,
+            alone: false,
+            ..alone()
+        });
+        assert!(tiles.contains(&Tile::GameReport));
+    }
+
+    #[test]
+    fn the_web_has_no_achievements() {
+        let tiles = tiles(&TileFacts {
+            web: true,
+            ..alone()
+        });
+        assert!(!tiles.contains(&Tile::Achievements));
+    }
+}

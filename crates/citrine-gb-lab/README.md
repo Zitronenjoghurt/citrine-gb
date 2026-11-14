@@ -16,7 +16,7 @@ Everything is built around three traits so experiments can swap implementations 
 The comparison engine (`src/runner.rs`) and recording format
 (`citrine_gb::recording`, shared with the app frontend) are emulator-agnostic.
 
-## Building SameBoy and mGBA
+## Building SameBoy, mGBA and melonDS
 
 SameBoy is a git submodule at `crates/sameboy-sys/SameBoy`, compiled by the `sameboy-sys` crate's `build.rs`
 (via the `cc` crate, with hand-written FFI, so no bindgen/libclang is needed).
@@ -25,8 +25,14 @@ mGBA 0.10.5 is a git submodule at `crates/mgba-sys/mGBA`. The `mgba-sys` crate's
 its GBA core alone, with no threads, debugger or optional libraries, plus a small C file
 (`src/shim.c`) that the Rust side calls. mGBA is under the MPL-2.0, and the lab is never shipped.
 
+melonDS 1.1 is a git submodule at `crates/melonds-sys/melonDS`. The `melonds-sys` crate's `build.rs`
+compiles its core with the software renderer and no JIT, OpenGL, wifi network or debugger, plus a C++
+file (`src/shim.cpp`) that implements melonDS's platform calls and the functions the Rust side calls.
+After the direct boot the shim turns the ARM9's ITCM on, as melonDS's commit `c8c7983e` (after 1.1)
+does; without it armwrestler's stack is lost and its menu hangs. melonDS is under the GPL-3.0, so only the lab links it: `cargo tree -p citrine-gb-app` does not list it.
+
 ```sh
-make lab-deps          # git submodule update --init for both submodules
+make lab-deps          # git submodule update --init for the three submodules
 cargo build -p citrine-gb-lab
 ```
 
@@ -47,15 +53,24 @@ cargo run --release -p citrine-gb-lab -- \
     --tolerance 2
 ```
 
-- `--boot-rom` is **recommended**: SameBoy needs a boot ROM to run, and feeding the same one to
-  both emulators makes the comparison start from an identical power-on state. Without it, SameBoy
-  will not execute the cartridge. (The boot ROM is also fed to Citrine.)
+- `--boot-rom` is **recommended**: feeding the same one to both emulators makes the comparison
+  start from an identical power-on state. (The boot ROM is also fed to Citrine.) Without it,
+  SameBoy idles for as long as the DMG or CGB boot ROM runs, writes what that boot ROM leaves
+  behind (logo, palettes, sound, registers) and unmaps it, so its frames from the hand-off at
+  0x100 equal a booted run's. Only HRAM differs, where the boot ROM keeps its stack.
 - Output is normalized to a canonical greyscale by default so palette/theme choices don't count as
   differences; pass `--raw` to compare actual RGB output.
 - SameBoy is the reference; Citrine is the candidate under test.
 - `--model gba` runs a GBA game against mGBA, without a boot ROM (mGBA starts the game itself) or
   with a GBA BIOS as `--boot-rom`. Frames are compared in 15-bit colour over windows of 280,896
   cycles, one GBA frame. Recordings name a Game Boy model, so a GBA run takes no `--recording` yet.
+- `--model nds` runs a DS game on Citrine's DS core and on melonDS and compares their frames in
+  15-bit colour. Both boot it directly from its header with the FreeBIOS images in
+  `crates/citrine-gb/assets/nds-bios`, so no `--boot-rom` is taken. Frames are 256x384, the top
+  screen above the bottom one. A ROM Citrine refuses runs on melonDS alone, and with
+  `--dump-divergences` each of melonDS's frames is written as `frame_NNNNN_ref.png`.
+  A `--recording` keeps `--model nds` and presses its buttons at its cycles, counted on the DS's
+  33.5 MHz clock (560,190 a frame).
 - Until Citrine has a GBA core it refuses GBA games. The lab then says so, runs mGBA alone and, with
   `--dump-divergences`, writes each of mGBA's frames as `frame_NNNNN_ref.png`.
 - `--dump-divergences` defaults to **no cap**. On a run where most frames differ, that is three PNGs

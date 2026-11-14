@@ -118,7 +118,7 @@ fn fold_mon(tables: &RomTables, mon: &Mon) -> state::Mon {
             time_of_day: TimeOfDay::Unknown,
             level: mon.met.level,
             ot_gender: mon.met.ot_gender,
-            location: mon.met.location,
+            location: u16::from(mon.met.location),
         }),
     }
 }

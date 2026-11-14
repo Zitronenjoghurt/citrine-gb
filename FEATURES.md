@@ -1,38 +1,56 @@
 # Features
 
 - Full Game Boy, Game Boy Color and Game Boy Advance video and audio
-- Support for Windows, MacOS, Linux, Android and Web
+- Nintendo DS games with both screens, touch, sound, 2D and 3D
+- Support for Windows, MacOS, Linux, Android, Android TV and Web
 - In-app updates on desktop and Android
 - MBC1, MBC2, MBC3 with real-time clock, MBC5, MBC6, MBC7, MMM01, TAMA5, HuC1, HuC3, Pocket Camera and Wisdom Tree cartridges
 - Rumble, tilt, sunlight and camera through controllers, phone sensors or a webcam
 - Game Boy Printer, with prints in Media
-- Free built-in Game Boy Advance BIOS, or a BIOS file of your own
+- Free built-in Game Boy Advance BIOS and DS FreeBIOS, or BIOS and firmware files of your own
 - (M-)Cycle-accurate instruction and memory timing
+- DS 3D at up to 8x resolution, and a DS JIT recompiler, on desktop and Android
+- DS screen layouts, a lid you can close, and second screens on a phone, tablet, window or second display
+- Game library with folders, covers, search, filters, tags and game info
+- Games open from .zip files, by drag and drop or from recent games
 - Bundled open source homebrew games for Game Boy and Game Boy Advance, and real game names from MAME's game list
-- Phone layout with adjustable on-screen controls, 3x fast forward and a full-screen mode
+- Big screen layout for a controller or TV remote
+- Phone layout with adjustable on-screen controls and a full-screen mode
 - Controller support, including on the web
 - Remappable keys, controller buttons and shortcuts
+- Rewind of up to 2 minutes, and fast forward at 2x to 10x or Max
+- Cheats with Game Genie, GameShark, Action Replay and CodeBreaker codes
+- RetroAchievements for Game Boy and Game Boy Color
 - Battery saves other emulators can read, and unlimited named snapshots per game
 - Autosaves on a timer, on close and after a crash
-- .sav import and export, including mGBA's saves and RetroArch's .srm and .rtc with the game's clock
+- .sav import and export, including mGBA's saves, DeSmuME's .dsv and RetroArch's .srm and .rtc with the game's clock
 - Local link cable and infrared between two games side by side
 - Event partner that trades official event Pokémon to your game
-- Online play with friends through a relay server which also enables cloud saves
+- Online play with rollback through a relay server, which also enables cloud saves
 - Rooms of up to 16 people with room chat, and link groups of up to four on Game Boy Advance
 - Linking Game Boy and Game Boy Advance players by one playing the other's game
+- DS local wireless and Download Play with friends, and DS online through Kaeru WFC or another server
 - End-to-end encrypted chat with screenshots, recordings and replays
 - Encrypted relay connections and two-factor sign-in
-- Pokémon game info for Red to Crystal and Ruby to LeafGreen: party, boxes, bag, Pokédex, map with wild Pokémon and journey, plus live battles in Red to Crystal
+- One account on several devices, and several accounts on one device
+- Android push notifications for friend requests, play invites and messages
+- Self-hosted relay server with an admin panel
+- Pokémon game info for Red to Crystal, Ruby to LeafGreen and Diamond to Black 2 and White 2: party, boxes, bag, Pokédex, map with wild Pokémon and journey, plus live battles in Red to Crystal
+- Pokéwalker for HeartGold and SoulSilver, with steps from the game or a phone's step counter
+- GTS on your relay for the Gen 4 Pokémon games and Black and White
 - Play time stats per day, week, month, year and game
 - Discord Rich Presence on desktop
 - Custom screen palettes with short share codes
 - Game Boy Color palettes for original Game Boy games
-- Screen scaling, ghosting, a matrix grid overlay, Game Boy Advance colour correction and UI themes
+- Screen scaling, refresh rate matching, ghosting, an LCD grid, Game Boy Advance colour correction and UI themes
+- Sound settings for latency, channels, slowdown and the output device
 - Tabs you can split or pop out into windows, and a focus mode for only the screen
 - Screenshots and recordings
+- Game HUD with FPS, a frame graph and other live values
 - Export, import or delete everything the app keeps on a device
 - Debugger with disassembly, breakpoints, watchpoints, stepping, an instruction trace, APU inspection and input recording
-- Memory tool with hex edits, and a Video tool with tiles, background maps, sprites and palettes
+- Memory tool with hex edits, a Video tool with tiles, background maps, sprites and palettes, and a DS files tool
+- Performance tab and recordings, a Threads pane and game reports for bug reports
 
 # Planned
 

@@ -13,6 +13,7 @@ class CitrineOutput extends AudioWorkletProcessor {
     this.playing = false;
     this.started = false;
     this.paused = false;
+    this.quickResume = false;
     this.fadeIn = 0;
     this.blend = new Float32Array(o.fade * 2);
     this.blendPos = o.fade;
@@ -25,6 +26,12 @@ class CitrineOutput extends AudioWorkletProcessor {
     this.min = Infinity;
     this.max = -Infinity;
     this.ticks = 0;
+    this.header = null;
+    if (o.memory) {
+      this.header = new Uint32Array(o.memory.buffer, o.header, 5);
+      this.shared = new Float32Array(o.memory.buffer, o.samples, o.ringFrames * 2);
+      this.mask = o.ringFrames - 1;
+    }
     this.port.onmessage = (event) => this.receive(event.data);
   }
 
@@ -40,6 +47,8 @@ class CitrineOutput extends AudioWorkletProcessor {
       this.max = -Infinity;
     } else if (typeof data.paused === "boolean") {
       this.paused = data.paused;
+    } else if (typeof data.quickResume === "boolean") {
+      this.quickResume = data.quickResume;
     }
   }
 
@@ -58,6 +67,24 @@ class CitrineOutput extends AudioWorkletProcessor {
       write = write + 1 === this.capacity ? 0 : write + 1;
     }
     this.queued += take;
+  }
+
+  pull() {
+    const written = Atomics.load(this.header, 0);
+    const read = Atomics.load(this.header, 1);
+    const take = Math.min((written - read) >>> 0, this.capacity - this.queued);
+    let write = (this.read + this.queued) % this.capacity;
+    for (let i = 0; i < take; i++) {
+      const slot = ((read + i) & this.mask) * 2;
+      this.ring[write * 2] = this.shared[slot];
+      this.ring[write * 2 + 1] = this.shared[slot + 1];
+      write = write + 1 === this.capacity ? 0 : write + 1;
+    }
+    this.queued += take;
+    this.received += take;
+    Atomics.store(this.header, 1, (read + take) >>> 0);
+    this.paused = Atomics.load(this.header, 3) !== 0;
+    this.quickResume = Atomics.load(this.header, 4) !== 0;
   }
 
   popRaw() {
@@ -107,9 +134,16 @@ class CitrineOutput extends AudioWorkletProcessor {
     const left = out[0];
     const right = out.length > 1 ? out[1] : null;
     const frames = left.length;
+    if (this.header) {
+      this.pull();
+    }
 
     if (!this.playing) {
-      if (this.queued < this.target) {
+      const start =
+        this.started && this.quickResume
+          ? Math.min(this.target, frames + this.fade)
+          : this.target;
+      if (this.queued < start) {
         left.fill(0);
         if (right) {
           right.fill(0);
@@ -172,6 +206,9 @@ class CitrineOutput extends AudioWorkletProcessor {
   }
 
   report() {
+    if (this.header) {
+      Atomics.store(this.header, 2, this.queued);
+    }
     this.ticks++;
     if (this.ticks % 8 !== 0) {
       return;

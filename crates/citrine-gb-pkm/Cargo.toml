@@ -1,0 +1,17 @@
+[package]
+name = "citrine-gb-pkm"
+description = "Reads and writes the Pokémon of the DS games, their RNG methods, and the game data tables of their ROMs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+citrine-gb-nds-files.workspace = true
+thiserror = "2.0.18"
+
+[dev-dependencies]
+citrine-gb-test-roms = { workspace = true }
+citrine-gb-nds-files = { workspace = true, features = ["fixtures"] }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE gts_sim_records SET received = ?2, traded_at = ?3, traded_with = ?4\n              WHERE pid = ?1 AND traded_at IS NULL AND deposited_at <= ?5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "645249bd28db1a7d6233914d5dc346b8402dd35f7529e866580bde9e26182249"
+}

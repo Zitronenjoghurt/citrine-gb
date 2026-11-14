@@ -1,13 +1,19 @@
 use anyhow::Context;
 use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::GbModel;
+use citrine_lab::emulator::Frame;
 use citrine_lab::emulator::FrameEmulator;
-use citrine_lab::emulators::{CitrineEmulator, MgbaEmulator, SameBoyEmulator};
+use citrine_lab::emulators::{
+    CitrineEmulator, CitrineNdsEmulator, DS_CYCLES_PER_FRAME, DsBios, MelonDsEmulator,
+    MgbaEmulator, SameBoyEmulator,
+};
 use citrine_lab::metric::FrameMetric;
 use citrine_lab::metrics;
 use citrine_lab::recording::Recording;
 use citrine_lab::report::{ConsoleReporter, FrameDumper, JsonReporter, Reporter};
-use citrine_lab::runner::{ComparisonReport, run_alone, run_streaming};
+use citrine_lab::runner::{
+    ComparisonReport, Loaded, compare_loaded, run_alone, run_loaded, run_streaming,
+};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
@@ -90,12 +96,19 @@ impl From<AlignArg> for citrine_lab::runner::Alignment {
     }
 }
 
-fn parse_console(s: &str) -> anyhow::Result<ConsoleKind> {
+#[derive(Clone, Copy, Debug)]
+enum Model {
+    Console(ConsoleKind),
+    Ds,
+}
+
+fn parse_model(s: &str) -> anyhow::Result<Model> {
     match s.to_ascii_lowercase().as_str() {
-        "dmg" => Ok(ConsoleKind::Gb),
-        "cgb" => Ok(ConsoleKind::Gbc),
-        "gba" => Ok(ConsoleKind::Gba),
-        other => anyhow::bail!("unknown model '{other}' (expected dmg, cgb or gba)"),
+        "dmg" => Ok(Model::Console(ConsoleKind::Gb)),
+        "cgb" => Ok(Model::Console(ConsoleKind::Gbc)),
+        "gba" => Ok(Model::Console(ConsoleKind::Gba)),
+        "nds" => Ok(Model::Ds),
+        other => anyhow::bail!("unknown model '{other}' (expected dmg, cgb, gba or nds)"),
     }
 }
 
@@ -122,39 +135,58 @@ fn main() -> anyhow::Result<()> {
     };
     let boot_rom_ref = boot_rom.as_deref();
 
-    let (recording, console) = match &args.recording {
+    let (recording, model) = match &args.recording {
         Some(path) => {
             let recording = citrine_lab::recording::load(path)
                 .with_context(|| format!("failed to load recording {}", path.display()))?;
-            let console = recording.model.into();
-            (recording, console)
+            let model = match parse_model(&args.model)? {
+                Model::Ds => Model::Ds,
+                Model::Console(_) => Model::Console(recording.model.into()),
+            };
+            (recording, model)
         }
         None => {
-            let console = parse_console(&args.model)?;
-            let model = GbModel::try_from(console).unwrap_or(GbModel::Dmg);
-            (Recording::new("", model), console)
+            let model = parse_model(&args.model)?;
+            let gb_model = match model {
+                Model::Console(console) => GbModel::try_from(console).unwrap_or(GbModel::Dmg),
+                Model::Ds => GbModel::Dmg,
+            };
+            (Recording::new("", gb_model), model)
         }
     };
+    if let Model::Ds = model {
+        anyhow::ensure!(
+            boot_rom.is_none(),
+            "the lab boots DS games with FreeBIOS and takes no DS BIOS as --boot-rom"
+        );
+    }
 
     let metrics = build_metrics(&args.metrics)?;
 
-    let mut reference: Box<dyn FrameEmulator + Send> = match console {
-        ConsoleKind::Gba => Box::new(MgbaEmulator::new()),
-        ConsoleKind::Gb | ConsoleKind::Gbc => Box::new(SameBoyEmulator::new()),
+    let mut reference: Box<dyn FrameEmulator + Send> = match model {
+        Model::Console(ConsoleKind::Gba) => Box::new(MgbaEmulator::new()),
+        Model::Console(ConsoleKind::Gb | ConsoleKind::Gbc) => Box::new(SameBoyEmulator::new()),
+        Model::Console(ConsoleKind::Nds) | Model::Ds => Box::new(MelonDsEmulator::new()),
     };
-    let refusal = CitrineEmulator::new()
-        .load(&rom, boot_rom_ref, console)
-        .err()
-        .map(|e| e.to_string());
+    let candidate = match model {
+        Model::Console(console) => CitrineEmulator::new()
+            .load(&rom, boot_rom_ref, console)
+            .map(|_| Some(console))
+            .map_err(|e| e.to_string()),
+        Model::Ds => CitrineNdsEmulator::new()
+            .load_nds(&rom)
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
+    };
 
-    match &refusal {
-        Some(refusal) => println!(
+    match &candidate {
+        Err(refusal) => println!(
             "{refusal}\nrunning {} frames on {} alone ({} input event(s))...",
             args.frames,
             reference.name(),
             recording.events.len()
         ),
-        None => println!(
+        Ok(_) => println!(
             "running {} frames on citrine and {} ({} input event(s))...",
             args.frames,
             reference.name(),
@@ -166,7 +198,7 @@ fn main() -> anyhow::Result<()> {
         Some(dir) => Some(FrameDumper::new(
             dir,
             (args.max_dumps != 0).then_some(args.max_dumps),
-            args.dump_all_frames || refusal.is_some(),
+            args.dump_all_frames || candidate.is_err(),
         )?),
         None => None,
     };
@@ -183,49 +215,94 @@ fn main() -> anyhow::Result<()> {
     );
     progress.enable_steady_tick(Duration::from_millis(80));
 
-    let report = if let Some(refusal) = refusal {
-        let frames = run_alone(
-            &mut reference,
-            &rom,
-            boot_rom_ref,
-            &recording,
-            console,
-            args.frames,
-            |index, frame| {
+    let report = match candidate {
+        Err(refusal) => {
+            let on_frame = |index, frame: &_| {
                 if let Some(dumper) = dumper.as_mut() {
                     dumper.handle_alone(index, frame)?;
                 }
                 progress.inc(1);
                 Ok(())
-            },
-        )?;
-        ComparisonReport::reference_alone(reference.name(), "citrine", frames, refusal)
-    } else {
-        let mut divergent = 0usize;
-        run_streaming(
-            reference,
-            CitrineEmulator::new(),
-            &rom,
-            boot_rom_ref,
-            &recording,
-            console,
-            &metrics,
-            args.frames,
-            !args.raw,
-            args.align.into(),
-            args.tolerance,
-            |index, reference, candidate, diverged| {
-                if diverged {
-                    divergent += 1;
-                    progress.set_message(format!("{divergent} divergent"));
+            };
+            let frames = match model {
+                Model::Console(console) => run_alone(
+                    &mut reference,
+                    &rom,
+                    boot_rom_ref,
+                    &recording,
+                    console,
+                    args.frames,
+                    on_frame,
+                )?,
+                Model::Ds => {
+                    let mut melonds = MelonDsEmulator::new();
+                    let video = melonds.load_nds(&rom, DsBios::FREE)?;
+                    run_loaded(&mut melonds, video, &recording, args.frames, on_frame)?
                 }
-                if let Some(dumper) = dumper.as_mut() {
-                    dumper.handle(index, reference, candidate, diverged)?;
-                }
-                progress.inc(1);
-                Ok(())
-            },
-        )?
+            };
+            ComparisonReport::reference_alone(reference.name(), "citrine", frames, refusal)
+        }
+        Ok(None) => {
+            let mut melonds = MelonDsEmulator::new();
+            let video = melonds.load_nds(&rom, DsBios::FREE)?;
+            let mut citrine = CitrineNdsEmulator::new();
+            citrine.load_nds(&rom)?;
+            let loaded = Loaded {
+                video,
+                frame_cycles: DS_CYCLES_PER_FRAME,
+                canonical: Frame::rgb555_into,
+            };
+            let mut divergent = 0usize;
+            compare_loaded(
+                melonds,
+                citrine,
+                loaded,
+                &recording,
+                &metrics,
+                args.frames,
+                !args.raw,
+                args.align.into(),
+                args.tolerance,
+                |index, reference, candidate, diverged| {
+                    if diverged {
+                        divergent += 1;
+                        progress.set_message(format!("{divergent} divergent"));
+                    }
+                    if let Some(dumper) = dumper.as_mut() {
+                        dumper.handle(index, reference, candidate, diverged)?;
+                    }
+                    progress.inc(1);
+                    Ok(())
+                },
+            )?
+        }
+        Ok(Some(console)) => {
+            let mut divergent = 0usize;
+            run_streaming(
+                reference,
+                CitrineEmulator::new(),
+                &rom,
+                boot_rom_ref,
+                &recording,
+                console,
+                &metrics,
+                args.frames,
+                !args.raw,
+                args.align.into(),
+                args.tolerance,
+                |index, reference, candidate, diverged| {
+                    if diverged {
+                        divergent += 1;
+                        progress.set_message(format!("{divergent} divergent"));
+                    }
+                    if let Some(dumper) = dumper.as_mut() {
+                        dumper.handle(index, reference, candidate, diverged)?;
+                    }
+                    progress.inc(1);
+                    Ok(())
+                },
+            )?
+        }
     };
     progress.finish_and_clear();
 

@@ -216,6 +216,36 @@ fn cloud_battery(settings: &OnlineSettings) -> Vec<u8> {
 }
 
 #[test]
+fn a_three_megabyte_state_travels_in_parts_and_arrives_whole() {
+    const BIG: usize = 3 << 20;
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    a.store
+        .store_snapshot(ROM, 0, &noise(BIG, 3), &frame(), ConsoleKind::Gbc)
+        .unwrap();
+    let auto = a
+        .store
+        .store_autosave(ROM, &noise(BIG, 4), &frame(), ConsoleKind::Gbc, 5)
+        .unwrap();
+    a.online.cloud_game(Some((ROM.into(), TITLE.into())));
+    a.synced(&[LocalSave::Snapshot(0), LocalSave::Autosave(auto)]);
+    a.go_offline();
+    let largest = relay.stored_files().iter().map(Vec::len).max().unwrap();
+    assert!(largest > citrine_gb_net::MAX_SAVE_BYTES, "{largest}");
+
+    let mut b = Device::new(&settings);
+    b.sign_in(&settings);
+    b.online.cloud_game(Some((ROM.into(), TITLE.into())));
+    b.online.cloud_hold(ROM);
+    b.until("both big saves on the second device", |d| {
+        d.store.load_snapshot(ROM, 0).is_some() && !d.store.autosave_ids(ROM).is_empty()
+    });
+    assert_eq!(b.store.load_snapshot(ROM, 0).unwrap(), noise(BIG, 3));
+    let id = b.store.autosave_ids(ROM)[0];
+    assert_eq!(b.store.load_autosave(ROM, id).unwrap(), noise(BIG, 4));
+}
+
+#[test]
 fn a_save_made_on_one_device_arrives_on_the_other() {
     let relay = Relay::start(50);
     let (mut a, settings) = first_account(&relay);
@@ -744,4 +774,113 @@ fn a_gba_snapshot_with_full_memory_arrives_on_the_other_device() {
     let info = b.store.snapshot_info(&rom_key, 0).unwrap();
     assert_eq!(info.console, Some(ConsoleKind::Gba));
     assert_eq!(info.thumb_size(), [120, 80]);
+}
+
+#[cfg(feature = "nds")]
+fn ds_rom() -> std::sync::Arc<[u8]> {
+    let mut rom = vec![0; 0x1000];
+    rom[..4].copy_from_slice(b"TEST");
+    for (at, offset, ram) in [(0x20, 0x200u32, 0x0200_0000u32), (0x30, 0x800, 0x0380_0000)] {
+        for (index, value) in [offset, ram, ram, 4].into_iter().enumerate() {
+            rom[at + 4 * index..at + 4 * index + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        rom[offset as usize..offset as usize + 4].copy_from_slice(&0xEAFF_FFFEu32.to_le_bytes());
+    }
+    rom.into()
+}
+
+#[cfg(feature = "nds")]
+fn ds_game(n: usize) -> String {
+    format!("{:064x}", 0xd500 + n)
+}
+
+#[cfg(feature = "nds")]
+#[test]
+fn ds_battery_saves_of_every_chip_arrive_on_the_other_device() {
+    use citrine_gb::nds::machine::{Nds, NdsFirmware};
+    use citrine_gb::nds::save::SaveType;
+    use citrine_gb::persistence::battery_save::BatterySave;
+    let chips = [
+        SaveType::Eeprom512,
+        SaveType::Eeprom8K,
+        SaveType::Fram32K,
+        SaveType::Eeprom64K,
+        SaveType::Eeprom128K,
+        SaveType::Flash256K,
+        SaveType::Flash512K,
+        SaveType::Flash1M,
+    ];
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    for (n, chip) in chips.into_iter().enumerate() {
+        let save = BatterySave::raw(noise(chip.size(), n as u64));
+        a.store.store_battery_save(&ds_game(n), &save).unwrap();
+        a.store
+            .set_game_console(&ds_game(n), ConsoleKind::Nds)
+            .unwrap();
+        synced_on(&mut a, &ds_game(n), &LocalSave::Battery);
+    }
+    a.go_offline();
+
+    let mut b = Device::new(&settings);
+    b.sign_in(&settings);
+    let nds = Nds::new(ds_rom(), NdsFirmware::default()).unwrap();
+    for (n, chip) in chips.into_iter().enumerate() {
+        let rom = ds_game(n);
+        synced_on(&mut b, &rom, &LocalSave::Battery);
+        let arrived = b.store.load_battery_save(&rom, &nds).unwrap();
+        assert_eq!(arrived.ram, noise(chip.size(), n as u64));
+        assert_eq!(SaveType::for_size(arrived.ram.len()), Some(chip));
+    }
+}
+
+#[cfg(feature = "nds")]
+#[test]
+fn a_ds_snapshot_arrives_on_the_other_device() {
+    use citrine_gb::console::Console;
+    use citrine_gb::nds::machine::{Nds, NdsFirmware};
+    let mut nds = Nds::new(ds_rom(), NdsFirmware::default()).unwrap();
+    nds.put_battery(
+        citrine_gb::persistence::battery_save::BatterySave::raw(noise(512 << 10, 7)),
+        0,
+    );
+    for _ in 0..3 {
+        nds.run_frame();
+    }
+    let state = nds.save_state(0).unwrap();
+    let frame = nds.frame().to_vec();
+    let rom_key = ds_game(20);
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    a.store
+        .store_snapshot(&rom_key, 0, &state, &frame, ConsoleKind::Nds)
+        .unwrap();
+    let auto = a
+        .store
+        .store_autosave(&rom_key, &state, &frame, ConsoleKind::Nds, 5)
+        .unwrap();
+    synced_on(&mut a, &rom_key, &LocalSave::Snapshot(0));
+    synced_on(&mut a, &rom_key, &LocalSave::Autosave(auto));
+    a.go_offline();
+
+    let mut b = Device::new(&settings);
+    b.sign_in(&settings);
+    b.online.cloud_game(Some((rom_key.clone(), TITLE.into())));
+    b.until("both DS saves on the second device", |d| {
+        d.store.load_snapshot(&rom_key, 0).is_some() && !d.store.autosave_ids(&rom_key).is_empty()
+    });
+    let id = b.store.autosave_ids(&rom_key)[0];
+    synced_on(&mut b, &rom_key, &LocalSave::Snapshot(0));
+    synced_on(&mut b, &rom_key, &LocalSave::Autosave(id));
+    let arrived = b.store.load_snapshot(&rom_key, 0).unwrap();
+    assert_eq!(arrived, state);
+    assert_eq!(b.store.load_autosave(&rom_key, id).unwrap(), state);
+    let restored = Nds::new(ds_rom(), NdsFirmware::default())
+        .unwrap()
+        .restore(&arrived)
+        .unwrap();
+    assert_eq!(restored.cycles(), nds.cycles());
+    let info = b.store.snapshot_info(&rom_key, 0).unwrap();
+    assert_eq!(info.console, Some(ConsoleKind::Nds));
+    assert_eq!(info.thumb_size(), [128, 192]);
 }

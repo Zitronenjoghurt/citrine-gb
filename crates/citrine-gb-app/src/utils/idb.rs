@@ -67,7 +67,7 @@ async fn connect(
     Ok(db.into())
 }
 
-pub async fn wait(request: &IdbRequest) -> Result<JsValue, JsValue> {
+pub fn wait(request: &IdbRequest) -> wasm_bindgen_futures::JsFuture {
     let request = request.clone();
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
         let done = request.clone();
@@ -86,7 +86,7 @@ pub async fn wait(request: &IdbRequest) -> Result<JsValue, JsValue> {
         request.set_onsuccess(Some(on_success.unchecked_ref()));
         request.set_onerror(Some(on_error.unchecked_ref()));
     });
-    wasm_bindgen_futures::JsFuture::from(promise).await
+    wasm_bindgen_futures::JsFuture::from(promise)
 }
 
 pub async fn finished(tx: &IdbTransaction) -> Result<(), JsValue> {

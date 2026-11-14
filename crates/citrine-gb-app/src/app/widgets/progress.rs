@@ -1,4 +1,3 @@
-use crate::app::mobile::kit::icon_tile_fill;
 use crate::app::ui_state::ui_theme::brand;
 use crate::progress::Progress;
 use egui::{
@@ -114,8 +113,8 @@ pub fn bar(ui: &mut Ui, fraction: Option<f32>) -> Response {
     let visuals = ui.visuals();
     let radius = CornerRadius::same((BAR_HEIGHT / 2.0) as u8);
     let fill = brand(visuals);
-    ui.painter()
-        .rect_filled(rect, radius, icon_tile_fill(visuals));
+    let track = crate::app::mobile::bar_track(ui).unwrap_or(visuals.widgets.inactive.bg_fill);
+    ui.painter().rect_filled(rect, radius, track);
     let (start, end) = match fraction {
         Some(fraction) if fraction > 0.0 => (0.0, (rect.width() * fraction).max(rect.height())),
         Some(_) => return response,
@@ -305,5 +304,36 @@ mod tests {
             narrow.height,
             wide.height
         );
+    }
+
+    fn track(touch: bool) -> (egui::Color32, egui::Visuals) {
+        let ctx = Context::default();
+        let mut fills = Vec::new();
+        let shapes = ctx
+            .run(RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if touch {
+                        ui.spacing_mut().interact_size.y = 48.0;
+                    }
+                    bar(ui, Some(0.5));
+                });
+            })
+            .shapes;
+        for clipped in shapes {
+            if let Shape::Rect(rect) = clipped.shape
+                && (rect.rect.height() - BAR_HEIGHT).abs() < 0.01
+            {
+                fills.push(rect.fill);
+            }
+        }
+        (fills[0], ctx.style().visuals.clone())
+    }
+
+    #[test]
+    fn a_desktop_bar_runs_in_the_desktop_button_fill() {
+        let (desktop, visuals) = track(false);
+        assert_eq!(desktop, visuals.widgets.inactive.bg_fill);
+        let (phone, visuals) = track(true);
+        assert_ne!(phone, visuals.widgets.inactive.bg_fill);
     }
 }

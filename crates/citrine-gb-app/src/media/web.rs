@@ -30,7 +30,7 @@ pub struct MediaStore {
 impl Default for MediaStore {
     fn default() -> Self {
         let (tx, loaded_rx) = channel();
-        wasm_bindgen_futures::spawn_local(load_all(tx));
+        citrine_gb_threads::spawn_local(load_all(tx));
         Self {
             items: Vec::new(),
             loaded_rx,
@@ -83,7 +83,7 @@ impl MediaStore {
     pub fn read_bytes(&self, id: &MediaId, done: impl FnOnce(Option<Vec<u8>>) + 'static) {
         self.read(id, move |blob| match blob {
             None => done(None),
-            Some(blob) => wasm_bindgen_futures::spawn_local(async move {
+            Some(blob) => citrine_gb_threads::spawn_local(async move {
                 let buffer = wasm_bindgen_futures::JsFuture::from(blob.array_buffer())
                     .await
                     .ok();
@@ -124,7 +124,7 @@ impl MediaStore {
         self.items.retain(|i| &i.id != id);
         let key = id.as_str().to_string();
         WAITING.with_borrow_mut(|waiting| waiting.retain(|(queued, _, _)| *queued != key));
-        wasm_bindgen_futures::spawn_local(async move {
+        citrine_gb_threads::spawn_local(async move {
             if let Err(err) = remove(&key).await {
                 log::error!("Could not delete {key}: {err:?}");
             }
@@ -132,9 +132,13 @@ impl MediaStore {
         Ok(())
     }
 
-    pub fn read_files(&self, mut each: impl FnMut(Option<(MediaId, Vec<u8>)>) + 'static) {
+    pub fn read_files(
+        &self,
+        spawner: &citrine_gb_threads::Spawner,
+        mut each: impl FnMut(Option<(MediaId, Vec<u8>)>) + 'static,
+    ) {
         let ids: Vec<MediaId> = self.items.iter().map(|item| item.id.clone()).collect();
-        wasm_bindgen_futures::spawn_local(async move {
+        spawner.run_future("media read", async move {
             while WRITING.get() {
                 crate::utils::next_tick().await;
             }
@@ -202,7 +206,7 @@ impl MediaStore {
         self.items.clear();
         self.loaded = true;
         WAITING.with_borrow_mut(Vec::clear);
-        wasm_bindgen_futures::spawn_local(async move {
+        citrine_gb_threads::spawn_local(async move {
             if let Err(err) = clear().await {
                 log::error!("Could not clear the media library: {err:?}");
             }
@@ -212,7 +216,7 @@ impl MediaStore {
 
     pub fn read(&self, id: &MediaId, done: impl FnOnce(Option<web_sys::Blob>) + 'static) {
         let key = id.as_str().to_string();
-        wasm_bindgen_futures::spawn_local(async move {
+        citrine_gb_threads::spawn_local(async move {
             done(read_file(&key).await.ok().flatten());
         });
     }
@@ -260,8 +264,10 @@ async fn list() -> Result<Vec<MediaItem>, JsValue> {
     let db = open().await?;
     let tx = db.transaction_with_str(ITEMS)?;
     let store = tx.object_store(ITEMS)?;
-    let keys = wait(&store.get_all_keys()?).await?;
-    let values = wait(&store.get_all()?).await?;
+    let keys = wait(&store.get_all_keys()?);
+    let values = wait(&store.get_all()?);
+    let keys = keys.await?;
+    let values = values.await?;
     let keys = js_sys::Array::from(&keys);
     let values = js_sys::Array::from(&values);
     Ok((0..keys.length().min(values.length()))
@@ -274,7 +280,7 @@ fn queue_put(key: String, record: JsValue, file: JsValue) {
     if WRITING.replace(true) {
         return;
     }
-    wasm_bindgen_futures::spawn_local(async {
+    citrine_gb_threads::spawn_local(async {
         loop {
             let batch: Vec<_> = WAITING.with_borrow_mut(|waiting| {
                 let end = waiting.len().min(WRITE_BATCH);

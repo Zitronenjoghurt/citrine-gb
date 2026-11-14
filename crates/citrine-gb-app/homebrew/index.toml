@@ -199,3 +199,15 @@ links = [
 tags = ["Strategy"]
 sha1 = "90ffde893a28d1a2f4515f34b8feabeb0b6b0342"
 size = 6948016
+
+[pong_nds]
+title = "Pong-NDS"
+author = "Thomas Sayen"
+description = "Bounce the ball past the computer's paddle. Move the blue paddle on the left with the D-pad."
+license = "MIT"
+links = [
+    { url = "https://github.com/Chi-Iroh/Pong-NDS", kind = "github" }
+]
+tags = ["Arcade"]
+sha1 = "3a8b91af7b71d0c799e78775dab9cc5dca8f437d"
+size = 2472960

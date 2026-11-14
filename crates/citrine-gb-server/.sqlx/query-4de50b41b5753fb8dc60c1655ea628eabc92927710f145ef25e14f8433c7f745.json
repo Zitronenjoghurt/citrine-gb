@@ -1,0 +1,194 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pid AS \"pid!\", name, language, version, country, region, tid, sid, female, avatar,\n                      utc_offset, seed, started_at, days, next_at\n                 FROM gts_sims ORDER BY pid",
+  "describe": {
+    "columns": [
+      {
+        "name": "pid!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "language",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "language"
+          }
+        }
+      },
+      {
+        "name": "version",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "name": "country",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "country"
+          }
+        }
+      },
+      {
+        "name": "region",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "region"
+          }
+        }
+      },
+      {
+        "name": "tid",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "tid"
+          }
+        }
+      },
+      {
+        "name": "sid",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "sid"
+          }
+        }
+      },
+      {
+        "name": "female",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "female"
+          }
+        }
+      },
+      {
+        "name": "avatar",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "avatar"
+          }
+        }
+      },
+      {
+        "name": "utc_offset",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "utc_offset"
+          }
+        }
+      },
+      {
+        "name": "seed",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "seed"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "days",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "days"
+          }
+        }
+      },
+      {
+        "name": "next_at",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sims",
+            "name": "next_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4de50b41b5753fb8dc60c1655ea628eabc92927710f145ef25e14f8433c7f745"
+}

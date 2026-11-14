@@ -28,10 +28,7 @@ impl GbaHeader {
             title: text(rom, TITLE),
             game_code: text(rom, GAME_CODE),
             maker_code: text(rom, MAKER),
-            maker: match &maker_code {
-                b"01" => RomLicensee::Nintendo,
-                _ => RomHeader::licensee_for_code(maker_code),
-            },
+            maker: RomHeader::maker_for_code(maker_code),
             version: rom.get(VERSION).copied().unwrap_or(0),
             provided_checksum: rom.get(CHECKSUM).copied().unwrap_or(0),
             actual_checksum: checksum(rom),

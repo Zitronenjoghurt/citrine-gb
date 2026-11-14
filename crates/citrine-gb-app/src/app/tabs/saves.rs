@@ -5,12 +5,13 @@ use crate::app::widgets::cloud_mark::cloud_status;
 use crate::app::widgets::scroll;
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::snapshots::{
-    NameEdit, PendingLoad, SnapshotNews, editable_name, name_editor, quick_slot_message,
-    relative_time, snapshot_message, stamp_row_with,
+    FailedStep, NameEdit, PendingLoad, SnapshotNews, editable_name, failed_message, name_editor,
+    named, quick_slot_message, relative_time, snapshot_message, stamp_row_with,
 };
 use crate::icons;
 use crate::online::cloud::LocalSave;
 use citrine_gb::console::ConsoleKind;
+use citrine_gb::error::GbError;
 
 const LIST_END: f32 = 12.0;
 
@@ -128,12 +129,14 @@ fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
     if let Some(question) = viewer.ui.snapshots.use_battery_question() {
         let choice =
             crate::app::widgets::confirm::confirm(ui.ctx(), "battery_use", &question, "Use this");
-        if let Some(token) = viewer.ui.snapshots.answer_use_battery(choice) {
+        if let Some((token, name)) = viewer.ui.snapshots.answer_use_battery(choice) {
             match viewer.emulator.use_battery(&token) {
                 Ok(()) => viewer.events.notify("Switched battery saves"),
-                Err(err) => viewer
-                    .events
-                    .notify_error(format!("Could not switch battery saves: {err:?}")),
+                Err(err) => viewer.events.notify_error(failed_message(
+                    FailedStep::Switch,
+                    &named(&name, "the battery save"),
+                    &err,
+                )),
             }
             viewer.ui.snapshots.invalidate();
         }
@@ -149,7 +152,7 @@ fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
             rom_key,
             &save,
         );
-        if let Some(token) = viewer.ui.snapshots.answer_delete_battery(choice) {
+        if let Some((token, name)) = viewer.ui.snapshots.answer_delete_battery(choice) {
             forget_in_cloud(viewer, rom_key, &save);
             match viewer
                 .emulator
@@ -157,9 +160,11 @@ fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
                 .delete_save(rom_key, &LocalSave::OtherBattery(token))
             {
                 Ok(()) => viewer.events.notify("Deleted the battery save"),
-                Err(err) => viewer
-                    .events
-                    .notify_error(format!("Could not delete the battery save: {err:?}")),
+                Err(err) => viewer.events.notify_error(failed_message(
+                    FailedStep::Delete,
+                    &named(&name, "the battery save"),
+                    &GbError::from(err),
+                )),
             }
             viewer.ui.snapshots.invalidate();
         }
@@ -230,29 +235,46 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
                 viewer.events.notify("The save is back to its default name")
             }
             Ok(()) => viewer.events.notify(format!("Renamed to '{trimmed}'")),
-            Err(err) => viewer
-                .events
-                .notify_error(format!("Rename failed: {err:?}")),
+            Err(err) => viewer.events.notify_error(failed_message(
+                FailedStep::Rename,
+                &named(&status.name, "the battery save"),
+                &err,
+            )),
         }
     }
 
     ui.add_space(4.0);
+    let kind = viewer.emulator.kind();
+    let (import_hint, import_types): (&str, &[&str]) = if kind == ConsoleKind::Nds {
+        (
+            "Load a .sav, or a DeSmuME .dsv, from another emulator or a backup",
+            &["sav", "dsv"],
+        )
+    } else if kind == ConsoleKind::Gba {
+        (
+            "Load a .sav from another emulator or a backup",
+            &["sav", "srm"],
+        )
+    } else {
+        (
+            "Load a .sav, or a .srm with its .rtc, from another emulator or a backup",
+            &["sav", "srm", "rtc"],
+        )
+    };
     ui.horizontal_wrapped(|ui| {
         if ui
             .button(format!("{} Import save", icons::UPLOAD_SIMPLE))
-            .on_hover_text(
-                "Load a .sav, or a .srm with its .rtc, from another emulator or a backup",
-            )
+            .on_hover_text(import_hint)
             .clicked()
         {
             crate::utils::file_loader::FileLoader::new()
                 .title("Import save files")
-                .add_filter("Save files", &["sav", "srm", "rtc"])
-                .dispatch_many(viewer.files.sav_tx.clone());
+                .add_filter("Save files", import_types)
+                .dispatch_many(&viewer.files.spawner, viewer.files.sav_tx.clone());
         }
 
         ui.add_enabled_ui(status.stored, |ui| {
-            if status.has_clock {
+            if status.has_clock && matches!(kind, ConsoleKind::Gb | ConsoleKind::Gbc) {
                 ui.menu_button(format!("{} Export", icons::DOWNLOAD_SIMPLE), |ui| {
                     if ui
                         .button(".sav")
@@ -273,6 +295,7 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
                         ))
                         .add_filter("Save files", &["srm"])
                         .dispatch_pair(
+                            &viewer.files.spawner,
                             ram,
                             "rtc",
                             clock,
@@ -282,7 +305,11 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
                 });
             } else if ui
                 .button(format!("{} Export .sav", icons::DOWNLOAD_SIMPLE))
-                .on_hover_text("Save this game's data as a .sav file other emulators can read")
+                .on_hover_text(if status.has_clock {
+                    "Save this game's data and its clock as a .sav file mGBA can read"
+                } else {
+                    "Save this game's data as a .sav file other emulators can read"
+                })
                 .clicked()
             {
                 export_sav(viewer, &status.name);
@@ -324,7 +351,7 @@ fn export_sav(viewer: &mut TabViewer, name: &str) {
     if let Some(data) = viewer.emulator.export_save_bytes() {
         crate::utils::file_saver::FileSaver::new(&save_file_name(name, "sav"))
             .add_filter("Save files", &["sav"])
-            .dispatch(data, viewer.files.save_tx.clone());
+            .dispatch(&viewer.files.spawner, data, viewer.files.save_tx.clone());
     }
 }
 
@@ -740,12 +767,20 @@ fn apply_auto(viewer: &mut TabViewer, rom_key: &str, action: AutoAction, ctx: &e
             match viewer.emulator.load_autosave(id) {
                 Ok(true) => Ok(format!("Loaded the autosave from {label}")),
                 Ok(false) => Err(format!("The autosave from {label} is gone")),
-                Err(err) => Err(format!("Could not load the autosave: {err:?}")),
+                Err(err) => Err(failed_message(
+                    FailedStep::Load,
+                    &format!("the autosave from {label}"),
+                    &err,
+                )),
             }
         }
         AutoAction::Delete(id, label) => match viewer.emulator.delete_autosave(id) {
             Ok(()) => Ok(format!("Deleted the autosave from {label}")),
-            Err(err) => Err(format!("Could not delete the autosave: {err:?}")),
+            Err(err) => Err(failed_message(
+                FailedStep::Delete,
+                &format!("the autosave from {label}"),
+                &err,
+            )),
         },
     };
 
@@ -786,47 +821,59 @@ fn apply(viewer: &mut TabViewer, rom_key: &str, action: SlotAction, ctx: &egui::
         return;
     }
 
+    let failed = |viewer: &TabViewer, step, slot, err: GbError| {
+        failed_message(step, &format!("'{}'", name(viewer, slot)), &err)
+    };
     let result = match action {
         SlotAction::New => {
-            let slot = viewer.emulator.store.next_free_slot(rom_key);
+            let slot = viewer.emulator.next_free_slot(rom_key);
             viewer
                 .emulator
                 .save_snapshot(slot)
                 .map(|_| snapshot_message(SnapshotNews::Saved, &name(viewer, slot)))
+                .map_err(|err| failed(viewer, FailedStep::Save, slot, err))
         }
         SlotAction::Save(slot) => viewer
             .emulator
             .save_snapshot(slot)
-            .map(|_| snapshot_message(SnapshotNews::Overwrote, &name(viewer, slot))),
-        SlotAction::Load(slot) => viewer.emulator.load_snapshot(slot).map(|loaded| {
-            let news = if loaded {
-                SnapshotNews::Loaded
-            } else {
-                SnapshotNews::Empty
-            };
-            snapshot_message(news, &name(viewer, slot))
-        }),
+            .map(|_| snapshot_message(SnapshotNews::Overwrote, &name(viewer, slot)))
+            .map_err(|err| failed(viewer, FailedStep::Save, slot, err)),
+        SlotAction::Load(slot) => viewer
+            .emulator
+            .load_snapshot(slot)
+            .map(|loaded| {
+                let news = if loaded {
+                    SnapshotNews::Loaded
+                } else {
+                    SnapshotNews::Empty
+                };
+                snapshot_message(news, &name(viewer, slot))
+            })
+            .map_err(|err| failed(viewer, FailedStep::Load, slot, err)),
         SlotAction::Delete(slot) => {
             let deleted = name(viewer, slot);
             viewer
                 .emulator
                 .delete_snapshot(slot)
                 .map(|_| snapshot_message(SnapshotNews::Deleted, &deleted))
+                .map_err(|err| failed_message(FailedStep::Delete, &format!("'{deleted}'"), &err))
         }
         SlotAction::Rename(slot, name) => {
             let trimmed = name.trim().to_string();
-            viewer.emulator.rename_snapshot(slot, &trimmed).map(|()| {
-                snapshot_message(SnapshotNews::Renamed, &viewer.emulator.snapshot_name(slot))
-            })
+            viewer
+                .emulator
+                .rename_snapshot(slot, &trimmed)
+                .map(|()| {
+                    snapshot_message(SnapshotNews::Renamed, &viewer.emulator.snapshot_name(slot))
+                })
+                .map_err(|err| failed(viewer, FailedStep::Rename, slot, err))
         }
         SlotAction::MakeQuick(_) => unreachable!("handled above"),
     };
 
     match result {
         Ok(message) => viewer.events.notify(message),
-        Err(err) => viewer
-            .events
-            .notify_error(format!("Snapshot failed: {err:?}")),
+        Err(message) => viewer.events.notify_error(message),
     }
     // The set of snapshots changed, so drop the cached textures and read it back.
     viewer

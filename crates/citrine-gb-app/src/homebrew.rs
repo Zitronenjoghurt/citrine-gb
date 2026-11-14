@@ -11,6 +11,8 @@ impl ShelfConsole {
         match self {
             ShelfConsole::GameBoy => "Game Boy",
             ShelfConsole::GameBoyAdvance => "Game Boy Advance",
+            #[cfg(feature = "nds")]
+            ShelfConsole::NintendoDs => "Nintendo DS",
         }
     }
 
@@ -18,6 +20,8 @@ impl ShelfConsole {
         match self {
             ShelfConsole::GameBoy => icons::DEVICE_MOBILE,
             ShelfConsole::GameBoyAdvance => icons::GAME_CONTROLLER,
+            #[cfg(feature = "nds")]
+            ShelfConsole::NintendoDs => icons::SQUARE_SPLIT_VERTICAL,
         }
     }
 }
@@ -52,6 +56,16 @@ impl LinkKind {
 }
 
 impl HomebrewGame {
+    #[cfg(feature = "nds")]
+    pub fn icon_texture(&self, ctx: &egui::Context) -> Option<egui::TextureId> {
+        crate::ds_banner::texture(ctx, self.ds_icon?).map(|texture| texture.id())
+    }
+
+    #[cfg(not(feature = "nds"))]
+    pub fn icon_texture(&self, _ctx: &egui::Context) -> Option<egui::TextureId> {
+        None
+    }
+
     pub fn show_links(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             for link in self.links {
@@ -95,19 +109,45 @@ mod tests {
         if cfg!(feature = "gba") {
             roms.extend(gba_files().into_iter().map(|(id, _)| id));
         }
+        if cfg!(feature = "nds") {
+            roms.extend(nds_files().into_iter().map(|(id, _)| id));
+        }
         roms
     }
 
-    fn gba_files() -> Vec<(String, std::path::PathBuf)> {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("homebrew/gba");
+    fn packed_files(folder: &str) -> Vec<(String, std::path::PathBuf)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("homebrew")
+            .join(folder);
+        let suffix = format!(".{folder}.br");
         std::fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .filter_map(|path| {
                 let name = path.file_name()?.to_str()?;
-                Some((name.strip_suffix(".gba.br")?.to_string(), path.clone()))
+                Some((name.strip_suffix(&suffix)?.to_string(), path.clone()))
             })
             .collect()
+    }
+
+    fn gba_files() -> Vec<(String, std::path::PathBuf)> {
+        packed_files("gba")
+    }
+
+    fn nds_files() -> Vec<(String, std::path::PathBuf)> {
+        packed_files("nds")
+    }
+
+    #[cfg(feature = "gba")]
+    fn unpacked(path: &std::path::Path) -> Vec<u8> {
+        let stored = std::fs::read(path).unwrap();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(
+            &mut brotli::Decompressor::new(stored.as_slice(), 4096),
+            &mut data,
+        )
+        .unwrap();
+        data
     }
 
     fn game_boy_games() -> impl Iterator<Item = &'static HomebrewGame> {
@@ -120,11 +160,18 @@ mod tests {
     fn every_index_entry_has_its_rom_and_every_rom_its_entry() {
         let mut entries = INDEX.lines().filter(|line| line.starts_with('[')).count();
         if !cfg!(feature = "gba") {
-            entries -= INDEX
+            entries -= gba_files().len();
+        }
+        if !cfg!(feature = "nds") {
+            entries -= nds_files().len();
+        }
+        assert_eq!(
+            INDEX
                 .lines()
                 .filter(|line| line.starts_with("sha1 = "))
-                .count();
-        }
+                .count(),
+            gba_files().len() + nds_files().len()
+        );
         let roms = rom_files();
         assert_eq!(entries, HOMEBREW_GAMES.len());
         assert_eq!(roms.len(), HOMEBREW_GAMES.len());
@@ -161,7 +208,7 @@ mod tests {
         let shelves = shelves();
         let consoles: Vec<ShelfConsole> = shelves.iter().map(|shelf| shelf.0).collect();
         assert_eq!(
-            consoles,
+            consoles[..2],
             [ShelfConsole::GameBoy, ShelfConsole::GameBoyAdvance]
         );
         let titles: Vec<&str> = shelves[1].1.iter().map(|(_, game)| game.title).collect();
@@ -190,13 +237,7 @@ mod tests {
         for (id, path) in files {
             let game = HOMEBREW_GAMES.iter().find(|game| game.id == id).unwrap();
             assert_eq!(game.console, ShelfConsole::GameBoyAdvance, "{id}");
-            let stored = std::fs::read(&path).unwrap();
-            let mut data = Vec::new();
-            std::io::Read::read_to_end(
-                &mut brotli::Decompressor::new(stored.as_slice(), 4096),
-                &mut data,
-            )
-            .unwrap();
+            let data = unpacked(&path);
             assert_eq!(game.embedded().as_deref(), Some(data.as_slice()), "{id}");
             let rom_id = RomId::new(&data);
             assert_eq!(rom_id.sha1, game.sha1, "{id}");
@@ -215,6 +256,46 @@ mod tests {
                     || licence.contains("Mozilla Public License"),
                 "{id}"
             );
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn ds_games_follow_the_game_boy_advance_on_their_own_shelf() {
+        let shelves = shelves();
+        let consoles: Vec<ShelfConsole> = shelves.iter().map(|shelf| shelf.0).collect();
+        assert_eq!(
+            consoles,
+            [
+                ShelfConsole::GameBoy,
+                ShelfConsole::GameBoyAdvance,
+                ShelfConsole::NintendoDs
+            ]
+        );
+        let titles: Vec<&str> = shelves[2].1.iter().map(|(_, game)| game.title).collect();
+        assert_eq!(titles, ["Pong-NDS"]);
+        assert_eq!(ShelfConsole::NintendoDs.label(), "Nintendo DS");
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn every_ds_file_unpacks_to_the_upstream_rom_with_its_licence() {
+        let files = nds_files();
+        assert_eq!(files.len(), 1);
+        for (id, path) in files {
+            let game = HOMEBREW_GAMES.iter().find(|game| game.id == id).unwrap();
+            assert_eq!(game.console, ShelfConsole::NintendoDs, "{id}");
+            let data = unpacked(&path);
+            assert_eq!(game.embedded().as_deref(), Some(data.as_slice()), "{id}");
+            let rom_id = RomId::new(&data);
+            assert_eq!(rom_id.sha1, game.sha1, "{id}");
+            assert_eq!(data.len(), game.size, "{id}");
+            assert_eq!(rom_id.sha256_hex_string(), game.rom_key, "{id}");
+            assert_eq!(&data[0x0C..0x10], b"####", "{id}");
+            let licence = path.with_file_name(format!("{id}.LICENSE.txt"));
+            let licence = std::fs::read_to_string(&licence).unwrap();
+            assert!(licence.starts_with(game.title), "{id}");
+            assert!(licence.contains("Permission is hereby granted"), "{id}");
         }
     }
 
@@ -325,6 +406,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test boots the games on four threads"
+    )]
     fn every_game_boots_and_keeps_drawing_through_its_first_half_minute() {
         let games: Vec<&HomebrewGame> = game_boy_games().collect();
         let per_thread = games.len().div_ceil(4);

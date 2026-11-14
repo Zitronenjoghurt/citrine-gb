@@ -2,4 +2,6 @@
 <paths>
     <files-path name="files" path="." />
     <cache-path name="crash" path="crash/" />
+    <cache-path name="reports" path="reports/" />
+    <cache-path name="updates" path="updates/" />
 </paths>

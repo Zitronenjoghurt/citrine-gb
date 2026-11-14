@@ -1,7 +1,7 @@
 use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
 use egui::{Button, Response, Ui};
 
-fn shortcut_hint(hotkeys: &Hotkeys, action: HotkeyAction, on: bool) -> String {
+pub fn shortcut_hint(hotkeys: &Hotkeys, action: HotkeyAction, on: bool) -> String {
     let hint = action.hint(on);
     match hotkeys.key_name(action) {
         Some(key) => format!("{hint} ({key})"),

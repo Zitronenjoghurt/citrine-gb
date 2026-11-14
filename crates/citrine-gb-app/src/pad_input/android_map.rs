@@ -441,7 +441,7 @@ mod tests {
         let bindings = KeyBindings::default();
         let capture = BindingCapture::default();
         let events = translator.translate(5, AndroidInput::KeyDown(97, false));
-        let action = route(events[1].input, &bindings, &capture, None);
+        let action = route(events[1].input, &bindings, &capture, None, false);
         assert_eq!(action, PadAction::Press(GbButton::A));
     }
 }

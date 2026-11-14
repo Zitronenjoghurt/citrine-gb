@@ -1,4 +1,5 @@
 use citrine_gb::console::ConsoleKind;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub mod copies;
@@ -6,14 +7,56 @@ pub mod copies;
 const MAX_ENTRIES: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "StoredRom", into = "StoredRom")]
 pub struct RecentRom {
     pub path: PathBuf,
     pub title: String,
     pub last_played: u64,
-    #[serde(default)]
     pub rom_key: Option<String>,
-    #[serde(default)]
     pub console: Option<ConsoleKind>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct StoredRom {
+    path: PathBuf,
+    title: String,
+    last_played: u64,
+    #[serde(default)]
+    rom_key: Option<String>,
+    #[serde(default)]
+    console: Option<ConsoleKind>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    nds: bool,
+}
+
+impl From<StoredRom> for RecentRom {
+    fn from(stored: StoredRom) -> Self {
+        Self {
+            path: stored.path,
+            title: stored.title,
+            last_played: stored.last_played,
+            rom_key: stored.rom_key,
+            console: if stored.nds {
+                Some(ConsoleKind::Nds)
+            } else {
+                stored.console
+            },
+        }
+    }
+}
+
+impl From<RecentRom> for StoredRom {
+    fn from(rom: RecentRom) -> Self {
+        let nds = rom.console == Some(ConsoleKind::Nds);
+        Self {
+            path: rom.path,
+            title: rom.title,
+            last_played: rom.last_played,
+            rom_key: rom.rom_key,
+            console: rom.console.filter(|_| !nds),
+            nds,
+        }
+    }
 }
 
 impl RecentRom {
@@ -43,6 +86,10 @@ impl RecentRom {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct RecentRoms {
     entries: Vec<RecentRom>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    icons: BTreeMap<PathBuf, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    games: BTreeMap<PathBuf, String>,
     #[serde(skip)]
     named: bool,
 }
@@ -70,12 +117,49 @@ impl RecentRoms {
                 console,
             },
         );
-        self.entries.split_off(MAX_ENTRIES.min(self.entries.len()))
+        let dropped = self.entries.split_off(MAX_ENTRIES.min(self.entries.len()));
+        self.keep_icons();
+        dropped
+    }
+
+    pub fn set_icon(&mut self, path: &Path, icon: Option<String>) {
+        match icon {
+            Some(icon) => self.icons.insert(path.to_path_buf(), icon),
+            None => self.icons.remove(path),
+        };
+        self.keep_icons();
+    }
+
+    pub fn icon(&self, path: &Path) -> Option<&str> {
+        self.icons.get(path).map(String::as_str)
+    }
+
+    pub fn set_game_key(&mut self, path: &Path, rom_key: String) {
+        self.games.insert(path.to_path_buf(), rom_key);
+        self.keep_icons();
+    }
+
+    pub fn game_key(&self, path: &Path) -> Option<&str> {
+        self.games.get(path).map(String::as_str).or_else(|| {
+            self.entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .and_then(|entry| entry.rom_key.as_deref())
+        })
+    }
+
+    fn keep_icons(&mut self) {
+        let entries = &self.entries;
+        let listed = |path: &PathBuf| entries.iter().any(|entry| entry.path == *path);
+        self.icons.retain(|path, _| listed(path));
+        self.games.retain(|path, _| listed(path));
     }
 
     pub fn prune(&mut self) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|e| e.path.is_file());
+        self.entries
+            .retain(|e| crate::utils::zip_games::on_disk(&e.path));
+        self.keep_icons();
         before - self.entries.len()
     }
 
@@ -87,6 +171,17 @@ impl RecentRoms {
             let Ok(data) = std::fs::read(&entry.path) else {
                 continue;
             };
+            #[cfg(feature = "nds")]
+            if entry.console == Some(ConsoleKind::Nds)
+                && let Some(title) = crate::ds_banner::game_name(
+                    &data,
+                    &citrine_gb::rom::id::rom_sha1(&data),
+                    entry.path.file_name().and_then(|name| name.to_str()),
+                )
+            {
+                entry.title = title;
+                continue;
+            }
             let Ok(header) = citrine_gb::rom::Rom::new(&data).header() else {
                 continue;
             };
@@ -101,6 +196,7 @@ impl RecentRoms {
 
     pub fn remove(&mut self, path: &Path) {
         self.entries.retain(|e| e.path != path);
+        self.keep_icons();
     }
 
     pub fn entries(&self) -> &[RecentRom] {
@@ -138,10 +234,12 @@ impl RecentRoms {
     pub fn replace(&mut self, entries: Vec<RecentRom>) {
         self.entries = entries;
         self.named = false;
+        self.keep_icons();
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.icons.clear();
         self.named = false;
     }
 }
@@ -169,6 +267,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         dir
+    }
+
+    #[test]
+    fn a_ds_entry_keeps_its_console_and_older_builds_still_read_it() {
+        #[derive(serde::Deserialize)]
+        enum OlderConsole {
+            Gb,
+            Gbc,
+            Gba,
+        }
+        #[derive(serde::Deserialize)]
+        struct OlderRom {
+            #[serde(default)]
+            console: Option<OlderConsole>,
+        }
+        let entry = RecentRom {
+            path: PathBuf::from("/roms/Both Screens.nds"),
+            title: "Both Screens Console".to_owned(),
+            last_played: 7,
+            rom_key: Some("KEY".to_owned()),
+            console: Some(ConsoleKind::Nds),
+        };
+        let text = serde_json::to_string(&entry).expect("write");
+        assert_eq!(
+            serde_json::from_str::<RecentRom>(&text).expect("read"),
+            entry
+        );
+        let older: OlderRom = serde_json::from_str(&text).expect("older build");
+        assert!(older.console.is_none());
+        let gba = serde_json::to_string(&RecentRom {
+            console: Some(ConsoleKind::Gba),
+            ..entry
+        })
+        .expect("write");
+        let older: OlderRom = serde_json::from_str(&gba).expect("older build");
+        assert!(matches!(older.console, Some(OlderConsole::Gba)));
     }
 
     #[test]

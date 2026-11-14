@@ -1,0 +1,46 @@
+[build]
+pattern_preload = ""
+pattern_script = """
+<script type="module">
+const plain = { js: "{base}{js}", wasm: "{base}{wasm}" };
+
+async function threaded() {
+  if (!self.crossOriginIsolated) {
+    return null;
+  }
+  const response = await fetch("{base}threaded/index.html");
+  if (!response.ok) {
+    return null;
+  }
+  const page = new DOMParser().parseFromString(await response.text(), "text/html");
+  const build = page.getElementById("citrine-build");
+  return build && { js: build.dataset.js, wasm: build.dataset.wasm };
+}
+
+async function start(build) {
+  globalThis.citrineGlue = new URL(build.js, location.href).href;
+  const bindings = await import(globalThis.citrineGlue);
+  const wasm = await bindings.default({ module_or_path: build.wasm });
+  window.wasmBindings = bindings;
+  dispatchEvent(new CustomEvent("TrunkApplicationStarted", { detail: { wasm } }));
+}
+
+const build = await threaded().catch((err) => {
+  console.warn("No threaded build here", err);
+  return null;
+});
+if (build) {
+  await start(build).catch((err) => {
+    console.warn("The threaded build did not start, loading the plain one", err);
+    return start(plain);
+  });
+} else {
+  await start(plain);
+}
+</script>
+"""
+
+[serve.headers]
+"Cross-Origin-Opener-Policy" = "same-origin"
+"Cross-Origin-Embedder-Policy" = "require-corp"
+"Cross-Origin-Resource-Policy" = "same-origin"

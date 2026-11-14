@@ -1,0 +1,293 @@
+[ds-2d-layers]
+frames = ["08c2a2794756fc41", "56da3ee539ce97e1", "35294ed9d2b0fdef"]
+audio = ""
+state = ""
+
+[ds-2d-layers.facts]
+lines = 11520
+
+[ds-3d-cubes]
+frames = ["e658168e5df11f57", "75d99a09398f1fea", "ce9a66a7000bfc3f"]
+audio = ""
+state = ""
+
+[ds-3d-cubes.facts]
+polygons = 8640
+
+[ds-3d-panes]
+frames = ["4a6dfba3704c16ca", "1c209f5db60c16a3", "e9ff1037372251c5"]
+audio = ""
+state = ""
+
+[ds-3d-panes.facts]
+polygons = 450
+
+[ds-3d-terrain]
+frames = ["247dd5fc7eb6a766", "574d913cebcc6ecd", "524896d9b85ba28b"]
+audio = ""
+state = ""
+
+[ds-3d-terrain.facts]
+polygons = 57600
+
+[ds-both-screens]
+frames = ["96d85ecfde6ccd18", "96d85ecfde6ccd18", "96d85ecfde6ccd18"]
+audio = ""
+state = "97cc5bde06e436ee"
+
+[ds-both-screens.facts]
+cycles = 67071570
+
+[ds-touch-input]
+frames = ["f69a3a14e4dca14c", "51c0fceb528712f3", "c5a521eccb901aa4"]
+audio = ""
+state = "fa89bb33cf65a564"
+
+[ds-touch-input.facts]
+cycles = 67071570
+touches = 90
+
+[ds-video-mode-vram]
+frames = ["2e084245fd067600", "2e084245fd067600", "2e084245fd067600"]
+audio = ""
+state = "6b0c078e84e3050f"
+
+[ds-video-mode-vram.facts]
+cycles = 67071570
+
+[gb-cpu-instrs]
+frames = ["05223ebb9aa34a39", "05223ebb9aa34a39", "18408b2ba98f692d"]
+audio = "c2b2e196e9305ed1"
+state = "cedee51bcb4e5548"
+
+[gb-cpu-instrs.facts]
+samples = 963584
+
+[gb-dmg-acid2]
+frames = ["f2ad97c3c574fc3a", "f2ad97c3c574fc3a", "f2ad97c3c574fc3a"]
+audio = "3704f28c7a23082d"
+state = "ae60dfee959d511a"
+
+[gb-dmg-acid2.facts]
+samples = 481378
+
+[gb-libbet]
+frames = ["9297c23120fde739", "a54d22faefca1f70", "a8bcd12875594737"]
+audio = "016b367662e5daf1"
+state = "2c478cb7b68f372d"
+
+[gb-libbet.facts]
+samples = 962646
+
+[gb-link-snake]
+frames = ["972b33fc349b49f4", "972b33fc349b49f4", "be552b8a4f1329f5"]
+audio = "fb1deba0aec7951d"
+state = "9b66e416cabd1bfd"
+
+[gb-link-snake.facts]
+cable_transfers = 2
+samples = 623876
+
+[gb-pair-tobu]
+frames = ["98d1bd6cc14fcb32", "5a958fde71dd82a9", "9f486025093430ae"]
+audio = "134cdb636ac09ef9"
+state = "6ca3853558600c56"
+
+[gb-pair-tobu.facts]
+cable_transfers = 0
+samples = 640396
+
+[gb-shock-lobster]
+frames = ["3753bb9cf0f90c71", "98af1b2484c4f370", "5c51291a6f1eadbe"]
+audio = "f2546079976ab899"
+state = "fe64b71a023095e8"
+
+[gb-shock-lobster.facts]
+samples = 964178
+
+[gb-state-tobu]
+frames = ["e531d4ed83a7fea9", "e531d4ed83a7fea9", "9ab4e008dd5a4325"]
+audio = ""
+state = "63b61cd628b87e89"
+
+[gb-state-tobu.facts]
+rounds = 10
+state_bytes = 346233
+
+[gb-tobu]
+frames = ["e531d4ed83a7fea9", "ed4b4d2dc76a54ae", "ed4b4d2dc76a54ae"]
+audio = "750abb08b72752ad"
+state = "b7406b934278a0ba"
+
+[gb-tobu.facts]
+samples = 961856
+
+[gba-cascade7]
+frames = ["de45d97e0dc7e3c9", "c146af70a3a95a4c", "4a2f82bbc694650b"]
+audio = "ea2db19b18e6efb1"
+state = "1d33e2bbaad5999d"
+
+[gba-cascade7.facts]
+samples = 481274
+
+[gba-gbarcade]
+frames = ["da987e7bc2b40795", "d1bd71148936efaf", "c0f077271f1b2744"]
+audio = "42f53ec0f4c9ed1a"
+state = "b2f0fc9df5b8c169"
+
+[gba-gbarcade.facts]
+samples = 481274
+
+[gba-hyperspace-roll]
+frames = ["56e88ce132159f45", "12f5c8691eaf2d19", "4b59a0133dd54981"]
+audio = "72f4ae6774ddac82"
+state = "9755557f2aaee6f7"
+
+[gba-hyperspace-roll.facts]
+samples = 481274
+
+[gba-jsmolka-arm]
+frames = ["e5ab36d2fca96065", "e5ab36d2fca96065", "e5ab36d2fca96065"]
+audio = "86fb281cf6c9a865"
+state = "f99d3a83b7782cc5"
+
+[gba-jsmolka-arm.facts]
+samples = 384836
+
+[gba-jsmolka-memory]
+frames = ["e5ab36d2fca96065", "e5ab36d2fca96065", "e5ab36d2fca96065"]
+audio = "86fb281cf6c9a865"
+state = "c6c9b603e6982725"
+
+[gba-jsmolka-memory.facts]
+samples = 384836
+
+[gba-jsmolka-thumb]
+frames = ["e5ab36d2fca96065", "e5ab36d2fca96065", "e5ab36d2fca96065"]
+audio = "86fb281cf6c9a865"
+state = "5ecf8423e620fa02"
+
+[gba-jsmolka-thumb.facts]
+samples = 384836
+
+[gba-pair-pentris]
+frames = ["a9418ba32a4dcbef", "4d029fcbe756f3d9", "f47fc238198e6b6f"]
+audio = "b69f3843a2f873b5"
+state = "ea4d080aa5d4c914"
+
+[gba-pair-pentris.facts]
+cable_transfers = 0
+samples = 320544
+
+[gba-pentris]
+frames = ["31112e7edc0748a9", "4000d15bebc308a1", "a2b3f2273b5dfd63"]
+audio = "62a09984b882786d"
+state = "526de719f1ab23ce"
+
+[gba-pentris.facts]
+samples = 481274
+
+[gba-rollback-cascade7]
+frames = ["05064fad1587b8ee", "28908f6a14c38aa2", "25b37c6d4a20150c"]
+audio = "3700240f96d98c85"
+state = "d9c6adfff74d3dc8"
+
+[gba-rollback-cascade7.facts]
+cable_transfers = 0
+resimulated = 24
+rollbacks = 8
+samples = 245694
+
+[gba-state-pentris]
+frames = ["069dce87c69d85af", "e4f6254e90f72cc7", "8e5a2e79f3ec1971"]
+audio = ""
+state = "84b946458f273ac2"
+
+[gba-state-pentris.facts]
+rounds = 6
+state_bytes = 2383506
+
+[gba-status-irq-dma]
+frames = ["c60d23db47e79325", "c60d23db47e79325", "c60d23db47e79325"]
+audio = "86fb281cf6c9a865"
+state = "203720d3fb1cf1da"
+
+[gba-status-irq-dma.facts]
+samples = 384836
+
+[gba-the-hat]
+frames = ["91fceb8d3a48388e", "51867fb8a3d84326", "174e0e51b24c7b89"]
+audio = "09ccd9c4db2e6f4f"
+state = "549fb8e663e5092c"
+
+[gba-the-hat.facts]
+samples = 481274
+
+[gbc-cgb-acid2]
+frames = ["71a4a863fe5bcde0", "71a4a863fe5bcde0", "71a4a863fe5bcde0"]
+audio = "25e0fd31d497982d"
+state = "a6c66464ea308514"
+
+[gbc-cgb-acid2.facts]
+samples = 481634
+
+[gbc-hdma]
+frames = ["6f1968134cdc7912", "6f1968134cdc7912", "6f1968134cdc7912"]
+audio = "76f7477227c38341"
+state = "e1dd48b04d4bcc82"
+
+[gbc-hdma.facts]
+samples = 479796
+
+[gbc-link-petris]
+frames = ["dc14ed98ea0f10c5", "a1507605445649ce", "6885efc558a8d709"]
+audio = "9c8c8c2cc0d08db1"
+state = "46dbe332b014ac83"
+
+[gbc-link-petris.facts]
+cable_transfers = 37
+samples = 1605622
+
+[gbc-postie]
+frames = ["1d294502ec6125f2", "068922c37bc69f6a", "8d72ba1455ed22f5"]
+audio = "971d2369f7a4a789"
+state = "10a78b3ef7d884fb"
+
+[gbc-postie.facts]
+samples = 963854
+
+[gbc-rollback-ucity]
+frames = ["bf83c84b59251edf", "d0cecd2e1c788112", "e480c061dfbb5ea7"]
+audio = "7fa14c89758fa7e1"
+state = "bbece1dc7f4914f3"
+
+[gbc-rollback-ucity.facts]
+cable_transfers = 0
+resimulated = 55
+rollbacks = 18
+samples = 481814
+
+[gbc-state-ucity]
+frames = ["3ef553076b0c96df", "c58d1a0d0131eb8d", "9ab4e008dd5a4325"]
+audio = ""
+state = "d7a529fca3cbe1c3"
+
+[gbc-state-ucity.facts]
+rounds = 10
+state_bytes = 1883137
+
+[gbc-tobu-deluxe]
+frames = ["328fc9cb74799c46", "012407129a1f2c47", "012407129a1f2c47"]
+audio = "052e8d97a825e4d9"
+state = "860b1b3d250ee85e"
+
+[gbc-tobu-deluxe.facts]
+samples = 962066
+
+[gbc-ucity]
+frames = ["8273fdd65d77d6a7", "bc7c9b1835cb1167", "bc7c9b1835cb1167"]
+audio = "e7c73d64a7032b51"
+state = "01cabd1f2cd2c8c1"
+
+[gbc-ucity.facts]
+samples = 964004

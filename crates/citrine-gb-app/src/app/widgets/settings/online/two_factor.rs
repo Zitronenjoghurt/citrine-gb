@@ -1,7 +1,6 @@
 use super::{JoinForm, copy_button, primary};
 use crate::app::widgets::confirm::{CodeAsk, confirm_with_code};
 use crate::app::widgets::field::row_field;
-use crate::app::widgets::info_mark::info_mark;
 use crate::app::widgets::problem::problem_line;
 use crate::app::widgets::qr::Qr;
 use crate::app::widgets::settings::form::Form;
@@ -12,7 +11,8 @@ use citrine_gb_net::ErrorCode;
 use egui::{RichText, Ui};
 use web_time::Instant;
 
-const ABOUT: &str = "Asks for a code from an authenticator app when someone uses your sign-in key on another device.";
+pub(super) const ABOUT: &str =
+    "Asks for a code from an authenticator app when someone uses your relay ID on another device.";
 const QR_SIDE: f32 = 184.0;
 const CODES_FILE: &str = "citrine-recovery-codes.txt";
 
@@ -43,44 +43,49 @@ pub(super) fn two_factor(
         return;
     };
     let (on, left) = (account.two_factor, account.codes_left);
+    let codes = online.recovery_codes().map(<[String]>::to_vec);
+    let secret = online.two_factor_setup().map(<[u8]>::to_vec);
     Form::show(ui, "online_two_factor", |f| {
-        f.text_row("Two-factor sign-in", |ui| {
+        f.text_row("Status", |ui| {
             if on {
                 ui.label("On");
                 ui.label(RichText::new(format!("· {left} recovery codes left")).weak());
             } else {
                 ui.label(RichText::new("Off").weak());
             }
-            info_mark(ui, ABOUT);
         });
+        if let Some(codes) = codes {
+            f.custom(|ui| recovery_codes(ui, online, form, &codes, name, host, now));
+        } else if let Some(secret) = secret {
+            f.custom(|ui| setup(ui, online, form, &secret, name, now));
+        } else if on {
+            f.buttons(|ui| {
+                let connected = online.is_connected();
+                if ui
+                    .add_enabled(connected, egui::Button::new("Turn off"))
+                    .clicked()
+                {
+                    open(form, Ask::TurnOff);
+                }
+                if ui
+                    .add_enabled(connected, egui::Button::new("New recovery codes"))
+                    .clicked()
+                {
+                    open(form, Ask::NewCodes);
+                }
+            });
+        } else {
+            f.buttons(|ui| {
+                if ui
+                    .add_enabled(online.is_connected(), egui::Button::new("Set up"))
+                    .clicked()
+                {
+                    form.setup_code.clear();
+                    online.start_two_factor();
+                }
+            });
+        }
     });
-    if let Some(codes) = online.recovery_codes().map(<[String]>::to_vec) {
-        recovery_codes(ui, online, form, &codes, name, host, now);
-    } else if let Some(secret) = online.two_factor_setup().map(<[u8]>::to_vec) {
-        setup(ui, online, form, &secret, name, now);
-    } else if on {
-        ui.horizontal(|ui| {
-            let connected = online.is_connected();
-            if ui
-                .add_enabled(connected, egui::Button::new("Turn off"))
-                .clicked()
-            {
-                open(form, Ask::TurnOff);
-            }
-            if ui
-                .add_enabled(connected, egui::Button::new("New recovery codes"))
-                .clicked()
-            {
-                open(form, Ask::NewCodes);
-            }
-        });
-    } else if ui
-        .add_enabled(online.is_connected(), egui::Button::new("Set up"))
-        .clicked()
-    {
-        form.setup_code.clear();
-        online.start_two_factor();
-    }
 }
 
 pub(super) fn phone(
@@ -251,7 +256,7 @@ fn phone_codes(
     )
     .clicked()
     {
-        save_codes(name, host, &all);
+        save_codes(form, name, host, &all);
     }
     ui.add_space(8.0);
     if kit::primary_button(ui, "Done") {
@@ -259,12 +264,20 @@ fn phone_codes(
     }
 }
 
-fn save_codes(name: &str, host: &str, all: &str) {
-    let text = format!("Citrine recovery codes for {name} on {host}\n\n{all}\n");
+fn save_codes(form: &mut JoinForm, name: &str, host: &str, all: &str) {
+    form.codes_to_save = Some(format!(
+        "Citrine recovery codes for {name} on {host}\n\n{all}\n"
+    ));
+}
+
+pub(crate) fn save_asked_codes(form: &mut JoinForm, spawner: &citrine_gb_threads::Spawner) {
+    let Some(text) = form.codes_to_save.take() else {
+        return;
+    };
     let (tx, _rx) = std::sync::mpsc::channel();
     crate::utils::file_saver::FileSaver::new(CODES_FILE)
         .add_filter("Text", &["txt"])
-        .dispatch(text.into_bytes(), tx);
+        .dispatch(spawner, text.into_bytes(), tx);
 }
 
 pub(super) fn open(form: &mut JoinForm, ask: Ask) {
@@ -370,7 +383,7 @@ fn recovery_codes(
             .button(format!("{} Save as file", icons::DOWNLOAD_SIMPLE))
             .clicked()
         {
-            save_codes(name, host, &all);
+            save_codes(form, name, host, &all);
         }
         if ui.button("Done").clicked() {
             online.forget_recovery_codes();

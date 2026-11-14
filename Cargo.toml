@@ -3,15 +3,26 @@ members = ["crates/*"]
 default-members = [
     "crates/citrine-gb",
     "crates/citrine-gb-app",
+    "crates/citrine-gb-blip",
     "crates/citrine-gb-gamedata",
     "crates/citrine-gb-net",
+    "crates/citrine-gb-nds-files",
+    "crates/citrine-gb-nds-net",
+    "crates/citrine-gb-nds-sound",
+    "crates/citrine-gb-pkm",
+    "crates/citrine-gb-report",
     "crates/citrine-gb-partner",
     "crates/citrine-gb-server",
+    "crates/citrine-gb-surface",
+    "crates/citrine-gb-test-roms",
+    "crates/citrine-gb-threads",
+    "crates/citrine-gb-walker",
+    "crates/citrine-gb-websocket",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://gb.lemon.industries"
@@ -19,32 +30,47 @@ repository = "https://github.com/Zitronenjoghurt/citrine-gb"
 
 [workspace.dependencies]
 citrine-gb = { path = "crates/citrine-gb" }
+citrine-gb-achievements = { path = "crates/citrine-gb-achievements" }
+citrine-gb-blip = { path = "crates/citrine-gb-blip" }
 citrine-gb-gamedata = { path = "crates/citrine-gb-gamedata" }
 citrine-gb-net = { path = "crates/citrine-gb-net" }
+citrine-gb-nds-files = { path = "crates/citrine-gb-nds-files" }
+citrine-gb-nds-gpu = { path = "crates/citrine-gb-nds-gpu" }
+citrine-gb-nds-sound = { path = "crates/citrine-gb-nds-sound" }
 citrine-gb-partner = { path = "crates/citrine-gb-partner" }
+citrine-gb-pkm = { path = "crates/citrine-gb-pkm" }
+citrine-gb-report = { path = "crates/citrine-gb-report", default-features = false }
 citrine-gb-server = { path = "crates/citrine-gb-server" }
+citrine-gb-surface = { path = "crates/citrine-gb-surface" }
+citrine-gb-nds-net = { path = "crates/citrine-gb-nds-net" }
+citrine-gb-walker = { path = "crates/citrine-gb-walker" }
+citrine-gb-websocket = { path = "crates/citrine-gb-websocket" }
+citrine-gb-threads = { path = "crates/citrine-gb-threads" }
+citrine-gb-test-roms = { path = "crates/citrine-gb-test-roms" }
+melonds-sys = { path = "crates/melonds-sys" }
 mgba-sys = { path = "crates/mgba-sys" }
+rcheevos-sys = { path = "crates/rcheevos-sys" }
 sameboy-sys = { path = "crates/sameboy-sys" }
 
 [profile.dev.package.citrine-gb]
+opt-level = 3
+
+[profile.dev.package.citrine-gb-app]
+opt-level = 3
+
+[profile.dev.package.citrine-gb-nds-gpu]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.melonds-sys]
 opt-level = 3
 
 [profile.dev.package.mgba-sys]
 opt-level = 3
 
 [profile.dev.package.sameboy-sys]
-opt-level = 3
-
-[profile.dev.package.openh264-sys2]
-opt-level = 3
-
-[profile.dev.package.rusty_aac]
-opt-level = 3
-
-[profile.dev.package.argon2]
-opt-level = 3
-
-[profile.dev.package.blake2]
 opt-level = 3
 
 [profile.dist]

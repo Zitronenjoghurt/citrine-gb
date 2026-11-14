@@ -16,7 +16,7 @@ const KEY_NOTE: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum YouSheet {
     DisplayName,
-    SignInKey,
+    RelayId,
     TwoFactor,
     Devices,
     Accounts,
@@ -148,8 +148,8 @@ impl Citrine {
                 let ctx = list.ui().ctx().clone();
                 online::copy_now(&ctx, form, "online", &account.online_id, now);
             }
-            if list.row(Row::new("Sign-in key").icon(icons::KEY)).clicked() {
-                open = Some(YouSheet::SignInKey);
+            if list.row(Row::new("Relay ID").icon(icons::KEY)).clicked() {
+                open = Some(YouSheet::RelayId);
             }
             if let Some(on) = account.two_factor
                 && list
@@ -244,19 +244,19 @@ impl Citrine {
                 }
                 shown.inner || shown.closed
             }
-            YouSheet::SignInKey => {
+            YouSheet::RelayId => {
                 let copied = online::just_copied(form, "relay", now);
-                let shown = sheet::show(ctx, id, "Sign-in key", |ui| {
+                let shown = sheet::show(ctx, id, "Relay ID", |ui| {
                     sheet::note(ui, KEY_NOTE);
                     let text = if copied {
                         format!("{} Copied", icons::CHECK)
                     } else {
-                        format!("{} Copy sign-in key", icons::COPY)
+                        format!("{} Copy relay ID", icons::COPY)
                     };
                     kit::primary_button(ui, &text)
                 });
                 if shown.inner {
-                    online::copy_now(ctx, form, "relay", &account.sign_in_key, now);
+                    online::copy_now(ctx, form, "relay", &account.relay_id, now);
                 }
                 shown.closed
             }
@@ -317,4 +317,36 @@ impl Citrine {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::stats::{GameTotals, Overview};
+
+    #[test]
+    fn stats_show_the_week_and_the_most_played_game() {
+        let overview = Overview {
+            week_ms: 6 * 3_600_000 + 20 * 60_000,
+            games: vec![GameTotals {
+                name: "Pokémon Silver".into(),
+                play_ms: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            stat_rows(&overview),
+            [
+                (icons::CHART_BAR, "This week", "6 h 20 min".to_owned()),
+                (
+                    icons::GAME_CONTROLLER,
+                    "Most played",
+                    "Pokémon Silver".to_owned()
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn no_most_played_before_the_first_game() {
+        assert_eq!(stat_rows(&Overview::default()).len(), 1);
+    }
+}

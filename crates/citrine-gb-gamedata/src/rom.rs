@@ -64,7 +64,9 @@ impl RomTables {
         let (sources, species_count, move_count, item_count) = match game.generation() {
             Generation::One => (gen1_sources(game, rom), GEN1_SPECIES, 165, 83),
             Generation::Two => (gen2_sources(game, rom), GEN2_SPECIES, 251, 249),
-            Generation::Three => return Err(ReadError::RomTables),
+            Generation::Three | Generation::Four | Generation::Five => {
+                return Err(ReadError::RomTables);
+            }
         };
         let sources = sources.ok_or(ReadError::RomTables)?;
         let species_names =
@@ -81,7 +83,7 @@ impl RomTables {
             name_list(game, rom, sources.items, item_count).ok_or(ReadError::RomTables)?;
         let dex_order = match game.generation() {
             Generation::One => find_dex_order(rom).ok_or(ReadError::RomTables)?,
-            Generation::Two | Generation::Three => Vec::new(),
+            Generation::Two | Generation::Three | Generation::Four | Generation::Five => Vec::new(),
         };
         let live = live_blocks(rom, Layout::of(game).live_starts);
         let base_stats = base::load(game, rom);
@@ -233,7 +235,7 @@ impl RomTables {
             Generation::Two => (1..=GEN2_SPECIES as u16)
                 .contains(&species)
                 .then_some(species),
-            Generation::Three => None,
+            Generation::Three | Generation::Four | Generation::Five => None,
         }
     }
 
@@ -245,7 +247,7 @@ impl RomTables {
                 .position(|&d| d != 0 && u16::from(d) == dex)
                 .map(|index| index as u16 + 1),
             Generation::Two => (1..=GEN2_SPECIES as u16).contains(&dex).then_some(dex),
-            Generation::Three => None,
+            Generation::Three | Generation::Four | Generation::Five => None,
         }
     }
 
@@ -283,7 +285,7 @@ impl RomTables {
         match self.game.generation() {
             Generation::One => (0xC4..=0xC8).contains(&item),
             Generation::Two => (0xF3..=0xF9).contains(&item),
-            Generation::Three => false,
+            Generation::Three | Generation::Four | Generation::Five => false,
         }
     }
 
@@ -298,7 +300,7 @@ impl RomTables {
         match self.game.generation() {
             Generation::One => GEN1_DEX,
             Generation::Two => GEN2_SPECIES as u16,
-            Generation::Three => 0,
+            Generation::Three | Generation::Four | Generation::Five => 0,
         }
     }
 }
@@ -435,7 +437,7 @@ fn find_machines(game: Game, rom: &[u8]) -> Vec<u8> {
     let (start, count): (&[u8], usize) = match game.generation() {
         Generation::One => (&[5, 13, 14, 18, 25, 92], 55),
         Generation::Two => (&[223, 29, 174, 205, 46, 92], 57),
-        Generation::Three => return Vec::new(),
+        Generation::Three | Generation::Four | Generation::Five => return Vec::new(),
     };
     rom.windows(start.len())
         .position(|window| window == start)
@@ -529,4 +531,248 @@ fn live_blocks(rom: &[u8], starts: &[usize]) -> Vec<LiveBlock> {
     }
     found.sort_by_key(|block| block.sram);
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fixtures::{
+        crystal_rom, game, japanese_cartridge_in_latin, name, put, seal_cartridge,
+    };
+    use crate::test_support::crystal_rom_with_pictures;
+    use crate::test_support::red_rom;
+    use crate::{Dvs, Gender, Genes, GrowthRate, Mon, Pokerus, Side, Stats};
+    use crate::{Language, ReadError, RomTables, Version};
+
+    #[test]
+    fn gen1_names_come_from_the_rom() {
+        let tables =
+            RomTables::load(game(Version::Red, Language::English), &red_rom()).expect("tables");
+        assert_eq!(tables.species_name(1), Some("MAA"));
+        assert_eq!(tables.species_name(190), Some("MHH"));
+        assert_eq!(tables.species_name(0), None);
+        assert_eq!(tables.move_name(1), Some("MOVEAA"));
+        assert_eq!(tables.move_name(165), Some("MOVEGI"));
+        assert_eq!(tables.item_name(1).as_deref(), Some("ITEMAA"));
+        assert_eq!(tables.item_name(0xC4).as_deref(), Some("HM01"));
+        assert_eq!(tables.item_name(0xC9).as_deref(), Some("TM01"));
+        assert_eq!(tables.item_name(0xFA).as_deref(), Some("TM50"));
+        assert!(tables.is_hm(0xC4));
+        assert!(tables.is_hm(0xC8));
+        assert!(!tables.is_hm(0xC9));
+    }
+
+    #[test]
+    fn gen1_pokedex_order_maps_both_ways() {
+        let tables =
+            RomTables::load(game(Version::Red, Language::English), &red_rom()).expect("tables");
+        assert_eq!(tables.dex_number(1), Some(151));
+        assert_eq!(tables.dex_number(2), None);
+        assert_eq!(tables.dex_number(190), Some(1));
+        assert_eq!(tables.dex_number(191), None);
+        assert_eq!(tables.species_for_dex(151), Some(1));
+        assert_eq!(tables.species_for_dex(150), Some(41));
+        assert_eq!(tables.species_for_dex(1), Some(190));
+        assert_eq!(tables.species_for_dex(152), None);
+        assert_eq!(tables.pokedex_size(), 151);
+    }
+
+    #[test]
+    fn a_rom_without_name_tables_is_refused() {
+        let rom = vec![0u8; 0x80000];
+        assert_eq!(
+            RomTables::load(game(Version::Red, Language::English), &rom).err(),
+            Some(ReadError::RomTables)
+        );
+        assert_eq!(
+            RomTables::load(game(Version::Gold, Language::English), &rom).err(),
+            Some(ReadError::RomTables)
+        );
+    }
+
+    #[test]
+    fn a_japanese_rom_with_latin_names_is_refused() {
+        let rom = japanese_cartridge_in_latin();
+        let game = crate::identify(&rom).expect("identified");
+        assert_eq!(game.language, Language::Japanese);
+        assert_eq!(
+            RomTables::load(game, &rom).err(),
+            Some(ReadError::RomTables)
+        );
+    }
+
+    #[test]
+    fn a_japanese_rom_loads_with_kana_names_and_its_own_checksum() {
+        let mut rom = japanese_cartridge_in_latin();
+        let kana: Vec<u8> = (0..251u8)
+            .flat_map(|i| name(&[0x80 + i % 0x1A, 0x05 + i % 0x0F, 0xE3], 5))
+            .collect();
+        put(&mut rom, 0x53384, &kana);
+        seal_cartridge(&mut rom);
+        let game = crate::identify(&rom).expect("identified");
+        assert!(RomTables::load(game, &rom).is_ok());
+
+        rom[0x4000] ^= 1;
+        assert_eq!(
+            RomTables::load(game, &rom).err(),
+            Some(ReadError::RomTables)
+        );
+    }
+
+    #[test]
+    fn machines_name_their_moves() {
+        let mut rom = crystal_rom();
+        let machines: Vec<u8> = [223u8, 29, 174, 205, 46, 92]
+            .into_iter()
+            .chain(7..58)
+            .collect();
+        put(&mut rom, 0x1167A, &machines);
+        let tables =
+            RomTables::load(game(Version::Crystal, Language::English), &rom).expect("tables");
+        assert_eq!(tables.machine_move(0xBF), tables.move_name(223));
+        assert_eq!(tables.machine_move(0xC4), tables.move_name(46));
+        assert_eq!(tables.machine_move(0xC3), None);
+        assert_eq!(tables.machine_move(0xDC), None);
+        assert_eq!(tables.machine_move(0xF3), tables.move_name(51));
+        assert_eq!(tables.machine_move(0xF9), tables.move_name(57));
+        assert_eq!(tables.machine_move(0xFA), None);
+        assert!(tables.is_hm(0xF3));
+        assert!(tables.is_hm(0xF9));
+        assert!(!tables.is_hm(0xF2));
+        assert!(!tables.is_hm(0xC4));
+        assert_eq!(tables.machine_move(0x01), None);
+    }
+
+    fn mon(species: u16, level: u8, exp: u32, dvs: Dvs, stat_exp: [u16; 5]) -> Mon {
+        Mon {
+            species,
+            nickname: String::new(),
+            ot_name: String::new(),
+            ot_id: 0,
+            level,
+            exp,
+            moves: Vec::new(),
+            held_item: None,
+            genes: Genes::Gb { dvs, stat_exp },
+            hp: None,
+            stats: None,
+            status: None,
+            friendship: None,
+            pokerus: None,
+            caught: None,
+        }
+    }
+
+    #[test]
+    fn stats_follow_base_dvs_and_stat_exp() {
+        let tables = RomTables::load(
+            game(Version::Crystal, Language::English),
+            &crystal_rom_with_pictures(),
+        )
+        .expect("tables");
+        let dvs = Dvs::from_bytes(0xFE, 0xDC);
+        assert_eq!(dvs.hp(), 10);
+        let mon = mon(25, 50, 0, dvs, [0, 100, 65535, 1, 10000]);
+        assert_eq!(
+            tables.mon_stats(&mon),
+            Some(Stats {
+                max_hp: 110,
+                attack: 71,
+                defense: 110,
+                speed: 88,
+                special_attack: 109,
+                special_defense: 119,
+            })
+        );
+    }
+
+    #[test]
+    fn exp_curves_match_the_growth_formulas() {
+        let at_ten = [
+            (GrowthRate::MediumFast, 1000),
+            (GrowthRate::SlightlyFast, 1720),
+            (GrowthRate::SlightlySlow, 2680),
+            (GrowthRate::MediumSlow, 560),
+            (GrowthRate::Fast, 800),
+            (GrowthRate::Slow, 1250),
+        ];
+        for (rate, exp) in at_ten {
+            assert_eq!(rate.exp_at(10), exp, "{rate:?}");
+        }
+        assert_eq!(GrowthRate::MediumSlow.exp_at(1), 0);
+        assert_eq!(GrowthRate::MediumSlow.exp_at(2), 9);
+        assert_eq!(GrowthRate::MediumFast.exp_at(100), 1_000_000);
+        assert_eq!(GrowthRate::Slow.exp_at(100), 1_250_000);
+        let tables = RomTables::load(
+            game(Version::Crystal, Language::English),
+            &crystal_rom_with_pictures(),
+        )
+        .expect("tables");
+        let dvs = Dvs::from_bytes(0, 0);
+        assert_eq!(
+            tables.exp_to_next_level(&mon(25, 9, 900, dvs, [0; 5])),
+            Some(100)
+        );
+        assert_eq!(
+            tables.exp_to_next_level(&mon(25, 9, 1500, dvs, [0; 5])),
+            Some(0)
+        );
+        assert_eq!(
+            tables.exp_to_next_level(&mon(25, 100, 1_000_000, dvs, [0; 5])),
+            None
+        );
+    }
+
+    #[test]
+    fn gender_compares_attack_and_speed_dvs_with_the_ratio() {
+        let tables = RomTables::load(
+            game(Version::Crystal, Language::English),
+            &crystal_rom_with_pictures(),
+        )
+        .expect("tables");
+        let gender = |species: u16, high: u8, low: u8| {
+            tables.mon_gender(&mon(species, 5, 0, Dvs::from_bytes(high, low), [0; 5]))
+        };
+        assert_eq!(gender(25, 0x00, 0x00), Some(Gender::Male));
+        assert_eq!(gender(26, 0x1F, 0xF0), Some(Gender::Female));
+        assert_eq!(gender(26, 0x20, 0x00), Some(Gender::Male));
+        assert_eq!(gender(27, 0x70, 0xF0), Some(Gender::Female));
+        assert_eq!(gender(27, 0x80, 0x00), Some(Gender::Male));
+        assert_eq!(gender(28, 0xF0, 0xF0), Some(Gender::Female));
+        assert_eq!(gender(29, 0x00, 0x00), None);
+    }
+
+    #[test]
+    fn shiny_mons_get_the_shiny_palette_and_unown_its_letter() {
+        let rom = crystal_rom_with_pictures();
+        let tables =
+            RomTables::load(game(Version::Crystal, Language::English), &rom).expect("tables");
+        let plain = mon(25, 5, 0, Dvs::from_bytes(0xAA, 0xAB), [0; 5]);
+        let shiny = mon(25, 5, 0, Dvs::from_bytes(0xAA, 0xAA), [0; 5]);
+        assert!(shiny.shiny() && !plain.shiny());
+        assert_eq!(tables.mon_palette(&plain), tables.palette(25, false));
+        assert_eq!(tables.mon_palette(&shiny), tables.palette(25, true));
+        let unown = mon(201, 5, 0, Dvs::from_bytes(0x00, 0x44), [0; 5]);
+        assert_eq!(unown.dvs().map(Dvs::unown_letter), Some('B'));
+        let sprite = tables.mon_sprite(&rom, &unown, Side::Front).expect("unown");
+        assert!(sprite.pixels.iter().all(|&p| p == 3 || p == 0));
+        assert_eq!(sprite.pixel(0, 0), 3);
+        assert_eq!(sprite.pixel(7, 0), 3);
+        assert_eq!(sprite.pixel(1, 0), 0);
+    }
+
+    #[test]
+    fn pokerus_reads_strain_and_days() {
+        let with = |byte| {
+            let mut m = mon(1, 5, 0, Dvs::from_bytes(0, 0), [0; 5]);
+            m.pokerus = byte;
+            m.pokerus_status()
+        };
+        assert_eq!(with(None), None);
+        assert_eq!(with(Some(0)), None);
+        assert_eq!(
+            with(Some(0x13)),
+            Some(Pokerus::Infected { strain: 1, days: 3 })
+        );
+        assert_eq!(with(Some(0xA0)), Some(Pokerus::Cured { strain: 10 }));
+    }
 }

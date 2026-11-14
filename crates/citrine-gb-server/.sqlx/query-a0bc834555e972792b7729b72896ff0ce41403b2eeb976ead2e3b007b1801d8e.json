@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO push_tokens (device_id, account_id, token, kinds, updated_at)\n               SELECT id, account_id, ?3, ?4, ?5 FROM devices\n                WHERE id = ?1 AND account_id = ?2 AND left_at IS NULL\n             ON CONFLICT (device_id) DO UPDATE\n                SET token = excluded.token, kinds = excluded.kinds, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a0bc834555e972792b7729b72896ff0ce41403b2eeb976ead2e3b007b1801d8e"
+}

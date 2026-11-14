@@ -2,6 +2,10 @@ use super::{Citrine, GAME_INFO_DOCK_SHARE};
 use crate::app::tabs::Tab;
 use citrine_gb_gamedata::Ram;
 use egui_dock::SurfaceIndex;
+use std::sync::Arc;
+
+#[cfg(feature = "nds")]
+const WALKER_REDRAW: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl Citrine {
     pub(super) fn watch_game_info(&mut self) {
@@ -11,10 +15,14 @@ impl Citrine {
             let saved_at = key
                 .as_deref()
                 .and_then(|key| self.emulator.store.battery_saved_at(key));
-            self.game_info.set_rom(key.as_deref(), &rom, saved_at);
-            if !self.game_info.recognised() {
+            self.game_info
+                .set_rom(key.as_deref(), rom, saved_at, &self.threads);
+            if !self.game_info.loading() {
                 self.close_game_info();
             }
+        }
+        if self.game_info.settle() == Some(false) {
+            self.close_game_info();
         }
         let open =
             self.dock.find_tab(&Tab::GameInfo).is_some() || self.mobile.showing(Tab::GameInfo);
@@ -39,6 +47,11 @@ impl Citrine {
                 let memory = gba_memory::GbaMemory::read(gba);
                 self.game_info.read(&memory.battery, memory.ram(), unix);
             }
+            #[cfg(feature = "nds")]
+            if let Some(nds) = self.emulator.as_nds() {
+                self.game_info
+                    .read(&[], Ram::Ds(nds.buses().main_ram()), unix);
+            }
         }
         if progress
             && let (Some(rom), Some(state)) = (self.game_info.rom_key(), self.game_info.progress())
@@ -48,19 +61,71 @@ impl Citrine {
         }
     }
 
-    fn game_info_rom(&self) -> Vec<u8> {
+    fn game_info_rom(&self) -> Arc<[u8]> {
         if let Some(gb) = self.emulator.as_gb() {
             return gb.cartridge.rom_bytes();
         }
         #[cfg(feature = "gba")]
         if let Some(gba) = self.emulator.as_gba() {
-            return gba.bus().rom().to_vec();
+            return gba.bus().shared_rom();
         }
-        Vec::new()
+        #[cfg(feature = "nds")]
+        if let Some(nds) = self.emulator.as_nds() {
+            return nds.rom_bytes();
+        }
+        Arc::from([])
     }
 
     pub(super) fn widen_for_game_info(&mut self) {
-        let Some((surface, node, _)) = self.dock.find_tab(&Tab::GameInfo) else {
+        self.widen_for(Tab::GameInfo, GAME_INFO_DOCK_SHARE);
+    }
+
+    #[cfg(feature = "nds")]
+    pub(super) fn open_walker(&mut self) {
+        self.open_tab(Tab::Walker);
+    }
+
+    #[cfg(feature = "nds")]
+    pub(super) fn follow_walker(&mut self, ctx: &egui::Context) {
+        let now_ms = (ctx.input(|i| i.time) * 1000.0) as u64;
+        let online = &self.ui.settings.online;
+        let synced = online.cloud_saves && online.cloud_owner().is_some();
+        self.emulator.sync_walker(&mut self.online, synced);
+        let showing =
+            self.dock.find_tab(&Tab::Walker).is_some() || self.mobile.showing(Tab::Walker);
+        self.follow_phone_steps(showing);
+        self.emulator
+            .set_steps_in_game(self.ui.settings.walker.in_game);
+        self.emulator.tick_walker(now_ms);
+        if self.emulator.take_walker_linked() && !self.is_mobile(ctx) {
+            self.open_walker();
+        }
+        if showing {
+            ctx.request_repaint_after(WALKER_REDRAW);
+        }
+    }
+
+    #[cfg(all(feature = "nds", target_os = "android"))]
+    fn follow_phone_steps(&mut self, showing: bool) {
+        use crate::platform::android::steps;
+        let on = self.ui.settings.walker.phone;
+        steps::follow(on, on && (showing || self.ui.settings.walker_asked));
+        let pokewalker = &mut self.emulator.pokewalker;
+        if on != pokewalker.has_step_source() {
+            pokewalker.set_step_source(on.then(|| {
+                Box::new(crate::walker::PhoneSteps::new(
+                    Box::new(steps::reading),
+                    crate::storage::Backend::settings(),
+                )) as Box<dyn crate::walker::StepSource>
+            }));
+        }
+    }
+
+    #[cfg(all(feature = "nds", not(target_os = "android")))]
+    fn follow_phone_steps(&mut self, _showing: bool) {}
+
+    fn widen_for(&mut self, tab: Tab, share: f32) {
+        let Some((surface, node, _)) = self.dock.find_tab(&tab) else {
             return;
         };
         let Some(parent) = node.parent() else {
@@ -69,9 +134,9 @@ impl Citrine {
         if surface == SurfaceIndex::main()
             && node.is_right()
             && let egui_dock::Node::Horizontal(split) = &mut self.dock.main_surface_mut()[parent]
-            && split.fraction > GAME_INFO_DOCK_SHARE
+            && split.fraction > share
         {
-            split.fraction = GAME_INFO_DOCK_SHARE;
+            split.fraction = share;
         }
     }
 

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pid AS \"pid!\", record, deposited_at FROM gts_sim_records\n                WHERE generation = ?1 AND species = ?2 AND traded_at IS NULL\n                ORDER BY deposited_at DESC LIMIT 500",
+  "describe": {
+    "columns": [
+      {
+        "name": "pid!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "name": "record",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "record"
+          }
+        }
+      },
+      {
+        "name": "deposited_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "gts_sim_records",
+            "name": "deposited_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c31bdf9810b02a0e39625b95249b95970db89e9a833615fbf3be584ddd3a6393"
+}

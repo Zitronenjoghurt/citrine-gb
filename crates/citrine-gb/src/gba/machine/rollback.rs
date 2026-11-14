@@ -4,7 +4,7 @@ use crate::error::GbResult;
 use crate::gba::bios::Boot;
 use crate::gba::bus::Bus;
 use crate::gba::cpu::Cpu;
-use crate::netplay::state::Fnv;
+use crate::netplay::state::CheckHash;
 
 #[derive(serde::Serialize)]
 struct Saved<'a> {
@@ -61,6 +61,7 @@ impl Rollback for Gba {
             frame_end: self.frame_end,
             fault: self.fault,
             rumble: self.rumble,
+            idle: self.idle.restarted(),
             #[cfg(feature = "debug")]
             debugger: Default::default(),
             #[cfg(feature = "debug")]
@@ -69,12 +70,20 @@ impl Rollback for Gba {
             stepping: Default::default(),
             #[cfg(feature = "rom-id")]
             rom_id: self.rom_id,
+            #[cfg(jit)]
+            jit: self.jit.as_deref().map(|jit| Box::new(jit.fork())),
+            #[cfg(jit)]
+            jit_cache: self.jit_cache.clone(),
+            #[cfg(jit)]
+            straight: false,
+            #[cfg(feature = "jit-lockstep")]
+            lockstep: Default::default(),
         }
     }
 
     fn copy_state_from(&mut self, source: &Gba) {
         self.cpu.clone_from(&source.cpu);
-        self.bus.adopt_rom(&source.bus);
+        let rom_changed = self.bus.adopt_rom(&source.bus);
         self.bus.copy_state_from(&source.bus);
         if self.bios != source.bios {
             self.bios.clone_from(&source.bios);
@@ -85,26 +94,48 @@ impl Rollback for Gba {
         self.frame_end = source.frame_end;
         self.fault = source.fault;
         self.rumble = source.rumble;
+        if rom_changed {
+            self.idle.forget();
+        } else {
+            self.idle.restart();
+        }
         #[cfg(feature = "rom-id")]
         {
             self.rom_id = source.rom_id;
         }
+        #[cfg(jit)]
+        {
+            self.straight = false;
+            if let Some(jit) = self.jit.as_deref_mut() {
+                jit.recheck();
+            }
+        }
+    }
+
+    fn snapshot_into(&mut self, slot: &mut Gba) {
+        self.bus.share_pages_into(&mut slot.bus);
+        slot.copy_state_from(self);
     }
 
     fn state_hash(&self, _scratch: &mut Gba) -> u64 {
-        let mut fnv = Fnv::new();
-        let _ = rmp_serde::encode::write(&mut fnv, &self.saved());
-        fnv.finish()
+        let mut hash = CheckHash::new();
+        let _ = rmp_serde::encode::write(&mut hash, &self.saved());
+        hash.finish()
     }
 
     fn encode_state(&self) -> GbResult<Vec<u8>> {
         Ok(rmp_serde::to_vec(&self.saved())?)
     }
 
+    fn encode_state_into(&self, out: &mut Vec<u8>) -> GbResult<()> {
+        Ok(rmp_serde::encode::write(out, &self.saved())?)
+    }
+
     fn decode_state(&self, data: &[u8]) -> GbResult<Gba> {
         let loaded: Loaded = rmp_serde::from_slice(data)?;
         let mut bus = loaded.bus;
         bus.adopt_rom(&self.bus);
+        bus.retime_prefetch();
         bus.sound_mut().keep_settings(self.bus.sound());
         Ok(Gba {
             cpu: loaded.cpu,
@@ -116,6 +147,7 @@ impl Rollback for Gba {
             frame_end: loaded.frame_end,
             fault: loaded.fault,
             rumble: loaded.rumble,
+            idle: self.idle.restarted(),
             #[cfg(feature = "debug")]
             debugger: Default::default(),
             #[cfg(feature = "debug")]
@@ -124,6 +156,14 @@ impl Rollback for Gba {
             stepping: Default::default(),
             #[cfg(feature = "rom-id")]
             rom_id: self.rom_id,
+            #[cfg(jit)]
+            jit: self.jit.as_deref().map(|jit| Box::new(jit.fork())),
+            #[cfg(jit)]
+            jit_cache: self.jit_cache.clone(),
+            #[cfg(jit)]
+            straight: false,
+            #[cfg(feature = "jit-lockstep")]
+            lockstep: Default::default(),
         })
     }
 

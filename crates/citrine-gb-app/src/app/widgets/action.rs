@@ -10,6 +10,18 @@ pub fn wide_button(ui: &mut Ui, button: Button) -> Response {
     ui.add_sized(size, button)
 }
 
+pub fn add_centered(ui: &mut Ui, button: Button) -> Response {
+    let layout = ui.layout();
+    if layout.is_vertical()
+        && !layout.horizontal_justify()
+        && layout.cross_align == egui::Align::Min
+    {
+        ui.horizontal(|ui| ui.add(button)).inner
+    } else {
+        ui.add(button)
+    }
+}
+
 pub fn icon_text(icon: impl Into<String>) -> RichText {
     RichText::new(icon).size(18.0)
 }

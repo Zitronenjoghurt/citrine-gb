@@ -11,6 +11,7 @@ mod changelog;
 mod features;
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
 mod licenses;
+mod tail;
 mod welcome;
 
 #[derive(
@@ -100,7 +101,11 @@ impl Widget for InfoPanel<'_> {
             }
 
             let markdown = self.state.tab.build_md(&self.controls);
+            let mut tail = tail::HiddenTail::new(ui, &markdown);
             for (index, block) in blocks(&markdown).into_iter().enumerate() {
+                if tail.skip_rest(ui, index) {
+                    return;
+                }
                 match block {
                     Block::Text(text) => {
                         egui_commonmark::CommonMarkViewer::new().show(ui, self.commonmark, &text);
@@ -135,6 +140,7 @@ impl Widget for InfoPanel<'_> {
                     }
                 }
             }
+            tail.measured(ui);
         })
         .response
     }
@@ -553,7 +559,8 @@ mod tests {
         for target in BindingTarget::buttons() {
             let name = target.button_name().expect("a button");
             let row = format!("| {name} |");
-            assert_eq!(about.matches(&row).count(), 2, "{name}: {about}");
+            let rows = about.lines().filter(|line| line.starts_with(&row)).count();
+            assert_eq!(rows, 2, "{name}: {about}");
         }
     }
 
@@ -613,6 +620,64 @@ mod tests {
         for width in [110.0, 130.0, 150.0, 180.0, 240.0, 412.0] {
             let broken = wrapped_words(width);
             assert!(broken.is_empty(), "at {width}: {broken:?}");
+        }
+    }
+
+    fn scrolled_about(full_draw: bool, offset: f32) -> (Vec<String>, egui::Vec2, usize) {
+        tail::ALWAYS_FULL.set(full_draw);
+        let ctx = egui::Context::default();
+        let mut state = InfoState::default();
+        let mut cache = egui_commonmark::CommonMarkCache::default();
+        let (bindings, hotkeys) = (KeyBindings::default(), Hotkeys::default());
+        let mut last = (Vec::new(), egui::Vec2::ZERO, 0);
+        for _ in 0..4 {
+            tail::SKIPS.set(0);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 480.0),
+                )),
+                ..Default::default()
+            };
+            let mut size = egui::Vec2::ZERO;
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let controls = Controls::Desktop {
+                        bindings: &bindings,
+                        hotkeys: &hotkeys,
+                    };
+                    size = egui::ScrollArea::vertical()
+                        .vertical_scroll_offset(offset)
+                        .show(ui, |ui| {
+                            InfoPanel::new(&mut state, &mut cache, controls).ui(ui);
+                        })
+                        .content_size;
+                });
+            });
+            let seen = output
+                .shapes
+                .into_iter()
+                .filter(|clipped| {
+                    clipped
+                        .clip_rect
+                        .intersects(clipped.shape.visual_bounding_rect())
+                })
+                .map(|clipped| format!("{:?} {:?}", clipped.clip_rect, clipped.shape))
+                .collect();
+            last = (seen, size, tail::SKIPS.get());
+        }
+        last
+    }
+
+    #[test]
+    fn the_hidden_end_of_a_page_is_skipped_without_changing_what_shows() {
+        for offset in [0.0, 600.0] {
+            let (full, full_size, full_skips) = scrolled_about(true, offset);
+            let (cut, cut_size, cut_skips) = scrolled_about(false, offset);
+            assert_eq!(full_skips, 0, "at {offset}");
+            assert_eq!(cut_size, full_size, "at {offset}");
+            assert!(cut == full, "at {offset}: what shows changed");
+            assert_eq!(cut_skips, 1, "at {offset}: nothing skipped");
         }
     }
 

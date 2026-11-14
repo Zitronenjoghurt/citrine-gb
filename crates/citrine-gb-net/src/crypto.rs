@@ -11,6 +11,9 @@ const AUTH_INFO: &[u8] = b"auth key";
 const BOX_INFO: &[u8] = b"x25519 key";
 const SAVE_INFO: &[u8] = b"save key";
 const SAVE_INDEX_INFO: &[u8] = b"save index";
+const SCREEN_DOOR_INFO: &[u8] = b"screen door";
+const SCREEN_TAG_INFO: &[u8] = b"screen tag key";
+const SCREEN_PROOF_INFO: &[u8] = b"screen proof key";
 pub const NONCE_BYTES: usize = 24;
 pub const SEAL_OVERHEAD: usize = 16;
 const PLAYING_BYTES: usize = 21;
@@ -64,6 +67,7 @@ pub struct Sealed {
 #[error("the message can't be opened with these keys")]
 pub struct OpenError;
 
+#[derive(Clone)]
 pub struct Keys {
     auth: AuthKey,
     secret: SecretKey,
@@ -94,6 +98,26 @@ impl Keys {
         }
     }
 
+    fn screen_key<const N: usize>(&self, device: u64, info: &[u8]) -> [u8; N] {
+        let hkdf = Hkdf::<Sha256>::new(Some(&self.save_index), &device.to_le_bytes());
+        let mut key = [0; N];
+        hkdf.expand(info, &mut key)
+            .expect("16 and 32 bytes are valid lengths");
+        key
+    }
+
+    pub fn screen_door(&self, device: u64) -> [u8; 16] {
+        self.screen_key(device, SCREEN_DOOR_INFO)
+    }
+
+    pub fn screen_tag_key(&self, device: u64) -> [u8; 32] {
+        self.screen_key(device, SCREEN_TAG_INFO)
+    }
+
+    pub fn screen_proof(&self, device: u64) -> [u8; 32] {
+        self.screen_key(device, SCREEN_PROOF_INFO)
+    }
+
     pub fn auth_key(&self) -> &AuthKey {
         &self.auth
     }
@@ -103,22 +127,11 @@ impl Keys {
     }
 
     pub fn seal(&self, to: &PublicKey, plaintext: &[u8]) -> Sealed {
-        let mut nonce = [0; NONCE_BYTES];
-        getrandom::getrandom(&mut nonce).expect("no system random source");
-        self.seal_with_nonce(to, plaintext, nonce)
+        self.sealer(to).seal(plaintext)
     }
 
-    fn seal_with_nonce(
-        &self,
-        to: &PublicKey,
-        plaintext: &[u8],
-        nonce: [u8; NONCE_BYTES],
-    ) -> Sealed {
-        let ciphertext = self
-            .salsa_box(to)
-            .encrypt(Nonce::from_slice(&nonce), plaintext)
-            .expect("sealing in memory can't fail");
-        Sealed { nonce, ciphertext }
+    pub fn sealer(&self, to: &PublicKey) -> PeerSealer {
+        PeerSealer(self.salsa_box(to))
     }
 
     pub fn open(&self, from: &PublicKey, sealed: &Sealed) -> Result<Vec<u8>, OpenError> {
@@ -157,6 +170,24 @@ impl Keys {
     }
 }
 
+pub struct PeerSealer(SalsaBox);
+
+impl PeerSealer {
+    pub fn seal(&self, plaintext: &[u8]) -> Sealed {
+        let mut nonce = [0; NONCE_BYTES];
+        getrandom::getrandom(&mut nonce).expect("no system random source");
+        self.seal_with_nonce(plaintext, nonce)
+    }
+
+    fn seal_with_nonce(&self, plaintext: &[u8], nonce: [u8; NONCE_BYTES]) -> Sealed {
+        let ciphertext = self
+            .0
+            .encrypt(Nonce::from_slice(&nonce), plaintext)
+            .expect("sealing in memory can't fail");
+        Sealed { nonce, ciphertext }
+    }
+}
+
 impl fmt::Debug for Keys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Keys")
@@ -180,6 +211,22 @@ mod tests {
         assert_eq!(a.auth_key(), b.auth_key());
         assert_eq!(a.public_key(), b.public_key());
         assert_eq!(a.auth_key().hash(), b.auth_key().hash());
+    }
+
+    #[test]
+    fn screen_doors_match_across_devices_of_one_account_only() {
+        let (mac, phone) = (id(7).keys(), id(7).keys());
+        assert_eq!(mac.screen_door(3), phone.screen_door(3));
+        assert_eq!(mac.screen_tag_key(3), phone.screen_tag_key(3));
+        assert_eq!(mac.screen_proof(3), phone.screen_proof(3));
+        assert_ne!(mac.screen_door(3), mac.screen_door(4));
+        assert_ne!(mac.screen_proof(3), mac.screen_proof(4));
+        assert_ne!(mac.screen_door(3), id(8).keys().screen_door(3));
+        assert_ne!(mac.screen_proof(3), id(8).keys().screen_proof(3));
+        let door = mac.screen_door(3);
+        let proof = mac.screen_proof(3);
+        assert_ne!(proof[..16], door);
+        assert_ne!(proof, mac.screen_tag_key(3));
     }
 
     #[test]
@@ -281,8 +328,12 @@ mod tests {
     fn seal_with_fixed_nonce_is_deterministic() {
         let alice = id(1).keys();
         let bob = id(2).keys();
-        let a = alice.seal_with_nonce(&bob.public_key(), b"x", [9; 24]);
-        let b = bob.seal_with_nonce(&alice.public_key(), b"x", [9; 24]);
+        let a = alice
+            .sealer(&bob.public_key())
+            .seal_with_nonce(b"x", [9; 24]);
+        let b = bob
+            .sealer(&alice.public_key())
+            .seal_with_nonce(b"x", [9; 24]);
         assert_eq!(a, b);
     }
 

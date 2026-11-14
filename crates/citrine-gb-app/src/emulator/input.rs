@@ -1,13 +1,14 @@
 use super::Emulator;
+use super::runner::Hooks;
 use crate::app::ui_state::keybinds::{
-    BindingCapture, BindingKind, Captured, GbButton, KeyBindings, PadButton, Shoulder,
+    BindingCapture, BindingKind, Captured, GbButton, KeyBindings, PadButton,
 };
 use crate::controller_debug::PadLog;
 use crate::held::{Change, InputSource};
 use crate::local_link::{Game, Source};
 use crate::pad_input::{Ignored, PadAction, PadAxis, PadEvent, PadInput, PadKey, PadSource};
-use citrine_gb::console::{Console, Keys};
-use citrine_gb::debug::Debug;
+use crate::recorder::InputRecorder;
+use citrine_gb::console::{Console, ConsoleKind, Keys};
 use strum::IntoEnumIterator;
 
 const STICK_TILT_DEADZONE: f32 = 0.15;
@@ -29,6 +30,21 @@ impl Emulator {
         }
     }
 
+    pub fn lid_closed(&self) -> bool {
+        self.held.of(InputSource::Lid).contains(Keys::LID)
+    }
+
+    pub fn lid(&self) -> Option<bool> {
+        (self.played_kind() == ConsoleKind::Nds).then(|| self.lid_closed())
+    }
+
+    pub fn toggle_lid(&mut self) {
+        let Some(closed) = self.lid() else {
+            return;
+        };
+        self.set_held(InputSource::Lid, Keys::LID, !closed);
+    }
+
     pub fn held_buttons(&self) -> Keys {
         self.held.held()
     }
@@ -41,11 +57,15 @@ impl Emulator {
         self.pressed_by.take()
     }
 
+    pub fn hold(&mut self, source: InputSource, down: Keys) -> bool {
+        self.set_source(source, Keys::all(), down)
+    }
+
     pub fn release_keyboard(&mut self) {
         let all = Keys::all();
         let none = Keys::empty();
         self.set_game_source(Game::First, InputSource::Keyboard, all, none);
-        if self.link.is_some() {
+        if self.linked() {
             self.set_game_source(Game::Second, InputSource::Keyboard, all, none);
         }
     }
@@ -59,11 +79,12 @@ impl Emulator {
         let routed = match source {
             InputSource::PadButtons(pad) | InputSource::PadAxis(pad, _) => Source::Pad(pad),
             InputSource::Touch => Source::Touch,
-            InputSource::Keyboard => return self.set_game_source(Game::First, source, mask, down),
+            InputSource::Keyboard | InputSource::Surface | InputSource::Lid => {
+                return self.set_game_source(Game::First, source, mask, down);
+            }
         };
         let game = self
-            .link
-            .as_mut()
+            .link_mut()
             .map_or(Game::First, |link| link.game_for(routed));
         self.set_game_source(game, source, mask, down)
     }
@@ -79,7 +100,7 @@ impl Emulator {
             self.pressed_by = Some(source);
         }
         if game == Game::Second
-            && let Some(link) = &mut self.link
+            && let Some(link) = &mut self.seat.core_mut().link
         {
             let before = link.held();
             link.set_held(source, mask, down);
@@ -92,17 +113,12 @@ impl Emulator {
     }
 
     pub(super) fn apply(&mut self, change: Change) {
-        let total_cycles = Debug::cycles(&self.machine);
-        let buttons = GbButton::iter().map(GbButton::key);
-        for joypad in buttons.chain(Shoulder::iter().map(Shoulder::key)) {
-            if change.pressed.contains(joypad) {
-                self.machine.set_keys(self.machine.keys() | joypad);
-                self.recorder.record(total_cycles, joypad, true);
-            } else if change.released.contains(joypad) {
-                self.machine.set_keys(self.machine.keys() - joypad);
-                self.recorder.record(total_cycles, joypad, false);
-            }
-        }
+        super::runner::apply(
+            &mut self.seat.core_mut().machine,
+            change.pressed,
+            change.released,
+            &mut Recording(&mut self.recorder),
+        );
     }
 
     pub(super) fn sync_joypad(&mut self) {
@@ -111,7 +127,8 @@ impl Emulator {
             pressed: Keys::empty(),
             released: owed,
         });
-        self.machine.set_keys(self.held_buttons());
+        let held = self.held_buttons();
+        self.seat.core_mut().machine.set_keys(held);
     }
 
     pub(super) fn apply_pad(
@@ -125,6 +142,8 @@ impl Emulator {
             PadAction::Release(button) => self.release(source, button.key()),
             PadAction::Shoulder(shoulder, true) => self.press(source, shoulder.key()),
             PadAction::Shoulder(shoulder, false) => self.release(source, shoulder.key()),
+            PadAction::Ds(button, true) => self.press(source, button.key()),
+            PadAction::Ds(button, false) => self.release(source, button.key()),
             PadAction::Steer { on, off } => {
                 let mask = off
                     .iter()
@@ -141,7 +160,7 @@ impl Emulator {
                 let before = self.held.held();
                 let change = match source {
                     InputSource::PadButtons(pad) => {
-                        if let Some(link) = &mut self.link {
+                        if let Some(link) = &mut self.seat.core_mut().link {
                             link.forget_pad(pad);
                         }
                         self.held.forget_pad(pad)
@@ -159,6 +178,10 @@ impl Emulator {
         std::mem::take(&mut self.loose_presses)
     }
 
+    pub fn loose_held(&self) -> &[PadButton] {
+        &self.loose_held
+    }
+
     pub fn handle_pads(
         &mut self,
         pads: &mut dyn PadSource,
@@ -166,6 +189,7 @@ impl Emulator {
         capture: &mut BindingCapture,
         mut log: Option<&mut PadLog>,
     ) {
+        let ds = self.kind() == ConsoleKind::Nds;
         while let Some(PadEvent { pad, input, code }) = pads.next_event() {
             match input {
                 PadInput::Moved(PadAxis::RightStickX, value) => {
@@ -182,11 +206,19 @@ impl Emulator {
             };
             let zone = self.held_of(pad, source);
             let steering = GbButton::iter().find(|b| zone.contains(b.key()));
-            let action = crate::pad_input::route(input, bindings, capture, steering);
+            let action = crate::pad_input::route(input, bindings, capture, steering, ds);
             if let (PadInput::Pressed(PadKey::Known(button)), PadAction::Ignore(Ignored::Unbound)) =
                 (input, action)
             {
                 self.loose_presses.push(button);
+                self.loose_held.push(button);
+            }
+            match input {
+                PadInput::Released(PadKey::Known(button)) => {
+                    self.loose_held.retain(|held| *held != button);
+                }
+                PadInput::Disconnected | PadInput::Dropped => self.loose_held.clear(),
+                _ => {}
             }
             let changed = self.apply_pad(source, action, capture);
             let Some(log) = log.as_deref_mut() else {
@@ -213,25 +245,20 @@ impl Emulator {
         self.handle_pads(pads, bindings, capture, log);
 
         if ctx.wants_keyboard_input() && !capture.wants(BindingKind::Keyboard) {
+            #[cfg(threaded)]
+            self.away_keys.clear();
             self.release_keyboard();
             return;
         }
 
-        let events: Vec<(egui::Key, bool, egui::Modifiers)> = ctx.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|event| match event {
-                    egui::Event::Key {
-                        key,
-                        pressed,
-                        repeat: false,
-                        modifiers,
-                        ..
-                    } => Some((*key, *pressed, *modifiers)),
-                    _ => None,
-                })
-                .collect()
-        });
+        #[cfg(threaded)]
+        let events = {
+            let mut events = std::mem::take(&mut self.away_keys);
+            events.extend(key_events(ctx));
+            events
+        };
+        #[cfg(not(threaded))]
+        let events = key_events(ctx);
 
         for (key, pressed, modifiers) in events {
             if capture.wants(BindingKind::Keyboard) {
@@ -240,11 +267,13 @@ impl Emulator {
                 }
                 continue;
             }
-            let routed = match &self.link {
+            let routed = match self.link() {
                 Some(link) => link
                     .key(key, bindings)
                     .map(|(game, button)| (game, button.key())),
-                None => bindings.input_for_key(key).map(|keys| (Game::First, keys)),
+                None => bindings
+                    .input_for_key(key, self.kind() == ConsoleKind::Nds)
+                    .map(|keys| (Game::First, keys)),
             };
             if let Some((game, joypad)) = routed {
                 let down = if pressed { joypad } else { Keys::empty() };
@@ -256,10 +285,36 @@ impl Emulator {
     }
 }
 
+pub(super) fn key_events(ctx: &egui::Context) -> Vec<(egui::Key, bool, egui::Modifiers)> {
+    ctx.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some((*key, *pressed, *modifiers)),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
 fn stick_tilt(value: f32) -> f32 {
     if value.abs() < STICK_TILT_DEADZONE {
         0.0
     } else {
         value
+    }
+}
+
+struct Recording<'a>(&'a mut InputRecorder);
+
+impl Hooks for Recording<'_> {
+    fn record(&mut self, cycles: u128, key: Keys, pressed: bool) {
+        self.0.record(cycles, key, pressed);
     }
 }

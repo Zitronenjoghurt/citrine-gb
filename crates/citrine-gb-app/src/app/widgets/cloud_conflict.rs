@@ -1,7 +1,6 @@
 use crate::app::widgets::snapshots::relative_time;
 use crate::app::widgets::text::faint;
 use crate::online::cloud::{Choice, Conflict, ConflictSide};
-use crate::storage::thumb_size_of;
 use egui::{ColorImage, Context, RichText, TextureHandle, TextureOptions, Ui};
 
 pub enum Answer {
@@ -10,13 +9,13 @@ pub enum Answer {
 }
 
 fn thumb(ctx: &Context, key: String, side: &ConflictSide) -> Option<TextureHandle> {
-    let pixels = side.thumb.as_ref()?;
-    let size = thumb_size_of(pixels)?;
+    let thumb = side.thumb.as_ref()?;
     let id = egui::Id::new(("cloud_thumb", &key));
     if let Some(texture) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
         return Some(texture);
     }
-    let image = ColorImage::from_rgba_unmultiplied(size, pixels);
+    let size = [thumb.width as usize, thumb.height as usize];
+    let image = ColorImage::from_rgba_unmultiplied(size, &thumb.rgba);
     let texture = ctx.load_texture(key, image, TextureOptions::NEAREST);
     ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
     Some(texture)

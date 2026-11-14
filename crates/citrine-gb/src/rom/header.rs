@@ -303,6 +303,13 @@ impl RomHeader {
         Self::licensee_for_code([data[0x144], data[0x145]])
     }
 
+    pub fn maker_for_code(code: [u8; 2]) -> RomLicensee {
+        match &code {
+            b"01" => RomLicensee::Nintendo,
+            _ => Self::licensee_for_code(code),
+        }
+    }
+
     pub fn licensee_for_code(code: [u8; 2]) -> RomLicensee {
         match &code {
             b"00" => RomLicensee::None,

@@ -1,4 +1,6 @@
 use super::queue::{QueueConfig, QueueReader, QueueStats, QueueWriter, RemoteReport, audio_queue};
+#[cfg(threaded)]
+use super::shared::{RingReader, RingWriter, SharedRing};
 use js_sys::{Array, Float32Array, Object, Reflect};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -36,6 +38,7 @@ struct Link {
     sent: u64,
     playing: bool,
     paused: bool,
+    quick_resume: bool,
 }
 
 pub struct WebOutput {
@@ -43,6 +46,15 @@ pub struct WebOutput {
     gain: GainNode,
     link: Rc<RefCell<Link>>,
     wake: Option<Wake>,
+    #[cfg(threaded)]
+    relay: RefCell<Option<Relay>>,
+}
+
+#[cfg(threaded)]
+struct Relay {
+    reader: RingReader,
+    port: PortWriter,
+    scratch: Vec<f32>,
 }
 
 struct Wake {
@@ -77,7 +89,10 @@ impl WebOutput {
                 sent: 0,
                 playing: false,
                 paused: false,
+                quick_resume: false,
             })),
+            #[cfg(threaded)]
+            relay: RefCell::new(None),
         })
     }
 
@@ -85,8 +100,53 @@ impl WebOutput {
         self.ctx.sample_rate() as u32
     }
 
+    #[cfg(not(threaded))]
     pub fn connect(&self, config: QueueConfig) -> PortWriter {
         let options = processor_options(&config);
+        self.connect_port(config, options)
+    }
+
+    #[cfg(threaded)]
+    pub fn connect(&self, config: QueueConfig) -> RingWriter {
+        let ring = SharedRing::new(config.capacity_frames);
+        let options = processor_options(&config);
+        let shared = [
+            ("header", ring.header_address()),
+            ("samples", ring.samples_address()),
+            ("ringFrames", ring.capacity_frames()),
+        ];
+        for (key, value) in shared {
+            let _ = Reflect::set(&options, &key.into(), &(value as f64).into());
+        }
+        let _ = Reflect::set(&options, &"memory".into(), &wasm_bindgen::memory());
+        let port = self.connect_port(config, options);
+        let (writer, reader) = ring.split(port.stats().clone());
+        *self.relay.borrow_mut() = Some(Relay {
+            reader,
+            port,
+            scratch: Vec::new(),
+        });
+        writer
+    }
+
+    #[cfg(threaded)]
+    pub fn pump(&self) {
+        let mut relay = self.relay.borrow_mut();
+        let Some(relay) = relay.as_mut() else {
+            return;
+        };
+        if !matches!(self.link.borrow().mode, Mode::Fallback(_)) {
+            return;
+        }
+        relay.reader.drain(&mut relay.scratch);
+        relay.port.write(&relay.scratch);
+        relay.scratch.clear();
+        relay.port.set_paused(relay.reader.paused());
+        relay.port.set_quick_resume(relay.reader.quick_resume());
+        relay.reader.set_held(relay.port.queued_frames());
+    }
+
+    fn connect_port(&self, config: QueueConfig, options: Object) -> PortWriter {
         let (writer, reader) = audio_queue(config);
         let stats = writer.stats().clone();
         self.link.borrow_mut().mode = Mode::Loading(writer);
@@ -95,7 +155,7 @@ impl WebOutput {
         let gain = self.gain.clone();
         let link = self.link.clone();
         let report_stats = stats.clone();
-        wasm_bindgen_futures::spawn_local(async move {
+        citrine_gb_threads::spawn_local(async move {
             if let Err(err) = attach_worklet(&ctx, &gain, &link, options, report_stats).await {
                 log::warn!("Audio worklet unavailable, playing from the page: {err:?}");
                 if let Err(err) = attach_fallback(&ctx, &gain, &link, reader) {
@@ -135,6 +195,8 @@ impl WebOutput {
 
 impl Drop for WebOutput {
     fn drop(&mut self) {
+        #[cfg(threaded)]
+        self.relay.borrow_mut().take();
         if let Some(wake) = self.wake.take() {
             wake.remove();
         }
@@ -197,6 +259,7 @@ impl PortWriter {
         }
     }
 
+    #[cfg(not(threaded))]
     pub fn is_playing(&self) -> bool {
         let link = self.link.borrow();
         match &link.mode {
@@ -214,6 +277,19 @@ impl PortWriter {
         match &link.mode {
             Mode::Worklet(port) => post_flag(port, "paused", paused),
             Mode::Fallback(writer) | Mode::Loading(writer) => writer.set_paused(paused),
+            Mode::Closed => {}
+        }
+    }
+
+    pub fn set_quick_resume(&self, quick: bool) {
+        let mut link = self.link.borrow_mut();
+        if link.quick_resume == quick {
+            return;
+        }
+        link.quick_resume = quick;
+        match &link.mode {
+            Mode::Worklet(port) => post_flag(port, "quickResume", quick),
+            Mode::Fallback(writer) | Mode::Loading(writer) => writer.set_quick_resume(quick),
             Mode::Closed => {}
         }
     }
@@ -287,7 +363,7 @@ fn wake(ctx: &AudioContext) -> Result<(), JsValue> {
         return Ok(());
     }
     let resumed = ctx.resume()?;
-    wasm_bindgen_futures::spawn_local(async move {
+    citrine_gb_threads::spawn_local(async move {
         if let Err(err) = JsFuture::from(resumed).await {
             log::warn!("Audio did not resume: {err:?}");
         }
@@ -388,6 +464,9 @@ async fn attach_worklet(
     if link.paused {
         post_flag(&port, "paused", true);
     }
+    if link.quick_resume {
+        post_flag(&port, "quickResume", true);
+    }
     link.mode = Mode::Worklet(port);
     link.node = Some(node.into());
     link.on_message = Some(on_message);
@@ -409,6 +488,7 @@ fn attach_fallback(
         }
     };
     writer.set_paused(link.paused);
+    writer.set_quick_resume(link.quick_resume);
 
     let node = ctx
         .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(
