@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1030536188883",
+    "project_id": "citrine-83c61",
+    "storage_bucket": "citrine-83c61.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1030536188883:android:de0a0b2402072a9fb8d526",
+        "android_client_info": {
+          "package_name": "io.github.zitronenjoghurt.citrine"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBmSlBhAfBE9RcPz9XeqY4Dlq8ZOzavcVA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
