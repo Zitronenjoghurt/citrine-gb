@@ -5,6 +5,13 @@ use egui::Context;
 
 const CLOUD_SAVE_LOAD: &str = "cloud save";
 
+fn hold_note() -> String {
+    format!(
+        "The game starts when it arrives, or after {} seconds",
+        CLOUD_HOLD_LIMIT.as_secs()
+    )
+}
+
 impl Citrine {
     pub(super) fn watch_cloud_game(&mut self) {
         let rom = self.emulator.rom_key().map(str::to_owned);
@@ -17,7 +24,7 @@ impl Citrine {
         let Some(rom) = rom else {
             return;
         };
-        if !self.online.cloud_enabled()
+        if !self.online.syncs_saves()
             || (self.online.cloud_settled(&rom) && !self.online.is_connected())
         {
             return;
@@ -61,12 +68,17 @@ impl Citrine {
                 .is_none_or(|rom| self.online.cloud_settled(rom));
             let waited = now.duration_since(hold.since);
             if !settled && waited < CLOUD_HOLD_LIMIT {
-                self.toasts.load(
-                    CLOUD_SAVE_LOAD,
-                    "Getting your save from the cloud",
-                    Progress::unknown(),
-                    now,
-                );
+                let text = match self
+                    .cloud_rom
+                    .as_deref()
+                    .and_then(|rom| self.online.network_getting_from(rom))
+                {
+                    Some(device) => format!("Getting your save from {device}"),
+                    None => "Getting your save from the cloud".to_owned(),
+                };
+                self.toasts
+                    .load(CLOUD_SAVE_LOAD, text, Progress::unknown(), now);
+                self.toasts.load_note(CLOUD_SAVE_LOAD, &hold_note());
                 return;
             }
             self.toasts.load_done(CLOUD_SAVE_LOAD);

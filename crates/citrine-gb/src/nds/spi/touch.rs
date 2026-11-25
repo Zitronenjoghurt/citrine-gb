@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use super::firmware::Calibration;
+use crate::nds::lcd::FRAME_CYCLES;
 
 pub const TEMPERATURE0: u16 = 0x31C;
 pub const TEMPERATURE1: u16 = TEMPERATURE0 + 143;
@@ -18,6 +19,24 @@ const RELEASED_Z1: u16 = 0x000;
 const RELEASED_Z2: u16 = 0xFFF;
 const MIC_QUEUE: usize = 0x1000;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct MicClock {
+    start: u64,
+    read: bool,
+}
+
+impl PartialEq for MicClock {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for MicClock {}
+
+impl std::hash::Hash for MicClock {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Touch {
@@ -27,6 +46,8 @@ pub struct Touch {
     result: u16,
     eight_bit: bool,
     position: u8,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    mic_clock: MicClock,
 }
 
 impl Touch {
@@ -49,13 +70,20 @@ impl Touch {
         self.pen.is_some()
     }
 
-    pub fn push_mic(&mut self, samples: &[i16]) {
-        self.mic.extend(samples);
-        let excess = self.mic.len().saturating_sub(MIC_QUEUE);
-        self.mic.drain(..excess);
+    pub fn set_mic(&mut self, samples: &[i16], now: u64) {
+        self.mic.clear();
+        self.mic.extend(&samples[..samples.len().min(MIC_QUEUE)]);
+        self.mic_clock = MicClock {
+            start: now,
+            read: false,
+        };
     }
 
-    pub fn transfer(&mut self, byte: u8) -> u8 {
+    pub fn mic_read(&self) -> bool {
+        self.mic_clock.read
+    }
+
+    pub fn transfer(&mut self, byte: u8, now: u64) -> u8 {
         let output = match (self.position, self.eight_bit) {
             (1, false) => (self.result >> 5) as u8,
             (2, false) => (self.result << 3) as u8,
@@ -64,7 +92,7 @@ impl Touch {
             _ => 0,
         };
         if byte & START != 0 {
-            self.convert(byte);
+            self.convert(byte, now);
             self.position = 1;
         } else {
             self.position = self.position.saturating_add(1);
@@ -76,7 +104,7 @@ impl Touch {
         self.position = 0;
     }
 
-    fn convert(&mut self, control: u8) {
+    fn convert(&mut self, control: u8, now: u64) {
         self.eight_bit = control & EIGHT_BIT != 0;
         let value = match control >> CHANNEL_SHIFT & CHANNEL_MASK {
             0 => TEMPERATURE0,
@@ -84,7 +112,7 @@ impl Touch {
             3 => self.pen.map_or(RELEASED_Z1, |_| PRESSED_Z1),
             4 => self.pen.map_or(RELEASED_Z2, |_| PRESSED_Z2),
             5 => self.adc().map_or(RELEASED_X, |(x, _)| x),
-            6 => self.mic_sample(),
+            6 => self.mic_sample(now),
             7 => TEMPERATURE1,
             _ => 0,
         };
@@ -95,8 +123,11 @@ impl Touch {
         self.pen.map(|(x, y)| self.calibration.to_adc(x, y))
     }
 
-    fn mic_sample(&mut self) -> u16 {
-        let sample = self.mic.pop_front().unwrap_or(0);
+    fn mic_sample(&mut self, now: u64) -> u16 {
+        self.mic_clock.read = true;
+        let offset = now.saturating_sub(self.mic_clock.start);
+        let index = offset * self.mic.len() as u64 / u64::from(FRAME_CYCLES);
+        let sample = self.mic.get(index as usize).copied().unwrap_or(0);
         ((i32::from(sample) >> 4) + i32::from(SILENCE)) as u16
     }
 }
@@ -115,9 +146,13 @@ mod tests {
     const BATTERY: u8 = 0xA0;
 
     fn convert(touch: &mut Touch, control: u8) -> u16 {
-        touch.transfer(control);
-        let high = touch.transfer(0);
-        let low = touch.transfer(0);
+        convert_at(touch, control, 0)
+    }
+
+    fn convert_at(touch: &mut Touch, control: u8, now: u64) -> u16 {
+        touch.transfer(control, now);
+        let high = touch.transfer(0, 0);
+        let low = touch.transfer(0, 0);
         touch.deselect();
         let both = u16::from(high) << 8 | u16::from(low);
         if control & EIGHT_BIT != 0 {
@@ -164,22 +199,22 @@ mod tests {
     fn twelve_bit_results_start_after_one_dummy_bit() {
         let mut touch = touch();
         touch.set_pen(Some((0xAB, 0)));
-        assert_eq!(touch.transfer(X), 0);
-        assert_eq!(touch.transfer(0), (0xAB0u16 >> 5) as u8);
-        assert_eq!(touch.transfer(0), (0xAB0u16 << 3) as u8);
-        assert_eq!(touch.transfer(0), 0);
+        assert_eq!(touch.transfer(X, 0), 0);
+        assert_eq!(touch.transfer(0, 0), (0xAB0u16 >> 5) as u8);
+        assert_eq!(touch.transfer(0, 0), (0xAB0u16 << 3) as u8);
+        assert_eq!(touch.transfer(0, 0), 0);
     }
 
     #[test]
     fn a_new_control_byte_overlaps_the_last_result_byte() {
         let mut touch = touch();
         touch.set_pen(Some((0x40, 0x20)));
-        touch.transfer(X);
-        let high = touch.transfer(0);
-        let low = touch.transfer(Y);
+        touch.transfer(X, 0);
+        let high = touch.transfer(0, 0);
+        let low = touch.transfer(Y, 0);
         assert_eq!((u16::from(high) << 8 | u16::from(low)) >> 3, 0x400);
-        let high = touch.transfer(0);
-        let low = touch.transfer(0);
+        let high = touch.transfer(0, 0);
+        let low = touch.transfer(0, 0);
         assert_eq!((u16::from(high) << 8 | u16::from(low)) >> 3, 0x200);
     }
 
@@ -201,31 +236,74 @@ mod tests {
     }
 
     #[test]
-    fn the_microphone_reads_pushed_samples_in_order() {
+    fn a_microphone_read_picks_the_sample_for_its_time_in_the_frame() {
         let mut touch = touch();
-        touch.push_mic(&[i16::MAX, i16::MIN, 0x100]);
-        assert_eq!(convert(&mut touch, AUX), 0xFFF);
-        assert_eq!(convert(&mut touch, AUX), 0x000);
-        assert_eq!(convert(&mut touch, AUX), 0x810);
-        assert_eq!(convert(&mut touch, AUX), SILENCE);
+        let start = 1_000;
+        let quarter = |k: u64| start + u64::from(FRAME_CYCLES) * k / 4;
+        touch.set_mic(&[i16::MAX, i16::MIN, 0x100, -0x100], start);
+        assert_eq!(convert_at(&mut touch, AUX, start), 0xFFF);
+        assert_eq!(convert_at(&mut touch, AUX, quarter(1) - 1), 0xFFF);
+        assert_eq!(convert_at(&mut touch, AUX, quarter(1) + 1), 0x000);
+        assert_eq!(convert_at(&mut touch, AUX, quarter(2) + 1), 0x810);
+        assert_eq!(convert_at(&mut touch, AUX, quarter(3) + 1), 0x7F0);
+        assert_eq!(convert_at(&mut touch, AUX, quarter(4) - 1), 0x7F0);
     }
 
     #[test]
-    fn the_microphone_queue_keeps_the_newest_samples() {
+    fn the_microphone_is_silent_once_its_frame_has_passed() {
         let mut touch = touch();
-        let samples: Vec<i16> = (0..MIC_QUEUE + 16)
-            .map(|index| (index % 1024) as i16 * 16)
-            .collect();
-        touch.push_mic(&samples);
-        assert_eq!(convert(&mut touch, AUX), SILENCE + 16);
+        touch.set_mic(&[i16::MAX; 8], 0);
+        assert_eq!(
+            convert_at(&mut touch, AUX, u64::from(FRAME_CYCLES)),
+            SILENCE
+        );
+        touch.set_mic(&[], u64::from(FRAME_CYCLES));
+        assert_eq!(
+            convert_at(&mut touch, AUX, u64::from(FRAME_CYCLES)),
+            SILENCE
+        );
+    }
+
+    #[test]
+    fn a_microphone_frame_keeps_at_most_the_queue_length() {
+        let mut touch = touch();
+        let samples: Vec<i16> = (0..MIC_QUEUE + 16).map(|index| index as i16).collect();
+        touch.set_mic(&samples, 0);
+        let last = u64::from(FRAME_CYCLES) - 1;
+        assert_eq!(
+            convert_at(&mut touch, AUX, last),
+            SILENCE + (MIC_QUEUE as u16 - 1) / 16
+        );
+    }
+
+    #[test]
+    fn a_microphone_read_counts_until_the_next_frame() {
+        let mut touch = touch();
+        touch.set_mic(&[], 0);
+        convert_at(&mut touch, X, 10);
+        assert!(!touch.mic_read());
+        convert_at(&mut touch, AUX, 20);
+        assert!(touch.mic_read());
+        touch.set_mic(&[], u64::from(FRAME_CYCLES));
+        assert!(!touch.mic_read());
+    }
+
+    #[test]
+    fn the_microphone_clock_is_not_part_of_the_state() {
+        let mut read = touch();
+        read.set_mic(&[], 500);
+        convert_at(&mut read, AUX, 600);
+        let mut fresh = touch();
+        convert_at(&mut fresh, AUX, 0);
+        assert_eq!(read, fresh);
     }
 
     #[test]
     fn deselect_ends_the_result() {
         let mut touch = touch();
         touch.set_pen(Some((0xFF, 0)));
-        touch.transfer(X);
+        touch.transfer(X, 0);
         touch.deselect();
-        assert_eq!(touch.transfer(0), 0);
+        assert_eq!(touch.transfer(0, 0), 0);
     }
 }

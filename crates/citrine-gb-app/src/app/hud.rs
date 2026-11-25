@@ -3,12 +3,14 @@ use egui::{Rect, Vec2, pos2};
 pub mod cells;
 pub mod chip;
 pub mod editor;
+pub mod online;
 pub mod overlay;
 pub mod paint;
 
 pub const SIZES: std::ops::RangeInclusive<f32> = 0.75..=2.0;
 pub const DEFAULT_OPACITY: f32 = 0.35;
 pub const INSET: f32 = 12.0;
+pub const TRACKER: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Value {
@@ -28,6 +30,10 @@ pub enum Value {
     Played,
     Refresh,
     Clock,
+    Ping,
+    Delay,
+    Connection,
+    Waits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,16 +44,18 @@ pub enum Group {
     Sound,
     Game,
     Device,
+    Online,
 }
 
 impl Group {
-    pub const ALL: [Group; 6] = [
+    pub const ALL: [Group; 7] = [
         Group::Rate,
         Group::Smoothness,
         Group::Load,
         Group::Sound,
         Group::Game,
         Group::Device,
+        Group::Online,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,12 +66,13 @@ impl Group {
             Group::Sound => "Sound",
             Group::Game => "Game",
             Group::Device => "Device",
+            Group::Online => "Online",
         }
     }
 }
 
 impl Value {
-    pub const ALL: [Value; 16] = [
+    pub const ALL: [Value; 20] = [
         Value::Fps,
         Value::Low,
         Value::Speed,
@@ -80,6 +89,10 @@ impl Value {
         Value::Played,
         Value::Refresh,
         Value::Clock,
+        Value::Ping,
+        Value::Delay,
+        Value::Connection,
+        Value::Waits,
     ];
 
     pub fn name(self) -> &'static str {
@@ -100,6 +113,10 @@ impl Value {
             Value::Played => "Played",
             Value::Refresh => "Refresh",
             Value::Clock => "Clock",
+            Value::Ping => "Ping",
+            Value::Delay => "Input delay",
+            Value::Connection => "Connection",
+            Value::Waits => "Waits",
         }
     }
 
@@ -121,6 +138,16 @@ impl Value {
             Value::Played => "Time played since the game started",
             Value::Refresh => "How often the screen refreshes",
             Value::Clock => "The time on this device",
+            Value::Ping => {
+                "Time a message takes to the other player and back. Without a game together, to the server and back"
+            }
+            Value::Delay => {
+                "How long the game holds each button press so both players see it on the same frame"
+            }
+            Value::Connection => {
+                "Direct when the game runs straight between the players, Relay when it goes through the server"
+            }
+            Value::Waits => "Times the game paused for the other player in the last minute",
         }
     }
 
@@ -132,6 +159,7 @@ impl Value {
             Value::SoundBuffer | Value::SoundGaps => Group::Sound,
             Value::Jit | Value::Resolution | Value::Played => Group::Game,
             Value::Refresh | Value::Clock => Group::Device,
+            Value::Ping | Value::Delay | Value::Connection | Value::Waits => Group::Online,
         }
     }
 
@@ -300,6 +328,7 @@ pub struct HudSettings {
     pub shown: bool,
     pub opacity: f32,
     pub huds: Vec<Hud>,
+    pub tracker: Option<Hud>,
 }
 
 impl Default for HudSettings {
@@ -308,6 +337,7 @@ impl Default for HudSettings {
             shown: true,
             opacity: DEFAULT_OPACITY,
             huds: Vec::new(),
+            tracker: None,
         }
     }
 }
@@ -339,11 +369,47 @@ impl HudSettings {
     }
 
     pub fn get(&self, id: u32) -> Option<&Hud> {
+        if id == TRACKER {
+            return self.tracker.as_ref();
+        }
         self.huds.iter().find(|hud| hud.id == id)
     }
 
     pub fn get_mut(&mut self, id: u32) -> Option<&mut Hud> {
+        if id == TRACKER {
+            return Some(self.tracker());
+        }
         self.huds.iter_mut().find(|hud| hud.id == id)
+    }
+
+    pub fn tracker(&mut self) -> &mut Hud {
+        let corner = self.free_corner();
+        self.tracker.get_or_insert_with(|| Hud {
+            id: TRACKER,
+            values: Vec::new(),
+            corner,
+            ..Hud::default()
+        })
+    }
+
+    pub fn home_corner(&self, id: u32) -> Corner {
+        if id == TRACKER {
+            self.free_corner()
+        } else {
+            Corner::TopLeft
+        }
+    }
+
+    fn free_corner(&self) -> Corner {
+        [
+            Corner::TopRight,
+            Corner::BottomRight,
+            Corner::BottomLeft,
+            Corner::TopLeft,
+        ]
+        .into_iter()
+        .find(|corner| self.huds.iter().all(|hud| hud.corner != *corner))
+        .unwrap_or(Corner::TopRight)
     }
 
     pub fn remove(&mut self, id: u32) -> Option<(usize, Hud)> {
@@ -359,8 +425,8 @@ impl HudSettings {
         self.huds.insert(index, hud);
     }
 
-    pub fn visible(&self) -> bool {
-        self.shown && !self.huds.is_empty()
+    pub fn visible(&self, trackers: bool) -> bool {
+        self.shown && (trackers || !self.huds.is_empty())
     }
 }
 
@@ -369,18 +435,24 @@ pub struct HudState {
     pub editor: Option<u32>,
     pub drag: Option<overlay::Drag>,
     pub cells: cells::Cache,
+    pub placed: Vec<(u32, egui::Rect)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     place: &overlay::Place,
     state: &mut crate::app::ui_state::UiState,
     emulator: &crate::emulator::Emulator,
     stats: &crate::stats::Stats,
+    play: &crate::play::Play,
+    online: &mut crate::online::Online,
+    trackers: &[(String, String)],
 ) -> overlay::Outcome {
-    if !state.settings.hud.visible() {
+    if !state.settings.hud.visible(!trackers.is_empty()) {
         state.hud.drag = None;
         state.hud.editor = None;
+        state.hud.placed.clear();
         return overlay::Outcome::default();
     }
     let facts = cells::gather(
@@ -389,11 +461,20 @@ pub fn show(
             load: state.performance.view(),
             emulator,
             stats,
+            play,
+            online,
         },
         &mut state.hud.cells,
         &state.settings.hud,
     );
-    let outcome = overlay::show(ui, place, &facts, &mut state.settings.hud, &mut state.hud);
+    let outcome = overlay::show(
+        ui,
+        place,
+        &facts,
+        trackers,
+        &mut state.settings.hud,
+        &mut state.hud,
+    );
     if outcome.changed {
         state.settings.dirty = true;
     }
@@ -407,8 +488,10 @@ impl crate::app::Citrine {
         area: egui::Rect,
         picture: Option<egui::Rect>,
         touch: bool,
+        keep_below: Option<f32>,
     ) {
-        if !self.emulator.has_game() {
+        let engine = self.play.session().is_some_and(|s| s.runs_engine());
+        if !self.emulator.shows_console() && !engine {
             return;
         }
         let place = overlay::Place {
@@ -416,8 +499,25 @@ impl crate::app::Citrine {
             picture,
             screens: self.emulator.placed_screens().to_vec(),
             touch,
+            editing: self.editing_layout(),
+            keep_below,
         };
-        let outcome = show(ui, &place, &mut self.ui, &self.emulator, &self.stats);
+        let boards = &self.achievements.boards;
+        let trackers = if place.editing {
+            boards.layout_lines()
+        } else {
+            boards.tracker_lines()
+        };
+        let outcome = show(
+            ui,
+            &place,
+            &mut self.ui,
+            &self.emulator,
+            &self.stats,
+            &self.play,
+            &mut self.online,
+            &trackers,
+        );
         if let Some(id) = outcome.remove {
             self.remove_hud(id);
         }
@@ -463,6 +563,7 @@ mod tests {
             resolution: String::new(),
             played: None,
             clock: String::new(),
+            link: online::Link::default(),
         }
     }
 
@@ -565,6 +666,8 @@ mod tests {
             picture: Some(Rect::from_min_size(pos2(200.0, 100.0), vec2(400.0, 360.0))),
             screens: Vec::new(),
             touch: false,
+            editing: false,
+            keep_below: None,
         };
         let near = Rect::from_min_size(pos2(205.0 + INSET, 300.0), vec2(100.0, 30.0));
         let (snapped, guides) = snap(near, &place);
@@ -742,6 +845,25 @@ mod tests {
     }
 
     #[test]
+    fn the_hud_chip_drops_its_word_then_itself_before_it_leaves_its_pane() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(area(560.0, 400.0)),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let full = chip::width(ui, &chip::label());
+                let compact = chip::width(ui, &chip::compact_label());
+                assert!(compact < full);
+                assert_eq!(chip::label_for(ui, full), Some(chip::label()));
+                assert_eq!(chip::label_for(ui, full - 1.0), Some(chip::compact_label()));
+                assert_eq!(chip::label_for(ui, compact - 1.0), None);
+            });
+        });
+    }
+
+    #[test]
     fn the_hud_chip_menu_keeps_its_size_frame_after_frame() {
         let ctx = egui::Context::default();
         crate::app::ui_state::ui_theme::UiTheme::Dark.apply(&ctx);
@@ -801,6 +923,8 @@ mod tests {
             picture: Some(screens[0].union(screens[1])),
             screens: screens.to_vec(),
             touch: false,
+            editing: false,
+            keep_below: None,
         }
     }
 
@@ -815,6 +939,8 @@ mod tests {
             picture: Some(Rect::from_min_size(pos2(200.0, 100.0), vec2(400.0, 360.0))),
             screens: Vec::new(),
             touch: false,
+            editing: false,
+            keep_below: None,
         };
         let (snapped, guides) = snap(hud_at(pos2(405.0, 274.0)), &place);
         assert_eq!(snapped.center(), pos2(400.0, 280.0));
@@ -875,6 +1001,14 @@ mod tests {
     }
 
     fn drawn(pane: Rect, settings: &mut HudSettings) -> Vec<egui::epaint::ClippedShape> {
+        drawn_with(pane, settings, &[]).0
+    }
+
+    fn drawn_with(
+        pane: Rect,
+        settings: &mut HudSettings,
+        trackers: &[(String, String)],
+    ) -> (Vec<egui::epaint::ClippedShape>, bool) {
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(pos2(0.0, 0.0), pane.max.to_vec2() + vec2(40.0, 40.0));
         let facts = busy_facts();
@@ -884,8 +1018,11 @@ mod tests {
             picture: None,
             screens: Vec::new(),
             touch: false,
+            editing: false,
+            keep_below: None,
         };
         let mut shapes = Vec::new();
+        let mut changed = false;
         for _ in 0..2 {
             let input = egui::RawInput {
                 screen_rect: Some(screen),
@@ -896,12 +1033,84 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(ctx, |ui| {
-                            overlay::show(ui, &place, &facts, settings, &mut state);
+                            changed |=
+                                overlay::show(ui, &place, &facts, trackers, settings, &mut state)
+                                    .changed;
                         });
                 })
                 .shapes;
         }
-        shapes
+        (shapes, changed)
+    }
+
+    fn attempt(title: &str, score: &str) -> (String, String) {
+        (title.into(), score.into())
+    }
+
+    fn drawn_text(shapes: &[egui::epaint::ClippedShape], text: &str) -> bool {
+        shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(shape) if shape.galley.text() == text)
+        })
+    }
+
+    #[test]
+    fn the_tracker_makes_itself_in_a_corner_no_hud_uses() {
+        let pane = area(760.0, 700.0);
+        let mut settings = HudSettings::default();
+        settings.add();
+        let (shapes, changed) =
+            drawn_with(pane, &mut settings, &[attempt("Fastest lap", "0:42.10")]);
+        assert!(changed);
+        let tracker = settings.tracker.as_ref().expect("the tracker is made");
+        assert_eq!(tracker.corner, Corner::TopRight);
+        let title = label_rect(&shapes, "Fastest lap");
+        assert!(title.center().x > pane.center().x);
+        assert!(title.center().y < pane.center().y);
+        settings.huds[0].corner = Corner::TopRight;
+        settings.tracker = None;
+        drawn_with(pane, &mut settings, &[attempt("Fastest lap", "0:42.10")]);
+        assert_eq!(settings.tracker.unwrap().corner, Corner::BottomRight);
+    }
+
+    #[test]
+    fn two_attempts_stack_in_one_block() {
+        let pane = area(760.0, 700.0);
+        let mut settings = HudSettings::default();
+        let trackers = [attempt("Fastest lap", "0:42.10"), attempt("Coins", "120")];
+        let (shapes, _) = drawn_with(pane, &mut settings, &trackers);
+        let first = label_rect(&shapes, "Fastest lap");
+        let second = label_rect(&shapes, "Coins");
+        assert!(second.top() >= first.bottom());
+        assert!((second.left() - first.left()).abs() < 1.0);
+        let first_score = label_rect(&shapes, "0:42.10");
+        let second_score = label_rect(&shapes, "120");
+        assert!((first_score.right() - second_score.right()).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_dragged_tracker_keeps_its_place_across_a_restart() {
+        let pane = area(800.0, 600.0);
+        let mut settings = HudSettings::default();
+        let size = vec2(160.0, 40.0);
+        let dropped = Rect::from_min_size(pos2(40.0, 500.0), size);
+        settings.get_mut(TRACKER).unwrap().place(pane, dropped);
+        let settings = restart(&settings);
+        let tracker = settings.get(TRACKER).unwrap();
+        assert_eq!(tracker.corner, Corner::BottomLeft);
+        assert_eq!(tracker.rect(pane, size), dropped);
+    }
+
+    #[test]
+    fn the_tracker_is_gone_once_no_attempt_runs() {
+        let pane = area(760.0, 700.0);
+        let mut settings = HudSettings::default();
+        let (shapes, _) = drawn_with(pane, &mut settings, &[attempt("Fastest lap", "0:42.10")]);
+        assert!(drawn_text(&shapes, "Fastest lap"));
+        let (shapes, changed) = drawn_with(pane, &mut settings, &[]);
+        assert!(!changed);
+        assert!(!drawn_text(&shapes, "Fastest lap"));
+        assert!(!drawn_text(&shapes, "0:42.10"));
+        assert!(settings.tracker.is_some());
     }
 
     fn label_rect(shapes: &[egui::epaint::ClippedShape], label: &str) -> Rect {
@@ -1001,5 +1210,108 @@ mod tests {
                 assert_inside(small, &drawn(small, &mut settings), &what);
             }
         }
+    }
+
+    const ONLINE: [Value; 4] = [Value::Ping, Value::Delay, Value::Connection, Value::Waits];
+
+    fn shown(value: Value, link: online::Link) -> String {
+        let shown = cells::cell(value, &cells::Facts { link, ..facts() });
+        match shown.unit.as_ref() {
+            "" => shown.value,
+            unit => format!("{} {unit}", shown.value),
+        }
+    }
+
+    #[test]
+    fn without_a_session_the_online_values_show_the_dash() {
+        for value in ONLINE {
+            assert_eq!(shown(value, online::Link::default()), cells::MISSING);
+        }
+    }
+
+    #[test]
+    fn the_online_values_read_in_words() {
+        let link = online::Link {
+            ping: online::Ping::Partner(Some(34)),
+            delay: Some(online::Delay { frames: 4, ms: 67 }),
+            path: Some(citrine_gb_net::LinkPath::Direct),
+            waits: Some(3),
+        };
+        assert_eq!(shown(Value::Ping, link.clone()), "34 ms");
+        assert_eq!(shown(Value::Delay, link.clone()), "4 frames, 67 ms");
+        assert_eq!(shown(Value::Connection, link.clone()), "Direct");
+        assert_eq!(shown(Value::Waits, link.clone()), "3 in 1 min");
+        let one = online::Link {
+            delay: Some(online::Delay { frames: 1, ms: 17 }),
+            path: Some(citrine_gb_net::LinkPath::Relay),
+            ..link
+        };
+        assert_eq!(shown(Value::Delay, one.clone()), "1 frame, 17 ms");
+        assert_eq!(shown(Value::Connection, one), "Relay");
+    }
+
+    #[test]
+    fn a_group_shows_the_ping_of_each_partner() {
+        let link = online::Link {
+            ping: online::Ping::Partners(vec![("Mia".into(), Some(34)), ("Jonas".into(), None)]),
+            ..online::Link::default()
+        };
+        assert_eq!(shown(Value::Ping, link), "Mia 34, Jonas - ms");
+    }
+
+    #[test]
+    fn signed_in_without_a_session_the_ping_names_the_server() {
+        let link = online::Link {
+            ping: online::Ping::Server(41),
+            ..online::Link::default()
+        };
+        assert_eq!(shown(Value::Ping, link), "41 ms to the server");
+    }
+
+    #[test]
+    fn every_console_offers_the_online_group() {
+        for ds in [false, true] {
+            let offered: Vec<Value> = addable(&[], ds, Group::Online).collect();
+            assert_eq!(offered, ONLINE);
+        }
+    }
+
+    fn texts(output: &egui::FullOutput) -> Vec<String> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_phone_playing_a_borrowed_game_shows_the_online_values() {
+        use crate::play::MyGame;
+        use crate::play::tests::{Pair, homebrew, snake};
+        let mut pair = Pair::new(false, 0, 0, homebrew());
+        let session = pair.invite(snake());
+        pair.accept(session, MyGame::Own(snake()));
+        pair.play_frames(60);
+        let mut app = crate::app::tests::phone_app("hud-online-borrowed");
+        app.mobile.nav.show_game();
+        let id = app.ui.settings.hud.add();
+        app.ui.settings.hud.get_mut(id).unwrap().values = vec![Value::Connection];
+        assert!(!app.emulator.has_game());
+        std::mem::swap(&mut *app.play, &mut pair.host.play);
+        std::mem::swap(&mut app.online, &mut pair.host.online);
+        let ctx = egui::Context::default();
+        let mut shown = Vec::new();
+        for _ in 0..3 {
+            shown = texts(&crate::app::tests::play_frame(&mut app, &ctx, Vec::new()));
+        }
+        std::mem::swap(&mut *app.play, &mut pair.host.play);
+        std::mem::swap(&mut app.online, &mut pair.host.online);
+        assert!(
+            shown.iter().any(|text| text == "ConnectionRelay"),
+            "{shown:?}"
+        );
     }
 }

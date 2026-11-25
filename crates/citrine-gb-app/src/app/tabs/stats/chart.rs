@@ -1,4 +1,4 @@
-use super::{CHART_HEIGHT, Range, TOUCH_CELL, WIDE, play_time, scale_top, short_time};
+use super::{CHART_HEIGHT, Pick, Range, TOUCH_CELL, WIDE, scale_top, short_time};
 use crate::stats::{day_key, parse_day};
 use egui::{Color32, CornerRadius, Rect, Sense, Ui, pos2, vec2};
 use jiff::civil::Date;
@@ -16,16 +16,23 @@ pub(super) fn empty_fill(ui: &Ui) -> Color32 {
 
 pub(super) struct Bar {
     pub(super) label: String,
-    tip: String,
+    pick: Pick,
     ms: u64,
     future: bool,
+}
+
+pub(super) struct Shown {
+    pub(super) first: Date,
+    pub(super) last: Date,
+    pub(super) weeks: usize,
+    pub(super) hovered: Option<Pick>,
 }
 
 pub(super) fn day_bar(days: &BTreeMap<String, u64>, day: Date, label: String, today: Date) -> Bar {
     let ms = days.get(&day_key(day)).copied().unwrap_or(0);
     Bar {
         label,
-        tip: format!("{}: {}", day.strftime("%a %-d %b"), play_time(ms)),
+        pick: Pick::Day(day),
         ms,
         future: day > today,
     }
@@ -55,7 +62,7 @@ pub(super) fn day_bars(days: &BTreeMap<String, u64>, today: Date, range: Range) 
                     .sum();
                 Bar {
                     label: month.strftime("%b").to_string().chars().take(1).collect(),
-                    tip: format!("{}: {}", month.strftime("%B"), play_time(ms)),
+                    pick: Pick::Month(month),
                     ms,
                     future: month.month() > today.month(),
                 }
@@ -64,22 +71,16 @@ pub(super) fn day_bars(days: &BTreeMap<String, u64>, today: Date, range: Range) 
     }
 }
 
-pub(super) fn readout(ui: &mut Ui, text: String) {
-    let height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-    ui.allocate_ui_with_layout(
-        vec2(ui.available_width(), height),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.add(egui::Label::new(text).truncate());
-        },
-    );
-}
-
-pub(super) fn bars(ui: &mut Ui, id: &str, days: &BTreeMap<String, u64>, today: Date, range: Range) {
+pub(super) fn bars(
+    ui: &mut Ui,
+    id: &str,
+    days: &BTreeMap<String, u64>,
+    today: Date,
+    range: Range,
+    picked: &mut Option<Pick>,
+) -> Shown {
     let bars = day_bars(days, today, range);
     let max = scale_top(bars.iter().map(|b| b.ms).max().unwrap_or(0));
-    let picked_id = ui.id().with((id, "picked", range.label()));
-    let mut picked: Option<usize> = ui.data(|d| d.get_temp(picked_id)).flatten();
     let label_height = 16.0;
     let (rect, _) = ui.allocate_exact_size(
         vec2(ui.available_width(), CHART_HEIGHT + label_height),
@@ -113,12 +114,16 @@ pub(super) fn bars(ui: &mut Ui, id: &str, days: &BTreeMap<String, u64>, today: D
             let column = Rect::from_min_max(pos2(x, plot.top()), pos2(x + slot, rect.bottom()));
             let response = ui.interact(column, ui.id().with((id, i)), Sense::click());
             if response.clicked() {
-                picked = if picked == Some(i) { None } else { Some(i) };
+                *picked = if *picked == Some(bar.pick) {
+                    None
+                } else {
+                    Some(bar.pick)
+                };
             }
             if response.hovered() {
-                hovered = Some(i);
+                hovered = Some(bar.pick);
             }
-            response.hovered() || picked == Some(i)
+            response.hovered() || *picked == Some(bar.pick)
         };
         if bar.ms > 0 {
             let shape = Rect::from_min_max(
@@ -156,16 +161,13 @@ pub(super) fn bars(ui: &mut Ui, id: &str, days: &BTreeMap<String, u64>, today: D
             );
         }
     }
-    ui.data_mut(|d| d.insert_temp(picked_id, picked));
-    let text = match hovered.or(picked) {
-        Some(i) => bars[i].tip.clone(),
-        None => format!(
-            "{}: {}",
-            range.total_label(),
-            play_time(bars.iter().map(|b| b.ms).sum())
-        ),
-    };
-    readout(ui, text);
+    let (first, last) = range.span(today);
+    Shown {
+        first,
+        last,
+        weeks: 0,
+        hovered,
+    }
 }
 
 pub(super) const LEVELS: [u64; 3] = [30 * 60_000, 60 * 60_000, 120 * 60_000];
@@ -203,7 +205,8 @@ pub(super) fn calendar(
     days: &BTreeMap<String, u64>,
     today: Date,
     touch: bool,
-) {
+    picked: &mut Option<Pick>,
+) -> Shown {
     let gap = 3.0;
     let left = 28.0;
     let room = ui.available_width() - left;
@@ -219,8 +222,6 @@ pub(super) fn calendar(
         left + weeks as f32 * (cell + gap),
         7.0 * (cell + gap) + 16.0 + 6.0 + cell,
     );
-    let picked_id = ui.id().with((id, "picked_day"));
-    let mut picked: Option<Date> = ui.data(|d| d.get_temp(picked_id)).flatten();
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter_at(rect);
     let start = crate::stats::week_start(today)
@@ -239,7 +240,6 @@ pub(super) fn calendar(
         );
     }
     let mut hovered = None;
-    let mut total = 0;
     for week in 0..weeks {
         for weekday in 0..7 {
             let Ok(day) = start.checked_add(jiff::Span::new().days(week as i64 * 7 + weekday))
@@ -261,40 +261,44 @@ pub(super) fn calendar(
                 );
             }
             let ms = days.get(&day_key(day)).copied().unwrap_or(0);
-            total += ms;
             let square = Rect::from_min_size(pos2(x, y), vec2(cell, cell));
             let response = ui.interact(
                 square.expand(gap / 2.0),
                 ui.id().with((id, week, weekday)),
                 Sense::click(),
             );
+            let pick = Pick::Day(day);
             if response.clicked() {
-                picked = if picked == Some(day) { None } else { Some(day) };
+                *picked = if *picked == Some(pick) {
+                    None
+                } else {
+                    Some(pick)
+                };
             }
             if response.hovered() {
-                hovered = Some((day, ms));
+                hovered = Some(pick);
             }
             level_cell(
                 ui,
                 &painter,
                 square,
                 ms,
-                response.hovered() || picked == Some(day),
+                response.hovered() || *picked == Some(pick),
             );
         }
     }
-    ui.data_mut(|d| d.insert_temp(picked_id, picked));
     legend(
         ui,
         &painter,
         pos2(rect.left(), rect.top() + 16.0 + 7.0 * (cell + gap) + 6.0),
         cell,
     );
-    let text = match hovered.or(picked.map(|d| (d, days.get(&day_key(d)).copied().unwrap_or(0)))) {
-        Some((day, ms)) => format!("{}: {}", day.strftime("%a %-d %b"), play_time(ms)),
-        None => format!("Last {weeks} weeks: {}", play_time(total)),
-    };
-    readout(ui, text);
+    Shown {
+        first: start,
+        last: today,
+        weeks,
+        hovered,
+    }
 }
 
 pub(super) fn legend(ui: &Ui, painter: &egui::Painter, top_left: egui::Pos2, side: f32) {

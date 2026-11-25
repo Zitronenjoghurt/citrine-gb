@@ -8,8 +8,8 @@ pub struct FileChannels {
     pub rom_rx: Receiver<PickedFile>,
     pub second_rom_tx: Sender<PickedFile>,
     pub second_rom_rx: Receiver<PickedFile>,
-    pub boot_rom_tx: Sender<PickedFile>,
-    pub boot_rom_rx: Receiver<PickedFile>,
+    pub boot_rom_tx: Sender<(crate::app::boot_rom::BootRom, PickedFile)>,
+    pub boot_rom_rx: Receiver<(crate::app::boot_rom::BootRom, PickedFile)>,
     pub gba_bios_tx: Sender<PickedFile>,
     pub gba_bios_rx: Receiver<PickedFile>,
     #[cfg(feature = "nds")]
@@ -26,6 +26,10 @@ pub struct FileChannels {
     pub folder_tx: Sender<std::path::PathBuf>,
     #[cfg(not(target_arch = "wasm32"))]
     pub folder_rx: Receiver<std::path::PathBuf>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub capture_folder_tx: Sender<std::path::PathBuf>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub capture_folder_rx: Receiver<std::path::PathBuf>,
     pub save_tx: Sender<SaveOutcome>,
     pub save_rx: Receiver<SaveOutcome>,
     pub copy_tx: Sender<Result<String, String>>,
@@ -49,6 +53,8 @@ impl FileChannels {
         let (sav_tx, sav_rx) = channel();
         #[cfg(not(target_arch = "wasm32"))]
         let (folder_tx, folder_rx) = channel();
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        let (capture_folder_tx, capture_folder_rx) = channel();
         let (save_tx, save_rx) = channel();
         let (copy_tx, copy_rx) = channel();
         let (error_tx, error_rx) = channel();
@@ -75,6 +81,10 @@ impl FileChannels {
             folder_tx,
             #[cfg(not(target_arch = "wasm32"))]
             folder_rx,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            capture_folder_tx,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            capture_folder_rx,
             save_tx,
             save_rx,
             copy_tx,

@@ -2,7 +2,9 @@ use super::bar::{Switch, bar_switches, switch_missing};
 use super::lines::{card_name, short_name};
 use crate::online::Online;
 use crate::play::{Play, PlaySession, Stage, UNLINK_AFTER};
-use citrine_gb_net::{Console, ErrorCode, FriendState, OnlineId, ROOM_MEMBERS, ROOMS_PROTOCOL};
+use citrine_gb_net::{
+    Console, ErrorCode, FriendState, LinkPath, OnlineId, ROOM_MEMBERS, ROOMS_PROTOCOL,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Person {
@@ -14,6 +16,7 @@ pub struct Person {
     pub away: bool,
     pub paused: bool,
     pub ms: Option<u16>,
+    pub path: Option<LinkPath>,
     pub playing: bool,
     pub game: Option<String>,
     pub console: Option<Console>,
@@ -84,6 +87,7 @@ impl RoomFacts {
                     away: false,
                     paused: false,
                     ms: None,
+                    path: None,
                     playing: view.is_some_and(|v| v.my_game().is_some()),
                     game: view
                         .and_then(|v| v.my_game())
@@ -108,6 +112,7 @@ impl RoomFacts {
                     .and_then(PlaySession::round_trip_ms)
                     .map(|ms| u16::try_from(ms).unwrap_or(u16::MAX))
                     .or_else(|| member.and_then(|m| m.state.round_trip_ms)),
+                path: room.pair(who).map(PlaySession::path),
                 playing: member.is_some_and(|m| m.state.playing),
                 game: theirs.map(|g| card_name(g).to_owned()),
                 console: theirs.map(|g| g.console),

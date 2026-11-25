@@ -1,12 +1,18 @@
 use crate::app::widgets::game_tile::Progress;
-use crate::storage::Backend;
+use crate::storage::Folders;
+use crate::storage::kinds::Folder;
 use citrine_gb_achievements::{Console, GameProgress, GameState, SetInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const NAMESPACE: &str = "achievements";
+const NAMESPACE: Folder = Folder::AchievementLists;
 const FRESH_FOR: u64 = 24 * 60 * 60;
-pub const CONSOLES: [Console; 2] = [Console::GameBoy, Console::GameBoyColor];
+pub const CONSOLES: [Console; 4] = [
+    Console::GameBoy,
+    Console::GameBoyColor,
+    Console::GameBoyAdvance,
+    Console::NintendoDs,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Set {
@@ -37,7 +43,7 @@ impl LibraryProgress {
         })
     }
 
-    pub fn load_cached(&mut self, cache: &Backend, console: Console, now: u64) -> bool {
+    pub fn load_cached(&mut self, cache: &Folders, console: Console, now: u64) -> bool {
         let cached = cache
             .read(NAMESPACE, &file_name(console))
             .and_then(|data| serde_json::from_slice::<Cached>(&data).ok())
@@ -51,7 +57,7 @@ impl LibraryProgress {
         true
     }
 
-    pub fn take_sets(&mut self, cache: &Backend, console: Console, sets: Vec<SetInfo>, now: u64) {
+    pub fn take_sets(&mut self, cache: &Folders, console: Console, sets: Vec<SetInfo>, now: u64) {
         let mut cached = Vec::new();
         for set in sets.into_iter().filter(|set| set.total > 0) {
             for hash in set.hashes {
@@ -106,23 +112,16 @@ fn file_name(console: Console) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn hash(console: Option<citrine_gb::console::ConsoleKind>, rom: &[u8]) -> Option<String> {
     use citrine_gb::console::ConsoleKind;
-    match console? {
-        ConsoleKind::Gb | ConsoleKind::Gbc => {
-            citrine_gb_achievements::hash_rom(Console::GameBoy, rom)
-                .map(|hash| hash.to_ascii_lowercase())
-        }
-        _ => None,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn hash(_console: Option<citrine_gb::console::ConsoleKind>, _rom: &[u8]) -> Option<String> {
-    None
+    let console = match console? {
+        ConsoleKind::Gb | ConsoleKind::Gbc => Console::GameBoy,
+        ConsoleKind::Gba => Console::GameBoyAdvance,
+        ConsoleKind::Nds => Console::NintendoDs,
+    };
+    citrine_gb_achievements::hash_rom(console, rom).map(|hash| hash.to_ascii_lowercase())
 }
 
 pub fn wants_hash(console: Option<citrine_gb::console::ConsoleKind>) -> bool {
-    use citrine_gb::console::ConsoleKind;
-    cfg!(not(target_arch = "wasm32")) && matches!(console, Some(ConsoleKind::Gb | ConsoleKind::Gbc))
+    cfg!(not(target_arch = "wasm32")) && console.is_some()
 }
 
 #[cfg(test)]
@@ -140,11 +139,11 @@ mod tests {
         }
     }
 
-    fn cache(name: &str) -> Backend {
-        let root =
-            std::env::temp_dir().join(format!("citrine-ra-progress-{}-{name}", std::process::id()));
+    fn cache(name: &str) -> Folders {
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-ra-progress-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        Backend::at(root)
+        Folders::at(root)
     }
 
     #[test]
@@ -203,6 +202,7 @@ mod tests {
                 points_unlocked: 20,
             },
             groups: Vec::new(),
+            leaderboards: Vec::new(),
         });
         assert_eq!(
             progress.of("3d45c1ee9abd5738df46d2bdda8b57dc"),
@@ -215,13 +215,16 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_game_boy_rom_hashes_to_its_md5() {
+    fn a_game_boy_or_gba_rom_hashes_to_its_md5() {
         use citrine_gb::console::ConsoleKind;
         let rom = [0u8; 0x8000];
         assert_eq!(
             hash(Some(ConsoleKind::Gb), &rom).as_deref(),
             Some("bb7df04e1b0a2570657527a7e108ae23")
         );
-        assert_eq!(hash(Some(ConsoleKind::Gba), &rom), None);
+        assert_eq!(
+            hash(Some(ConsoleKind::Gba), &rom).as_deref(),
+            Some("bb7df04e1b0a2570657527a7e108ae23")
+        );
     }
 }

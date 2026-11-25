@@ -12,6 +12,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
         Controls::Desktop {
             bindings: &settings.bindings,
             hotkeys: &settings.hotkeys,
+            quick_load: settings.quick_load,
         }
     };
     let panel = InfoPanel::new(&mut viewer.ui.info, viewer.commonmark, controls);

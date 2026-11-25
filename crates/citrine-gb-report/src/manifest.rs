@@ -39,6 +39,8 @@ pub struct GameInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareInfo {
     pub gb_boot_rom_sha1: Option<String>,
+    #[serde(default)]
+    pub gbc_boot_rom_sha1: Option<String>,
     pub gba_bios_sha1: Option<String>,
     pub nds_arm9_bios_sha1: Option<String>,
     pub nds_arm7_bios_sha1: Option<String>,

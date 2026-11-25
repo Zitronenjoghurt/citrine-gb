@@ -47,12 +47,21 @@ pub fn line(ui: &mut Ui, text: &str, style: TextStyle, color: Color32) -> Respon
     .inner
 }
 
-pub fn chat_line(names: &[&str]) -> Option<String> {
-    match names {
+pub const DEFAULT_TEXT: &str = "is typing";
+
+pub fn chat_line(people: &[(&str, Option<&str>)]) -> Option<String> {
+    match people {
         [] => None,
-        [one] => Some(format!("{one} is typing")),
-        [a, b] => Some(format!("{a} and {b} are typing")),
+        [(one, text)] => Some(format!("{one} {}", text.unwrap_or(DEFAULT_TEXT))),
+        [(a, _), (b, _)] => Some(format!("{a} and {b} are typing")),
         _ => Some("Several people are typing".to_owned()),
+    }
+}
+
+pub fn list_line(text: Option<&str>) -> &str {
+    match text {
+        Some(text) => text.strip_prefix("is ").unwrap_or(text),
+        None => "typing",
     }
 }
 
@@ -63,15 +72,26 @@ mod tests {
     #[test]
     fn one_two_or_several_names() {
         assert_eq!(chat_line(&[]), None);
-        assert_eq!(chat_line(&["Ana"]).unwrap(), "Ana is typing");
+        assert_eq!(chat_line(&[("Ana", None)]).unwrap(), "Ana is typing");
         assert_eq!(
-            chat_line(&["Ana", "Ben"]).unwrap(),
+            chat_line(&[("Ana", None), ("Ben", Some("is meowing"))]).unwrap(),
             "Ana and Ben are typing"
         );
         assert_eq!(
-            chat_line(&["Ana", "Ben", "Cem"]).unwrap(),
+            chat_line(&[("Ana", None), ("Ben", None), ("Cem", None)]).unwrap(),
             "Several people are typing"
         );
+    }
+
+    #[test]
+    fn a_friend_with_own_typing_text_shows_it_in_the_chat_and_the_list() {
+        assert_eq!(
+            chat_line(&[("Ana", Some("is meowing"))]).unwrap(),
+            "Ana is meowing"
+        );
+        assert_eq!(list_line(Some("is meowing")), "meowing");
+        assert_eq!(list_line(Some("spells it out")), "spells it out");
+        assert_eq!(list_line(None), "typing");
     }
 
     #[test]

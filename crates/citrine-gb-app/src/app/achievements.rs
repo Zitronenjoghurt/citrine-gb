@@ -1,4 +1,5 @@
 use super::Citrine;
+use crate::achievements::boards::BoardNotice;
 use crate::achievements::{Leaving, Notice};
 use crate::app::toasts::{Card, Toast};
 use egui::{Context, TextureHandle};
@@ -12,6 +13,9 @@ impl Citrine {
         let notices = self
             .achievements
             .pump(&mut self.emulator, &mut self.ui.settings, paused);
+        if let Some(frames) = self.emulator.take_pause_news() {
+            self.toasts.info(super::hardcore::pause_line(frames));
+        }
         let phone = self.is_mobile(ctx);
         for (notice, badge) in self.achievements.follow(ctx, notices) {
             self.toasts.add(Toast::card(card(notice, badge, phone)));
@@ -30,6 +34,28 @@ impl Citrine {
         }
         self.achievements.leaving = Some(leaving);
         true
+    }
+
+    pub(super) fn hardcore_confirm(&mut self, ctx: &Context) {
+        if !self.achievements.asking_hardcore {
+            return;
+        }
+        let answer = crate::app::widgets::confirm::confirm_with_detail(
+            ctx,
+            "hardcore_on",
+            "Turn on hardcore?",
+            Some("The game restarts. Anything since your last in-game save is lost."),
+            "Restart in hardcore",
+        );
+        let Some(yes) = answer else {
+            return;
+        };
+        self.achievements.asking_hardcore = false;
+        if yes {
+            self.ui.settings.achievements.hardcore = true;
+            self.ui.settings.dirty = true;
+            self.emulator.restart();
+        }
     }
 
     pub(super) fn unsent_confirm(&mut self, ctx: &Context) {
@@ -63,7 +89,7 @@ impl Citrine {
         match leaving {
             Leaving::Quit => {
                 self.achievements.quit_anyway = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                crate::platform::quit(ctx);
             }
             Leaving::CloseGame => self.close_game(),
         }
@@ -95,7 +121,11 @@ fn points(points: u32) -> String {
 }
 
 fn card(notice: Notice, badge: Option<TextureHandle>, phone: bool) -> Card {
-    let side = if phone { PHONE_BADGE } else { DESKTOP_BADGE };
+    let side = match notice {
+        Notice::Hardcore | Notice::Board { .. } => 0.0,
+        _ if phone => PHONE_BADGE,
+        _ => DESKTOP_BADGE,
+    };
     let (title, detail, aside) = match notice {
         Notice::Unlocked(achievement) if phone => (
             "Achievement unlocked".to_owned(),
@@ -112,6 +142,19 @@ fn card(notice: Notice, badge: Option<TextureHandle>, phone: bool) -> Card {
             title,
             String::new(),
         ),
+        Notice::Hardcore => (
+            "Hardcore is on".to_owned(),
+            "No rewind, loading states, cheats or link play".to_owned(),
+            String::new(),
+        ),
+        Notice::Board { title, notice } => {
+            let (what, aside) = board_lines(&notice);
+            if phone {
+                (what, title, aside)
+            } else {
+                (title, what, aside)
+            }
+        }
     };
     Card {
         badge,
@@ -122,11 +165,27 @@ fn card(notice: Notice, badge: Option<TextureHandle>, phone: bool) -> Card {
     }
 }
 
+fn board_lines(notice: &BoardNotice) -> (String, String) {
+    match notice {
+        BoardNotice::Started => ("Leaderboard attempt started".to_owned(), String::new()),
+        BoardNotice::Failed => ("Leaderboard attempt failed".to_owned(), String::new()),
+        BoardNotice::Submitted {
+            score,
+            rank,
+            entries,
+        } => (
+            format!("Submitted {score}"),
+            crate::achievements::boards::rank_line(*rank, *entries),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::achievements::Achievements;
     use crate::achievements::net::fake::Fake;
+    use crate::achievements::secrets::{Memory, Secrets};
     use crate::app::tabs::Tab;
     use citrine_gb::WriteMemory;
     use citrine_gb::gb::GbModel;
@@ -138,20 +197,28 @@ mod tests {
     const AWARD: &str = r#"{"Success":true,"Score":1000,"SoftcoreScore":245,"AchievementID":5501,"AchievementsRemaining":1}"#;
 
     fn game_set() -> String {
-        String::from(concat!(
-            r#"{"Success":true,"GameId":1234,"Title":"Sample Game","ConsoleId":4,"#,
-            r#""ImageIconUrl":"http://server/Images/112233.png","#,
-            r#""RichPresenceGameId":1234,"RichPresencePatch":"","Sets":[{"#,
-            r#""AchievementSetId":1111,"GameId":1234,"Title":null,"Type":"core","#,
-            r#""ImageIconUrl":"http://server/Images/112233.png","Achievements":["#,
-            r#"{"ID":5501,"Title":"Sunny Thunder Badge","Description":"Defeat Lt. Surge.","Flags":3,"Points":5,"#,
-            r#""MemAddr":"0xHc010=3_0xHc011=7","Author":"User1","BadgeName":"120704","#,
-            r#""Created":1367266583,"Modified":1376929305},"#,
-            r#"{"ID":5502,"Title":"Journey Has Started","Description":"Obtain the Pokedex.","Flags":3,"Points":2,"#,
-            r#""MemAddr":"0xHc012=9","Author":"User1","BadgeName":"120736","#,
-            r#""Created":1376970283,"Modified":1376970283}"#,
-            r#"],"Leaderboards":[]}]}"#
-        ))
+        game_set_on(4)
+    }
+
+    fn game_set_on(console: u32) -> String {
+        format!(
+            "{}{console}{}",
+            r#"{"Success":true,"GameId":1234,"Title":"Sample Game","ConsoleId":"#,
+            concat!(
+                r#","#,
+                r#""ImageIconUrl":"http://server/Images/112233.png","#,
+                r#""RichPresenceGameId":1234,"RichPresencePatch":"","Sets":[{"#,
+                r#""AchievementSetId":1111,"GameId":1234,"Title":null,"Type":"core","#,
+                r#""ImageIconUrl":"http://server/Images/112233.png","Achievements":["#,
+                r#"{"ID":5501,"Title":"Sunny Thunder Badge","Description":"Defeat Lt. Surge.","Flags":3,"Points":5,"#,
+                r#""MemAddr":"0xHc010=3_0xHc011=7","Author":"User1","BadgeName":"120704","#,
+                r#""Created":1367266583,"Modified":1376929305},"#,
+                r#"{"ID":5502,"Title":"Journey Has Started","Description":"Obtain the Pokedex.","Flags":3,"Points":2,"#,
+                r#""MemAddr":"0xHc012=9","Author":"User1","BadgeName":"120736","#,
+                r#""Created":1376970283,"Modified":1376970283}"#,
+                r#"],"Leaderboards":[]}]}"#
+            )
+        )
     }
 
     fn fake() -> Fake {
@@ -165,12 +232,11 @@ mod tests {
 
     fn app(name: &str, fake: &Fake) -> Citrine {
         let mut app = crate::app::tests::phone_app(name);
-        let cache =
-            std::env::temp_dir().join(format!("citrine-ra-cache-{}-{name}", std::process::id()));
+        let cache = crate::storage::cache_dir().join("ra-app").join(name);
         let _ = std::fs::remove_dir_all(&cache);
         app.achievements = Box::new(Achievements::on_net(
             Box::new(fake.clone()),
-            crate::storage::Backend::at(cache),
+            crate::storage::Folders::at(cache),
         ));
         app.events.open_tab(Tab::Achievements);
         app.handle_event_queue(true);
@@ -192,6 +258,7 @@ mod tests {
             app.follow_achievements(ctx);
             app.render(ctx);
             app.unsent_confirm(ctx);
+            app.hardcore_confirm(ctx);
             app.show_toasts(ctx);
             app.handle_event_queue(touch);
         })
@@ -239,11 +306,20 @@ mod tests {
     }
 
     fn unlock_surge(app: &mut Citrine) {
+        unlock_with(app, |app| {
+            let gb = app.emulator.as_gb_mut().unwrap();
+            gb.memory.write_naive(0xC010, 3);
+            gb.memory.write_naive(0xC011, 7);
+        });
+    }
+
+    fn unlock_with(app: &mut Citrine, poke: impl FnOnce(&mut Citrine)) {
+        let mut poke = Some(poke);
         for step in 0..3 {
-            if step == 1 {
-                let gb = app.emulator.as_gb_mut().unwrap();
-                gb.memory.write_naive(0xC010, 3);
-                gb.memory.write_naive(0xC011, 7);
+            if step == 1
+                && let Some(poke) = poke.take()
+            {
+                poke(app);
             }
             app.emulator.with_achievements(|seat| {
                 let (client, mut memory) = seat.parts();
@@ -507,7 +583,7 @@ mod tests {
             frame(&mut app, &ctx, vec![]);
         }
         assert!(app.achievements.user().is_some());
-        assert_eq!(asked(&fake), before + 2);
+        assert_eq!(asked(&fake), before + 4);
     }
 
     #[test]
@@ -554,7 +630,7 @@ mod tests {
 
         unlock_surge(&mut app);
         let mut shown = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..40 {
             shown = texts(&frame(&mut app, &ctx, vec![]));
             if shown.iter().any(|t| t == "Achievement unlocked") {
                 break;
@@ -727,6 +803,357 @@ mod tests {
         assert!(shown.iter().any(|t| t == "Sign in to RetroAchievements"));
     }
 
+    #[cfg(any(feature = "gba", feature = "nds"))]
+    fn load_fixture(app: &mut Citrine, path: &str, kind: citrine_gb::console::ConsoleKind) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        let rom = Rom::new(&std::fs::read(path).expect("fixture"));
+        app.emulator.load_game(&rom, kind, None).expect("load");
+        app.events.open_tab(Tab::Achievements);
+        app.handle_event_queue(true);
+    }
+
+    fn settle(app: &mut Citrine, ctx: &Context, until: &str) -> Vec<String> {
+        let mut shown = Vec::new();
+        for _ in 0..40 {
+            shown = texts(&frame(app, ctx, vec![]));
+            if shown.iter().any(|t| t.ends_with(until)) {
+                break;
+            }
+        }
+        shown
+    }
+
+    fn never_loading(shown: &[String]) {
+        assert!(
+            shown.iter().all(|t| t != "Loading achievements"),
+            "{shown:?}"
+        );
+    }
+
+    fn keyring_app(name: &str, fake: &Fake, keyring: &Memory) -> Citrine {
+        let mut app = app(name, fake);
+        app.achievements.keep_tokens_in(Box::new(keyring.clone()));
+        app
+    }
+
+    fn saved_account(token: &str) -> Option<crate::achievements::Account> {
+        Some(crate::achievements::Account {
+            username: "ClaraPlays".to_owned(),
+            token: token.to_owned(),
+        })
+    }
+
+    fn kept(keyring: &Memory) -> Option<String> {
+        keyring.tokens.lock().unwrap().get("ClaraPlays").cloned()
+    }
+
+    #[test]
+    fn a_working_keyring_keeps_the_token_out_of_the_settings_file() {
+        let ctx = Context::default();
+        let fake = fake();
+        let keyring = Memory::default();
+        let mut app = keyring_app("ra-keyring", &fake, &keyring);
+        signed_in(&mut app, &ctx);
+        assert_eq!(app.ui.settings.achievements.account, saved_account(""));
+        assert_eq!(kept(&keyring).as_deref(), Some("ApiToken"));
+        let saved = serde_json::to_string(&app.ui.settings).unwrap();
+        assert!(!saved.contains("ApiToken"), "{saved}");
+    }
+
+    #[test]
+    fn a_broken_keyring_leaves_the_token_in_the_settings_file() {
+        let ctx = Context::default();
+        let fake = fake();
+        let keyring = Memory {
+            broken: true,
+            ..Memory::default()
+        };
+        let mut app = keyring_app("ra-keyring-broken", &fake, &keyring);
+        signed_in(&mut app, &ctx);
+        assert_eq!(
+            app.ui.settings.achievements.account,
+            saved_account("ApiToken")
+        );
+        assert_eq!(kept(&keyring), None);
+    }
+
+    #[test]
+    fn a_token_from_the_settings_file_moves_to_the_keyring() {
+        let ctx = Context::default();
+        let fake = Fake::default();
+        fake.answer("r=login2&u=ClaraPlays&t=ApiToken", 200, LOGIN);
+        let keyring = Memory::default();
+        let mut app = keyring_app("ra-keyring-move", &fake, &keyring);
+        app.ui.settings.achievements.account = saved_account("ApiToken");
+        app.ui.settings.dirty = false;
+        for _ in 0..4 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        assert!(app.achievements.user().is_some());
+        assert_eq!(app.ui.settings.achievements.account, saved_account(""));
+        assert!(app.ui.settings.dirty);
+        assert_eq!(kept(&keyring).as_deref(), Some("ApiToken"));
+    }
+
+    #[test]
+    fn a_keyring_token_signs_in_by_itself() {
+        let ctx = Context::default();
+        let fake = Fake::default();
+        fake.answer("r=login2&u=ClaraPlays&t=ApiToken", 200, LOGIN);
+        let keyring = Memory::default();
+        keyring.set("ClaraPlays", "ApiToken");
+        let mut app = keyring_app("ra-keyring-token", &fake, &keyring);
+        app.ui.settings.achievements.account = saved_account("");
+        for _ in 0..4 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        assert!(app.achievements.user().is_some());
+    }
+
+    #[test]
+    fn a_missing_keyring_token_signs_out() {
+        let ctx = Context::default();
+        let fake = fake();
+        let keyring = Memory::default();
+        let mut app = keyring_app("ra-keyring-missing", &fake, &keyring);
+        app.ui.settings.achievements.account = saved_account("");
+        let shown = texts(&frame(&mut app, &ctx, vec![]));
+        assert!(app.ui.settings.achievements.account.is_none());
+        assert!(fake.sent.lock().unwrap().is_empty());
+        let shown = if shown.iter().any(|t| t == "Sign in to RetroAchievements") {
+            shown
+        } else {
+            texts(&frame(&mut app, &ctx, vec![]))
+        };
+        assert!(
+            shown.iter().any(|t| t == "Sign in to RetroAchievements"),
+            "{shown:?}"
+        );
+    }
+
+    #[test]
+    fn signing_out_removes_the_keyring_token() {
+        let ctx = Context::default();
+        let fake = fake();
+        let keyring = Memory::default();
+        let mut app = keyring_app("ra-keyring-out", &fake, &keyring);
+        signed_in(&mut app, &ctx);
+        assert!(kept(&keyring).is_some());
+        app.achievements.sign_out();
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(kept(&keyring), None);
+    }
+
+    #[cfg(any(feature = "gba", feature = "nds"))]
+    fn lists_the_set_and_unlocks(
+        name: &str,
+        fixture: &str,
+        kind: citrine_gb::console::ConsoleKind,
+        console: u32,
+        poke: impl Fn(&mut Citrine, u8, u8),
+    ) -> Fake {
+        let ctx = Context::default();
+        let fake = Fake::default();
+        fake.answer("r=login2", 200, LOGIN);
+        fake.answer("r=achievementsets", 200, &game_set_on(console));
+        fake.answer("r=startsession", 200, NO_UNLOCKS);
+        fake.answer("r=awardachievement", 200, AWARD);
+        let mut app = app(name, &fake);
+        load_fixture(&mut app, fixture, kind);
+        poke(&mut app, 0, 0);
+        signed_in(&mut app, &ctx);
+        let shown = settle(&mut app, &ctx, "0 of 2 unlocked");
+        never_loading(&shown);
+        assert!(shown.iter().any(|t| t == "0 of 2 unlocked"), "{shown:?}");
+        assert!(
+            shown.iter().any(|t| t == "Sunny Thunder Badge"),
+            "{shown:?}"
+        );
+
+        unlock_with(&mut app, |app| poke(app, 3, 7));
+        let shown = settle(&mut app, &ctx, "Achievement unlocked");
+        assert!(
+            shown.iter().any(|t| t == "Achievement unlocked"),
+            "{shown:?}"
+        );
+        fake
+    }
+
+    #[cfg(any(feature = "gba", feature = "nds"))]
+    fn sent_hash(fake: &Fake) -> Option<String> {
+        fake.sent.lock().unwrap().iter().find_map(|(request, _)| {
+            let post = request.post_data.as_deref()?;
+            let at = post.find("&m=")? + 3;
+            Some(post[at..].chars().take(32).collect())
+        })
+    }
+
+    #[cfg(feature = "gba")]
+    #[test]
+    fn a_gba_game_lists_its_set_and_unlocks_from_ewram() {
+        let fake = lists_the_set_and_unlocks(
+            "ra-state-gba",
+            "fixtures/gba/save-sram.gba",
+            citrine_gb::console::ConsoleKind::Gba,
+            5,
+            |app, low, high| {
+                let gba = app.emulator.as_gba_mut().unwrap();
+                gba.bus_mut().write8(0x0200_4010, low);
+                gba.bus_mut().write8(0x0200_4011, high);
+            },
+        );
+        assert_eq!(
+            sent_hash(&fake).as_deref(),
+            Some("77b6567a3d288d4a55848ca399207b22")
+        );
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_game_lists_its_set_and_unlocks_from_main_ram() {
+        use citrine_gb::gba::wait::Width;
+        let fixture = "fixtures/nds/blocksds-console-both-screens.nds";
+        let fake = lists_the_set_and_unlocks(
+            "ra-state-ds",
+            fixture,
+            citrine_gb::console::ConsoleKind::Nds,
+            18,
+            |app, low, high| {
+                let mut nds = app.emulator.as_nds_mut().unwrap().buses_mut().arm9();
+                nds.write(0x0200_C010, Width::Byte, low.into());
+                nds.write(0x0200_C011, Width::Byte, high.into());
+            },
+        );
+        let rom = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture))
+            .expect("fixture");
+        let hash =
+            citrine_gb_achievements::hash_rom(citrine_gb_achievements::Console::NintendoDs, &rom);
+        assert!(hash.is_some());
+        assert_eq!(sent_hash(&fake), hash);
+    }
+
+    #[test]
+    fn a_version_retroachievements_does_not_know_says_so() {
+        let ctx = Context::default();
+        let fake = Fake::default();
+        fake.answer("r=login2", 200, LOGIN);
+        fake.answer(
+            "r=achievementsets",
+            404,
+            r#"{"Success":false,"Error":"Unknown game","Code":"not_found","Status":404}"#,
+        );
+        let mut app = app("ra-state-unknown-game", &fake);
+        load_zero_rom(&mut app);
+        app.events.open_tab(Tab::Achievements);
+        app.handle_event_queue(true);
+        signed_in(&mut app, &ctx);
+        let shown = settle(&mut app, &ctx, "version of the game has no achievements");
+        never_loading(&shown);
+        assert!(
+            shown
+                .iter()
+                .any(|t| t == "This version of the game has no achievements"),
+            "{shown:?}"
+        );
+    }
+
+    #[test]
+    fn a_known_game_without_a_set_says_it_has_none_yet() {
+        let ctx = Context::default();
+        let fake = Fake::default();
+        fake.answer("r=login2", 200, LOGIN);
+        fake.answer(
+            "r=achievementsets",
+            200,
+            r#"{"Success":true,"GameId":1234,"Title":"Sample Game","ConsoleId":4,"ImageIconUrl":"http://server/Images/112233.png","RichPresenceGameId":1234,"RichPresencePatch":"","Sets":[]}"#,
+        );
+        let mut app = app("ra-state-no-set", &fake);
+        load_zero_rom(&mut app);
+        app.events.open_tab(Tab::Achievements);
+        app.handle_event_queue(true);
+        signed_in(&mut app, &ctx);
+        let shown = settle(&mut app, &ctx, "game has no achievements yet");
+        never_loading(&shown);
+        assert!(
+            shown
+                .iter()
+                .any(|t| t == "This game has no achievements yet"),
+            "{shown:?}"
+        );
+        assert!(
+            shown
+                .iter()
+                .all(|t| t != "This version of the game has no achievements"),
+            "{shown:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_server_says_so_and_try_again_loads_the_set() {
+        let ctx = Context::default();
+        let fake = Fake::default();
+        fake.answer("r=login2", 200, LOGIN);
+        let mut app = app("ra-state-unreachable", &fake);
+        load_zero_rom(&mut app);
+        app.events.open_tab(Tab::Achievements);
+        app.handle_event_queue(true);
+        signed_in(&mut app, &ctx);
+        let shown = settle(&mut app, &ctx, "Try again");
+        never_loading(&shown);
+        assert!(
+            shown.iter().any(|t| t == "Can't reach RetroAchievements"),
+            "{shown:?}"
+        );
+
+        fake.answer("r=achievementsets", 200, &game_set());
+        fake.answer("r=startsession", 200, NO_UNLOCKS);
+        let output = frame(&mut app, &ctx, vec![]);
+        let again = rect_of(&output, "Try again").center();
+        frame(&mut app, &ctx, crate::app::tests::tap(again));
+        let shown = settle(&mut app, &ctx, "0 of 2 unlocked");
+        assert!(shown.iter().any(|t| t == "0 of 2 unlocked"), "{shown:?}");
+    }
+
+    #[test]
+    fn a_server_error_says_so_with_try_again() {
+        let ctx = Context::default();
+        let fake = Fake::default();
+        fake.answer("r=login2", 200, LOGIN);
+        fake.answer(
+            "r=achievementsets",
+            500,
+            r#"{"Success":false,"Error":"Database is down"}"#,
+        );
+        let mut app = app("ra-state-error", &fake);
+        load_zero_rom(&mut app);
+        app.events.open_tab(Tab::Achievements);
+        app.handle_event_queue(true);
+        signed_in(&mut app, &ctx);
+        let shown = settle(&mut app, &ctx, "Try again");
+        never_loading(&shown);
+        assert!(
+            shown.iter().any(|t| t == "Achievements didn't load"),
+            "{shown:?}"
+        );
+        assert!(shown.iter().any(|t| t.ends_with("Try again")), "{shown:?}");
+    }
+
+    #[test]
+    fn signed_out_with_a_game_shows_the_sign_in() {
+        let ctx = Context::default();
+        let fake = fake();
+        let mut app = app("ra-state-signed-out", &fake);
+        load_zero_rom(&mut app);
+        app.events.open_tab(Tab::Achievements);
+        app.handle_event_queue(true);
+        let shown = settle(&mut app, &ctx, "Sign in to RetroAchievements");
+        never_loading(&shown);
+        assert!(
+            shown.iter().any(|t| t == "Sign in to RetroAchievements"),
+            "{shown:?}"
+        );
+    }
+
     fn surge() -> Notice {
         Notice::Unlocked(Achievement {
             title: "Sunny Thunder Badge".to_owned(),
@@ -752,4 +1179,7 @@ mod tests {
         assert_eq!(card.detail, "Defeat Lt. Surge.");
         assert_eq!(card.aside, "Unlocked · 5 points");
     }
+
+    mod boards;
+    mod hardcore;
 }

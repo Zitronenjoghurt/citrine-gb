@@ -1,4 +1,6 @@
 use super::Citrine;
+use super::system_files::SystemFile;
+use crate::app::ui_state::settings_tree::rows::RowId;
 use crate::utils::file_loader::{FileLoader, PickedFile};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -14,6 +16,7 @@ pub enum DsFile {
 }
 
 impl DsFile {
+    #[cfg(test)]
     pub fn label(self) -> &'static str {
         match self {
             Self::Arm9Bios => "ARM9 BIOS",
@@ -22,11 +25,19 @@ impl DsFile {
         }
     }
 
-    fn noun(self) -> &'static str {
+    pub fn noun(self) -> &'static str {
         match self {
             Self::Arm9Bios => "DS ARM9 BIOS",
             Self::Arm7Bios => "DS ARM7 BIOS",
             Self::Firmware => "DS firmware",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Arm9Bios => crate::icons::DS_ARM9_BIOS,
+            Self::Arm7Bios => crate::icons::DS_ARM7_BIOS,
+            Self::Firmware => crate::icons::DS_FIRMWARE,
         }
     }
 
@@ -38,7 +49,7 @@ impl DsFile {
         }
     }
 
-    fn size_text(self) -> &'static str {
+    pub(super) fn size_text(self) -> &'static str {
         match self {
             Self::Arm9Bios => "4 KB",
             Self::Arm7Bios => "16 KB",
@@ -68,7 +79,7 @@ impl Citrine {
         #[cfg(ds_wifi)]
         self.load_ds_wifi();
         for file in DsFile::iter() {
-            match self.settings_store.ds_file(file) {
+            match self.settings_store.kept_file(file.store_keys()) {
                 Some((image, name)) if file.accepts(&image) => {
                     self.emulator.set_ds_file(file, Some((image, name)));
                 }
@@ -89,23 +100,17 @@ impl Citrine {
     }
 
     pub(super) fn handle_load_ds_file(&mut self, file: DsFile, picked: PickedFile) {
-        if !file.accepts(&picked.data) {
-            self.toasts.error(format!(
-                "'{}' isn't a {}. A {} file is {}.",
-                picked.name,
-                file.noun(),
-                file.noun(),
-                file.size_text()
-            ));
-            return;
-        }
+        self.handle_system_file(SystemFile::Ds(file), picked);
+    }
+
+    pub(super) fn keep_ds_file(&mut self, file: DsFile, picked: PickedFile) -> Option<String> {
         if let Err(err) = self
             .settings_store
-            .store_ds_file(file, Some((&picked.data, &picked.name)))
+            .store_kept_file(file.store_keys(), Some((&picked.data, &picked.name)))
         {
             self.toasts
                 .error(format!("Could not keep the {}: {err}", file.noun()));
-            return;
+            return None;
         }
         let waited = file == DsFile::Arm7Bios && self.waits_for_ds_bios();
         self.emulator
@@ -115,12 +120,11 @@ impl Citrine {
             self.toasts.close(NEEDS_BIOS);
             if let Err(err) = self.emulator.restart_ds() {
                 self.toasts.error(format!("Couldn't start the game: {err}"));
-                return;
+                return None;
             }
-            self.toasts.success(BIOS_SAVED);
-            return;
+            return Some(BIOS_SAVED.to_owned());
         }
-        self.toasts.success(self.ds_toast(&done));
+        Some(self.ds_toast(&done))
     }
 
     fn waits_for_ds_bios(&self) -> bool {
@@ -130,7 +134,7 @@ impl Citrine {
     }
 
     pub(super) fn remove_ds_file(&mut self, file: DsFile) {
-        if let Err(err) = self.settings_store.store_ds_file(file, None) {
+        if let Err(err) = self.settings_store.store_kept_file(file.store_keys(), None) {
             self.toasts
                 .error(format!("Could not remove the {}: {err}", file.noun()));
             return;
@@ -138,15 +142,6 @@ impl Citrine {
         self.emulator.set_ds_file(file, None);
         self.toasts
             .success(self.ds_toast(&format!("Using the built-in {}", file.noun())));
-    }
-
-    pub(super) fn clear_jit_cache(&mut self) {
-        use crate::app::ui_state::settings::{JIT_CLEAR_FAILED, JIT_CLEARED};
-        if self.emulator.clear_jit_cache() {
-            self.toasts.success(JIT_CLEARED);
-        } else {
-            self.toasts.error(JIT_CLEAR_FAILED);
-        }
     }
 
     pub(super) fn ask_for_ds_bios(&mut self) {
@@ -160,13 +155,11 @@ impl Citrine {
     }
 
     pub(super) fn find_ds_bios(&mut self, touch: bool) {
-        self.ui.settings.find_ds_bios = true;
-        self.open_settings(crate::app::ui_state::settings::SettingsTab::General, touch);
+        self.find_setting(RowId::Arm7Bios, touch);
     }
 
     pub(super) fn find_ds_direct(&mut self, touch: bool) {
-        self.ui.settings.find_ds_direct = true;
-        self.open_settings(crate::app::ui_state::settings::SettingsTab::General, touch);
+        self.find_setting(RowId::DsDirect, touch);
     }
 
     fn ds_toast(&self, done: &str) -> String {
@@ -227,6 +220,7 @@ impl Citrine {
         if firmware.user_settings != wanted {
             firmware.user_settings = wanted;
         }
+        self.emulator.ds_languages = self.ui.settings.boot_languages();
         if let Some(offset) = self.emulator.take_ds_clock_set() {
             self.ui.settings.ds_user.clock = Some(offset);
             self.ui.settings.dirty = true;
@@ -244,7 +238,8 @@ mod tests {
     use crate::app::tabs::Tab;
     use crate::app::tests::{info_frame_out, inside_its_clip, play_frame, tap, text_rect};
     use crate::app::ui_state::ds_user::{DsLanguage, DsUser};
-    use crate::app::ui_state::settings::{LayoutMode, SettingsTab};
+    use crate::app::ui_state::settings::LayoutMode;
+    use crate::app::ui_state::settings_tree::SettingsTab;
     use crate::utils::file_loader::PickedFile;
     use citrine_gb::gba::wait::Width;
     use citrine_gb::nds::card::{KEY_TABLE_BYTES, KEY_TABLE_OFFSET, KeyTable, encrypt_secure_area};
@@ -329,6 +324,30 @@ mod tests {
             screen_text(&mut opened.app),
             "NICKNAME Zitrone\nCOLOR 9\nBIRTHDAY 3/14\nLANGUAGE 2\nFLASH Zitrone"
         );
+    }
+
+    #[test]
+    fn a_language_pinned_to_a_game_boots_only_that_game_in_it() {
+        let mut opened = Opened::new("ds-user-language");
+        let key = citrine_gb::rom::Rom::from(homebrew().data)
+            .ids()
+            .0
+            .sha256_hex_string();
+        let pin = |language: DsLanguage| serde_json::to_value(Some(language)).expect("a language");
+        let settings = &mut opened.app.ui.settings;
+        settings.ds_user.language = Some(DsLanguage::German);
+        settings.set_own(&key, "ds_user.language", pin(DsLanguage::French));
+        settings.set_own("tobu", "ds_user.language", pin(DsLanguage::Japanese));
+        settings.play_game(Some("tobu"));
+        assert_eq!(settings.ds_user.language, Some(DsLanguage::Japanese));
+        opened.app.sync_ds_user();
+        let text = screen_text(&mut opened.app);
+        assert!(text.contains("LANGUAGE 2"), "the game's own French: {text}");
+
+        opened.app.ui.settings.drop_own(&key, "ds_user.language");
+        opened.app.sync_ds_user();
+        let text = screen_text(&mut opened.app);
+        assert!(text.contains("LANGUAGE 3"), "German for all games: {text}");
     }
 
     #[test]
@@ -428,7 +447,7 @@ mod tests {
         let mut opened = Opened::new("ds-bad-file");
         let file = PickedFile {
             name: "bios9.bin".to_owned(),
-            data: vec![0; 0x100].into(),
+            data: vec![0; 0x300].into(),
             path: None,
             seen: None,
         };
@@ -436,7 +455,7 @@ mod tests {
         assert_eq!(opened.app.emulator.ds_file_name(DsFile::Arm9Bios), None);
         assert_eq!(
             opened.app.toasts.texts(),
-            ["'bios9.bin' isn't a DS ARM9 BIOS. A DS ARM9 BIOS file is 4 KB."]
+            ["'bios9.bin' is 768 bytes. A DS ARM9 BIOS is 4 KB."]
         );
     }
 
@@ -445,7 +464,7 @@ mod tests {
         let mut opened = Opened::new("ds-settings-desktop");
         let app = &mut opened.app;
         app.ui.settings.layout = LayoutMode::Desktop;
-        app.ui.settings.current_tab = SettingsTab::General;
+        app.ui.settings.current_tab = SettingsTab::Ds;
         app.open_tab(Tab::Settings);
         let ctx = Context::default();
         for width in [560.0, 1280.0] {
@@ -461,7 +480,7 @@ mod tests {
     fn the_phone_picks_a_birthday_month_then_day() {
         let mut opened = Opened::new("ds-settings-phone");
         let app = &mut opened.app;
-        app.mobile.nav.open_settings(SettingsTab::General);
+        app.mobile.nav.open_settings(SettingsTab::Ds);
         let ctx = Context::default();
         let tap_text = |app: &mut Citrine, text: &str| {
             play_frame(app, &ctx, Vec::new());
@@ -506,7 +525,7 @@ mod tests {
         let output = play_frame(app, &ctx, Vec::new());
         let row = text_rect(&output, DsFile::Arm7Bios.label()).expect("the BIOS row");
         assert!(row.min.y >= 0.0 && row.max.y <= 915.0, "{row:?}");
-        assert!(!app.ui.settings.find_ds_bios);
+        assert!(app.ui.settings.find.is_none());
     }
 
     fn key_bios() -> PickedFile {
@@ -632,12 +651,15 @@ mod tests {
         app.ui.settings.layout = LayoutMode::Desktop;
         app.find_ds_bios(false);
         let ctx = Context::default();
-        for _ in 0..4 {
+        for _ in 0..30 {
             info_frame_out(app, &ctx, 1280.0, 600.0);
         }
         let output = info_frame_out(app, &ctx, 1280.0, 600.0);
-        assert!(inside_its_clip(&output, DsFile::Arm7Bios.label()));
-        assert!(!app.ui.settings.find_ds_bios);
+        let label = DsFile::Arm7Bios.label();
+        let row = text_rect(&output, label).expect("the BIOS row");
+        assert!(row.min.y >= 0.0 && row.max.y <= 600.0, "{row:?}");
+        assert!(inside_its_clip(&output, label));
+        assert!(app.ui.settings.find.is_none());
     }
 
     #[test]

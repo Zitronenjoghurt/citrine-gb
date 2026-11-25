@@ -39,7 +39,7 @@ const HOT: u8 = if cfg!(feature = "jit-lockstep") { 0 } else { 2 };
 const MAX_INSTRUCTIONS: usize = 128;
 const BLOCK_BYTES: u32 = 1 << marks::PAGE_BITS;
 const ARENA_LIMIT: usize = 64 << 20;
-const CODE_RAMS: usize = 6;
+pub const CODE_RAMS: usize = 6;
 
 static EPOCHS: AtomicU32 = AtomicU32::new(1);
 
@@ -67,6 +67,7 @@ impl CodeSpan {
 
 pub trait JitBus: CpuBus + FastBus {
     const TIMED_FETCH: bool = false;
+    const QUICK_FETCH: Option<QuickFetch> = None;
     const CP15: bool = false;
     const WRITABLE: &'static [CodeRam];
 
@@ -81,6 +82,11 @@ pub trait JitBus: CpuBus + FastBus {
     fn code_layout(&self) -> u64;
     fn code_span(&self, addr: u32) -> Option<CodeSpan>;
     fn code_word(&self, span: CodeSpan) -> u32;
+
+    fn rom_literal(&self, _addr: u32) -> Option<u32> {
+        None
+    }
+
     fn mark_code(&mut self, ram: CodeRam, page: usize) -> u32;
     fn code_generation(&self, ram: CodeRam, page: usize) -> Option<u32>;
     fn take_code_hit(&mut self) -> bool;
@@ -93,13 +99,119 @@ pub trait JitBus: CpuBus + FastBus {
     }
     fn code_stamp(&self, ram: CodeRam) -> u32;
     fn written_page(&self, ram: CodeRam, stamp: u32) -> Option<usize>;
+    fn code_quiet(&self, _seen: &[u32; CODE_RAMS]) -> bool {
+        false
+    }
 
     fn runs_on(&self, _masked: bool) -> bool {
         false
     }
 
-    fn fetch_flat(&mut self, _addr: u32, _width: Width, _count: u32, _room: u32) -> bool {
+    fn jit_write(&mut self, addr: u32, width: Width, value: u32, access: Access) -> u32 {
+        self.timed_write(addr, width, value, access)
+    }
+
+    fn fetch_flat(
+        &mut self,
+        _addr: u32,
+        _width: Width,
+        _count: u32,
+        _cycles: u32,
+        _room: u32,
+    ) -> bool {
         false
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuickFetch {
+    pub now: i32,
+    pub sample: i32,
+    pub dma_check: i32,
+    pub plain_rom_end: i32,
+    pub head: i32,
+    pub count: i32,
+    pub clock: i32,
+    pub due: i32,
+    pub since: i32,
+    pub progress: i32,
+    pub cost: i32,
+    pub paused: i32,
+    pub branched: i32,
+    pub stuck: i32,
+    pub following: i32,
+    pub flowing: i32,
+    pub active: i32,
+    pub force_n: i32,
+    pub parked: i32,
+    pub page_cost: i32,
+    pub open_addr: i32,
+    pub open_last: i32,
+    pub open_iwram: i32,
+    pub open_bios: i32,
+    pub wait_bits: i32,
+    pub first_halves: i32,
+    pub sequential_halves: i32,
+    pub code_hits: [i32; 2],
+    pub prefetch_bit: u32,
+    pub iwram_page: u32,
+    pub bios_end: u32,
+    pub rom_start: u32,
+    pub rom_span: u32,
+    pub rom_mirror: u32,
+    pub rom_skip: u32,
+    pub rom_page: u32,
+    pub capacity: u32,
+}
+
+impl QuickFetch {
+    pub fn rom_offset(&self, addr: u32) -> Option<u64> {
+        if addr.wrapping_sub(self.rom_start) >= self.rom_span {
+            return None;
+        }
+        let offset = addr & self.rom_mirror;
+        offset.checked_sub(self.rom_skip).map(u64::from)
+    }
+
+    pub fn packed(&self) -> bool {
+        let words = [
+            self.head,
+            self.cost,
+            self.count,
+            self.progress,
+            self.parked,
+            self.page_cost,
+        ];
+        let flags = [
+            self.active,
+            self.flowing,
+            self.paused,
+            self.branched,
+            self.stuck,
+            self.following,
+            self.force_n,
+        ];
+        let head = self.head;
+        head % 8 == 0
+            && (0..).zip(words).all(|(at, offset)| offset == head + 4 * at)
+            && (0..)
+                .zip(flags)
+                .all(|(at, offset)| offset == head + 24 + at)
+    }
+
+    pub fn iwram_latch(&self, first: u32, last: u32, thumb: bool, words: [u32; 2]) -> Option<u32> {
+        if first >> 24 != self.iwram_page || last >> 24 != self.iwram_page {
+            return None;
+        }
+        if !thumb {
+            return Some(words[1]);
+        }
+        let [before, after] = words.map(|word| word & 0xFFFF);
+        Some(if last & 2 == 0 {
+            after | before << 16
+        } else {
+            before | after << 16
+        })
     }
 }
 
@@ -155,6 +267,7 @@ struct Compiled {
     words: Box<[u32]>,
     spans: Box<[CodeSpan]>,
     pages: Box<[(CodeRam, usize)]>,
+    literals: Box<[scan::Literal]>,
 }
 
 impl Compiled {
@@ -328,11 +441,11 @@ impl Jit {
         let mut scans = self.scans;
         let mut runs = 0;
         let mut end = 0;
-        bus.take_code_hit();
         self.forget_written(bus);
         let mut fast = bus.fast();
+        let mut resumed = None;
         while ran.cycles < budget || !Self::ends::<V5, B>(core) {
-            let ((code, start, words), slot) = match self.find(core) {
+            let ((code, start, words), slot) = match resumed.take().or_else(|| self.find(core)) {
                 Some(found) => found,
                 None => {
                     let Some(found) = self.enter(core, bus) else {
@@ -397,10 +510,10 @@ impl Jit {
                 if ran.cycles >= budget && Self::ends::<V5, B>(core) || !self.resumes(core, bus) {
                     break;
                 }
-                bus.take_code_hit();
                 self.forget_written(bus);
                 fast = bus.fast();
-                if self.find(core).is_none() {
+                resumed = self.find(core);
+                if resumed.is_none() {
                     break;
                 }
             }
@@ -438,7 +551,14 @@ impl Jit {
     }
 
     #[inline(always)]
-    fn forget_written<B: JitBus>(&mut self, bus: &B) {
+    fn forget_written<B: JitBus>(&mut self, bus: &mut B) {
+        if !bus.code_quiet(&self.seen) {
+            self.forget_marked(bus);
+        }
+    }
+
+    fn forget_marked<B: JitBus>(&mut self, bus: &mut B) {
+        bus.take_code_hit();
         for &ram in B::WRITABLE {
             let stamp = bus.code_stamp(ram);
             let seen = std::mem::replace(&mut self.seen[ram as usize], stamp);
@@ -568,13 +688,6 @@ impl Jit {
         self.inflight += 1;
         self.entries
             .insert(key(pc, thumb), Entry::Queued(Arc::clone(&heat)));
-        let job = match job {
-            Ok(job) => job,
-            Err(done) => {
-                self.install(*done, bus);
-                return self.entered(pc, thumb, pipeline);
-            }
-        };
         match &self.lane {
             None => {
                 let done = worker::compile(&mut self.emitter, job);
@@ -628,6 +741,7 @@ impl Jit {
             spans,
             pages,
             gens,
+            literals,
             ..
         } = done.scan;
         self.lookup.forget(key(pc, thumb));
@@ -660,6 +774,7 @@ impl Jit {
             words,
             spans,
             pages,
+            literals,
         });
         let epoch = self.epoch;
         let mut gens = gens;
@@ -747,6 +862,23 @@ impl Jit {
         }
         words.truncate(count + 2);
         spans.truncate(count + 2);
+        let literals: Box<[scan::Literal]> =
+            if thumb && !V5 && B::TIMED_FETCH && B::QUICK_FETCH.is_some() {
+                ops.iter()
+                    .enumerate()
+                    .filter_map(|(index, op)| {
+                        let scan::Op::Transfer(transfer) = op else {
+                            return None;
+                        };
+                        let index = index as u32;
+                        let addr = transfer.pc_literal(pc.wrapping_add((index + 2) * size))?;
+                        let word = bus.rom_literal(addr)?;
+                        Some(scan::Literal { index, addr, word })
+                    })
+                    .collect()
+            } else {
+                Box::default()
+            };
         let width = if thumb { Width::Half } else { Width::Word };
         let fetch = (0..count as u32)
             .map(|index| {
@@ -779,6 +911,7 @@ impl Jit {
             fetch: fetch.into_boxed_slice(),
             pages: pages.into_boxed_slice(),
             gens,
+            literals,
         })
     }
 
@@ -788,6 +921,9 @@ impl Jit {
         self.entries.clear();
         self.lookup.clear();
         self.arena = Arena::default();
+        if let Some(native) = &mut self.native {
+            native.forget_fetch_cost();
+        }
     }
 }
 
@@ -826,6 +962,13 @@ fn current<B: JitBus>(
         .iter()
         .zip(block.words.iter())
         .any(|(&span, &word)| code_unit(bus, span, block.thumb) != word)
+    {
+        return false;
+    }
+    if block
+        .literals
+        .iter()
+        .any(|literal| bus.rom_literal(literal.addr) != Some(literal.word))
     {
         return false;
     }

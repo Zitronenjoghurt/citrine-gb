@@ -1,22 +1,9 @@
 use super::toasts::Toast;
-use super::toolbar::{BRAND, CORE_GIVES_WAY};
 use super::{Citrine, DOCK_PANE_MIN, FRIENDS_DOCK_SHARE, FRIENDS_DOCK_WIDTH, FRIENDS_STACK_SHARE};
 use super::{tabs, viewer};
 use crate::app::tabs::Tab;
 use crate::app::ui_state::hotkeys::HotkeyAction;
-use crate::app::ui_state::keybinds::PadButton;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::app::ui_state::settings::console_name;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::app::ui_state::settings::kind_short;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::app::ui_state::settings::other_console;
-use crate::app::widgets::shortcut::{shortcut_button, shortcut_hint};
-use crate::icons;
-use crate::utils::file_loader::FileLoader;
-use crate::utils::save_files::ROM_FILTER;
-#[cfg(not(target_arch = "wasm32"))]
-use citrine_gb::rom::header::RomCgbMode;
+use crate::app::widgets::shortcut::shortcut_hint;
 use egui::{CentralPanel, Color32, Context, TopBottomPanel};
 use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabIndex};
 use strum::IntoEnumIterator;
@@ -27,21 +14,24 @@ impl Citrine {
     }
 
     pub(super) fn render(&mut self, ctx: &Context) {
+        self.follow_layout_pick(ctx);
+        self.follow_screen_marks();
         let mobile = self.is_mobile(ctx);
         self.sync_focus_popups(!mobile);
         if mobile {
             self.render_mobile(ctx);
-            return;
-        }
-        crate::app::mobile::sheet::set_area(ctx, None);
-        if std::mem::take(&mut self.mobile.phone) {
-            self.release_phone_pause();
-        }
-        if self.ui.focus_mode {
-            self.render_focus_mode(ctx);
         } else {
-            self.render_normal_mode(ctx);
+            crate::app::mobile::sheet::set_area(ctx, None);
+            if std::mem::take(&mut self.mobile.phone) {
+                self.release_phone_pause();
+            }
+            if self.ui.focus_mode {
+                self.render_focus_mode(ctx);
+            } else {
+                self.render_normal_mode(ctx);
+            }
         }
+        self.layout_dialogs(ctx);
     }
 
     pub(super) fn render_normal_mode(&mut self, ctx: &Context) {
@@ -57,8 +47,24 @@ impl Citrine {
             screens.as_deref(),
             &self.ui.ds_files,
         );
+        let (need, room) = self.toasts.page_strip(ctx);
+        if room > 0.0 {
+            TopBottomPanel::bottom("toast_room")
+                .exact_height(room)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
+                .show(ctx, |ui| {
+                    self.toasts.place_strip(
+                        ui.max_rect(),
+                        need.unwrap_or(room),
+                        super::toasts::MARGIN,
+                    );
+                });
+        }
         CentralPanel::default().show(ctx, |ui| {
-            self.toasts.place_page(ui.max_rect());
+            if room == 0.0 {
+                self.toasts.place_page(ui.max_rect());
+            }
             let mut viewer = tabs::TabViewer {
                 achievements: &mut self.achievements,
                 audio: &mut self.audio,
@@ -77,6 +83,8 @@ impl Citrine {
                 stats: &self.stats,
                 threads: &self.threads,
                 ui: &mut self.ui,
+                #[cfg(feature = "nds")]
+                mic_test: self.mic.test(),
             };
 
             let mut style = egui_dock::Style::from_egui(ctx.style().as_ref());
@@ -108,6 +116,8 @@ impl Citrine {
             stats: &self.stats,
             threads: &self.threads,
             ui: &mut self.ui,
+            #[cfg(feature = "nds")]
+            mic_test: self.mic.test(),
         };
         viewer::show(&mut viewer, ctx);
     }
@@ -130,153 +140,7 @@ impl Citrine {
         }
     }
 
-    pub(super) fn top_panel(&mut self, ui: &mut egui::Ui) {
-        let row = ui.horizontal(|ui| {
-            let room = ui.available_width();
-            if self.brand_fits(ui) {
-                ui.label(BRAND);
-                ui.separator();
-            }
-            let core = ui.cursor().left();
-
-            ui.menu_button(icons::FOLDER, |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                ui.set_min_width(180.0);
-
-                if ui.button("Load ROM").clicked() {
-                    FileLoader::new()
-                        .title("Load ROM")
-                        .add_filter(ROM_FILTER.0, ROM_FILTER.1)
-                        .dispatch(&self.files.spawner, self.files.rom_tx.clone());
-                }
-                if ui.button("Load boot ROM").clicked() {
-                    FileLoader::new()
-                        .title("Load boot ROM")
-                        .add_filter("Game Boy boot ROM", &["bin"])
-                        .dispatch(&self.files.spawner, self.files.boot_rom_tx.clone());
-                }
-                #[cfg(feature = "gba")]
-                if ui.button("Load GBA BIOS").clicked() {
-                    self.pick_gba_bios();
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    ui.separator();
-                    self.ui.recent.prune();
-                    self.ui.recent.name_from_files();
-                    if self.ui.recent.is_empty() {
-                        ui.add_enabled(false, egui::Button::new("No recent ROMs"));
-                    } else {
-                        ui.label("Recent");
-                        let mut chosen = None;
-                        for entry in self.ui.recent.entries() {
-                            let name = entry.display_name();
-                            let clicked = match entry.rom_key.as_deref() {
-                                Some(key) => {
-                                    let model = other_console(
-                                        self.ui.settings.console_for(key, RomCgbMode::CgbAndGb),
-                                    );
-                                    let arrow = egui::containers::menu::SubMenuButton::RIGHT_ARROW;
-                                    let right = match entry.console {
-                                        Some(kind) => format!("{}  {arrow}", kind_short(kind)),
-                                        None => arrow.to_owned(),
-                                    };
-                                    let button = egui::Button::new(name).right_text(right);
-                                    egui::containers::menu::SubMenuButton::from_button(button)
-                                        .ui(ui, |ui| {
-                                            if ui
-                                                .button(format!("Play on {}", console_name(model)))
-                                                .clicked()
-                                            {
-                                                chosen = Some((
-                                                    entry.path.clone(),
-                                                    Some((key.to_owned(), model)),
-                                                ));
-                                            }
-                                        })
-                                        .0
-                                        .clicked()
-                                }
-                                None => ui
-                                    .add(egui::Button::new(name).right_text(
-                                        entry.console.map(kind_short).unwrap_or_default(),
-                                    ))
-                                    .on_hover_text(entry.path.display().to_string())
-                                    .clicked(),
-                            };
-                            if clicked {
-                                chosen = Some((entry.path.clone(), None));
-                            }
-                        }
-                        if let Some((path, console)) = chosen {
-                            if let Some((key, model)) = console {
-                                self.ui.settings.set_game_console(&key, model);
-                            }
-                            self.load_recent(path);
-                        }
-                    }
-                }
-            })
-            .response
-            .on_hover_text("Files");
-
-            ui.separator();
-            self.transport_buttons(ui);
-            ui.separator();
-            self.ui.toolbar_core = ui.cursor().left() - core;
-            self.place_core(ui, room);
-
-            self.toolbar_tools(ui);
-        });
-        self.ui.toolbar_reach = row.response.rect.right();
-    }
-
-    pub(super) fn transport_buttons(&mut self, ui: &mut egui::Ui) {
-        let loaded = self.emulator.has_game();
-        let running = self.emulator.is_running();
-        let muted = self.ui.settings.muted;
-        let hotkeys = &self.ui.settings.hotkeys;
-        let mut pressed = None;
-        if shortcut_button(ui, hotkeys, HotkeyAction::TogglePause, running, loaded).clicked() {
-            pressed = Some(HotkeyAction::TogglePause);
-        }
-        if self.emulator.rewind_length.seconds().is_some() {
-            self.rewind_pressed |= self.rewind_button(ui);
-        }
-        self.fast_forward_button(ui);
-        let hotkeys = &self.ui.settings.hotkeys;
-        let folded = &CORE_GIVES_WAY[..self.ui.core_in_more];
-        for action in [HotkeyAction::SoftReset, HotkeyAction::Screenshot] {
-            if folded.contains(&action) {
-                continue;
-            }
-            if shortcut_button(ui, hotkeys, action, false, loaded).clicked() {
-                pressed = Some(action);
-            }
-        }
-        if let Some(action) = pressed {
-            self.run_hotkey(action);
-        }
-
-        if self.recording_button(ui, None).clicked() {
-            self.run_hotkey(HotkeyAction::ToggleRecording);
-        }
-
-        let mute = HotkeyAction::ToggleMute;
-        if shortcut_button(ui, &self.ui.settings.hotkeys, mute, muted, true).clicked() {
-            self.run_hotkey(mute);
-        }
-
-        if let Some(closed) = self.emulator.lid() {
-            let lid = HotkeyAction::ToggleLid;
-            if shortcut_button(ui, &self.ui.settings.hotkeys, lid, closed, true).clicked() {
-                self.run_hotkey(lid);
-            }
-        }
-    }
-
-    fn rewind_button(&self, ui: &mut egui::Ui) -> bool {
+    pub(super) fn rewind_button(&self, ui: &mut egui::Ui) -> bool {
         let action = HotkeyAction::Rewind;
         let button = egui::Button::new(action.icon(false)).selected(self.emulator.is_rewinding());
         let response = ui
@@ -287,7 +151,9 @@ impl Citrine {
     }
 
     pub(super) fn rewind_off_reason(&self) -> &'static str {
-        if self.emulator.together {
+        if self.emulator.hardcore() {
+            "Rewind is off in hardcore"
+        } else if self.emulator.together {
             "Rewind is off while playing together"
         } else if self.emulator.has_game() {
             "Rewind is off while a link is on"
@@ -328,11 +194,9 @@ impl Citrine {
         names
     }
 
-    pub(super) fn run_pad_shortcuts(&mut self, presses: Vec<PadButton>) {
-        for pad in presses {
-            if let Some(action) = self.ui.settings.hotkeys.action_for_pad(pad)
-                && !action.is_hold()
-            {
+    pub(super) fn run_shortcuts(&mut self) {
+        for action in self.emulator.take_shortcuts() {
+            if !self.ui.settings.holds(action) {
                 self.run_hotkey(action);
             }
         }
@@ -421,11 +285,28 @@ impl Citrine {
     }
 
     pub(super) fn open_tab(&mut self, tab: Tab) {
-        if let Some((surface_idx, node_idx, tab_idx)) = self.dock.find_tab(&tab) {
-            self.dock.set_active_tab((surface_idx, node_idx, tab_idx));
-            return;
+        if self.dock.find_tab(&tab).is_none() {
+            self.place_tab(tab);
         }
+        self.focus_tab(tab);
+    }
 
+    pub(super) fn focus_tab(&mut self, tab: Tab) -> bool {
+        let Some((surface, node, index)) = self.dock.find_tab(&tab) else {
+            return false;
+        };
+        self.dock.set_active_tab((surface, node, index));
+        self.dock.set_focused_node_and_surface((surface, node));
+        true
+    }
+
+    pub(super) fn show_games(&mut self) {
+        self.ui.games.hidden = false;
+        self.sync_games_tab();
+        self.focus_tab(Tab::Games);
+    }
+
+    fn place_tab(&mut self, tab: Tab) {
         if matches!(tab, Tab::DsFile(_)) && self.open_beside_files(tab) {
             return;
         }
@@ -455,7 +336,7 @@ impl Citrine {
         if let Some((surface_idx, node_idx)) = tools_node {
             self.dock
                 .set_focused_node_and_surface((surface_idx, node_idx));
-            self.dock.main_surface_mut().push_to_focused_leaf(tab);
+            self.dock.push_to_focused_leaf(tab);
         } else if let Some((_gb_surface, gb_node, _)) = gb_loc {
             self.dock
                 .main_surface_mut()
@@ -558,6 +439,7 @@ fn stack_friends_column(dock: &mut DockState<Tab>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tests::assert_in_front;
 
     fn room_dock() -> DockState<Tab> {
         let mut dock = DockState::new(vec![Tab::GameBoy]);
@@ -721,5 +603,130 @@ mod tests {
         app.ui.games.hidden = false;
         app.sync_games_tab();
         assert!(app.dock.find_tab(&Tab::Games).is_some());
+    }
+
+    fn tools_beside_game(app: &mut Citrine, tools: Vec<Tab>) {
+        app.dock = DockState::new(vec![Tab::GameBoy]);
+        app.dock
+            .main_surface_mut()
+            .split_right(NodeIndex::root(), 0.6, tools);
+        let game = app.dock.find_tab(&Tab::GameBoy).unwrap();
+        app.dock.set_focused_node_and_surface((game.0, game.1));
+    }
+
+    #[test]
+    fn a_new_tab_opens_in_front_in_the_tools_pane() {
+        let mut app = games_app("open-new");
+        load_crystal(&mut app);
+        tools_beside_game(&mut app, vec![Tab::Cheats]);
+        app.open_tab(Tab::Stats);
+        assert_in_front(&app, Tab::Stats);
+        assert_eq!(
+            app.dock.find_tab(&Tab::Stats).unwrap().1,
+            app.dock.find_tab(&Tab::Cheats).unwrap().1
+        );
+    }
+
+    #[test]
+    fn a_tab_open_behind_another_comes_to_the_front() {
+        let mut app = games_app("open-behind");
+        load_crystal(&mut app);
+        tools_beside_game(&mut app, vec![Tab::Stats, Tab::Cheats]);
+        let cheats = app.dock.find_tab(&Tab::Cheats).unwrap();
+        app.dock.set_active_tab(cheats);
+        app.open_tab(Tab::Stats);
+        assert_in_front(&app, Tab::Stats);
+    }
+
+    #[test]
+    fn a_tab_opens_in_the_window_that_holds_the_tools() {
+        let mut app = games_app("open-window");
+        load_crystal(&mut app);
+        app.dock = DockState::new(vec![Tab::GameBoy]);
+        let window = app.dock.add_window(vec![Tab::Cheats]);
+        app.dock
+            .set_focused_node_and_surface((SurfaceIndex::main(), NodeIndex::root()));
+        app.open_tab(Tab::Stats);
+        assert_eq!(app.dock.find_tab(&Tab::Stats).unwrap().0, window);
+        assert_in_front(&app, Tab::Stats);
+        let (_, game_node, _) = app.dock.find_tab(&Tab::GameBoy).unwrap();
+        assert_eq!(app.dock.main_surface()[game_node].tabs_count(), 1);
+    }
+
+    #[test]
+    fn a_tab_split_off_beside_the_game_takes_the_focus() {
+        let mut app = games_app("open-split");
+        load_crystal(&mut app);
+        for tab in [Tab::Stats, Tab::Friends] {
+            app.dock = DockState::new(vec![Tab::GameBoy]);
+            app.open_tab(tab);
+            assert_in_front(&app, tab);
+            assert_ne!(
+                app.dock.find_tab(&tab).unwrap().1,
+                app.dock.find_tab(&Tab::GameBoy).unwrap().1
+            );
+        }
+    }
+
+    #[test]
+    fn a_notice_button_brings_its_tab_to_the_front() {
+        let mut app = games_app("open-notice");
+        load_crystal(&mut app);
+        tools_beside_game(&mut app, vec![Tab::Media, Tab::Cheats]);
+        let cheats = app.dock.find_tab(&Tab::Cheats).unwrap();
+        app.dock.set_active_tab(cheats);
+        app.handle_event(
+            crate::app::events::AppEvent::OpenTab { tab: Tab::Media },
+            false,
+        );
+        assert_in_front(&app, Tab::Media);
+    }
+
+    #[test]
+    fn with_no_game_a_toast_sits_in_its_strip_below_every_pane() {
+        let mut app = games_app("toast-strip");
+        app.dock = DockState::new(vec![Tab::GameBoy]);
+        app.dock
+            .main_surface_mut()
+            .split_right(NodeIndex::root(), 0.6, vec![Tab::Info]);
+        let ctx = Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input(), |ctx| {
+            app.render(ctx);
+            app.show_toasts(ctx);
+        });
+        app.toasts
+            .info("Getting your save from Steam Deck")
+            .duration(None);
+        for frame in 0..60 {
+            let _ = ctx.run(input(), |ctx| {
+                app.render(ctx);
+                app.show_toasts(ctx);
+            });
+            let rects = app.toasts.rects(&ctx);
+            assert_eq!(rects.len(), 1);
+            let panes: Vec<_> = app
+                .dock
+                .main_surface()
+                .iter()
+                .filter_map(|node| node.get_leaf())
+                .map(|leaf| leaf.viewport)
+                .filter(|pane| pane.is_positive())
+                .collect();
+            assert_eq!(panes.len(), 2);
+            for pane in panes {
+                assert!(
+                    rects[0].top() >= pane.bottom() - 0.5,
+                    "frame {frame}: the toast {:?} covers the pane {pane:?}",
+                    rects[0]
+                );
+            }
+        }
     }
 }

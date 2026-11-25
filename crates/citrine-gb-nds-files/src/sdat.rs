@@ -91,9 +91,10 @@ impl<'a> Sdat<'a> {
             })
             .collect::<Result<Vec<_>, RomError>>()?;
         let mut entries: [Vec<SoundEntry>; 5] = Default::default();
+        let mut name_bytes = symb.map_or(0, <[u8]>::len);
         for (slot, kind) in SoundKind::ALL.into_iter().enumerate() {
             let names = match symb {
-                Some(symb) => names(symb, kind).unwrap_or_default(),
+                Some(symb) => names(symb, kind, &mut name_bytes).unwrap_or_default(),
                 None => Vec::new(),
             };
             entries[slot] = read_entries(info, kind, &names)?;
@@ -131,7 +132,11 @@ fn record(block: &[u8], kind: SoundKind) -> Result<(usize, usize), RomError> {
     Ok((at + 4, u32_at(block, at)? as usize))
 }
 
-fn names(symb: &[u8], kind: SoundKind) -> Result<Vec<Option<String>>, RomError> {
+fn names(
+    symb: &[u8],
+    kind: SoundKind,
+    budget: &mut usize,
+) -> Result<Vec<Option<String>>, RomError> {
     let (first, count) = record(symb, kind)?;
     let stride = if kind == SoundKind::SequenceArchive {
         8
@@ -146,6 +151,10 @@ fn names(symb: &[u8], kind: SoundKind) -> Result<Vec<Option<String>>, RomError> 
             }
             let rest = symb.get(at..).ok_or(RomError::Truncated(at))?;
             let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            if end > *budget {
+                return Ok(None);
+            }
+            *budget -= end;
             Ok(Some(String::from_utf8_lossy(&rest[..end]).into_owned()))
         })
         .collect()
@@ -406,6 +415,28 @@ mod tests {
             Sdat::parse(&bytes).unwrap_err(),
             RomError::MissingSection("INFO")
         );
+    }
+
+    #[test]
+    fn names_shared_past_the_symbol_block_size_are_dropped() {
+        let long: &'static str = "N".repeat(200).leak();
+        let mut bytes = build(&[
+            sound(SoundKind::Sequence, Some(long), b"SSEQ"),
+            sound(SoundKind::Sequence, Some("B"), b"SSEQ"),
+            sound(SoundKind::Sequence, Some("C"), b"SSEQ"),
+        ]);
+        let symb = u32_at(&bytes, 0x10).unwrap() as usize;
+        let pointers = symb + u32_at(&bytes, symb + 8).unwrap() as usize + 4;
+        let first = bytes[pointers..pointers + 4].to_vec();
+        bytes[pointers + 4..pointers + 8].copy_from_slice(&first);
+        bytes[pointers + 8..pointers + 12].copy_from_slice(&first);
+        let sdat = Sdat::parse(&bytes).unwrap();
+        let labels: Vec<String> = sdat
+            .entries(SoundKind::Sequence)
+            .iter()
+            .map(SoundEntry::label)
+            .collect();
+        assert_eq!(labels, [long, "1", "2"]);
     }
 
     #[test]

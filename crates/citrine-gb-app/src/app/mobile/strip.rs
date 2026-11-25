@@ -1,7 +1,7 @@
 use crate::app::Citrine;
 use crate::app::tabs::{Tab, playing};
 use crate::app::ui_state::hotkeys::HotkeyAction;
-use crate::app::widgets::avatar;
+use crate::app::widgets::{avatar, info_mark};
 use crate::icons;
 use crate::play::Stage;
 use egui::{Align, Layout, RichText, Ui, vec2};
@@ -11,9 +11,14 @@ pub const STRIP_INSET: f32 = 10.0;
 const STRIP_AVATAR: f32 = 28.0;
 const STRIP_BUTTON: f32 = 40.0;
 const STRIP_GAP: f32 = 8.0;
+const BAR_PAD: f32 = 2.5;
 
 pub fn strip_row_width(buttons: usize) -> f32 {
     buttons as f32 * (STRIP_BUTTON + STRIP_GAP) - STRIP_GAP + 4.0
+}
+
+pub fn top_bar_height(ui: &Ui) -> f32 {
+    STRIP_HEIGHT.max(super::kit::pill_height(ui) + 2.0 * BAR_PAD)
 }
 
 pub fn strip_height(buttons: usize, width: f32) -> f32 {
@@ -31,8 +36,7 @@ pub enum StripButton {
     SaveState,
     Chat,
     Switch,
-    StopRecording,
-    Screens,
+    Layout,
     More,
 }
 
@@ -53,17 +57,14 @@ pub struct StripFacts {
     pub room: bool,
     pub watching_only: bool,
     pub linked: bool,
-    pub recording: bool,
     pub can_save: bool,
-    pub screens: bool,
+    pub layout: bool,
     pub rewind: bool,
+    pub replay: bool,
 }
 
 pub fn plan(facts: &StripFacts) -> StripPlan {
     let mut buttons = vec![StripButton::Hide];
-    if facts.recording {
-        buttons.push(StripButton::StopRecording);
-    }
     let lead = if facts.room {
         if !facts.watching_only {
             buttons.push(StripButton::Pause);
@@ -90,24 +91,24 @@ pub fn plan(facts: &StripFacts) -> StripPlan {
         if facts.rewind {
             buttons.push(StripButton::Rewind);
         }
-        if !facts.recording {
-            buttons.push(StripButton::FastForward);
+        buttons.push(StripButton::FastForward);
+        if !facts.replay {
+            buttons.push(StripButton::Pause);
         }
-        buttons.push(StripButton::Pause);
         if facts.can_save {
             buttons.push(StripButton::SaveState);
         }
         StripLead::Empty
     };
-    if facts.screens {
-        buttons.push(StripButton::Screens);
+    if facts.layout {
+        buttons.push(StripButton::Layout);
     }
     buttons.push(StripButton::More);
     StripPlan { lead, buttons }
 }
 
 impl Citrine {
-    fn room_linked(&self) -> bool {
+    pub(super) fn room_linked(&self) -> bool {
         let me = self.online.account().map(|a| a.online_id);
         self.play.room().zip(me).is_some_and(|(room, me)| {
             room.links()
@@ -126,16 +127,20 @@ impl Citrine {
                 .is_some_and(|r| r.is_live() && r.members().len() > 1),
             watching_only: session.is_some_and(|s| s.watching_only()),
             linked: self.emulator.linked() || self.room_linked(),
-            recording: self.emulator.screen_recorder.is_recording(),
             can_save: self.emulator.rom_key().is_some() && !self.emulator.partnered(),
-            screens: self.emulator.two_screens() && !self.emulator.linked(),
+            layout: !self.emulator.linked(),
             rewind: self.emulator.can_rewind(),
+            replay: self.emulator.is_playing_tape(),
         }
     }
 
     pub(super) fn strip(&mut self, ui: &mut Ui, buttons_only: bool) {
         let plan = plan(&self.strip_facts());
-        let height = STRIP_HEIGHT;
+        let height = if buttons_only {
+            STRIP_HEIGHT
+        } else {
+            top_bar_height(ui)
+        };
         let mut pressed = None;
         let mut rewind = false;
         let mut open_friend = false;
@@ -205,10 +210,11 @@ impl Citrine {
             return tapped;
         }
         let group = playing::group_link(&self.play, &self.online);
-        let (name, ms) = match group {
-            Some((partners, slowest)) => (partners, slowest.map(u32::from)),
-            None => (name, session.round_trip_ms()),
+        let (name, ms, path) = match group {
+            Some((partners, slowest)) => (partners, slowest.map(u32::from), None),
+            None => (name, session.round_trip_ms(), Some(session.path())),
         };
+        let mark = path.map(|path| format!("{} ", playing::path_mark(path)));
         let inviting = session.stage() == Stage::Inviting;
         let link = ms.filter(|_| !inviting).map(|ms| {
             let (word, color) = playing::quality(ms, ui.visuals().dark_mode);
@@ -219,8 +225,9 @@ impl Citrine {
                     .x
             };
             let name_width = measure(&name, egui::FontId::proportional(16.0));
-            let room = ui.available_width() - name_width - ui.spacing().item_spacing.x;
             let body = egui::TextStyle::Body.resolve(ui.style());
+            let mark_width = mark.as_deref().map_or(0.0, |m| measure(m, body.clone()));
+            let room = ui.available_width() - name_width - mark_width - ui.spacing().item_spacing.x;
             let (link, time) = link_parts(word, ms, room, |text| measure(text, body.clone()));
             (link, time, color, ms)
         });
@@ -235,11 +242,23 @@ impl Citrine {
                 ..Default::default()
             };
             let mut job = egui::text::LayoutJob::default();
+            if let Some(mark) = &mark {
+                job.append(mark, 0.0, format(ui.visuals().weak_text_color()));
+            }
             job.append(&link, 0.0, format(color));
+            let hidden_ms = time.is_none().then(|| format!("{ms} ms"));
             if let Some(time) = time {
                 job.append(&time, 0.0, format(ui.visuals().text_color()));
             }
-            ui.label(job).on_hover_text(format!("{ms} ms"));
+            let hover = match (path, hidden_ms) {
+                (Some(path), Some(ms)) => Some(format!("{} \u{b7} {ms}", playing::path_line(path))),
+                (Some(path), None) => Some(playing::path_line(path).to_owned()),
+                (None, ms) => ms,
+            };
+            let response = ui.add(egui::Label::new(job).sense(egui::Sense::click()));
+            if let Some(hover) = hover {
+                info_mark::hint(&response, &hover);
+            }
         } else {
             ui.label(RichText::new("Connecting").weak());
         }
@@ -254,23 +273,20 @@ impl Citrine {
             StripButton::FastForward => (icons::FAST_FORWARD, "Fast forward"),
             StripButton::Pause if self.emulator.running => (icons::PAUSE, "Pause"),
             StripButton::Pause => (icons::PLAY, "Resume"),
-            StripButton::SaveState => (icons::FLOPPY_DISK, "Save state"),
+            StripButton::SaveState => (icons::SAVE_STATE, "Save state"),
             StripButton::Chat => (icons::CHAT_CIRCLE, "Chat"),
             StripButton::Switch => (icons::SWAP, "Switch game"),
-            StripButton::StopRecording => (icons::STOP, "Stop recording"),
-            StripButton::Screens => (self.screens_icon(), "Screens"),
+            StripButton::Layout => (self.screens_icon(), "Layout"),
             StripButton::More => (icons::DOTS_THREE_VERTICAL, "More"),
         };
         let on = (button == StripButton::FastForward && self.emulator.fast_forward)
             || (button == StripButton::Rewind && self.emulator.is_rewinding())
-            || (button == StripButton::Screens && self.mobile.screens_sheet);
+            || (button == StripButton::Layout && self.ui.layout_sheet.is_some());
         let mut text = RichText::new(icon).size(21.0);
         if on {
             text = text.color(crate::app::ui_state::ui_theme::ink_on(
                 ui.visuals().selection.bg_fill,
             ));
-        } else if button == StripButton::StopRecording {
-            text = text.color(ui.visuals().error_fg_color);
         }
         let mut widget = egui::Button::new(text)
             .min_size(vec2(side, side))
@@ -280,7 +296,11 @@ impl Citrine {
         } else {
             widget.frame(false)
         };
-        let response = ui.add(widget).on_hover_text(hint);
+        let off = button == StripButton::FastForward && self.emulator.is_recording();
+        let response = ui
+            .add_enabled(!off, widget)
+            .on_hover_text(hint)
+            .on_disabled_hover_text("Fast forward is off while recording");
         if button == StripButton::Chat
             && let Some(session) = self.play.session()
             && self.online.unread(session.friend()) > 0
@@ -307,8 +327,12 @@ impl Citrine {
                 }
             }
             StripButton::Switch => self.run_hotkey(HotkeyAction::SwitchGame),
-            StripButton::StopRecording => self.run_hotkey(HotkeyAction::ToggleRecording),
-            StripButton::Screens => self.mobile.screens_sheet = !self.mobile.screens_sheet,
+            StripButton::Layout => {
+                self.ui.layout_sheet = match self.ui.layout_sheet {
+                    Some(_) => None,
+                    None => Some(Default::default()),
+                };
+            }
             StripButton::More => self.open_more(),
         }
         self.release_touch();
@@ -337,11 +361,28 @@ mod tests {
             room: false,
             watching_only: false,
             linked: false,
-            recording: false,
             can_save: true,
-            screens: false,
+            layout: false,
             rewind: false,
+            replay: false,
         }
+    }
+
+    #[test]
+    fn a_replay_leaves_pause_to_the_replay_bar() {
+        let plan = plan(&StripFacts {
+            replay: true,
+            can_save: false,
+            ..alone()
+        });
+        assert_eq!(
+            plan.buttons,
+            [
+                StripButton::Hide,
+                StripButton::FastForward,
+                StripButton::More
+            ]
+        );
     }
 
     #[test]
@@ -390,9 +431,9 @@ mod tests {
     }
 
     #[test]
-    fn a_ds_game_adds_the_screens_button_before_more() {
+    fn a_game_adds_the_layout_button_before_more() {
         let plan = plan(&StripFacts {
-            screens: true,
+            layout: true,
             ..alone()
         });
         assert_eq!(
@@ -402,7 +443,7 @@ mod tests {
                 StripButton::FastForward,
                 StripButton::Pause,
                 StripButton::SaveState,
-                StripButton::Screens,
+                StripButton::Layout,
                 StripButton::More
             ]
         );
@@ -455,16 +496,6 @@ mod tests {
                 StripButton::More
             ]
         );
-    }
-
-    #[test]
-    fn recording_shows_stop_and_hides_fast_forward() {
-        let plan = plan(&StripFacts {
-            recording: true,
-            ..alone()
-        });
-        assert_eq!(plan.buttons[1], StripButton::StopRecording);
-        assert!(!plan.buttons.contains(&StripButton::FastForward));
     }
 
     #[test]

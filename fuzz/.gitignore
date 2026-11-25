@@ -1,0 +1,7 @@
+target
+corpus
+artifacts
+coverage
+.fuzztools
+.tools-*
+out

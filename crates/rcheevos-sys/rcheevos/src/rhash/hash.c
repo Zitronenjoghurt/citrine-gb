@@ -460,8 +460,10 @@ static size_t rc_file_read_buffered_file(void* file_handle, void* buffer, size_t
 {
   struct rc_buffered_file* buffered_file = (struct rc_buffered_file*)file_handle;
   const int64_t remaining = buffered_file->data_size - (buffered_file->read_ptr - buffered_file->data);
-  if ((int)requested_bytes > remaining)
-     requested_bytes = (int)remaining;
+  if (remaining <= 0)
+    return 0;
+  if ((uint64_t)requested_bytes > (uint64_t)remaining)
+    requested_bytes = (size_t)remaining;
 
   memcpy(buffer, buffered_file->read_ptr, requested_bytes);
   buffered_file->read_ptr += requested_bytes;

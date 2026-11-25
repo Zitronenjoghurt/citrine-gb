@@ -5,14 +5,16 @@ use std::time::Duration;
 use web_time::Instant;
 
 pub mod readout;
+pub mod tape_times;
 
 pub use readout::Readout;
+pub use tape_times::TapeTimes;
 
 pub const SHOWN: Duration = Duration::from_secs(10);
 const MOST_SHOWN: usize = 4096;
 const MOST_RECORDED: usize = 60 * 60 * 30;
 
-pub const COLUMNS: [&str; 46] = [
+pub const COLUMNS: [&str; 48] = [
     "time_s",
     "display_ms",
     "ui_ms",
@@ -35,11 +37,12 @@ pub const COLUMNS: [&str; 46] = [
     "jit",
     "gpu_clock",
     "gpu_reference_ms",
-    "gpu_upscaled_ms",
-    "gpu_centers_ms",
+    "gpu_opaque_ms",
+    "gpu_tail_ms",
     "gpu_edges_ms",
     "gpu_finish_ms",
     "gpu_present_ms",
+    "gpu_mipmaps_ms",
     "gpu_composite_ms",
     "present_wait_ms",
     "ui_shapes",
@@ -59,6 +62,7 @@ pub const COLUMNS: [&str; 46] = [
     "ahead_frames",
     "watching",
     "events",
+    "tape_frame",
 ];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -186,6 +190,7 @@ pub struct RowFacts {
     pub ui_shapes: Option<usize>,
     pub gpu_calibration: Option<Duration>,
     pub events: Vec<String>,
+    pub tape_frame: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -210,6 +215,7 @@ struct Row {
     gpu_calibration: Option<Duration>,
     session: Option<SessionTotals>,
     events: Vec<String>,
+    tape_frame: Option<u64>,
 }
 
 struct Recording {
@@ -338,6 +344,7 @@ impl FrameLog {
                 gpu_calibration: facts.gpu_calibration,
                 session: totals.session.map(|session| session.since(before.session)),
                 events: facts.events,
+                tape_frame: facts.tape_frame,
             });
         }
     }
@@ -385,16 +392,6 @@ impl FrameLog {
         });
     }
 
-    pub fn recording(&self) -> Option<(Duration, usize)> {
-        self.recording.as_ref().map(|recording| {
-            let length = recording
-                .rows
-                .last()
-                .map_or(Duration::ZERO, |row| row.sample.at);
-            (length, recording.rows.len())
-        })
-    }
-
     pub fn is_recording(&self) -> bool {
         self.recording.is_some()
     }
@@ -435,7 +432,7 @@ fn write_row(csv: &mut String, row: &Row, context: &RunContext) {
     let sample = &row.sample;
     let _ = writeln!(
         csv,
-        "{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         sample.at.as_secs_f64(),
         ms(sample.display),
         ms(sample.ui),
@@ -471,6 +468,9 @@ fn write_row(csv: &mut String, row: &Row, context: &RunContext) {
         row.gpu_calibration.map(ms).unwrap_or_default(),
         session(row.session),
         quoted(&row.events.join(";")),
+        row.tape_frame
+            .map(|frame| frame.to_string())
+            .unwrap_or_default(),
     );
 }
 
@@ -533,6 +533,7 @@ mod tests {
                 Duration::ZERO,
                 Duration::from_millis(frame),
                 Duration::from_millis(frame),
+                Duration::ZERO,
                 Duration::ZERO,
                 Duration::ZERO,
                 Duration::from_micros(500 * frame),
@@ -624,7 +625,7 @@ mod tests {
             "{} samples",
             samples.len()
         );
-        assert_eq!(log.recording(), None);
+        assert!(!log.is_recording());
     }
 
     #[test]
@@ -668,7 +669,7 @@ mod tests {
                 ..context()
             },
         );
-        assert_eq!(log.recording(), Some((Duration::from_millis(50), 2)));
+        assert!(log.is_recording());
         let recorded = log.stop_recording().unwrap();
         assert!(!log.is_recording());
         assert_eq!(recorded.frames, 2);
@@ -676,9 +677,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "time_s,display_ms,ui_ms,game_ms,game_frames,repeated,dropped,gpu_ms,gpu_frames,gpu_full_ms,jit_compile_ms,jit_blocks,budget_ms,refresh_ms,console,game,renderer,resolution_3d,smooth_edges,jit,gpu_clock,gpu_reference_ms,gpu_upscaled_ms,gpu_centers_ms,gpu_edges_ms,gpu_finish_ms,gpu_present_ms,gpu_composite_ms,present_wait_ms,ui_shapes,draw_ms,swap_wait_ms,console_wait_ms,audio_queued_ms,audio_underrun_ms,audio_overrun_ms,gpu_calibration_ms,delay_frames,ping_ms,ran_frames,waited_frames,skipped_frames,repaid_frames,ahead_frames,watching,events",
-                "0.017,16.700,3.250,7.000,1,1,0,3.000,1,1.500,0.500,2,16.715,,DS,\"Pokémon \"\"HeartGold\"\", JP\",gpu,4x,off,on,stamps,0.500,0.000,1.000,1.000,0.000,0.000,0.500,,,,,0.250,80.000,1.000,0.000,,,,,,,,,,",
-                "0.050,33.300,2.000,14.000,2,0,1,,0,,1.000,4,16.715,5.556,DS,Mario Kart DS,software,native,off,off,,,,,,,,,,,,,0.500,80.000,2.000,0.000,,,,,,,,,,",
+                "time_s,display_ms,ui_ms,game_ms,game_frames,repeated,dropped,gpu_ms,gpu_frames,gpu_full_ms,jit_compile_ms,jit_blocks,budget_ms,refresh_ms,console,game,renderer,resolution_3d,smooth_edges,jit,gpu_clock,gpu_reference_ms,gpu_opaque_ms,gpu_tail_ms,gpu_edges_ms,gpu_finish_ms,gpu_present_ms,gpu_mipmaps_ms,gpu_composite_ms,present_wait_ms,ui_shapes,draw_ms,swap_wait_ms,console_wait_ms,audio_queued_ms,audio_underrun_ms,audio_overrun_ms,gpu_calibration_ms,delay_frames,ping_ms,ran_frames,waited_frames,skipped_frames,repaid_frames,ahead_frames,watching,events,tape_frame",
+                "0.017,16.700,3.250,7.000,1,1,0,3.000,1,1.500,0.500,2,16.715,,DS,\"Pokémon \"\"HeartGold\"\", JP\",gpu,4x,off,on,stamps,0.500,0.000,1.000,1.000,0.000,0.000,0.000,0.500,,,,,0.250,80.000,1.000,0.000,,,,,,,,,,,",
+                "0.050,33.300,2.000,14.000,2,0,1,,0,,1.000,4,16.715,5.556,DS,Mario Kart DS,software,native,off,off,,,,,,,,,,,,,,0.500,80.000,2.000,0.000,,,,,,,,,,,",
             ]
         );
     }
@@ -707,7 +708,7 @@ mod tests {
         };
         assert_eq!(column("gpu_clock"), "submit-to-done");
         assert_eq!(column("gpu_reference_ms"), "0.500");
-        assert_eq!(column("gpu_centers_ms"), "1.000");
+        assert_eq!(column("gpu_tail_ms"), "1.000");
         assert_eq!(column("gpu_edges_ms"), "1.000");
         assert_eq!(column("gpu_composite_ms"), "0.500");
         assert_eq!(column("gpu_ms"), "3.000");
@@ -792,6 +793,7 @@ mod tests {
             ui_shapes: Some(412),
             gpu_calibration: Some(Duration::from_micros(1500)),
             events: vec!["settings: video, audio".to_string()],
+            tape_frame: Some(7),
         });
         log.note_power(start + Duration::from_millis(5), "fair", true);
         log.note(
@@ -812,13 +814,13 @@ mod tests {
         let lines: Vec<&str> = recorded.csv.lines().collect();
         assert!(
             lines[1].ends_with(
-                ",3.000,412,2.000,1.000,0.250,80.000,1.000,0.000,1.500,,,,,,,,,\"pause;settings: video, audio\""
+                ",3.000,412,2.000,1.000,0.250,80.000,1.000,0.000,1.500,,,,,,,,,\"pause;settings: video, audio\",7"
             ),
             "{}",
             lines[1]
         );
         assert!(
-            lines[2].ends_with(",,,,0.250,80.000,1.000,0.000,,,,,,,,,,"),
+            lines[2].ends_with(",,,,0.250,80.000,1.000,0.000,,,,,,,,,,,"),
             "{}",
             lines[2]
         );

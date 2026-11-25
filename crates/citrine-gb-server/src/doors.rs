@@ -6,6 +6,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use citrine_gb_net::Notice;
 use citrine_gb_surface::pairing::Code;
 use citrine_gb_surface::relay::{
     ACCOUNT_DOORS_PER_ADDRESS, BYTES_PER_SEC, Control, DOORS_PER_ADDRESS, DoorKey,
@@ -15,17 +16,47 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
+const QUEUED_FRAMES: usize = 16;
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
 enum ToHost {
-    Joined(mpsc::UnboundedSender<ToSurface>),
-    Data(Vec<u8>),
+    Joined(Pipe),
     Gone,
 }
 
-enum ToSurface {
-    Data(Vec<u8>),
-    Gone,
+struct Pipe {
+    to: mpsc::Sender<Vec<u8>>,
+    from: mpsc::Receiver<Vec<u8>>,
+}
+
+fn pipes() -> (Pipe, Pipe) {
+    let (to_host, from_surface) = mpsc::channel(QUEUED_FRAMES);
+    let (to_surface, from_host) = mpsc::channel(QUEUED_FRAMES);
+    (
+        Pipe {
+            to: to_surface,
+            from: from_surface,
+        },
+        Pipe {
+            to: to_host,
+            from: from_host,
+        },
+    )
+}
+
+async fn heard(from: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+    match from {
+        Some(from) => from.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn room(to: Option<mpsc::Sender<Vec<u8>>>) -> Option<mpsc::OwnedPermit<Vec<u8>>> {
+    to?.reserve_owned().await.ok()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,21 +150,18 @@ impl Doors {
         }
     }
 
-    fn join(
-        &self,
-        code: Key,
-        surface: mpsc::UnboundedSender<ToSurface>,
-    ) -> Result<(mpsc::UnboundedSender<ToHost>, u64), Control> {
+    fn join(&self, code: Key) -> Result<(Pipe, u64), Control> {
         let mut map = self.map();
         let door = map.get_mut(&code).ok_or(Control::NoCode)?;
         if door.joined {
             return Err(Control::Busy);
         }
-        if door.host.send(ToHost::Joined(surface)).is_err() {
+        let (host, surface) = pipes();
+        if door.host.send(ToHost::Joined(host)).is_err() {
             return Err(Control::NoCode);
         }
         door.joined = true;
-        Ok((door.host.clone(), door.id))
+        Ok((surface, door.id))
     }
 
     fn leave(&self, code: Key, id: u64) {
@@ -183,25 +211,49 @@ pub async fn upgrade(
     ws.max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
-            run(app, socket, ip).await;
-            drop(slot);
+            let mut gate = app.hub.gate();
+            app.clone().tasks.spawn(async move {
+                let shutting_down = async move {
+                    while !matches!(
+                        gate.recv().await,
+                        Ok(Notice::ShuttingDown) | Err(RecvError::Closed)
+                    ) {}
+                };
+                tokio::select! {
+                    () = run(app, socket, ip) => {}
+                    () = shutting_down => {}
+                }
+                drop(slot);
+            });
         })
 }
 
+async fn put(socket: &mut WebSocket, message: Message) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await,
+        Ok(Ok(()))
+    )
+}
+
 async fn say(socket: &mut WebSocket, control: Control) -> bool {
-    socket
-        .send(Message::Text(control.text().into()))
-        .await
-        .is_ok()
+    put(socket, Message::Text(control.text().into())).await
+}
+
+async fn first_message(socket: &mut WebSocket) -> Option<Option<Control>> {
+    loop {
+        match socket.recv().await {
+            Some(Ok(Message::Text(text))) => return Some(Control::parse(&text)),
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+            _ => return None,
+        }
+    }
 }
 
 async fn run(app: Arc<App>, mut socket: WebSocket, ip: IpAddr) {
-    let first = loop {
-        match socket.recv().await {
-            Some(Ok(Message::Text(text))) => break Control::parse(&text),
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            _ => return,
-        }
+    let Ok(Some(first)) =
+        tokio::time::timeout(FIRST_MESSAGE_TIMEOUT, first_message(&mut socket)).await
+    else {
+        return;
     };
     match first {
         Some(Control::Open { code, password }) => {
@@ -252,49 +304,56 @@ async fn host(
         app.doors.close(code, id);
         return;
     }
-    let mut to_surface: Option<mpsc::UnboundedSender<ToSurface>> = None;
+    let mut to_surface: Option<mpsc::Sender<Vec<u8>>> = None;
+    let mut from_surface: Option<mpsc::Receiver<Vec<u8>>> = None;
+    let mut held: Option<Vec<u8>> = None;
     let mut budget = Bucket::new(BYTES_PER_SEC, 2.0 * BYTES_PER_SEC);
     loop {
+        let pause = budget.wait(MAX_MESSAGE_BYTES as f64);
         tokio::select! {
-            frame = socket.recv() => match frame {
+            () = tokio::time::sleep(pause), if held.is_none() && !pause.is_zero() => {}
+            frame = socket.recv(), if held.is_none() && pause.is_zero() => match frame {
                 Some(Ok(Message::Binary(bytes))) => {
-                    if !budget.take(bytes.len() as f64) {
-                        say(&mut socket, Control::Limit).await;
-                        break;
-                    }
-                    if let Some(to) = &to_surface {
-                        let _ = to.send(ToSurface::Data(bytes.to_vec()));
+                    budget.take(bytes.len() as f64);
+                    if to_surface.is_some() {
+                        held = Some(bytes.to_vec());
                     }
                 }
                 Some(Ok(Message::Text(_) | Message::Ping(_) | Message::Pong(_))) => {}
                 _ => break,
             },
+            permit = room(to_surface.clone()), if held.is_some() => {
+                if let (Some(permit), Some(bytes)) = (permit, held.take()) {
+                    permit.send(bytes);
+                }
+            },
             event = rx.recv() => match event {
-                Some(ToHost::Joined(to)) => {
-                    to_surface = Some(to);
+                Some(ToHost::Joined(pipe)) => {
+                    to_surface = Some(pipe.to);
+                    from_surface = Some(pipe.from);
                     if !say(&mut socket, Control::Joined).await {
                         break;
                     }
                 }
-                Some(ToHost::Data(bytes)) => {
-                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
-                        break;
-                    }
-                }
                 Some(ToHost::Gone) => {
-                    to_surface = None;
+                    (to_surface, from_surface, held) = (None, None, None);
                     if !say(&mut socket, Control::Gone).await {
                         break;
                     }
                 }
                 None => break,
             },
+            data = heard(&mut from_surface) => match data {
+                Some(bytes) => {
+                    if !put(&mut socket, Message::Binary(bytes.into())).await {
+                        break;
+                    }
+                }
+                None => from_surface = None,
+            },
         }
     }
     app.doors.close(code, id);
-    if let Some(to) = to_surface {
-        let _ = to.send(ToSurface::Gone);
-    }
 }
 
 async fn surface(app: Arc<App>, mut socket: WebSocket, ip: IpAddr, code: Key) {
@@ -303,8 +362,7 @@ async fn surface(app: Arc<App>, mut socket: WebSocket, ip: IpAddr, code: Key) {
         say(&mut socket, Control::Limit).await;
         return;
     }
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let (to_host, id) = match app.doors.join(code, tx) {
+    let (mut host, id) = match app.doors.join(code) {
         Ok(joined) => joined,
         Err(refusal) => {
             if refusal == Control::NoCode {
@@ -314,28 +372,33 @@ async fn surface(app: Arc<App>, mut socket: WebSocket, ip: IpAddr, code: Key) {
             return;
         }
     };
+    let mut held: Option<Vec<u8>> = None;
     let mut budget = Bucket::new(BYTES_PER_SEC, 2.0 * BYTES_PER_SEC);
     if say(&mut socket, Control::Joined).await {
         loop {
+            let pause = budget.wait(MAX_MESSAGE_BYTES as f64);
             tokio::select! {
-                frame = socket.recv() => match frame {
+                () = tokio::time::sleep(pause), if held.is_none() && !pause.is_zero() => {}
+                frame = socket.recv(), if held.is_none() && pause.is_zero() => match frame {
                     Some(Ok(Message::Binary(bytes))) => {
-                        if !budget.take(bytes.len() as f64) {
-                            say(&mut socket, Control::Limit).await;
-                            break;
-                        }
-                        let _ = to_host.send(ToHost::Data(bytes.to_vec()));
+                        budget.take(bytes.len() as f64);
+                        held = Some(bytes.to_vec());
                     }
                     Some(Ok(Message::Text(_) | Message::Ping(_) | Message::Pong(_))) => {}
                     _ => break,
                 },
-                event = rx.recv() => match event {
-                    Some(ToSurface::Data(bytes)) => {
-                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                permit = host.to.reserve(), if held.is_some() => {
+                    if let (Ok(permit), Some(bytes)) = (permit, held.take()) {
+                        permit.send(bytes);
+                    }
+                },
+                data = host.from.recv() => match data {
+                    Some(bytes) => {
+                        if !put(&mut socket, Message::Binary(bytes.into())).await {
                             break;
                         }
                     }
-                    Some(ToSurface::Gone) | None => {
+                    None => {
                         say(&mut socket, Control::Gone).await;
                         break;
                     }

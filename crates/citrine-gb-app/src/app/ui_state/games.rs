@@ -35,21 +35,36 @@ pub struct GamesPane {
 pub struct Undo {
     pub folder: Option<String>,
     pub games: Vec<LibraryGame>,
-    pub words: String,
+    pub download: Option<String>,
+    pub name: String,
+    pub tail: String,
     shown: Option<f64>,
 }
 
 impl Undo {
     pub fn new(folder: Option<String>, games: Vec<LibraryGame>) -> Self {
-        let words = match (&folder, games.as_slice()) {
-            (Some(tree), _) => format!("Removed {}", super::library::scan::folder_label(tree)),
-            (None, [game]) => format!("Removed {}", game.name),
-            (None, games) => format!("Removed {} games", games.len()),
+        let name = match (&folder, games.as_slice()) {
+            (Some(tree), _) => super::library::scan::folder_label(tree),
+            (None, [game]) => game.name.clone(),
+            (None, games) => format!("{} games", games.len()),
         };
         Self {
             folder,
             games,
-            words,
+            download: None,
+            name,
+            tail: " removed".to_owned(),
+            shown: None,
+        }
+    }
+
+    pub fn download(path: String, name: &str) -> Self {
+        Self {
+            folder: None,
+            games: Vec::new(),
+            download: Some(path),
+            name: name.to_owned(),
+            tail: " download deleted".to_owned(),
             shown: None,
         }
     }
@@ -68,6 +83,10 @@ impl GamesPane {
         self.tag_draft = None;
     }
 
+    pub fn pending_download(&self) -> Option<&str> {
+        self.undo.as_ref()?.download.as_deref()
+    }
+
     pub fn offer_undo(&mut self, undo: Undo) -> Option<Undo> {
         self.undo.replace(undo)
     }
@@ -79,5 +98,22 @@ impl GamesPane {
             return None;
         }
         self.undo.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LibraryGame, Undo};
+
+    #[test]
+    fn a_removal_undo_names_the_game_first() {
+        let game = LibraryGame {
+            name: "Alleyway".to_owned(),
+            ..LibraryGame::default()
+        };
+        let undo = Undo::new(None, vec![game.clone()]);
+        assert_eq!(format!("{}{}", undo.name, undo.tail), "Alleyway removed");
+        let undo = Undo::new(None, vec![game.clone(), game]);
+        assert_eq!(format!("{}{}", undo.name, undo.tail), "2 games removed");
     }
 }

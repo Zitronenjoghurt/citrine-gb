@@ -1,22 +1,33 @@
 use crate::app::ui_state::keybinds::PadButton;
+use crate::combo::{Bound, Combo, Mods};
 use crate::icons;
 use std::fmt::Display;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "StoredKey", into = "StoredKey")]
 pub struct Hotkey {
-    pub key: egui::Key,
-    pub ctrl: bool,
-    pub shift: bool,
-    pub alt: bool,
+    keys: Combo<egui::Key>,
+    mods: Mods,
 }
 
-impl Default for Hotkey {
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct StoredKey {
+    key: egui::Key,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    with: Vec<egui::Key>,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+}
+
+impl Default for StoredKey {
     fn default() -> Self {
         Self {
             key: egui::Key::F8,
+            with: Vec::new(),
             ctrl: false,
             shift: false,
             alt: false,
@@ -24,67 +35,134 @@ impl Default for Hotkey {
     }
 }
 
-impl Hotkey {
-    pub fn plain(key: egui::Key) -> Self {
+impl From<StoredKey> for Hotkey {
+    fn from(stored: StoredKey) -> Self {
+        let mods = Mods {
+            ctrl: stored.ctrl,
+            shift: stored.shift,
+            alt: stored.alt,
+        };
+        let keys = Combo::new(stored.with.iter().copied().chain([stored.key]))
+            .unwrap_or_else(|| Combo::single(stored.key));
+        Self { keys, mods }
+    }
+}
+
+impl From<Hotkey> for StoredKey {
+    fn from(hotkey: Hotkey) -> Self {
+        let (key, with) = match hotkey.keys.inputs().split_last() {
+            Some((key, with)) => (*key, with.to_vec()),
+            None => (egui::Key::F8, Vec::new()),
+        };
         Self {
             key,
-            ..Default::default()
+            with,
+            ctrl: hotkey.mods.ctrl,
+            shift: hotkey.mods.shift,
+            alt: hotkey.mods.alt,
         }
+    }
+}
+
+impl Default for Hotkey {
+    fn default() -> Self {
+        Self::plain(egui::Key::F8)
+    }
+}
+
+impl Hotkey {
+    pub fn new(keys: Combo<egui::Key>, mods: Mods) -> Self {
+        Self { keys, mods }
+    }
+
+    pub fn plain(key: egui::Key) -> Self {
+        Self::new(Combo::single(key), Mods::NONE)
     }
 
     pub fn shift(key: egui::Key) -> Self {
-        Self {
-            key,
-            shift: true,
-            ..Default::default()
-        }
+        Self::new(
+            Combo::single(key),
+            Mods {
+                shift: true,
+                ..Mods::NONE
+            },
+        )
     }
 
     pub fn ctrl(key: egui::Key) -> Self {
-        Self {
-            key,
-            ctrl: true,
-            ..Default::default()
-        }
+        Self::new(
+            Combo::single(key),
+            Mods {
+                ctrl: true,
+                ..Mods::NONE
+            },
+        )
     }
 
     pub fn from_event(key: egui::Key, modifiers: egui::Modifiers) -> Self {
-        Self {
-            key,
-            ctrl: modifiers.command || modifiers.ctrl,
-            shift: modifiers.shift,
-            alt: modifiers.alt,
-        }
+        Self::new(Combo::single(key), Mods::of(modifiers))
+    }
+
+    pub fn keys(&self) -> &Combo<egui::Key> {
+        &self.keys
+    }
+
+    pub fn mods(&self) -> Mods {
+        self.mods
+    }
+
+    pub fn single_key(&self) -> Option<egui::Key> {
+        self.keys.only()
+    }
+
+    pub fn is_combo(&self) -> bool {
+        !self.keys.is_single()
     }
 
     pub fn types_text(&self) -> bool {
-        !self.ctrl && !self.alt && self.key.name().chars().count() == 1
+        !self.mods.ctrl
+            && !self.mods.alt
+            && self
+                .single_key()
+                .is_some_and(|key| key.name().chars().count() == 1)
     }
 
     pub fn matches(&self, key: egui::Key, modifiers: egui::Modifiers) -> bool {
-        self.key == key && *self == Self::from_event(key, modifiers)
+        self.single_key() == Some(key) && self.mods == Mods::of(modifiers)
     }
 }
 
 impl Display for Hotkey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.ctrl {
-            write!(f, "Ctrl+")?;
-        }
-        if self.shift {
-            write!(f, "Shift+")?;
-        }
-        if self.alt {
-            write!(f, "Alt+")?;
-        }
-        match self.key {
-            egui::Key::Escape => f.write_str("Esc"),
-            key => f.write_str(key.name()),
-        }
+        let mods = self.mods.names().map(str::to_owned);
+        let keys = self.keys.inputs().iter().map(|key| match key {
+            egui::Key::Escape => "Esc".to_owned(),
+            key => key.name().to_owned(),
+        });
+        let parts: Vec<String> = mods.chain(keys).collect();
+        f.write_str(&parts.join("+"))
     }
 }
 
 pub const FAST_FORWARD_KEY: egui::Key = egui::Key::Space;
+
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter,
+)]
+pub enum QuickLoadKey {
+    Press,
+    #[default]
+    Hold,
+}
+
+impl Display for QuickLoadKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Press => "Press",
+            Self::Hold => "Hold 2 s",
+        })
+    }
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, serde::Serialize, serde::Deserialize,
@@ -115,6 +193,10 @@ pub enum HotkeyAction {
     StepLine,
     StepFrame,
     ToggleHuds,
+    Fullscreen,
+    OpenSettings,
+    PushToTalk,
+    SaveClip,
 }
 
 impl HotkeyAction {
@@ -124,7 +206,8 @@ impl HotkeyAction {
             Self::QuickSaveNewSlot => "Save to a new slot",
             Self::QuickLoad => "Quick load",
             Self::Screenshot => "Screenshot",
-            Self::ToggleRecording => "Record video",
+            Self::ToggleRecording => "Record",
+            Self::SaveClip => "Save a clip",
             Self::TogglePause => "Pause / resume",
             Self::Rewind => "Rewind",
             Self::FastForward => "Fast forward",
@@ -145,6 +228,9 @@ impl HotkeyAction {
             Self::StepLine => "Step one line",
             Self::StepFrame => "Step one frame",
             Self::ToggleHuds => "Show HUDs",
+            Self::Fullscreen => "Fullscreen",
+            Self::OpenSettings => "Open Settings",
+            Self::PushToTalk => "Push to talk",
         }
     }
 
@@ -155,6 +241,7 @@ impl HotkeyAction {
             Self::QuickLoad => "Hold to restore the starred slot",
             Self::Screenshot => "Save the screen to Media",
             Self::ToggleRecording => "Start or stop recording the screen and sound",
+            Self::SaveClip => "Save the last seconds you played, cut to the part you want",
             Self::TogglePause => "Stop and start emulation",
             Self::Rewind => "Hold to play the game backwards",
             Self::FastForward => "Hold to run the game at the fast forward speed",
@@ -175,6 +262,9 @@ impl HotkeyAction {
             Self::StepLine => "Run until the screen moves to its next line",
             Self::StepFrame => "Run until the next frame is drawn",
             Self::ToggleHuds => "Show or hide the HUDs over the game",
+            Self::Fullscreen => "Fill the screen with the app, or go back to a window",
+            Self::OpenSettings => "Open Settings, ready to search",
+            Self::PushToTalk => "Hold so the DS game hears the microphone, with Push to talk on",
         }
     }
 
@@ -184,13 +274,14 @@ impl HotkeyAction {
             Self::TogglePause => icons::PLAY,
             Self::Rewind => icons::REWIND,
             Self::FastForward => icons::FAST_FORWARD,
-            Self::SoftReset => icons::ARROW_COUNTER_CLOCKWISE,
+            Self::SoftReset => icons::POWER,
             Self::Screenshot => icons::CAMERA,
+            Self::SaveClip => icons::SCISSORS,
             Self::ToggleMute if on => icons::SPEAKER_SLASH,
             Self::ToggleMute => icons::SPEAKER_HIGH,
             Self::ToggleFocusMode | Self::LeaveFocusMode => icons::FRAME_CORNERS,
             Self::SwapScreens => icons::ARROWS_DOWN_UP,
-            Self::OneScreen => icons::MONITOR,
+            Self::OneScreen => icons::DS_TOP_ONLY,
             Self::NextScreenLayout => icons::SQUARE_SPLIT_VERTICAL,
             Self::ToggleLid if on => icons::SUN,
             Self::ToggleLid => icons::MOON,
@@ -200,6 +291,7 @@ impl HotkeyAction {
             Self::StepLine => icons::ROWS,
             Self::StepFrame => icons::FILM_STRIP,
             Self::ToggleHuds => icons::GAUGE,
+            Self::PushToTalk => icons::MICROPHONE,
             _ => "",
         }
     }
@@ -245,6 +337,18 @@ impl HotkeyAction {
         self == Self::ToggleHuds
     }
 
+    pub fn is_window(self) -> bool {
+        matches!(self, Self::Fullscreen | Self::OpenSettings)
+    }
+
+    pub fn is_talk(self) -> bool {
+        self == Self::PushToTalk
+    }
+
+    pub fn is_clip(self) -> bool {
+        self == Self::SaveClip
+    }
+
     pub fn is_hold(self) -> bool {
         matches!(self, Self::QuickLoad)
     }
@@ -257,6 +361,7 @@ impl HotkeyAction {
             Self::QuickLoad => Hotkey::plain(Key::F9),
             Self::Screenshot => Hotkey::plain(Key::F12),
             Self::ToggleRecording => Hotkey::shift(Key::F12),
+            Self::SaveClip => Hotkey::ctrl(Key::F12),
             Self::TogglePause => Hotkey::plain(Key::F5),
             Self::Rewind => Hotkey::plain(Key::R),
             Self::FastForward => Hotkey::plain(FAST_FORWARD_KEY),
@@ -274,6 +379,9 @@ impl HotkeyAction {
             Self::StepOver => Hotkey::plain(Key::F3),
             Self::StepOut => Hotkey::plain(Key::F4),
             Self::ToggleHuds => Hotkey::shift(Key::F3),
+            Self::Fullscreen => Hotkey::shift(Key::F11),
+            Self::OpenSettings => Hotkey::ctrl(Key::Comma),
+            Self::PushToTalk => Hotkey::plain(Key::T),
             Self::ToggleLid | Self::StepLine | Self::StepFrame => return None,
         })
     }
@@ -289,7 +397,7 @@ impl Display for HotkeyAction {
 #[serde(from = "StoredHotkeys", into = "StoredHotkeys")]
 pub struct Hotkeys {
     bindings: Vec<(Hotkey, HotkeyAction)>,
-    pads: Vec<(PadButton, HotkeyAction)>,
+    pads: Vec<(Combo<PadButton>, HotkeyAction)>,
     offered: Vec<HotkeyAction>,
 }
 
@@ -302,6 +410,10 @@ struct StoredHotkeys {
     #[serde(default = "Vec::new")]
     offered: Vec<HotkeyAction>,
     #[serde(default)]
+    key_combos: Vec<(Hotkey, HotkeyAction)>,
+    #[serde(default)]
+    pad_combos: Vec<(Combo<PadButton>, HotkeyAction)>,
+    #[serde(default)]
     screens: LaterHotkeys,
     #[serde(default)]
     debugger: LaterHotkeys,
@@ -311,6 +423,12 @@ struct StoredHotkeys {
     fast_forward: LaterHotkeys,
     #[serde(default)]
     hud: LaterHotkeys,
+    #[serde(default)]
+    window: LaterHotkeys,
+    #[serde(default)]
+    talk: LaterHotkeys,
+    #[serde(default)]
+    clip: LaterHotkeys,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -319,29 +437,44 @@ struct LaterHotkeys {
     bindings: Vec<(Hotkey, HotkeyAction)>,
     pads: Vec<(PadButton, HotkeyAction)>,
     offered: Vec<HotkeyAction>,
+    key_combos: Vec<(Hotkey, HotkeyAction)>,
+    pad_combos: Vec<(Combo<PadButton>, HotkeyAction)>,
 }
 
 impl LaterHotkeys {
     fn take(hotkeys: &mut Hotkeys, later: fn(HotkeyAction) -> bool) -> Self {
+        let (key_combos, bindings) = hotkeys
+            .bindings
+            .extract_if(.., |(_, action)| later(*action))
+            .partition(|(hotkey, _)| hotkey.is_combo());
+        let (singles, pad_combos): (Vec<_>, Vec<_>) = hotkeys
+            .pads
+            .extract_if(.., |(_, action)| later(*action))
+            .partition(|(combo, _)| combo.is_single());
         Self {
-            bindings: hotkeys
-                .bindings
-                .extract_if(.., |(_, action)| later(*action))
-                .collect(),
-            pads: hotkeys
-                .pads
-                .extract_if(.., |(_, action)| later(*action))
+            bindings,
+            pads: singles
+                .into_iter()
+                .filter_map(|(combo, action)| combo.only().map(|pad| (pad, action)))
                 .collect(),
             offered: hotkeys
                 .offered
                 .extract_if(.., |action| later(*action))
                 .collect(),
+            key_combos,
+            pad_combos,
         }
     }
 
     fn put(self, hotkeys: &mut Hotkeys) {
         hotkeys.bindings.extend(self.bindings);
-        hotkeys.pads.extend(self.pads);
+        hotkeys.bindings.extend(self.key_combos);
+        hotkeys.pads.extend(
+            self.pads
+                .into_iter()
+                .map(|(pad, action)| (Combo::single(pad), action)),
+        );
+        hotkeys.pads.extend(self.pad_combos);
         if !hotkeys.offered.is_empty() {
             hotkeys.offered.extend(self.offered);
         }
@@ -356,6 +489,9 @@ impl Default for StoredHotkeys {
         stored.rewind = LaterHotkeys::default();
         stored.fast_forward = LaterHotkeys::default();
         stored.hud = LaterHotkeys::default();
+        stored.window = LaterHotkeys::default();
+        stored.talk = LaterHotkeys::default();
+        stored.clip = LaterHotkeys::default();
         stored
     }
 }
@@ -367,15 +503,25 @@ impl From<Hotkeys> for StoredHotkeys {
         let rewind = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_rewind);
         let fast_forward = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_fast_forward);
         let hud = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_hud);
+        let window = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_window);
+        let talk = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_talk);
+        let clip = LaterHotkeys::take(&mut hotkeys, HotkeyAction::is_clip);
+        let offered = std::mem::take(&mut hotkeys.offered);
+        let base = LaterHotkeys::take(&mut hotkeys, |_| true);
         Self {
-            bindings: hotkeys.bindings,
-            pads: hotkeys.pads,
-            offered: hotkeys.offered,
+            bindings: base.bindings,
+            pads: base.pads,
+            offered,
+            key_combos: base.key_combos,
+            pad_combos: base.pad_combos,
             screens,
             debugger,
             rewind,
             fast_forward,
             hud,
+            window,
+            talk,
+            clip,
         }
     }
 }
@@ -383,15 +529,26 @@ impl From<Hotkeys> for StoredHotkeys {
 impl From<StoredHotkeys> for Hotkeys {
     fn from(stored: StoredHotkeys) -> Self {
         let mut hotkeys = Self {
-            bindings: stored.bindings,
-            pads: stored.pads,
+            bindings: Vec::new(),
+            pads: Vec::new(),
             offered: stored.offered,
         };
+        let base = LaterHotkeys {
+            bindings: stored.bindings,
+            pads: stored.pads,
+            offered: Vec::new(),
+            key_combos: stored.key_combos,
+            pad_combos: stored.pad_combos,
+        };
+        base.put(&mut hotkeys);
         stored.screens.put(&mut hotkeys);
         stored.rewind.put(&mut hotkeys);
         stored.fast_forward.put(&mut hotkeys);
         stored.debugger.put(&mut hotkeys);
         stored.hud.put(&mut hotkeys);
+        stored.window.put(&mut hotkeys);
+        stored.talk.put(&mut hotkeys);
+        stored.clip.put(&mut hotkeys);
         hotkeys
     }
 }
@@ -409,6 +566,40 @@ impl Default for Hotkeys {
 }
 
 impl Hotkeys {
+    pub fn key_table(&self) -> Vec<Bound<egui::Key, HotkeyAction>> {
+        self.bindings
+            .iter()
+            .map(|(hotkey, action)| Bound::exact(hotkey.keys.clone(), hotkey.mods, *action))
+            .collect()
+    }
+
+    pub fn pad_table(&self) -> Vec<Bound<PadButton, HotkeyAction>> {
+        self.pads
+            .iter()
+            .map(|(combo, action)| Bound::any_mods(combo.clone(), *action))
+            .collect()
+    }
+
+    pub fn key_in_combo(&self, key: egui::Key) -> bool {
+        self.bindings
+            .iter()
+            .any(|(hotkey, _)| hotkey.is_combo() && hotkey.keys.contains(&key))
+    }
+
+    pub fn owner_of(&self, hotkey: &Hotkey) -> Option<HotkeyAction> {
+        self.bindings
+            .iter()
+            .find(|(bound, _)| bound == hotkey)
+            .map(|(_, action)| *action)
+    }
+
+    pub fn owner_of_pads(&self, combo: &Combo<PadButton>) -> Option<HotkeyAction> {
+        self.pads
+            .iter()
+            .find(|(bound, _)| bound == combo)
+            .map(|(_, action)| *action)
+    }
+
     pub fn action_for(&self, key: egui::Key, modifiers: egui::Modifiers) -> Option<HotkeyAction> {
         self.bindings
             .iter()
@@ -420,7 +611,7 @@ impl Hotkeys {
         self.bindings
             .iter()
             .filter(|(_, bound)| *bound == action)
-            .map(|(hotkey, _)| *hotkey)
+            .map(|(hotkey, _)| hotkey.clone())
             .collect()
     }
 
@@ -441,32 +632,42 @@ impl Hotkeys {
         self.bindings.push((hotkey, action));
     }
 
-    pub fn unbind(&mut self, hotkey: Hotkey) {
-        self.bindings.retain(|(bound, _)| *bound != hotkey);
+    pub fn unbind(&mut self, hotkey: &Hotkey) {
+        self.bindings.retain(|(bound, _)| bound != hotkey);
+    }
+
+    pub fn unbind_keys(&mut self, keys: &Combo<egui::Key>) {
+        self.bindings
+            .retain(|(bound, _)| bound.keys != *keys || bound.mods != Mods::NONE);
     }
 
     pub fn action_for_pad(&self, pad: PadButton) -> Option<HotkeyAction> {
-        self.pads
-            .iter()
-            .find(|(bound, _)| *bound == pad)
-            .map(|(_, action)| *action)
+        self.owner_of_pads(&Combo::single(pad))
     }
 
-    pub fn pads_for(&self, action: HotkeyAction) -> Vec<PadButton> {
+    pub fn pads_for(&self, action: HotkeyAction) -> Vec<Combo<PadButton>> {
         self.pads
             .iter()
             .filter(|(_, bound)| *bound == action)
-            .map(|(pad, _)| *pad)
+            .map(|(combo, _)| combo.clone())
             .collect()
     }
 
     pub fn bind_pad(&mut self, pad: PadButton, action: HotkeyAction) {
-        self.pads.retain(|(bound, _)| *bound != pad);
-        self.pads.push((pad, action));
+        self.bind_pads(Combo::single(pad), action);
+    }
+
+    pub fn bind_pads(&mut self, combo: Combo<PadButton>, action: HotkeyAction) {
+        self.pads.retain(|(bound, _)| *bound != combo);
+        self.pads.push((combo, action));
     }
 
     pub fn unbind_pad(&mut self, pad: PadButton) {
-        self.pads.retain(|(bound, _)| *bound != pad);
+        self.unbind_pads(&Combo::single(pad));
+    }
+
+    pub fn unbind_pads(&mut self, combo: &Combo<PadButton>) {
+        self.pads.retain(|(bound, _)| bound != combo);
     }
 
     pub fn is_default(&self) -> bool {
@@ -528,7 +729,7 @@ mod tests {
             Some(HotkeyAction::ToggleRecording)
         );
         assert!(hotkeys.keys_for(HotkeyAction::QuickSave).is_empty());
-        hotkeys.unbind(Hotkey::shift(Key::F12));
+        hotkeys.unbind(&Hotkey::shift(Key::F12));
         hotkeys.bind_new_defaults();
         assert!(hotkeys.keys_for(HotkeyAction::ToggleRecording).is_empty());
     }
@@ -619,7 +820,7 @@ mod tests {
     #[test]
     fn unbinding_leaves_the_action_with_nothing() {
         let mut hotkeys = Hotkeys::default();
-        hotkeys.unbind(Hotkey::plain(Key::F12));
+        hotkeys.unbind(&Hotkey::plain(Key::F12));
 
         assert!(hotkeys.keys_for(HotkeyAction::Screenshot).is_empty());
         assert_eq!(hotkeys.action_for(Key::F12, Modifiers::NONE), None);
@@ -689,6 +890,9 @@ mod tests {
         let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
         old.as_object_mut().unwrap().remove("debugger");
         old.as_object_mut().unwrap().remove("hud");
+        old.as_object_mut().unwrap().remove("window");
+        old.as_object_mut().unwrap().remove("talk");
+        old.as_object_mut().unwrap().remove("clip");
         let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
         assert!(hotkeys.keys_for(HotkeyAction::StepInstruction).is_empty());
 
@@ -834,7 +1038,208 @@ mod tests {
     }
 
     #[test]
+    fn shift_f11_goes_fullscreen_and_ctrl_comma_opens_settings() {
+        let hotkeys = Hotkeys::default();
+        assert_eq!(
+            hotkeys.action_for(Key::F11, Modifiers::SHIFT),
+            Some(HotkeyAction::Fullscreen)
+        );
+        assert_eq!(
+            hotkeys.action_for(Key::F11, Modifiers::NONE),
+            Some(HotkeyAction::ToggleFocusMode)
+        );
+        assert_eq!(
+            hotkeys.action_for(Key::Comma, Modifiers::CTRL),
+            Some(HotkeyAction::OpenSettings)
+        );
+        assert_eq!(
+            hotkeys.action_for(Key::Comma, Modifiers::COMMAND),
+            Some(HotkeyAction::OpenSettings),
+            "Cmd+Comma on macOS"
+        );
+        assert_eq!(Hotkey::ctrl(Key::Comma).to_string(), "Ctrl+Comma");
+    }
+
+    #[test]
+    fn a_build_from_before_the_window_shortcuts_still_reads_the_hotkeys() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind_pad(
+            PadButton::iter().next().unwrap(),
+            HotkeyAction::OpenSettings,
+        );
+        let stored = serde_json::to_string(&hotkeys).unwrap();
+
+        let older: Result<OlderHotkeys, _> = serde_json::from_str(&stored);
+
+        assert!(older.is_ok(), "{stored}");
+        let back: Hotkeys = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, hotkeys);
+    }
+
+    #[test]
+    fn hotkeys_from_before_the_window_shortcuts_gain_their_keys() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("window");
+        old.as_object_mut().unwrap().remove("talk");
+        old.as_object_mut().unwrap().remove("clip");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::Fullscreen).is_empty());
+        assert!(!hotkeys.offers(HotkeyAction::OpenSettings));
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::F11, Modifiers::SHIFT),
+            Some(HotkeyAction::Fullscreen)
+        );
+        assert_eq!(
+            hotkeys.action_for(Key::Comma, Modifiers::CTRL),
+            Some(HotkeyAction::OpenSettings)
+        );
+        assert_eq!(hotkeys, Hotkeys::default());
+    }
+
+    #[test]
+    fn hotkeys_from_before_push_to_talk_gain_its_key() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("talk");
+        old.as_object_mut().unwrap().remove("clip");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::PushToTalk).is_empty());
+        assert!(!hotkeys.offers(HotkeyAction::PushToTalk));
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::T, Modifiers::NONE),
+            Some(HotkeyAction::PushToTalk)
+        );
+        assert_eq!(hotkeys, Hotkeys::default());
+    }
+
+    #[test]
+    fn a_build_from_before_save_a_clip_still_reads_the_hotkeys() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind_pad(PadButton::iter().next().unwrap(), HotkeyAction::SaveClip);
+        let stored = serde_json::to_string(&hotkeys).unwrap();
+
+        let older: Result<OlderHotkeys, _> = serde_json::from_str(&stored);
+
+        assert!(older.is_ok(), "{stored}");
+        let back: Hotkeys = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, hotkeys);
+    }
+
+    #[test]
+    fn hotkeys_from_before_save_a_clip_gain_its_key() {
+        let mut old = serde_json::to_value(Hotkeys::default()).unwrap();
+        old.as_object_mut().unwrap().remove("clip");
+        let mut hotkeys: Hotkeys = serde_json::from_value(old).unwrap();
+        assert!(hotkeys.keys_for(HotkeyAction::SaveClip).is_empty());
+        assert!(!hotkeys.offers(HotkeyAction::SaveClip));
+
+        hotkeys.bind_new_defaults();
+
+        assert_eq!(
+            hotkeys.action_for(Key::F12, Modifiers::CTRL),
+            Some(HotkeyAction::SaveClip)
+        );
+        assert_eq!(hotkeys, Hotkeys::default());
+    }
+
+    #[test]
     fn escape_reads_as_esc_like_its_key_cap() {
         assert_eq!(Hotkey::plain(Key::Escape).to_string(), "Esc");
+    }
+
+    fn keys(list: &[Key]) -> Combo<Key> {
+        Combo::new(list.iter().copied()).expect("a combo")
+    }
+
+    fn ctrl_s_d() -> Hotkey {
+        Hotkey::new(
+            keys(&[Key::S, Key::D]),
+            Mods {
+                ctrl: true,
+                ..Mods::NONE
+            },
+        )
+    }
+
+    #[test]
+    fn a_key_combo_reads_with_its_modifiers_first() {
+        assert_eq!(ctrl_s_d().to_string(), "Ctrl+D+S");
+        assert!(ctrl_s_d().is_combo());
+        assert_eq!(ctrl_s_d().single_key(), None);
+        assert!(!ctrl_s_d().matches(Key::S, Modifiers::CTRL));
+    }
+
+    #[test]
+    fn a_single_key_stores_exactly_as_before() {
+        let stored = serde_json::to_value(Hotkey::shift(Key::F8)).unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({"key": "F8", "ctrl": false, "shift": true, "alt": false})
+        );
+    }
+
+    #[test]
+    fn combos_store_apart_so_older_builds_never_read_their_last_key() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind(ctrl_s_d(), HotkeyAction::ToggleMute);
+        hotkeys.bind(
+            Hotkey::new(keys(&[Key::Q, Key::W]), Mods::NONE),
+            HotkeyAction::Rewind,
+        );
+        let menu = Combo::new([
+            PadButton::LeftTrigger,
+            PadButton::RightTrigger,
+            PadButton::Select,
+        ])
+        .unwrap();
+        hotkeys.bind_pads(menu.clone(), HotkeyAction::ToggleFocusMode);
+        hotkeys.bind_pad(PadButton::Mode, HotkeyAction::FastForward);
+        let stored = serde_json::to_value(&hotkeys).unwrap();
+        let text = stored.to_string();
+
+        assert_eq!(stored["key_combos"].as_array().unwrap().len(), 1, "{text}");
+        assert_eq!(stored["rewind"]["key_combos"].as_array().unwrap().len(), 1);
+        assert_eq!(stored["pad_combos"].as_array().unwrap().len(), 1);
+        assert_eq!(stored["fast_forward"]["pads"].as_array().unwrap().len(), 1);
+        let older: OlderHotkeys = serde_json::from_value(stored.clone()).unwrap();
+        assert!(older.bindings.iter().all(|(hotkey, _)| !hotkey.is_combo()));
+
+        let back: Hotkeys = serde_json::from_value(stored).unwrap();
+        assert_eq!(back.owner_of(&ctrl_s_d()), Some(HotkeyAction::ToggleMute));
+        assert_eq!(
+            back.owner_of_pads(&menu),
+            Some(HotkeyAction::ToggleFocusMode)
+        );
+        assert_eq!(
+            back.action_for_pad(PadButton::Mode),
+            Some(HotkeyAction::FastForward)
+        );
+        assert_eq!(back.keys_for(HotkeyAction::Rewind).len(), 2);
+        assert!(back.key_in_combo(Key::Q));
+        assert!(!back.key_in_combo(Key::F8));
+    }
+
+    #[test]
+    fn a_game_binding_takes_only_the_shortcut_with_no_modifiers() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind(ctrl_s_d(), HotkeyAction::ToggleMute);
+        hotkeys.bind(
+            Hotkey::new(keys(&[Key::S, Key::D]), Mods::NONE),
+            HotkeyAction::Screenshot,
+        );
+        hotkeys.unbind_keys(&keys(&[Key::S, Key::D]));
+        assert_eq!(
+            hotkeys.owner_of(&ctrl_s_d()),
+            Some(HotkeyAction::ToggleMute)
+        );
+        assert_eq!(
+            hotkeys.keys_for(HotkeyAction::Screenshot),
+            [Hotkey::plain(Key::F12)]
+        );
     }
 }

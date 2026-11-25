@@ -3,9 +3,10 @@ use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::serial::LinkMessage;
 use citrine_gb::machine::Machine;
 use citrine_gb::persistence::sram_dump::SramDump;
+use citrine_gb_direct::Event;
 use citrine_gb_net::{
-    Ask, ClientMsg, Console, EndReason, GameCard, GameHash, GamePart, MAX_STATE_BYTES,
-    MAX_TITLE_CHARS, OLDEST_PLAY_VERSION, Offer, OnlineId, Origin, PeerSealer, Pieces, PlayMsg,
+    Ask, ClientMsg, Console, EndReason, GameCard, GameHash, GamePart, LinkPath, MAX_STATE_BYTES,
+    MAX_TITLE_CHARS, OLDEST_PLAY_VERSION, Offer, OnlineId, Origin, PeerLink, PeerSealer, PlayMsg,
     PublicKey, Refusal, Sealed, ServerMsg, SessionId, Start, plays_with,
 };
 use std::collections::VecDeque;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
+mod direct;
 mod engine;
 pub mod fetch;
 mod links;
@@ -109,6 +111,7 @@ pub struct Returned {
     pub friend: OnlineId,
     pub history: Option<DropHistory>,
     pub downloaded: bool,
+    pub peer_touched: bool,
 }
 
 pub enum MyGame {
@@ -197,6 +200,8 @@ struct Round {
     rejoin: Option<DropHistory>,
     their_rejoin: Option<citrine_gb_net::RejoinPoint>,
     their_user: Option<citrine_gb_net::DsUser>,
+    their_budget: Option<u32>,
+    budget_now: Option<u32>,
 }
 
 impl Round {
@@ -226,6 +231,8 @@ impl Round {
             rejoin: None,
             their_rejoin: None,
             their_user: None,
+            their_budget: None,
+            budget_now: None,
         }
     }
 
@@ -262,6 +269,9 @@ pub struct PlaySession {
     links_in: Vec<PlayMsg>,
     sync: citrine_gb::netplay::Sync,
     lanes: usize,
+    ds_cost: Option<links::DsCost>,
+    ds_measure: bool,
+    measured_cost: Option<(links::CostKey, links::DsCost)>,
     input_delay: Option<u32>,
     role: Role,
     stage: Stage,
@@ -269,6 +279,7 @@ pub struct PlaySession {
     downloading: bool,
     borrowed_save: Option<Vec<u8>>,
     lent: bool,
+    from_peer: bool,
     round: Round,
     roms: Vec<(GameHash, Arc<[u8]>)>,
     wants_state: bool,
@@ -276,6 +287,8 @@ pub struct PlaySession {
     pings: VecDeque<(u32, Instant)>,
     next_ping: u32,
     round_trips: VecDeque<u32>,
+    stale_trips: usize,
+    ping_path: LinkPath,
     #[cfg(test)]
     spread_for_test: Option<u32>,
     pinged_at: Option<Instant>,
@@ -294,8 +307,8 @@ pub struct PlaySession {
     sealer: Option<Arc<PeerSealer>>,
     sealing: VecDeque<Pending<Vec<Sealed>>>,
     sealed: Vec<Sealed>,
-    pieces: Pieces,
-    last_piece: u32,
+    link: Option<PeerLink>,
+    direct: direct::DirectLink,
     sample_rate: u32,
     grouped: bool,
     stashed: Option<Box<Rollback>>,
@@ -312,7 +325,15 @@ pub struct Play {
     finder: shelf::Finder,
     seen_invites: bool,
     input_delay: Option<u32>,
+    ds_cost: Option<links::DsCost>,
+    ds_costs: links::DsCosts,
+    ds_measure: bool,
     ds_user: citrine_gb_net::DsUser,
+    direct: citrine_gb_direct::Direct,
+    want_direct: bool,
+    direct_tags: Vec<u64>,
+    #[cfg(all(test, feature = "nds", not(target_arch = "wasm32")))]
+    direct_lag: Option<tests::DirectLag>,
 }
 
 impl Default for Play {
@@ -329,7 +350,15 @@ impl Play {
             finder: shelf::Finder::new(shelf),
             seen_invites: true,
             input_delay: None,
+            ds_cost: None,
+            ds_costs: links::DsCosts::default(),
+            ds_measure: true,
             ds_user: random_ds_user(),
+            direct: citrine_gb_direct::Direct::new(),
+            want_direct: false,
+            direct_tags: Vec::new(),
+            #[cfg(all(test, feature = "nds", not(target_arch = "wasm32")))]
+            direct_lag: None,
         }
     }
 
@@ -462,6 +491,16 @@ impl Play {
 
     pub fn set_input_delay(&mut self, frames: Option<u32>) {
         self.input_delay = frames;
+    }
+
+    #[cfg(test)]
+    fn set_ds_cost(&mut self, cost: Option<links::DsCost>) {
+        self.ds_cost = cost;
+        self.ds_measure = false;
+    }
+
+    pub fn set_direct(&mut self, on: bool) {
+        self.want_direct = on;
     }
 
     pub fn ds_mac(&self) -> [u8; 6] {
@@ -628,6 +667,8 @@ impl Play {
     }
 
     pub fn update(&mut self, online: &mut Online, threads: &Threads, now: Instant) {
+        self.direct.give_spawner(|| threads.spawner());
+        self.pump_direct(online, now);
         if !online.is_connected() {
             self.invites.clear();
             if let Some(room) = &mut self.room
@@ -659,6 +700,12 @@ impl Play {
         if let Some(room) = &mut self.room {
             let me = online.account().map(|a| a.online_id);
             room.set_input_delay(self.input_delay);
+            if self.ds_measure {
+                for (key, cost) in room.measured_ds_costs() {
+                    self.ds_costs.note(key, cost);
+                }
+            }
+            room.set_ds_cost(self.ds_cost, &self.ds_costs, self.ds_measure);
             room.step(&mut self.finder, threads, sharing, me, now);
             room.tell(online);
         }
@@ -666,12 +713,82 @@ impl Play {
             self.finder.look(&game.hash);
         }
         self.finder.run(threads);
-        self.flush(online);
+        self.flush(online, now);
     }
 
-    pub fn flush(&mut self, online: &mut Online) {
+    pub fn flush(&mut self, online: &mut Online, now: Instant) {
         if let Some(room) = &mut self.room {
-            room.flush(online);
+            room.flush(online, &mut self.direct, self.want_direct, now);
+        }
+    }
+
+    fn pump_direct(&mut self, online: &Online, now: Instant) {
+        self.direct.set_stun(online.stun());
+        let tags = self
+            .room
+            .as_ref()
+            .map(Room::direct_tags)
+            .unwrap_or_default();
+        if let Some(room) = &mut self.room
+            && tags.is_empty()
+        {
+            room.close_direct(&mut self.direct, now);
+        }
+        for tag in self.direct_tags.iter().filter(|t| !tags.contains(t)) {
+            self.direct.close(*tag);
+        }
+        self.direct_tags = tags;
+        let events = self.direct.poll();
+        #[cfg(all(test, feature = "nds", not(target_arch = "wasm32")))]
+        let events = match &mut self.direct_lag {
+            Some(lag) => {
+                let events = lag.caught_up(&mut self.direct, events);
+                lag.pass(events, now)
+            }
+            None => events,
+        };
+        for event in events {
+            let tag = match &event {
+                Event::Note(tag, _) | Event::Up(tag) | Event::Down(tag) | Event::Frame(tag, _) => {
+                    *tag
+                }
+            };
+            let Some(room) = self.room.as_mut().filter(|r| r.is_live()) else {
+                continue;
+            };
+            let Some(index) = room.pair_of_tag(tag) else {
+                continue;
+            };
+            let pair = room.pair_at(index);
+            match event {
+                Event::Note(_, note) => {
+                    let msg = pair.direct.note_out(note);
+                    pair.outbox.push(msg);
+                }
+                Event::Up(_) => {
+                    if let Some(link) = &mut pair.link {
+                        pair.direct.up(link, now);
+                    }
+                }
+                Event::Down(_) => {
+                    if let Some(link) = &mut pair.link {
+                        pair.direct.down(link, now);
+                    }
+                }
+                Event::Frame(_, frame) => {
+                    let Ok(sealed) = postcard::from_bytes::<Sealed>(&frame) else {
+                        continue;
+                    };
+                    let Some(link) = &mut pair.link else {
+                        continue;
+                    };
+                    if link.hear(LinkPath::Direct, &sealed, now).is_err() {
+                        continue;
+                    }
+                    pair.heard_at = now;
+                    take_heard(room, &mut self.finder, index, now);
+                }
+            }
         }
     }
 
@@ -704,17 +821,15 @@ impl Play {
             return;
         };
         let play = room.pair_at(index);
-        let Ok(opened) = play.pieces.open(keys, &key, sealed) else {
-            return;
-        };
-        play.heard_at = now;
-        let friend = play.friend;
-        if let Some(msg) = opened
-            && let Some(msg) = room.hear_watch(friend, msg)
-            && let Some(msg) = room.hear_group(friend, msg)
+        if play
+            .link(keys, &key)
+            .hear(LinkPath::Relay, sealed, now)
+            .is_err()
         {
-            room.pair_at(index).receive(msg, finder, now);
+            return;
         }
+        play.heard_at = now;
+        take_heard(room, finder, index, now);
     }
 
     fn hear_part(
@@ -892,6 +1007,21 @@ impl Play {
     }
 }
 
+fn take_heard(room: &mut Room, finder: &mut shelf::Finder, index: usize, now: Instant) {
+    let friend = room.pair_at(index).friend;
+    while let Some(msg) = room.pair_at(index).link.as_mut().and_then(PeerLink::take) {
+        if let PlayMsg::Direct(signal) = msg {
+            room.pair_at(index).direct.hear(signal);
+            continue;
+        }
+        if let Some(msg) = room.hear_watch(friend, msg)
+            && let Some(msg) = room.hear_group(friend, msg)
+        {
+            room.pair_at(index).receive(msg, finder, now);
+        }
+    }
+}
+
 pub fn shares_games(online: &Online) -> bool {
     sharing_of(online).is_some()
 }
@@ -1036,7 +1166,7 @@ pub(crate) mod tests {
     };
     use citrine_gb_server::{Config, Running, start};
     use citrine_gb_threads::Threads;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     pub(crate) const SNAKE: &[u8] = include_bytes!("../homebrew/snake.gb");
     const PASSWORD: &str = "lemon tree";
@@ -1065,54 +1195,245 @@ pub(crate) mod tests {
         }
     }
 
+    const SPIKE_PCT: u64 = 2;
+    const RESENT_AFTER: Duration = Duration::from_millis(200);
+
+    #[derive(Clone, Copy, Default)]
+    struct Bad {
+        extra_ms: u64,
+        spike_ms: u64,
+        loss_pct: u64,
+    }
+
+    impl Bad {
+        fn draw(self, rng: &mut Rng, legs: u64, uplink: bool) -> (Duration, bool) {
+            if self.extra_ms == 0 && self.spike_ms == 0 && self.loss_pct == 0 {
+                return (Duration::ZERO, false);
+            }
+            let lost = rng.below(100 * legs) < self.loss_pct;
+            let spiked = rng.below(100 * legs) < SPIKE_PCT;
+            let extra = if uplink { self.extra_ms } else { 0 };
+            let ms = extra + if spiked { self.spike_ms } else { 0 };
+            (Duration::from_millis(ms), lost)
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    pub(crate) struct DirectLag {
+        one_way: Duration,
+        jitter_ms: u64,
+        bad: Bad,
+        rng: Rng,
+        last: Option<Instant>,
+        held: VecDeque<(Instant, citrine_gb_direct::Event)>,
+        peer: Option<std::sync::Arc<citrine_gb_direct::Counts>>,
+        got: u64,
+    }
+
+    #[cfg(feature = "nds")]
+    impl DirectLag {
+        fn set(&mut self, one_way_ms: u64, jitter_ms: u64) {
+            self.one_way = Duration::from_millis(one_way_ms);
+            self.jitter_ms = jitter_ms;
+        }
+
+        fn new(one_way_ms: u64, jitter_ms: u64, seed: u64) -> Self {
+            Self {
+                one_way: Duration::from_millis(one_way_ms),
+                jitter_ms,
+                bad: Bad::default(),
+                rng: Rng(seed),
+                last: None,
+                held: VecDeque::new(),
+                peer: None,
+                got: 0,
+            }
+        }
+
+        fn hear(&mut self, peer: std::sync::Arc<citrine_gb_direct::Counts>) {
+            self.peer = Some(peer);
+        }
+
+        pub(crate) fn caught_up(
+            &mut self,
+            direct: &mut citrine_gb_direct::Direct,
+            mut events: Vec<citrine_gb_direct::Event>,
+        ) -> Vec<citrine_gb_direct::Event> {
+            let Some(peer) = self.peer.clone() else {
+                return events;
+            };
+            let began = std::time::Instant::now();
+            let mut counted = 0;
+            loop {
+                self.got += events[counted..]
+                    .iter()
+                    .filter(|event| matches!(event, citrine_gb_direct::Event::Frame(..)))
+                    .count() as u64;
+                counted = events.len();
+                let due = peer.sent().saturating_sub(peer.dropped());
+                if self.got >= due {
+                    return events;
+                }
+                if began.elapsed() > LOSS_WAIT {
+                    self.got = due;
+                    return events;
+                }
+                std::thread::sleep(Duration::from_micros(100));
+                events.extend(direct.poll());
+            }
+        }
+
+        pub(crate) fn pass(
+            &mut self,
+            events: Vec<citrine_gb_direct::Event>,
+            now: Instant,
+        ) -> Vec<citrine_gb_direct::Event> {
+            let mut out = Vec::new();
+            for event in events {
+                if matches!(event, citrine_gb_direct::Event::Frame(..)) {
+                    let (bad, lost) = self.bad.draw(&mut self.rng, 1, true);
+                    if lost {
+                        continue;
+                    }
+                    let jitter = Duration::from_millis(self.rng.below(self.jitter_ms + 1));
+                    let due = (now + self.one_way + jitter + bad).max(self.last.unwrap_or(now));
+                    self.last = Some(due);
+                    self.held.push_back((due, event));
+                } else {
+                    out.push(event);
+                }
+            }
+            while self.held.front().is_some_and(|(due, _)| *due <= now) {
+                out.extend(self.held.pop_front().map(|(_, event)| event));
+            }
+            out
+        }
+    }
+
     type Meter = std::rc::Rc<std::cell::RefCell<Vec<(Instant, usize)>>>;
     type Cut = std::rc::Rc<std::cell::Cell<bool>>;
     type Now = std::rc::Rc<std::cell::Cell<Instant>>;
     type Pace = std::rc::Rc<std::cell::Cell<u32>>;
+    type Weather = std::rc::Rc<std::cell::Cell<Bad>>;
     type Nonce = [u8; NONCE_BYTES];
     type SharedWire = std::rc::Rc<std::cell::RefCell<Wire>>;
     type Presses = Vec<(u32, u32, Keys)>;
     type Touches = Vec<(u32, u32, Touch)>;
 
-    const LOSS_WAIT: Duration = Duration::from_secs(1);
+    const LOSS_WAIT: Duration = Duration::from_secs(30);
+    const BARRIER_PINGS: u64 = u64::MAX;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Channel {
+        Play(SessionId),
+        Game(SessionId),
+        RoomPlay(SessionId),
+        RoomGame(SessionId),
+    }
+
+    type Addressed = (Nonce, Option<OnlineId>, Channel);
+
+    struct InFlight {
+        from: usize,
+        to: Option<OnlineId>,
+        channel: Channel,
+        nonce: Nonce,
+        handed: Instant,
+        started: bool,
+    }
+
+    impl InFlight {
+        fn reaches(&self, ids: &[Option<OnlineId>], side: usize) -> bool {
+            self.from != side && self.to.is_none_or(|to| ids[side] == Some(to))
+        }
+    }
 
     #[derive(Default)]
     struct Wire {
-        in_flight: Vec<(usize, Nonce, Instant)>,
+        in_flight: Vec<InFlight>,
         lossy: Vec<bool>,
+        live: Vec<Cut>,
+        ids: Vec<Option<OnlineId>>,
+        heard: Vec<HashSet<Channel>>,
+        started: Vec<HashSet<SessionId>>,
+        untracked: u64,
     }
 
     impl Wire {
-        fn join(&mut self) -> usize {
+        fn join(&mut self, live: Cut) -> usize {
             self.lossy.push(false);
+            self.live.push(live);
+            self.ids.push(None);
+            self.heard.push(HashSet::new());
+            self.started.push(HashSet::new());
             self.lossy.len() - 1
         }
 
+        fn name(&mut self, side: usize, id: OnlineId) {
+            self.ids[side] = Some(id);
+        }
+
         fn reopened(&mut self, side: usize) {
-            self.in_flight.retain(|&(from, ..)| from == side);
+            let ids = &self.ids;
+            self.in_flight.retain(|sent| !sent.reaches(ids, side));
+            self.heard[side].clear();
+            self.started[side].clear();
             self.lossy[side] = false;
+        }
+
+        fn heard_server(&mut self, side: usize, msg: &ServerMsg) {
+            match msg {
+                ServerMsg::SessionStarted { session, .. } => {
+                    self.started[side].insert(*session);
+                }
+                ServerMsg::SessionEnded { session, .. } => {
+                    self.started[side].remove(session);
+                }
+                _ => {}
+            }
+        }
+
+        fn both_started(&self, side: usize, sent: &InFlight) -> bool {
+            match sent.channel {
+                Channel::Play(session) => sent.started && self.started[side].contains(&session),
+                _ => false,
+            }
         }
 
         fn awaits(&self, side: usize, now: Instant) -> bool {
             !self.lossy[side]
-                && self
-                    .in_flight
-                    .iter()
-                    .any(|&(from, _, handed)| from != side && handed < now)
+                && self.live[side].get()
+                && self.in_flight.iter().any(|sent| {
+                    sent.reaches(&self.ids, side)
+                        && (self.both_started(side, sent)
+                            || self.heard[side].contains(&sent.channel))
+                        && sent.handed < now
+                        && self.live[sent.from].get()
+                })
+        }
+
+        fn handed(&self, side: usize, nonce: &Nonce) -> Option<Instant> {
+            self.in_flight
+                .iter()
+                .find(|sent| sent.reaches(&self.ids, side) && sent.nonce == *nonce)
+                .map(|sent| sent.handed)
         }
 
         fn arrived(&mut self, side: usize, nonce: &Nonce) -> Option<Instant> {
             let at = self
                 .in_flight
                 .iter()
-                .position(|(from, sent, _)| *from != side && sent == nonce)?;
+                .position(|sent| sent.reaches(&self.ids, side) && sent.nonce == *nonce)?;
             self.lossy[side] = false;
-            Some(self.in_flight.remove(at).2)
+            let sent = self.in_flight.remove(at);
+            self.heard[side].insert(sent.channel);
+            Some(sent.handed)
         }
 
         fn lost(&mut self, side: usize, now: Instant) {
+            let ids = &self.ids;
             self.in_flight
-                .retain(|&(from, _, handed)| from == side || handed >= now);
+                .retain(|sent| !(sent.reaches(ids, side) && sent.handed < now));
             self.lossy[side] = true;
         }
     }
@@ -1134,21 +1455,28 @@ pub(crate) mod tests {
         cut: Cut,
         down: Cut,
         pace: Pace,
+        weather: Weather,
         wire: Option<(SharedWire, usize)>,
         closed: bool,
+        opened: bool,
+        told: u64,
+        barrier: Option<u64>,
         half: Duration,
         jitter_ms: u64,
         rng: Rng,
-        out: VecDeque<(Instant, Vec<u8>, Option<Nonce>)>,
+        out: VecDeque<(Instant, Vec<u8>, Option<Addressed>)>,
+        early: VecDeque<TransportEvent>,
         inbound: VecDeque<(Instant, TransportEvent)>,
         last_out: Instant,
         last_in: Instant,
     }
 
     impl Lag {
-        fn due(&mut self, last: Instant, now: Instant) -> Instant {
+        fn due(&mut self, last: Instant, now: Instant, uplink: bool) -> Instant {
             let jitter = Duration::from_millis(self.rng.below(self.jitter_ms + 1));
-            (now + self.half + jitter).max(last)
+            let (bad, lost) = self.weather.get().draw(&mut self.rng, 2, uplink);
+            let resent = if lost { RESENT_AFTER } else { Duration::ZERO };
+            (now + self.half + jitter + bad + resent).max(last)
         }
 
         fn on_the_wire(&self, event: &TransportEvent) -> Duration {
@@ -1161,21 +1489,92 @@ pub(crate) mod tests {
         }
 
         fn take_in(&mut self, event: TransportEvent, now: Instant) {
+            match &event {
+                TransportEvent::Opened | TransportEvent::Failed(_) | TransportEvent::Closed => {
+                    self.opened = true;
+                }
+                TransportEvent::Message(bytes) => {
+                    if let Ok(ServerMsg::Pong(n)) = ServerMsg::decode(bytes)
+                        && self.barrier == Some(n)
+                    {
+                        self.barrier = None;
+                        return;
+                    }
+                }
+            }
+            if !self.early.is_empty() || self.handed_this_tick(&event, now) {
+                self.early.push_back(event);
+                return;
+            }
             let handed = match (&event, &self.wire) {
-                (TransportEvent::Message(bytes), Some((wire, side))) => ServerMsg::decode(bytes)
-                    .ok()
-                    .as_ref()
-                    .and_then(relayed_nonce)
-                    .and_then(|nonce| wire.borrow_mut().arrived(*side, nonce)),
+                (TransportEvent::Message(bytes), Some((wire, side))) => {
+                    ServerMsg::decode(bytes).ok().and_then(|msg| {
+                        let mut wire = wire.borrow_mut();
+                        wire.heard_server(*side, &msg);
+                        relayed_nonce(&msg).and_then(|nonce| wire.arrived(*side, nonce))
+                    })
+                }
                 _ => None,
             };
             let reached = handed.map_or(now, |handed| handed + FRAME);
-            let due = self.due(self.last_in, reached) + self.on_the_wire(&event);
+            let due = self.due(self.last_in, reached, false) + self.on_the_wire(&event);
             self.last_in = due;
             self.inbound.push_back((due, event));
         }
 
+        fn poll_inner(&mut self, now: Instant) {
+            for _ in 0..256 {
+                let Some(event) = self.inner.poll() else {
+                    break;
+                };
+                self.take_in(event, now);
+            }
+        }
+
+        fn wait_for(&mut self, now: Instant, done: impl Fn(&Self) -> bool) {
+            let began = std::time::Instant::now();
+            loop {
+                self.poll_inner(now);
+                if done(self) || began.elapsed() > LOSS_WAIT {
+                    return;
+                }
+                std::thread::sleep(Duration::from_micros(100));
+            }
+        }
+
+        fn settle_server(&mut self, now: Instant) {
+            let Some(untracked) = self.wire.as_ref().map(|(wire, _)| wire.borrow().untracked)
+            else {
+                return;
+            };
+            self.wait_for(now, |lag| lag.opened);
+            if untracked > self.told {
+                self.told = untracked;
+                let n = BARRIER_PINGS - untracked;
+                if let Ok(bytes) = ClientMsg::Ping(n).encode() {
+                    self.barrier = Some(n);
+                    self.inner.send(bytes);
+                    self.wait_for(now, |lag| lag.barrier.is_none());
+                }
+            }
+        }
+
+        fn handed_this_tick(&self, event: &TransportEvent, now: Instant) -> bool {
+            let (TransportEvent::Message(bytes), Some((wire, side))) = (event, &self.wire) else {
+                return false;
+            };
+            ServerMsg::decode(bytes).is_ok_and(|msg| {
+                relayed_nonce(&msg)
+                    .and_then(|nonce| wire.borrow().handed(*side, nonce))
+                    .is_some_and(|handed| handed >= now)
+            })
+        }
+
         fn drain(&mut self, now: Instant) {
+            for event in std::mem::take(&mut self.early) {
+                self.take_in(event, now);
+            }
+            self.settle_server(now);
             let began = std::time::Instant::now();
             loop {
                 for _ in 0..256 {
@@ -1205,19 +1604,30 @@ pub(crate) mod tests {
                 return;
             }
             let now = self.clock.get();
-            let nonce = match ClientMsg::decode(&bytes) {
-                Ok(
-                    ClientMsg::Play { sealed, .. }
-                    | ClientMsg::Game { sealed, .. }
-                    | ClientMsg::RoomPlay { sealed, .. }
-                    | ClientMsg::RoomGame { sealed, .. },
-                ) => {
-                    self.meter.borrow_mut().push((now, sealed.ciphertext.len()));
-                    Some(sealed.nonce)
+            let decoded = ClientMsg::decode(&bytes);
+            if let (Ok(ClientMsg::Leave(session)), Some((wire, side))) = (&decoded, &self.wire) {
+                wire.borrow_mut().started[*side].remove(session);
+            }
+            let nonce = match decoded {
+                Ok(ClientMsg::Play { sealed, session }) => {
+                    Some((sealed, None, Channel::Play(session)))
+                }
+                Ok(ClientMsg::Game { sealed, session }) => {
+                    Some((sealed, None, Channel::Game(session)))
+                }
+                Ok(ClientMsg::RoomPlay { sealed, to, room }) => {
+                    Some((sealed, Some(to), Channel::RoomPlay(room)))
+                }
+                Ok(ClientMsg::RoomGame { sealed, to, room }) => {
+                    Some((sealed, Some(to), Channel::RoomGame(room)))
                 }
                 _ => None,
-            };
-            let due = self.due(self.last_out, now);
+            }
+            .map(|(sealed, to, channel)| {
+                self.meter.borrow_mut().push((now, sealed.ciphertext.len()));
+                (sealed.nonce, to, channel)
+            });
+            let due = self.due(self.last_out, now, true);
             self.last_out = due;
             self.out.push_back((due, bytes, nonce));
         }
@@ -1233,8 +1643,23 @@ pub(crate) mod tests {
             let now = self.clock.get();
             while self.out.front().is_some_and(|(due, ..)| *due <= now) {
                 if let Some((_, bytes, nonce)) = self.out.pop_front() {
-                    if let (Some(nonce), Some((wire, side))) = (nonce, &self.wire) {
-                        wire.borrow_mut().in_flight.push((*side, nonce, now));
+                    if let (None, Some((wire, _))) = (&nonce, &self.wire) {
+                        wire.borrow_mut().untracked += 1;
+                    }
+                    if let (Some((nonce, to, channel)), Some((wire, side))) = (nonce, &self.wire) {
+                        let mut wire = wire.borrow_mut();
+                        let started = match channel {
+                            Channel::Play(session) => wire.started[*side].contains(&session),
+                            _ => false,
+                        };
+                        wire.in_flight.push(InFlight {
+                            from: *side,
+                            to,
+                            channel,
+                            nonce,
+                            handed: now,
+                            started,
+                        });
                     }
                     self.inner.send(bytes);
                 }
@@ -1253,7 +1678,7 @@ pub(crate) mod tests {
         seed: u64,
         meter: Meter,
         [cut, down]: [Cut; 2],
-        pace: Pace,
+        (pace, weather): (Pace, Weather),
         hookup: Hookup,
     ) -> Connector {
         let mut websocket = transport::websocket();
@@ -1271,12 +1696,17 @@ pub(crate) mod tests {
                 cut: cut.clone(),
                 down: down.clone(),
                 pace: pace.clone(),
+                weather: weather.clone(),
                 wire: hookup.wire.clone(),
                 closed: false,
+                opened: false,
+                told: 0,
+                barrier: None,
                 half: Duration::from_millis(one_way_ms) / 2,
                 jitter_ms: jitter_ms / 2,
                 rng: Rng(seed + opened),
                 out: VecDeque::new(),
+                early: VecDeque::new(),
                 inbound: VecDeque::new(),
                 last_out: now,
                 last_in: now,
@@ -1312,11 +1742,11 @@ pub(crate) mod tests {
             }
         }
 
-        fn hookup(&self) -> Hookup {
+        fn hookup(&self, live: &Cut) -> Hookup {
             Hookup {
                 clock: self.now.clone(),
                 wire: self.wire.clone().map(|wire| {
-                    let side = wire.borrow_mut().join();
+                    let side = wire.borrow_mut().join(live.clone());
                     (wire, side)
                 }),
             }
@@ -1324,6 +1754,19 @@ pub(crate) mod tests {
 
         fn now(&self) -> Instant {
             self.now.get()
+        }
+
+        #[cfg(feature = "nds")]
+        fn catch_up(&mut self) {
+            let real = Instant::now();
+            self.now.set(self.now.get().max(real));
+            self.next = real;
+        }
+
+        fn name(&self, side: usize, id: OnlineId) {
+            if let Some(wire) = &self.wire {
+                wire.borrow_mut().name(side, id);
+            }
         }
 
         fn tick(&mut self) -> Instant {
@@ -1354,16 +1797,22 @@ pub(crate) mod tests {
         running: Option<Running>,
         runtime: tokio::runtime::Runtime,
         address: ServerAddress,
+        sharing: bool,
         _dir: tempfile::TempDir,
     }
 
     impl Relay {
         fn start(sharing: bool) -> Self {
+            Self::start_with(sharing, &[])
+        }
+
+        fn start_with(sharing: bool, limits: &[(&'static str, &str)]) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let mut vars: HashMap<&str, String> = HashMap::from([
                 ("CITRINE_BIND", "127.0.0.1".into()),
                 ("CITRINE_PORT", "0".into()),
                 ("CITRINE_DISK_FLOOR_MB", "0".into()),
+                ("CITRINE_STUN_PORT", "0".into()),
                 ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
                 (
                     "CITRINE_DATA_DIR",
@@ -1384,6 +1833,7 @@ pub(crate) mod tests {
                     if sharing { "on" } else { "off" }.into(),
                 ),
             ]);
+            vars.extend(limits.iter().map(|&(k, v)| (k, v.to_string())));
             if let Ok(ip) = std::env::var("CITRINE_R4_PUBLIC_IP") {
                 vars.insert("CITRINE_DS_NET_PUBLIC_IP", ip);
                 vars.insert("CITRINE_DS_NET_STUN", "stun.l.google.com:19302".into());
@@ -1401,12 +1851,25 @@ pub(crate) mod tests {
                 running: Some(running),
                 runtime,
                 address,
+                sharing,
                 _dir: dir,
             }
         }
     }
 
     impl Relay {
+        fn stall(&self, length: Duration) {
+            let both_held = Arc::new(std::sync::Barrier::new(3));
+            for _ in 0..2 {
+                let held = both_held.clone();
+                self.runtime.spawn(async move {
+                    held.wait();
+                    std::thread::sleep(length);
+                });
+            }
+            both_held.wait();
+        }
+
         fn sql(&self, sql: &'static str) {
             let path = self._dir.path().join("data").join("citrine.db");
             self.runtime.block_on(async {
@@ -1480,7 +1943,10 @@ pub(crate) mod tests {
         meter: Meter,
         cut: Cut,
         down: Cut,
+        live: Cut,
         pace: Pace,
+        #[cfg_attr(not(feature = "nds"), allow(dead_code))]
+        weather: Weather,
         pub(crate) play: Play,
         threads: Threads,
         rng: Rng,
@@ -1519,6 +1985,8 @@ pub(crate) mod tests {
             let (cut, down) = (Cut::default(), Cut::default());
             let line = [cut.clone(), down.clone()];
             let pace = Pace::default();
+            let weather = Weather::default();
+            let live = Cut::default();
             Self {
                 online: Online::new(lagged(
                     lag.0,
@@ -1526,14 +1994,20 @@ pub(crate) mod tests {
                     seed,
                     meter.clone(),
                     line,
-                    pace.clone(),
-                    clock.hookup(),
+                    (pace.clone(), weather.clone()),
+                    clock.hookup(&live),
                 )),
                 meter,
                 cut,
                 down,
+                live,
                 pace,
-                play: Play::new(shelf),
+                weather,
+                play: {
+                    let mut play = Play::new(shelf);
+                    play.set_ds_cost(Some(links::DsCost::X86.pair_on(1)));
+                    play
+                },
                 threads: Threads::new(citrine_gb_threads::Mode::from_env()),
                 rng: Rng(seed),
                 held: Keys::empty(),
@@ -1743,7 +2217,8 @@ pub(crate) mod tests {
             }
             self.sent |= self.play.session().is_some_and(PlaySession::sends_game);
             self.play.tick_watch(now);
-            self.play.flush(&mut self.online);
+            self.play.flush(&mut self.online, now);
+            self.live.set(self.play.is_live() && !self.down.get());
         }
     }
 
@@ -1761,9 +2236,53 @@ pub(crate) mod tests {
             jitter_ms: u64,
             shelves: [Box<dyn Shelf>; 2],
         ) -> Self {
-            let relay = Relay::start(sharing);
+            Self::over(
+                Relay::start(sharing),
+                Clock::wired(),
+                (one_way_ms, jitter_ms),
+                shelves,
+            )
+        }
+
+        fn limited(limits: &[(&'static str, &str)], lag: (u64, u64)) -> Self {
+            let relay = Relay::start_with(false, limits);
+            Self::over(relay, Clock::new(), lag, homebrew())
+        }
+
+        pub(crate) fn direct(host: bool, guest: bool) -> Self {
+            let port = std::net::UdpSocket::bind("127.0.0.1:0")
+                .and_then(|socket| socket.local_addr())
+                .unwrap()
+                .port()
+                .to_string();
+            let relay = Relay::start_with(false, &[("CITRINE_STUN_PORT", port.as_str())]);
+            let mut pair = Self::over(relay, Clock::wired(), (30, 0), homebrew());
+            pair.host.play.set_direct(host);
+            pair.guest.play.set_direct(guest);
+            let session = pair.invite(snake());
+            pair.accept(session, MyGame::Own(snake()));
+            pair
+        }
+
+        pub(crate) fn paths(&self) -> [LinkPath; 2] {
+            [self.host.session().path(), self.guest.session().path()]
+        }
+
+        fn assert_kept_in_step(&self) {
+            let (host, guest) = (self.host.session(), self.guest.session());
+            assert!(host.is_live() && guest.is_live());
+            assert_same_inputs(host, guest);
+            assert_eq!(host.resyncs() + guest.resyncs(), 0);
+        }
+
+        fn over(
+            relay: Relay,
+            clock: Clock,
+            (one_way_ms, jitter_ms): (u64, u64),
+            shelves: [Box<dyn Shelf>; 2],
+        ) -> Self {
+            let sharing = relay.sharing;
             let [host_shelf, guest_shelf] = shelves;
-            let clock = Clock::wired();
             let mut pair = Self {
                 host: Side::new((one_way_ms, jitter_ms), 11, host_shelf, &clock),
                 guest: Side::new((one_way_ms, jitter_ms), 29, guest_shelf, &clock),
@@ -1798,6 +2317,8 @@ pub(crate) mod tests {
                     && p.guest.online.account().is_some()
             });
             let (host_id, guest_id) = (pair.host.id(), pair.guest.id());
+            pair.clock.name(0, host_id);
+            pair.clock.name(1, guest_id);
             assert!(pair.host.online.add_friend(guest_id));
             pair.until("the request arrives", |p| {
                 p.guest.online.friend(host_id).map(|f| f.state) == Some(FriendState::Incoming)
@@ -1869,18 +2390,42 @@ pub(crate) mod tests {
             self.guest.play.invites()[0].session
         }
 
-        fn run_host_alone(&mut self, frames: u32) {
+        pub(crate) fn now(&self) -> Instant {
+            self.clock.now()
+        }
+
+        pub(crate) fn run_host_alone(&mut self, frames: u32) {
             for _ in 0..frames {
                 let now = self.clock.tick();
                 self.host.step(now);
             }
         }
 
-        fn run_guest_alone(&mut self, frames: u32) {
+        pub(crate) fn run_guest_alone(&mut self, frames: u32) {
             for _ in 0..frames {
                 let now = self.clock.tick();
                 self.guest.step(now);
             }
+        }
+
+        #[cfg(feature = "nds")]
+        pub(crate) fn run_partner_alone(&mut self, host: bool) {
+            if host {
+                self.run_guest_alone(1);
+            } else {
+                self.run_host_alone(1);
+            }
+        }
+
+        #[cfg(feature = "nds")]
+        pub(crate) fn swap_seat(&mut self, host: bool, play: &mut Play, online: &mut Online) {
+            let side = if host {
+                &mut self.host
+            } else {
+                &mut self.guest
+            };
+            std::mem::swap(play, &mut side.play);
+            std::mem::swap(online, &mut side.online);
         }
 
         pub(crate) fn accept(&mut self, session: SessionId, game: MyGame) {
@@ -1902,6 +2447,12 @@ pub(crate) mod tests {
                         .is_some_and(|log| log.checks.len() >= 3)
                 })
             });
+        }
+
+        #[cfg(feature = "nds")]
+        pub(crate) fn hand_over_at_real_time(&mut self) {
+            self.clock.catch_up();
+            self.play_frames(2);
         }
 
         pub(crate) fn play_frames(&mut self, frames: u32) {
@@ -2048,6 +2599,20 @@ pub(crate) mod tests {
         assert_matches_reference(guest, [SNAKE, SNAKE]);
         assert_eq!(host.resyncs() + guest.resyncs(), 0);
         assert!(host.cable_plugged() && guest.cable_plugged());
+    }
+
+    #[test]
+    fn a_relay_stall_past_the_silence_limit_keeps_the_pair_playing() {
+        let mut pair = Pair::new(false, 0, 0, homebrew());
+        let session = pair.invite(snake());
+        pair.accept(session, MyGame::Own(snake()));
+        pair.play_frames(60);
+        pair.relay.stall(SILENCE_LIMIT * 2);
+        pair.play_frames(240);
+        let (host, guest) = (pair.host.session(), pair.guest.session());
+        assert!(host.is_live() && guest.is_live());
+        assert_same_inputs(host, guest);
+        assert_eq!(host.resyncs() + guest.resyncs(), 0);
     }
 
     #[test]
@@ -2306,6 +2871,132 @@ pub(crate) mod tests {
         pair.play_frames(120);
         assert_eq!(pair.host.session().resyncs(), 0);
         assert_same_inputs(pair.host.session(), pair.guest.session());
+    }
+
+    #[test]
+    fn a_resync_of_my_console_sends_my_saves_to_a_separate_file() {
+        let mut pair = Pair::new(false, 0, 0, homebrew());
+        let session = pair.invite(snake());
+        pair.accept(session, MyGame::Own(snake()));
+        pair.play_frames(120);
+        let dump = || citrine_gb::persistence::sram_dump::SramDump::from_slice(&[1, 2, 3]);
+        let own = |saves: &[LinkedSave]| {
+            !saves.is_empty() && saves.iter().all(|s| matches!(s.key, SaveKey::Rom(_)))
+        };
+        for side in [&mut pair.host, &mut pair.guest] {
+            side.session_mut().keep_saves([dump()]);
+            assert!(own(&side.session_mut().take_saves()));
+        }
+        pair.host
+            .session_mut()
+            .resync_friend(|_| {})
+            .expect("a checkpoint");
+        pair.until("the resync arrives", |p| p.guest.session().resyncs() == 1);
+        assert!(pair.guest.session().from_peer());
+        assert!(!pair.host.session().from_peer());
+        let hash = hash_of(&snake());
+        pair.guest.session_mut().keep_saves([dump()]);
+        let saves = pair.guest.session_mut().take_saves();
+        assert!(!saves.is_empty());
+        assert!(saves.iter().all(|s| s.key == SaveKey::Borrowed(hash)));
+        pair.host.session_mut().keep_saves([dump()]);
+        assert!(own(&pair.host.session_mut().take_saves()));
+        pair.play_frames(30);
+        let touched = [&mut pair.host, &mut pair.guest].map(|side| {
+            side.play.leave(&mut side.online);
+            side.play.close().unwrap().finish().unwrap().peer_touched
+        });
+        assert_eq!(touched, [false, true]);
+    }
+
+    #[test]
+    fn a_resync_past_the_relays_rate_limit_arrives_through_resends() {
+        let mut pair = Pair::limited(&[("CITRINE_SESSION_BURST_MB", "1")], (30, 10));
+        let session = pair.invite(snake());
+        pair.accept(session, MyGame::Own(snake()));
+        pair.play_frames(120);
+        let mut padding = noise(2 << 20, 5);
+        padding.resize(7 << 20, 0);
+        let host = pair.host.session_mut().round.rollback_mut().unwrap();
+        host.send_resync(&padding).unwrap();
+        pair.until("the resync arrives", |p| p.guest.session().resyncs() == 1);
+        pair.play_frames(120);
+        assert_eq!(pair.host.session().resyncs(), 0);
+        assert_same_inputs(pair.host.session(), pair.guest.session());
+        assert!(pair.host.session().is_live() && pair.guest.session().is_live());
+    }
+
+    #[test]
+    fn two_players_with_direct_on_play_straight_to_each_other() {
+        let mut pair = Pair::direct(true, true);
+        pair.until("both play direct", |p| p.paths() == [LinkPath::Direct; 2]);
+        pair.play_frames(600);
+        assert_eq!(pair.paths(), [LinkPath::Direct; 2]);
+        let ping = pair.host.session().round_trip_ms().unwrap();
+        assert!(ping < 30, "ping {ping} ms over a relay 60 ms away");
+        pair.assert_kept_in_step();
+    }
+
+    #[test]
+    fn a_pair_stays_on_the_relay_when_one_player_has_direct_off() {
+        let mut pair = Pair::direct(true, false);
+        for _ in 0..360 {
+            pair.tick();
+            assert_eq!(pair.paths(), [LinkPath::Relay; 2]);
+        }
+        pair.assert_kept_in_step();
+    }
+
+    #[test]
+    fn a_cut_direct_path_falls_back_to_the_relay_and_comes_back_without_a_resync() {
+        let mut pair = Pair::direct(true, true);
+        pair.until("both play direct", |p| p.paths() == [LinkPath::Direct; 2]);
+        pair.play_frames(60);
+        pair.host.play.direct.cut(true);
+        pair.until("both fall back", |p| p.paths() == [LinkPath::Relay; 2]);
+        pair.play_frames(60);
+        pair.host.play.direct.cut(false);
+        pair.until("both play direct again", |p| {
+            p.paths() == [LinkPath::Direct; 2]
+        });
+        pair.play_frames(120);
+        pair.assert_kept_in_step();
+    }
+
+    #[test]
+    fn turning_direct_off_and_on_mid_session_switches_paths_without_a_resync() {
+        let mut pair = Pair::direct(true, true);
+        pair.until("both play direct", |p| p.paths() == [LinkPath::Direct; 2]);
+        pair.guest.play.set_direct(false);
+        pair.until("both move to the relay", |p| {
+            p.paths() == [LinkPath::Relay; 2]
+        });
+        pair.play_frames(120);
+        assert_eq!(pair.paths(), [LinkPath::Relay; 2]);
+        pair.guest.play.set_direct(true);
+        pair.until("both play direct again", |p| {
+            p.paths() == [LinkPath::Direct; 2]
+        });
+        pair.play_frames(120);
+        pair.assert_kept_in_step();
+    }
+
+    #[test]
+    fn frames_both_paths_deliver_are_taken_once() {
+        let mut pair = Pair::direct(true, true);
+        pair.until("both play direct", |p| p.paths() == [LinkPath::Direct; 2]);
+        pair.play_frames(60);
+        let duplicates = |p: &Pair| p.guest.session().link.as_ref().unwrap().duplicates();
+        let before = duplicates(&pair);
+        pair.host.play.direct.deafen(true);
+        pair.until("the host falls back", |p| {
+            p.host.session().path() == LinkPath::Relay
+        });
+        pair.play_frames(60);
+        assert!(duplicates(&pair) > before);
+        pair.host.play.direct.deafen(false);
+        pair.play_frames(60);
+        pair.assert_kept_in_step();
     }
 
     #[test]
@@ -3244,7 +3935,7 @@ pub(crate) mod tests {
             fn from_env(name: &str) -> Option<Self> {
                 let dir = citrine_gb_test_roms::env_path(name, "CITRINE_WDIST_DIR")?;
                 let out = std::env::var_os("CITRINE_WDIST_OUT")
-                    .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
+                    .map_or_else(crate::storage::scratch_dir, std::path::PathBuf::from)
                     .join(name);
                 std::fs::create_dir_all(&out).ok()?;
                 let lag = std::env::var("CITRINE_WDIST_LAG").unwrap_or_else(|_| "40,20".into());
@@ -3894,6 +4585,7 @@ pub(crate) mod tests {
             told_start: bool,
             peers: Vec<citrine_gb_nds_net::gateway::UdpPeer>,
             qr2: Qr2Watch,
+            shift: u32,
         }
 
         #[cfg(all(feature = "nds", ds_wifi))]
@@ -4006,10 +4698,11 @@ pub(crate) mod tests {
         impl Wfc {
             fn frame(&mut self, frame: u32, now: Instant) {
                 use crate::held::InputSource;
+                let at = frame - self.shift;
                 let held = self
                     .keys
                     .iter()
-                    .filter(|(from, until, _)| (*from..*until).contains(&frame))
+                    .filter(|(from, until, _)| (*from..*until).contains(&at))
                     .fold(Keys::empty(), |keys, (_, _, more)| keys | *more);
                 let up = self.held.difference(held);
                 if !up.is_empty() {
@@ -4023,13 +4716,17 @@ pub(crate) mod tests {
                 let touch = self
                     .touches
                     .iter()
-                    .find(|(from, until, _)| (*from..*until).contains(&frame))
+                    .find(|(from, until, _)| (*from..*until).contains(&at))
                     .map(|(_, _, touch)| *touch);
                 if touch != self.touch {
                     self.emulator.set_touch(touch);
                     self.touch = touch;
                 }
                 self.emulator.advance(now, None);
+                if self.shift == 0 && self.emulator.ds_wifi.restarted() {
+                    self.shift = frame;
+                    println!("WFC p{} restarted at f{frame}", self.n);
+                }
                 self.online.update(Instant::now());
                 self.emulator.ds_wifi.pump(&mut self.online);
                 let refusal = self.emulator.ds_wifi.take_refusal();
@@ -4464,6 +5161,7 @@ pub(crate) mod tests {
                     told_start: false,
                     peers: Vec::new(),
                     qr2: Qr2Watch::default(),
+                    shift: 0,
                 });
             }
             let started = Instant::now();
@@ -4539,6 +5237,285 @@ pub(crate) mod tests {
                 }
             }
         }
+
+        #[cfg(all(feature = "nds", ds_wifi))]
+        #[test]
+        #[ignore]
+        fn mario_kart_keeps_its_wfc_profile_through_the_relay() {
+            struct ProfileLog;
+
+            impl log::Log for ProfileLog {
+                fn enabled(&self, metadata: &log::Metadata) -> bool {
+                    metadata.target().starts_with("citrine_gb_app::ds_wifi")
+                        || metadata.target().starts_with("citrine_gb_server::relay")
+                }
+
+                fn log(&self, record: &log::Record) {
+                    let line = record.args().to_string();
+                    if self.enabled(record.metadata())
+                        && (line.contains("ds wifi: gp") || line.contains("profile"))
+                    {
+                        println!("WFC {line}");
+                    }
+                }
+
+                fn flush(&self) {}
+            }
+
+            const DS_FRAME: Duration = Duration::from_nanos(16_715_000);
+            let Some(distance) = Distance::from_env("mkprofile") else {
+                println!("no CITRINE_WDIST_DIR, skipped");
+                return;
+            };
+            if !distance.dir.join("mk.nds").is_file() {
+                println!("no mk.nds in CITRINE_WDIST_DIR, skipped");
+                return;
+            }
+            let var = |name: &str| std::env::var(name).ok();
+            let frames = var("CITRINE_R4_FRAMES")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(4000);
+            let every = var("CITRINE_R4_SHOT_EVERY")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(250)
+                .max(1);
+            let save = distance.read(&var("CITRINE_R4_SAVE_A").expect("CITRINE_R4_SAVE_A"));
+            let identity = crate::ds_wifi::Identity::from_bytes(
+                &distance.read(&var("CITRINE_R4_IDENTITY_A").expect("CITRINE_R4_IDENTITY_A")),
+            )
+            .expect("an identity file");
+            let script = var("CITRINE_R4_SCRIPT_A").unwrap_or_else(|| "r4/mk.txt".into());
+            let text = String::from_utf8(distance.read(&script)).expect("a text script");
+            let mk = Rom::new(&distance.read("mk.nds"));
+            if log::set_logger(&ProfileLog).is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+            }
+            let relay = Relay::start(false);
+            let threads = Threads::default();
+            let fresh = crate::ds_wifi::Identity::random();
+            let mut players = vec![
+                (1, "Ben", identity.clone(), true),
+                (2, "Cara", identity, true),
+            ];
+            if var("CITRINE_R4_FRESH").is_some() {
+                players.push((3, "Ben", fresh.clone(), true));
+                players.push((4, "Ben", fresh, false));
+            }
+            let mut bens = None;
+            for (n, name, identity, answers) in players {
+                let kept = if name == "Ben" { bens.take() } else { None };
+                let (mut online, tally) = match kept {
+                    Some(kept) => kept,
+                    None => {
+                        let tally = std::rc::Rc::new(std::cell::RefCell::new(Tally::default()));
+                        let mut online = Online::new(counted(tally.clone()));
+                        online.probe(
+                            relay.address.clone(),
+                            PASSWORD.into(),
+                            Trust::default(),
+                            Instant::now(),
+                        );
+                        wait_online(&mut online, &format!("p{n} reaches the relay"), |o| {
+                            o.phase() == Phase::Probed
+                        });
+                        online.create_account(name.into(), Instant::now());
+                        (online, tally)
+                    }
+                };
+                wait_online(&mut online, &format!("p{n} signs up"), |o| {
+                    o.is_connected() && o.account().is_some()
+                });
+                let account = online.account().map(|a| a.online_id.value());
+                let mut emulator = stored_emulator(&format!("mkprofile-p{n}"));
+                emulator.firmware.nds.online = identity.online(None, true, false);
+                emulator.ds_wifi.identity = Some(identity.clone());
+                if !answers {
+                    emulator.ds_wifi.answered_user = Some((0, 0));
+                }
+                emulator.ds_wifi.spawner = Some(threads.spawner());
+                emulator.ds_wifi.online = true;
+                emulator.ds_wifi.direct = false;
+                emulator.ds_wifi.relay = account;
+                emulator
+                    .load_game(&mk, ConsoleKind::Nds, None)
+                    .expect("Mario Kart loads");
+                let imported = emulator
+                    .import_save(Some(&save), None)
+                    .expect("the save loads");
+                assert_eq!(imported, crate::emulator::SaveImport::Imported);
+                let (keys, touches) = lab_lines(&text);
+                println!(
+                    "WFC p{n} {name} account {account:?} script {script} mac {:02x?} answers {answers}",
+                    identity.mac
+                );
+                let mut player = Wfc {
+                    n,
+                    emulator,
+                    online,
+                    tally,
+                    mac: identity.mac,
+                    keys,
+                    touches,
+                    held: Keys::empty(),
+                    touch: None,
+                    told_start: false,
+                    peers: Vec::new(),
+                    qr2: Qr2Watch::default(),
+                    shift: 0,
+                };
+                let started = Instant::now();
+                let mut now = started;
+                for frame in 1..=frames {
+                    now += DS_FRAME;
+                    player.frame(frame, now);
+                    if frame % every == 0 || frame == frames {
+                        player.shot(&distance, frame);
+                    }
+                    let real = Instant::now();
+                    if now > real {
+                        std::thread::sleep(now - real);
+                    }
+                }
+                println!(
+                    "WFC p{n} done after {:?}, user answered {:?}",
+                    started.elapsed(),
+                    player.emulator.ds_wifi.answered_user
+                );
+                let Wfc { online, tally, .. } = player;
+                if name == "Ben" {
+                    bens = Some((online, tally));
+                }
+            }
+        }
+
+        #[cfg(all(feature = "nds", ds_wifi))]
+        #[test]
+        #[ignore]
+        fn mario_kart_players_find_each_other_through_the_relay() {
+            struct MatchLog;
+
+            impl log::Log for MatchLog {
+                fn enabled(&self, metadata: &log::Metadata) -> bool {
+                    metadata.target().starts_with("citrine_gb_app::ds_wifi")
+                }
+
+                fn log(&self, record: &log::Record) {
+                    let line = record.args().to_string();
+                    if self.enabled(record.metadata()) && line.contains("ds wifi:") {
+                        println!("MATCH {line}");
+                    }
+                }
+
+                fn flush(&self) {}
+            }
+
+            const DS_FRAME: Duration = Duration::from_nanos(16_715_000);
+            let Some(distance) = Distance::from_env("mkmatch") else {
+                println!("no CITRINE_WDIST_DIR, skipped");
+                return;
+            };
+            if !distance.dir.join("mk.nds").is_file() {
+                println!("no mk.nds in CITRINE_WDIST_DIR, skipped");
+                return;
+            }
+            let var = |name: &str| std::env::var(name).ok();
+            let frames = var("CITRINE_R4_FRAMES")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(9000);
+            let every = var("CITRINE_R4_SHOT_EVERY")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(300)
+                .max(1);
+            let script = var("CITRINE_R4_SCRIPT_A").unwrap_or_else(|| "r4/mk-wfc-saved.txt".into());
+            let text = String::from_utf8(distance.read(&script)).expect("a text script");
+            let mk = Rom::new(&distance.read("mk.nds"));
+            if log::set_logger(&MatchLog).is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+            }
+            let relay = Relay::start(false);
+            let threads = Threads::default();
+            let mut wfc = Vec::new();
+            for (n, (tag, name)) in [("A", "Ben"), ("B", "Cara")].into_iter().enumerate() {
+                let n = n + 1;
+                let save = distance
+                    .read(&var(&format!("CITRINE_R4_SAVE_{tag}")).expect("a save for each player"));
+                let identity = crate::ds_wifi::Identity::from_bytes(
+                    &distance.read(
+                        &var(&format!("CITRINE_R4_IDENTITY_{tag}"))
+                            .expect("an identity for each player"),
+                    ),
+                )
+                .expect("an identity file");
+                let tally = std::rc::Rc::new(std::cell::RefCell::new(Tally::default()));
+                let mut online = Online::new(counted(tally.clone()));
+                online.probe(
+                    relay.address.clone(),
+                    PASSWORD.into(),
+                    Trust::default(),
+                    Instant::now(),
+                );
+                wait_online(&mut online, &format!("p{n} reaches the relay"), |o| {
+                    o.phase() == Phase::Probed
+                });
+                online.create_account(name.into(), Instant::now());
+                wait_online(&mut online, &format!("p{n} signs up"), |o| {
+                    o.is_connected() && o.account().is_some()
+                });
+                let account = online.account().map(|a| a.online_id.value());
+                let mut emulator = stored_emulator(&format!("mkmatch-p{n}"));
+                emulator.firmware.nds.online = identity.online(None, true, false);
+                emulator.ds_wifi.identity = Some(identity.clone());
+                emulator.ds_wifi.spawner = Some(threads.spawner());
+                emulator.ds_wifi.online = true;
+                emulator.ds_wifi.direct = false;
+                emulator.ds_wifi.relay = account;
+                emulator
+                    .load_game(&mk, ConsoleKind::Nds, None)
+                    .expect("Mario Kart loads");
+                let imported = emulator
+                    .import_save(Some(&save), None)
+                    .expect("the save loads");
+                assert_eq!(imported, crate::emulator::SaveImport::Imported);
+                let (keys, touches) = lab_lines(&text);
+                println!(
+                    "MATCH p{n} {name} account {account:?} mac {:02x?}",
+                    identity.mac
+                );
+                wfc.push(Wfc {
+                    n,
+                    emulator,
+                    online,
+                    tally,
+                    mac: identity.mac,
+                    keys,
+                    touches,
+                    held: Keys::empty(),
+                    touch: None,
+                    told_start: false,
+                    peers: Vec::new(),
+                    qr2: Qr2Watch::default(),
+                    shift: 0,
+                });
+            }
+            let started = Instant::now();
+            let mut now = started;
+            for frame in 1..=frames {
+                now += DS_FRAME;
+                for player in &mut wfc {
+                    player.frame(frame, now);
+                }
+                if frame % every == 0 || frame == frames {
+                    for player in &mut wfc {
+                        player.shot(&distance, frame);
+                    }
+                }
+                let real = Instant::now();
+                if now > real {
+                    std::thread::sleep(now - real);
+                }
+            }
+            println!("MATCH done after {:?}", started.elapsed());
+        }
     }
     mod rooms {
         use super::*;
@@ -4560,7 +5537,7 @@ pub(crate) mod tests {
         impl Group {
             fn new(names: &[&str], old: &[usize]) -> Self {
                 let relay = Relay::start(false);
-                let clock = Clock::new();
+                let clock = Clock::wired();
                 let mut sides: Vec<Side> = names
                     .iter()
                     .enumerate()
@@ -4603,6 +5580,9 @@ pub(crate) mod tests {
                         .iter()
                         .all(|s| s.online.is_connected() && s.online.account().is_some())
                 });
+                for i in 0..group.sides.len() {
+                    group.clock.name(i, group.id(i));
+                }
                 for i in 1..group.sides.len() {
                     group.befriend(0, i);
                 }
@@ -4630,12 +5610,23 @@ pub(crate) mod tests {
             fn until(&mut self, what: &str, mut done: impl FnMut(&Group) -> bool) {
                 let begun = self.clock.now();
                 while !done(self) {
-                    self.clock.waited(begun, what);
+                    assert!(
+                        self.clock.now().duration_since(begun) < SETTLE,
+                        "timed out waiting until {what}: {}",
+                        self.whereabouts()
+                    );
                     let now = self.clock.tick();
                     for side in &mut self.sides {
                         side.step(now);
                     }
                 }
+            }
+
+            fn whereabouts(&self) -> String {
+                (0..self.sides.len())
+                    .map(|i| format!("{i}: {}", self.sides[i].whereabouts()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             }
 
             fn invite(&mut self, from: usize, to: usize, game: Option<GameFile>) {
@@ -5006,7 +5997,11 @@ pub(crate) mod tests {
             ) {
                 let begun = self.clock.now();
                 while !done(self) {
-                    self.clock.waited(begun, what);
+                    assert!(
+                        self.clock.now().duration_since(begun) < SETTLE,
+                        "timed out waiting until {what}: {}",
+                        self.whereabouts()
+                    );
                     let now = self.clock.tick();
                     for &i in sides {
                         self.sides[i].step(now);
@@ -5054,6 +6049,19 @@ pub(crate) mod tests {
             assert_eq!(partners, "Clara and Jonas");
             let facts = RoomFacts::of(&side.play, &side.online, 0).unwrap();
             assert_eq!(slowest, facts.partners().iter().filter_map(|p| p.ms).max());
+        }
+
+        #[cfg(feature = "gba")]
+        #[test]
+        fn a_relay_stall_past_the_silence_limit_keeps_the_group_playing() {
+            let mut group = gba_group();
+            group.group_runs(&[0, 1, 2], 60);
+            group._relay.stall(SILENCE_LIMIT * 2);
+            group.group_runs(&[0, 1, 2], 240);
+            for i in 0..3 {
+                assert!(group.room(i).group_engine().is_some());
+                assert_eq!(group.group_resyncs(i), 0);
+            }
         }
 
         #[cfg(feature = "gba")]
@@ -6517,6 +7525,9 @@ pub(crate) mod tests {
         next_press: Option<Instant>,
         held: u32,
         press_frames: Vec<f64>,
+        presses: Vec<(Instant, u32)>,
+        low_frames: u64,
+        mute_until: Option<Instant>,
     }
 
     #[cfg(feature = "nds")]
@@ -6542,6 +7553,9 @@ pub(crate) mod tests {
                 next_press: None,
                 held: 0,
                 press_frames: Vec::new(),
+                presses: Vec::new(),
+                low_frames: u64::MAX,
+                mute_until: None,
             }
         }
 
@@ -6554,6 +7568,7 @@ pub(crate) mod tests {
             while self.device >= DEVICE_READ {
                 self.device -= DEVICE_READ;
                 self.reader.read(&mut self.out, 2);
+                self.low_frames = self.low_frames.min(self.feed.stats().left_frames());
             }
             self.since += step;
             if self.since + Duration::from_micros(100) < self.every {
@@ -6566,6 +7581,7 @@ pub(crate) mod tests {
             if self.press.is_none() && self.held == 0 && now >= next && due > 0 {
                 let delay = u32::from(play.delay().unwrap_or(0));
                 self.press = Some((now, play.frame() + delay));
+                self.presses.push((now, play.frame() + delay));
                 self.held = PRESS_FRAMES;
                 self.next_press = Some(now + PRESS_EVERY);
             }
@@ -6586,7 +7602,9 @@ pub(crate) mod tests {
             }
             play.drain_audio(&mut self.mine, &mut self.friend);
             self.feed.set_session(true);
-            self.feed.push_at(&self.mine, now);
+            if self.mute_until.is_none_or(|until| now >= until) {
+                self.feed.push_at(&self.mine, now);
+            }
             self.mine.clear();
             self.friend.clear();
         }
@@ -6594,6 +7612,12 @@ pub(crate) mod tests {
         fn start_counting(&mut self) {
             self.feed.stats().reset();
             self.press_frames.clear();
+            self.presses.clear();
+            self.low_frames = u64::MAX;
+        }
+
+        fn low_ms(&self) -> f64 {
+            self.low_frames as f64 * 1000.0 / f64::from(DEVICE_RATE)
         }
 
         fn underrun_ms(&self) -> f64 {
@@ -6710,6 +7734,638 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "nds")]
+    struct LatencyCase {
+        direct: bool,
+        one_way_ms: u64,
+        jitter_ms: u64,
+        relay: (u64, u64),
+        rise: Option<(u64, u64)>,
+        bad: Option<(Bad, u64)>,
+        mute_ms: Option<u64>,
+        delay: Option<u32>,
+        costs: Option<[links::DsCost; 2]>,
+    }
+
+    #[cfg(feature = "nds")]
+    struct Latency {
+        steps: Vec<(f64, u32)>,
+        own_p50_ms: Option<f64>,
+        waits_a_minute: [f64; 2],
+        rise_at: Option<f64>,
+        stalls: Option<[Vec<(f64, f64)>; 2]>,
+        stall_bounds: Option<[f64; 2]>,
+    }
+
+    #[cfg(feature = "nds")]
+    fn stall_bound_ms(extra_ms: u64, delay: u32, round_trip_ms: u32) -> f64 {
+        let tick = FRAME.as_secs_f64() * 1000.0;
+        let slack = f64::from(delay.saturating_sub(1)) * tick - f64::from(round_trip_ms) / 2.0;
+        extra_ms as f64 - slack + 2.0 * tick
+    }
+
+    #[cfg(feature = "nds")]
+    impl LatencyCase {
+        fn parse(text: &str) -> Option<Self> {
+            let (text, costs) = match text.split_once('#') {
+                Some((text, hosts)) => {
+                    let cost = |host: &str| match host {
+                        "mac" => Some(links::DsCost::MAC.pair_on(2)),
+                        "x86" => Some(links::DsCost::X86.pair_on(2)),
+                        _ => None,
+                    };
+                    let (host, guest) = hosts.split_once(',').unwrap_or((hosts, hosts));
+                    (text, Some([cost(host)?, cost(guest)?]))
+                }
+                None => (text, None),
+            };
+            let (text, delay) = match text.split_once('@') {
+                Some((text, frames)) => (text, Some(frames.parse::<u32>().ok()?)),
+                None => (text, None),
+            };
+            let (text, mute_ms) = match text.split_once('~') {
+                Some((text, ms)) => (text, Some(ms.parse::<u64>().ok()?)),
+                None => (text, None),
+            };
+            let (text, bad) = match text.split_once('!') {
+                Some((text, spec)) => {
+                    let n: Vec<u64> = spec
+                        .split(':')
+                        .map(|p| p.parse().ok())
+                        .collect::<Option<_>>()?;
+                    let [extra_ms, spike_ms, loss_pct, secs] = n[..] else {
+                        return None;
+                    };
+                    let bad = Bad {
+                        extra_ms,
+                        spike_ms,
+                        loss_pct,
+                    };
+                    (text, Some((bad, secs)))
+                }
+                None => (text, None),
+            };
+            let (text, rise) = match text.split_once('^') {
+                Some((text, to)) => {
+                    let (o, j) = to.split_once(':')?;
+                    (text, Some((o.parse().ok()?, j.parse().ok()?)))
+                }
+                None => (text, None),
+            };
+            let parts: Vec<&str> = text.split(':').collect();
+            let num = |i: usize| parts.get(i).and_then(|p| p.parse::<u64>().ok());
+            let direct = match *parts.first()? {
+                "relay" => false,
+                "direct" => true,
+                _ => return None,
+            };
+            let (one_way_ms, jitter_ms) = (num(1)?, num(2)?);
+            let relay = match (num(3), num(4)) {
+                (Some(o), Some(j)) => (o, j),
+                _ => (one_way_ms, jitter_ms),
+            };
+            Some(Self {
+                direct,
+                one_way_ms,
+                jitter_ms,
+                relay,
+                rise,
+                bad,
+                mute_ms,
+                delay,
+                costs,
+            })
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    struct Sample {
+        at: f64,
+        waited: [u64; 2],
+        silent_ms: [f64; 2],
+    }
+
+    #[cfg(feature = "nds")]
+    fn recovery(
+        samples: &[Sample],
+        lines: &[Vec<(f64, u32)>; 2],
+        steps: &[(f64, u32)],
+        bad_at: f64,
+        calm_at: f64,
+    ) -> [Vec<(f64, f64)>; 2] {
+        let gap_ms = |w: &[(f64, u32)]| ((w[1].0 - w[0].0) * 10_000.0).round() / 10.0;
+        let end = samples.last().map_or(calm_at, |s| s.at);
+        let before = steps
+            .iter()
+            .take_while(|&&(at, _)| at <= bad_at)
+            .last()
+            .map_or(0, |&(_, delay)| delay);
+        let peak = steps
+            .iter()
+            .filter(|&&(at, _)| at >= bad_at)
+            .map(|&(_, delay)| delay)
+            .max()
+            .unwrap_or(before)
+            .max(before);
+        let last = steps.last().map_or(before, |&(_, delay)| delay);
+        let back = steps
+            .iter()
+            .rev()
+            .take_while(|&&(_, delay)| delay <= before)
+            .last()
+            .map(|&(at, _)| {
+                if at < calm_at {
+                    "during the spell".to_string()
+                } else {
+                    format!("{:.1} s", at - calm_at)
+                }
+            });
+        println!(
+            "LATR delay {before} before, peak {peak}, end {last}; bad {bad_at:.1}-{calm_at:.1} s; back to {before} after calm: {}",
+            back.unwrap_or_else(|| "never".into())
+        );
+        let windows = [
+            (
+                "before",
+                (bad_at - 10.0).max(samples.first().map_or(0.0, |s| s.at)),
+                bad_at,
+            ),
+            ("first 1 s", bad_at, bad_at + 1.0),
+            ("bad", bad_at, calm_at),
+            ("calm 0-3 s", calm_at, calm_at + 3.0),
+            ("calm 3 s on", calm_at + 3.0, end),
+        ];
+        let mut after = [Vec::new(), Vec::new()];
+        for (side, who) in ["host", "guest"].iter().enumerate() {
+            let line = &lines[side];
+            after[side] = line
+                .windows(2)
+                .filter(|w| w[0].0 >= bad_at && gap_ms(w) > 50.0)
+                .map(|w| (w[0].0 - bad_at, gap_ms(w)))
+                .collect();
+            let mut parts = Vec::new();
+            for (name, from, to) in windows {
+                let first = samples.iter().find(|s| s.at >= from);
+                let past = samples.iter().rev().find(|s| s.at <= to);
+                let (waits, silent) = match (first, past) {
+                    (Some(a), Some(b)) => (
+                        b.waited[side].saturating_sub(a.waited[side]),
+                        b.silent_ms[side] - a.silent_ms[side],
+                    ),
+                    _ => (0, 0.0),
+                };
+                let gaps: Vec<(f64, u32)> = line
+                    .windows(2)
+                    .filter(|w| w[0].0 >= from && w[0].0 < to)
+                    .map(|w| (gap_ms(w), w[1].1.saturating_sub(w[0].1)))
+                    .collect();
+                let most = gaps.iter().map(|g| g.0).fold(0.0, f64::max);
+                let over = gaps.iter().filter(|g| g.0 > 100.0).count();
+                let stalled: f64 = gaps.iter().filter(|g| g.0 > 34.0).map(|g| g.0 - 16.7).sum();
+                let bursts = gaps.iter().filter(|g| g.1 > 1).count();
+                parts.push(format!(
+                    "{name}: waits {waits}, silence {silent:.0} ms, longest stall {most:.0} ms, stalls over 100 ms {over}, stalled {stalled:.0} ms, multi-frame steps {bursts}"
+                ));
+            }
+            for part in parts {
+                println!("LATR {who} {part}");
+            }
+            let last_wait = |from: f64, to: f64| {
+                samples
+                    .windows(2)
+                    .rfind(|w| {
+                        w[1].at >= from && w[1].at < to && w[1].waited[side] > w[0].waited[side]
+                    })
+                    .map(|w| format!("{:.2} s", w[1].at - from))
+            };
+            let last_stall = |from: f64, to: f64| {
+                line.windows(2)
+                    .rfind(|w| w[0].0 >= from && w[0].0 < to && gap_ms(w) > 50.0)
+                    .map(|w| format!("{:.2} s", w[1].0 - from))
+            };
+            let stalls: Vec<String> = line
+                .windows(2)
+                .filter(|w| w[0].0 >= bad_at && w[0].0 < calm_at && gap_ms(w) >= 50.0)
+                .take(16)
+                .map(|w| format!("+{:.2}s {:.0} ms", w[0].0 - bad_at, gap_ms(w)))
+                .collect();
+            println!(
+                "LATR {who} stalls of 50 ms or more after the turn: {}",
+                stalls.join(", ")
+            );
+            println!(
+                "LATR {who} settles: last wait {} and last stall over 50 ms {} after the turn; last wait {} and last stall {} after calm",
+                last_wait(bad_at, calm_at).unwrap_or_else(|| "none".into()),
+                last_stall(bad_at, calm_at).unwrap_or_else(|| "none".into()),
+                last_wait(calm_at, end + 1.0).unwrap_or_else(|| "none".into()),
+                last_stall(calm_at, end + 1.0).unwrap_or_else(|| "none".into()),
+            );
+        }
+        after
+    }
+
+    #[cfg(feature = "nds")]
+    fn spread(mut ms: Vec<f64>) -> String {
+        if ms.is_empty() {
+            return "none".into();
+        }
+        ms.sort_by(f64::total_cmp);
+        let at = |q: f64| ms[((ms.len() as f64 - 1.0) * q).round() as usize];
+        format!(
+            "p50 {:.1} p90 {:.1} max {:.1} ms (n {})",
+            at(0.5),
+            at(0.9),
+            at(1.0),
+            ms.len()
+        )
+    }
+
+    #[cfg(feature = "nds")]
+    fn ds_latency(case: &LatencyCase, refresh: [f64; 2], secs: u64) -> Latency {
+        let _one = one_ds_pair_at_a_time();
+        let mut pair = if case.direct {
+            let port = std::net::UdpSocket::bind("127.0.0.1:0")
+                .and_then(|socket| socket.local_addr())
+                .unwrap()
+                .port()
+                .to_string();
+            let relay = Relay::start_with(true, &[("CITRINE_STUN_PORT", port.as_str())]);
+            Pair::over(relay, Clock::wired(), case.relay, empty())
+        } else {
+            Pair::new(true, case.one_way_ms, case.jitter_ms, empty())
+        };
+        pair.host
+            .play
+            .set_ds_user(super::ds_user_with([0x00, 0x09, 0xBF, 0x12, 0x34, 0x00]));
+        pair.guest
+            .play
+            .set_ds_user(super::ds_user_with([0x00, 0x09, 0xBF, 0x12, 0x34, 0x01]));
+        pair.host.play.set_input_delay(case.delay);
+        pair.guest.play.set_input_delay(case.delay);
+        if let Some([host, guest]) = case.costs {
+            pair.host.play.set_ds_cost(Some(host));
+            pair.guest.play.set_ds_cost(Some(guest));
+        }
+        if case.direct {
+            let counts = [&pair.guest, &pair.host].map(|side| side.play.direct.counts());
+            for ((side, seed), peer) in [(&mut pair.host, 7), (&mut pair.guest, 13)]
+                .into_iter()
+                .zip(counts)
+            {
+                side.play.set_direct(true);
+                let mut lag = DirectLag::new(case.one_way_ms, case.jitter_ms, seed);
+                lag.hear(peer);
+                side.play.direct_lag = Some(lag);
+            }
+        }
+        let session = pair.invite(airtalk());
+        pair.accept(session, MyGame::Own(airtalk()));
+        let start_delay = pair.host.session().delay();
+        let start_trip = pair.host.session().round_trip_ms();
+        let start_spread = pair.host.session().round_trip_spread_ms();
+        if case.direct {
+            pair.until("both play direct", |p| p.paths() == [LinkPath::Direct; 2]);
+        }
+        let direct_at = pair.host.frame();
+        let begun = pair.clock.now();
+        let mut steps: Vec<(f64, u32)> = Vec::new();
+        let mut guest_steps: Vec<(f64, u32)> = Vec::new();
+        let note = |steps: &mut Vec<(f64, u32)>, pair: &Pair| {
+            let delay = u32::from(pair.host.session().delay().unwrap_or(0));
+            if steps.last().is_none_or(|&(_, d)| d != delay) {
+                let at = pair.clock.now().duration_since(begun).as_secs_f64();
+                steps.push((at, delay));
+            }
+        };
+        note(&mut steps, &pair);
+        pair.play_frames(240);
+        note(&mut steps, &pair);
+        pair.host.app = Some(Box::new(AppLoop::new(refresh[0], 1.0)));
+        pair.guest.app = Some(Box::new(AppLoop::new(refresh[1], 1.0)));
+        let tick = Duration::from_secs_f64(1.0 / 360.0);
+        let ticks = |secs: u64| (secs as f64 / tick.as_secs_f64()) as u64;
+        for _ in 0..ticks(5) {
+            pair.tick_by(tick);
+            note(&mut steps, &pair);
+        }
+        let mut rise_at = None;
+        for side in [&mut pair.host, &mut pair.guest] {
+            side.app.as_mut().unwrap().start_counting();
+        }
+        let counts = [&pair.host, &pair.guest].map(|side| side.session().frame_totals().unwrap());
+        let mut lines: [Vec<(Instant, u32)>; 2] = [Vec::new(), Vec::new()];
+        let mut samples: Vec<Sample> = Vec::new();
+        let mut bad_at = None;
+        let mut calm_at = None;
+        let mut stall_bounds = None;
+        if let Some((_, bad_secs)) = case.bad {
+            assert!(ticks(secs) / 3 + ticks(bad_secs) < ticks(secs));
+        }
+        for i in 0..ticks(secs) {
+            if let Some((bad, bad_secs)) = case.bad {
+                let from = ticks(secs) / 3;
+                if i == from || i == from + ticks(bad_secs) {
+                    if i == from {
+                        stall_bounds = Some([&pair.host, &pair.guest].map(|side| {
+                            let session = side.session();
+                            stall_bound_ms(
+                                bad.extra_ms,
+                                u32::from(session.delay().unwrap_or(0)),
+                                session.round_trip_ms().unwrap_or(0),
+                            )
+                        }));
+                    }
+                    let weather = if i == from { bad } else { Bad::default() };
+                    for side in [&mut pair.host, &mut pair.guest] {
+                        side.weather.set(weather);
+                        if let Some(lag) = &mut side.play.direct_lag {
+                            lag.bad = weather;
+                        }
+                    }
+                    let at = Some(pair.clock.now().duration_since(begun).as_secs_f64());
+                    if i == from {
+                        bad_at = at;
+                    } else {
+                        calm_at = at;
+                    }
+                }
+            }
+            if i == ticks(secs) / 2
+                && let Some((one_way, jitter)) = case.rise
+            {
+                for side in [&mut pair.host, &mut pair.guest] {
+                    if let Some(lag) = &mut side.play.direct_lag {
+                        lag.set(one_way, jitter);
+                    }
+                }
+                rise_at = Some(pair.clock.now().duration_since(begun).as_secs_f64());
+            }
+            if i == ticks(secs) / 2
+                && let Some(ms) = case.mute_ms
+            {
+                let until = pair.clock.now() + Duration::from_millis(ms);
+                for side in [&mut pair.host, &mut pair.guest] {
+                    side.app.as_mut().unwrap().mute_until = Some(until);
+                }
+            }
+            pair.tick_by(tick);
+            note(&mut steps, &pair);
+            let now = pair.clock.now();
+            if case.bad.is_some() || case.rise.is_some() {
+                let delay = u32::from(pair.guest.session().delay().unwrap_or(0));
+                if guest_steps.last().is_none_or(|&(_, d)| d != delay) {
+                    guest_steps.push((now.duration_since(begun).as_secs_f64(), delay));
+                }
+                let sides = [&pair.host, &pair.guest];
+                samples.push(Sample {
+                    at: now.duration_since(begun).as_secs_f64(),
+                    waited: sides.map(|side| side.session().frame_totals().unwrap().waited),
+                    silent_ms: sides.map(|side| side.app.as_ref().unwrap().underrun_ms()),
+                });
+            }
+            for (line, side) in lines.iter_mut().zip([&pair.host, &pair.guest]) {
+                let frame = side.frame();
+                if line.last().is_none_or(|&(_, f)| f != frame) {
+                    line.push((now, frame));
+                }
+            }
+        }
+        let shown = |line: &[(Instant, u32)], at: Instant, target: u32| {
+            line.iter()
+                .find(|&&(_, f)| f > target)
+                .map(|&(t, _)| t.duration_since(at).as_secs_f64() * 1000.0)
+        };
+        let mut own = Vec::new();
+        let mut friend = Vec::new();
+        for (me, them) in [(0, 1), (1, 0)] {
+            let side = if me == 0 { &pair.host } else { &pair.guest };
+            for &(at, target) in &side.app.as_ref().unwrap().presses {
+                if let (Some(a), Some(b)) = (
+                    shown(lines[me].as_slice(), at, target),
+                    shown(lines[them].as_slice(), at, target),
+                ) {
+                    own.push(a);
+                    friend.push(b);
+                }
+            }
+        }
+        let own_p50_ms = (!own.is_empty()).then(|| {
+            let mut sorted = own.clone();
+            sorted.sort_by(f64::total_cmp);
+            sorted[(sorted.len() - 1) / 2]
+        });
+        let minutes = secs as f64 / 60.0;
+        let ends = [&pair.host, &pair.guest].map(|side| side.session().frame_totals().unwrap());
+        let waits_a_minute = [0, 1].map(|i| (ends[i].waited - counts[i].waited) as f64 / minutes);
+        let waits: Vec<String> = counts
+            .iter()
+            .zip(&ends)
+            .map(|(a, b)| format!("{:.0}", (b.waited - a.waited) as f64 / minutes))
+            .collect();
+        let underrun: Vec<String> = [&pair.host, &pair.guest]
+            .iter()
+            .map(|side| {
+                let app = side.app.as_ref().unwrap();
+                format!(
+                    "{:.0} (total {:.0}, lowest queue {:.0} ms)",
+                    app.underrun_ms() / minutes,
+                    app.underrun_ms(),
+                    app.low_ms()
+                )
+            })
+            .collect();
+        println!(
+            "LAT {} one way {} jitter {} (relay {:?}) fixed {:?} mute {:?} refresh {:?}: start delay {:?} trip {:?} spread {:?}, direct from frame {}, end delay {:?} trip {:?} spread {:?}, waits a minute {}, silence ms a minute {}",
+            if case.direct { "direct" } else { "relay" },
+            case.one_way_ms,
+            case.jitter_ms,
+            case.relay,
+            case.delay,
+            case.mute_ms,
+            refresh,
+            start_delay,
+            start_trip,
+            start_spread,
+            direct_at,
+            pair.host.session().delay(),
+            pair.host.session().round_trip_ms(),
+            pair.host.session().round_trip_spread_ms(),
+            waits.join("/"),
+            underrun.join("/"),
+        );
+        println!("LAT   own screen {}", spread(own));
+        println!("LAT   friend screen {}", spread(friend));
+        let shown_steps: Vec<String> = steps
+            .iter()
+            .map(|(at, delay)| format!("{at:.1}s {delay}"))
+            .collect();
+        println!(
+            "LAT   delay steps {} (rise at {:?})",
+            shown_steps.join(", "),
+            rise_at.map(|at| format!("{at:.1}s"))
+        );
+        let turn = match (bad_at, calm_at, rise_at) {
+            (Some(bad_at), Some(calm_at), _) => Some((bad_at, calm_at)),
+            (_, _, Some(rise_at)) => samples.last().map(|s| (rise_at, s.at)),
+            _ => None,
+        };
+        let stalls = turn.map(|(bad_at, calm_at)| {
+            let lines = lines.each_ref().map(|line| {
+                line.iter()
+                    .map(|&(at, frame)| (at.duration_since(begun).as_secs_f64(), frame))
+                    .collect::<Vec<_>>()
+            });
+            let shown: Vec<String> = guest_steps
+                .iter()
+                .filter(|&&(at, _)| at >= bad_at - 1.0)
+                .map(|(at, delay)| format!("{at:.1}s {delay}"))
+                .collect();
+            println!("LATR guest delay steps {}", shown.join(", "));
+            recovery(&samples, &lines, &steps, bad_at, calm_at)
+        });
+        for side in [pair.host.session(), pair.guest.session()] {
+            assert_eq!(side.resyncs(), 0);
+            assert!(side.failure().is_none());
+        }
+        assert_same_inputs(pair.host.session(), pair.guest.session());
+        let [host, guest] =
+            [&pair.host, &pair.guest].map(|side| side.session().log().unwrap().checks.clone());
+        let mut compared = 0;
+        for check in &host {
+            if let Some(theirs) = guest.iter().find(|c| c.frame == check.frame) {
+                assert_eq!(theirs.hashes, check.hashes, "frame {}", check.frame);
+                compared += 1;
+            }
+        }
+        println!("LAT   checks compared {compared}, all equal");
+        Latency {
+            steps,
+            own_p50_ms,
+            waits_a_minute,
+            rise_at,
+            stalls,
+            stall_bounds,
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_pair_on_direct_eases_below_the_relay_delay_and_steps_up_when_the_ping_rises() {
+        let case = LatencyCase::parse("direct:15:5:45:15^90:15").unwrap();
+        let run = ds_latency(&case, [180.0, 60.0], 20);
+        let rise_at = run.rise_at.unwrap();
+        let started = run.steps[0].1;
+        let eased = run
+            .steps
+            .iter()
+            .filter(|&&(at, _)| at < rise_at)
+            .map(|&(_, delay)| delay)
+            .min()
+            .unwrap();
+        assert!(
+            started >= 6 && eased <= 4,
+            "delay {started} at the start, eased to {eased}: {:?}",
+            run.steps
+        );
+        let stepped = run
+            .steps
+            .iter()
+            .find(|&&(at, delay)| at >= rise_at && delay > eased)
+            .map(|&(at, _)| at - rise_at);
+        assert!(
+            stepped.is_some_and(|after| after < 4.0),
+            "step up {stepped:?} s after the rise: {:?}",
+            run.steps
+        );
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_pair_of_macs_on_the_relay_rolls_back_two_frames_instead_of_waiting_them() {
+        let macs = ds_latency(
+            &LatencyCase::parse("relay:45:15#mac").unwrap(),
+            [180.0, 60.0],
+            6,
+        );
+        let x86 = ds_latency(
+            &LatencyCase::parse("relay:45:15#x86").unwrap(),
+            [180.0, 60.0],
+            6,
+        );
+        let mixed = ds_latency(
+            &LatencyCase::parse("relay:45:15#mac,x86").unwrap(),
+            [180.0, 60.0],
+            6,
+        );
+        let started = |run: &Latency| run.steps[0].1;
+        assert_eq!(started(&x86), 6, "{:?}", x86.steps);
+        assert_eq!(started(&mixed), 6, "{:?}", mixed.steps);
+        assert_eq!(started(&macs), 4, "{:?}", macs.steps);
+        assert!(
+            macs.steps.iter().all(|&(_, delay)| delay <= 5),
+            "{:?}",
+            macs.steps
+        );
+        assert!(
+            macs.own_p50_ms
+                .is_some_and(|ms| ms < x86.own_p50_ms.unwrap() - 25.0),
+            "own press p50 {:?} on Macs, {:?} on x86",
+            macs.own_p50_ms,
+            x86.own_p50_ms
+        );
+        for (macs, x86) in macs.waits_a_minute.iter().zip(x86.waits_a_minute) {
+            assert!(
+                *macs <= x86 + 12.0,
+                "waits a minute {macs} on Macs, {x86} on x86"
+            );
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    fn ds_rides_out_a_ping_jump(case: &str) {
+        let case = LatencyCase::parse(case).unwrap();
+        let run = ds_latency(&case, [180.0, 60.0], 30);
+        let stalls = run.stalls.unwrap();
+        let bounds = run.stall_bounds.unwrap();
+        println!("LATR stall bounds ms {bounds:?}");
+        for ((who, stalls), bound) in ["host", "guest"].iter().zip(&stalls).zip(bounds) {
+            assert!(
+                stalls.len() <= 1
+                    && stalls
+                        .iter()
+                        .all(|&(at, ms)| ms < bound && at + ms / 1000.0 <= 1.0),
+                "{who} stalls over 50 ms after the jump (s, ms): {stalls:?}, bound {bound:.0} ms"
+            );
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_pair_on_the_relay_rides_out_a_ping_jump() {
+        ds_rides_out_a_ping_jump("relay:15:5!135:0:0:10");
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_pair_on_direct_rides_out_a_ping_jump() {
+        ds_rides_out_a_ping_jump("direct:15:5:45:15!135:0:0:10");
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    #[ignore = "measures latency, set LATENCY_CASES"]
+    fn ds_latency_by_path_and_lag() {
+        let cases = std::env::var("LATENCY_CASES").unwrap_or_else(|_| "relay:15:5".into());
+        let secs = std::env::var("LATENCY_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(40);
+        let refresh = [180.0, 60.0];
+        for case in cases.split(';').filter_map(LatencyCase::parse) {
+            ds_latency(&case, refresh, secs);
+        }
+    }
+
+    #[cfg(feature = "nds")]
     fn ds_wireless_pacing(
         one_way_ms: u64,
         jitter_ms: u64,
@@ -6773,12 +8429,23 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "nds")]
+    type DelaySteps = Vec<(usize, Option<u8>)>;
+
+    #[cfg(feature = "nds")]
     fn ds_sound_against_the_clock(
         one_way_ms: u64,
         jitter_ms: u64,
         spread_ms: Option<u32>,
         ticks: usize,
-    ) -> ([f64; 2], [Pacing; 2], [Option<u8>; 2]) {
+    ) -> ([f64; 2], [Pacing; 2], [Option<u8>; 2], DelaySteps) {
+        fn tick_noting(pair: &mut Pair, at: &mut usize, steps: &mut DelaySteps) {
+            pair.tick();
+            *at += 1;
+            let delay = pair.host.session().delay();
+            if steps.last().is_none_or(|&(_, last)| last != delay) {
+                steps.push((*at, delay));
+            }
+        }
         let _one = one_ds_pair_at_a_time();
         let mut pair = Pair::new(true, one_way_ms, jitter_ms, empty());
         pair.host
@@ -6799,7 +8466,11 @@ pub(crate) mod tests {
             p.host.stage() == Some(Stage::Playing) && p.guest.stage() == Some(Stage::Playing)
         });
         let at_start = pair.host.session().delay();
-        pair.play_frames(240);
+        let (mut at, mut steps) = (0, vec![(0, at_start)]);
+        let target = pair.host.frame().max(pair.guest.frame()) + 240;
+        while pair.host.frame() < target || pair.guest.frame() < target {
+            tick_noting(&mut pair, &mut at, &mut steps);
+        }
         let (mut mine, mut friend) = (Vec::new(), Vec::new());
         let mut drain = |side: &mut Side| {
             side.session_mut().drain_audio(&mut mine, &mut friend);
@@ -6813,7 +8484,7 @@ pub(crate) mod tests {
         let from = [pair.host.frame(), pair.guest.frame()];
         let mut heard = [0usize; 2];
         for _ in 0..240 {
-            pair.tick();
+            tick_noting(&mut pair, &mut at, &mut steps);
             heard[0] += drain(&mut pair.host);
             heard[1] += drain(&mut pair.guest);
         }
@@ -6824,7 +8495,7 @@ pub(crate) mod tests {
         }
         let mut heard = [0usize; 2];
         for _ in 0..ticks {
-            pair.tick();
+            tick_noting(&mut pair, &mut at, &mut steps);
             heard[0] += drain(&mut pair.host);
             heard[1] += drain(&mut pair.guest);
         }
@@ -6846,13 +8517,18 @@ pub(crate) mod tests {
             share
         });
         assert_eq!(pair.host.session().delay(), pair.guest.session().delay());
-        (shares, pacing, [at_start, pair.host.session().delay()])
+        (
+            shares,
+            pacing,
+            [at_start, pair.host.session().delay()],
+            steps,
+        )
     }
 
     #[cfg(feature = "nds")]
     #[test]
     fn ds_sound_keeps_up_with_the_clock_without_jitter() {
-        let (shares, pacing, delay) = ds_sound_against_the_clock(40, 0, None, 1200);
+        let (shares, pacing, delay, _) = ds_sound_against_the_clock(40, 0, None, 1200);
         assert_eq!(delay, [Some(6); 2], "a steady link keeps its delay");
         assert_eq!(pacing.map(|p| p.gaps), [[0; 4]; 2]);
         for share in shares {
@@ -6863,8 +8539,16 @@ pub(crate) mod tests {
     #[cfg(feature = "nds")]
     #[test]
     fn ds_sound_keeps_up_with_the_clock_through_stalls() {
-        let (shares, pacing, delay) = ds_sound_against_the_clock(40, 90, None, 1200);
-        assert_eq!(delay[1], Some(10), "a jittery link gets two frames more");
+        let (shares, pacing, delay, steps) = ds_sound_against_the_clock(40, 90, None, 1200);
+        let most = steps.iter().filter_map(|&(_, delay)| delay).max();
+        assert!(
+            most >= Some(10),
+            "a jittery link gets more frames: {steps:?}"
+        );
+        assert!(
+            delay[1] >= Some(9),
+            "easing keeps three frames over a steady link: {steps:?}"
+        );
         for share in shares {
             assert!(share >= 0.995, "sound {:.2}% of the clock", share * 100.0);
         }
@@ -6877,12 +8561,26 @@ pub(crate) mod tests {
     #[cfg(feature = "nds")]
     #[test]
     fn ds_waits_add_the_frame_a_low_spread_reading_missed() {
-        let (shares, pacing, delay) = ds_sound_against_the_clock(40, 90, Some(16), 1200);
+        let (shares, pacing, delay, steps) = ds_sound_against_the_clock(40, 90, Some(16), 1200);
+        assert_eq!(delay[0], Some(9));
+        let rise = steps
+            .iter()
+            .find(|&&(_, delay)| delay == Some(10))
+            .map(|&(at, _)| at)
+            .expect("waits add one frame");
+        let calm_ends = rise + engine::CALM_FRAMES as usize;
+        let held: Vec<_> = steps.iter().filter(|&&(at, _)| at < calm_ends).collect();
         assert_eq!(
-            delay,
-            [Some(9), Some(10)],
-            "waits add one frame and keep it"
+            held,
+            [&(0, Some(9)), &(rise, Some(10))],
+            "waits add one frame and keep it through the calm window"
         );
+        for &(at, delay) in &steps {
+            assert!(
+                matches!(delay, Some(9 | 10)),
+                "delay {delay:?} at tick {at} after the calm window"
+            );
+        }
         for share in shares {
             assert!(share >= 0.995, "sound {:.2}% of the clock", share * 100.0);
         }
@@ -7027,7 +8725,8 @@ pub(crate) mod tests {
     }
 
     fn stored_emulator(name: &str) -> crate::emulator::Emulator {
-        let root = std::env::temp_dir().join(format!("citrine-{name}-{}", std::process::id()));
+        let root =
+            crate::storage::scratch_dir().join(format!("citrine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut emulator = crate::emulator::Emulator::default();
         emulator.store = crate::storage::SaveStore::at(root);

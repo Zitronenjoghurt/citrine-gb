@@ -95,6 +95,11 @@ fn prepare(emulator: &mut Emulator, playing: &mut PlayingUi) {
     playing.swapped = false;
 }
 
+fn refused_in_hardcore(emulator: &Emulator, playing: &mut PlayingUi) -> bool {
+    playing.hardcore_refused |= emulator.hardcore();
+    emulator.hardcore()
+}
+
 fn tune(play: &mut Play, emulator: &Emulator) {
     let rate = emulator.sample_rate();
     if let Some(session) = play.session_mut() {
@@ -110,6 +115,9 @@ pub fn invite(
     recent: &RecentRoms,
     friend: OnlineId,
 ) -> bool {
+    if refused_in_hardcore(emulator, playing) {
+        return true;
+    }
     if adds_to_room(play, online) && !in_room(play, friend) {
         return play.invite(online, friend, None);
     }
@@ -135,6 +143,9 @@ pub fn watch(
     recent: &RecentRoms,
     friend: OnlineId,
 ) -> bool {
+    if refused_in_hardcore(emulator, playing) {
+        return true;
+    }
     if play.is_live() {
         return false;
     }
@@ -202,6 +213,9 @@ fn join_as(
     invite: &IncomingInvite,
     asks_how: bool,
 ) -> bool {
+    if refused_in_hardcore(emulator, playing) {
+        return true;
+    }
     if play.is_live() {
         playing.joining = Some(invite.clone());
         return true;

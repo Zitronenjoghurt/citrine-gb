@@ -151,24 +151,24 @@ shown_by_label!(Arrangement, Corner, SmallSize, Rotation);
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Placement {
+    #[serde(deserialize_with = "known_arrangement")]
     pub arrangement: Arrangement,
     pub swapped: bool,
     pub one_screen: bool,
 }
 
-impl Placement {
-    pub fn only_label(self) -> &'static str {
-        if self.swapped {
-            "Only the bottom screen"
-        } else {
-            "Only the top screen"
-        }
-    }
+fn known_arrangement<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arrangement, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
 
+impl Placement {
     pub fn chip(self) -> (&'static str, &'static str) {
         match (self.one_screen, self.swapped) {
-            (true, false) => (icons::MONITOR, "Top only"),
-            (true, true) => (icons::MONITOR, "Bottom only"),
+            (true, false) => (icons::DS_TOP_ONLY, "Top only"),
+            (true, true) => (icons::DS_BOTTOM_ONLY, "Bottom only"),
             _ => (self.arrangement.icon(), self.arrangement.label()),
         }
     }
@@ -184,16 +184,32 @@ impl Placement {
         }
     }
 
-    pub fn swap_icon(self) -> &'static str {
-        if self.arrangement == Arrangement::SideBySide && !self.one_screen {
-            icons::ARROWS_LEFT_RIGHT
-        } else {
-            icons::ARROWS_DOWN_UP
-        }
-    }
-
     pub fn touch_hidden(self) -> bool {
         self.one_screen && !self.swapped
+    }
+
+    pub fn act(self, action: ScreensAction) -> Self {
+        match action {
+            ScreensAction::Arrange(arrangement) => Self {
+                arrangement,
+                one_screen: false,
+                ..self
+            },
+            ScreensAction::Swap => Self {
+                swapped: !self.swapped,
+                ..self
+            },
+            ScreensAction::OneScreen => Self {
+                one_screen: !self.one_screen,
+                ..self
+            },
+            ScreensAction::NextLayout => Self {
+                arrangement: self.arrangement.next(),
+                one_screen: false,
+                ..self
+            },
+            ScreensAction::SeparateTabs => self,
+        }
     }
 }
 
@@ -214,9 +230,17 @@ pub enum ScreenContext {
     Landscape,
 }
 
+impl ScreenContext {
+    pub fn on_phone(self) -> Self {
+        match self {
+            Self::Desktop => Self::Portrait,
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShownRows {
-    pub placement: bool,
     pub separate_tabs: bool,
     pub small: bool,
     pub gap: bool,
@@ -271,19 +295,21 @@ impl DsScreens {
     }
 
     pub fn apply(&mut self, context: ScreenContext, action: ScreensAction) {
-        let placement = self.placement_mut(context);
         match action {
-            ScreensAction::Arrange(arrangement) => {
-                placement.arrangement = arrangement;
-                placement.one_screen = false;
-            }
-            ScreensAction::Swap => placement.swapped = !placement.swapped,
-            ScreensAction::OneScreen => placement.one_screen = !placement.one_screen,
-            ScreensAction::NextLayout => {
-                placement.arrangement = placement.arrangement.next();
-                placement.one_screen = false;
-            }
             ScreensAction::SeparateTabs => self.separate_tabs = !self.separate_tabs,
+            _ => {
+                let placement = self.placement_mut(context);
+                *placement = placement.act(action);
+            }
+        }
+    }
+
+    pub fn with_placements_of(self, shown: &DsScreens) -> Self {
+        Self {
+            desktop: shown.desktop,
+            portrait: shown.portrait,
+            landscape: shown.landscape,
+            ..self
         }
     }
 
@@ -292,21 +318,17 @@ impl DsScreens {
     }
 
     pub fn shown_rows(&self, context: ScreenContext) -> ShownRows {
-        let placement = self.placement(context);
+        self.shown_rows_with(self.placement(context), context)
+    }
+
+    pub fn shown_rows_with(&self, placement: Placement, context: ScreenContext) -> ShownRows {
         let tabs = self.tabs_shown(context);
         let together = !tabs && !placement.one_screen;
         ShownRows {
-            placement: !tabs,
             separate_tabs: context == ScreenContext::Desktop,
             small: together && placement.arrangement == Arrangement::BigAndSmall,
             gap: together,
         }
-    }
-
-    pub fn arrange(&mut self, context: ScreenContext, arrangement: Arrangement) -> bool {
-        let before = self.placement(context);
-        self.apply(context, ScreensAction::Arrange(arrangement));
-        self.placement(context) != before
     }
 
     pub fn gap_label(&self) -> String {
@@ -328,27 +350,18 @@ mod tests {
         let mut screens = DsScreens::default();
         let desktop = ScreenContext::Desktop;
         let rows = screens.shown_rows(desktop);
-        assert!(rows.placement && rows.separate_tabs && rows.gap && !rows.small);
+        assert!(rows.separate_tabs && rows.gap && !rows.small);
         screens.desktop.arrangement = Arrangement::BigAndSmall;
         assert!(screens.shown_rows(desktop).small);
         screens.desktop.one_screen = true;
         let rows = screens.shown_rows(desktop);
-        assert!(rows.placement && !rows.small && !rows.gap);
+        assert!(!rows.small && !rows.gap);
         screens.desktop.one_screen = false;
         screens.separate_tabs = true;
         let rows = screens.shown_rows(desktop);
-        assert!(!rows.placement && !rows.small && !rows.gap && rows.separate_tabs);
+        assert!(!rows.small && !rows.gap && rows.separate_tabs);
         let phone = screens.shown_rows(ScreenContext::Portrait);
-        assert!(phone.placement && phone.gap && !phone.separate_tabs);
-    }
-
-    #[test]
-    fn arrange_says_whether_the_placement_changed() {
-        let mut screens = DsScreens::default();
-        screens.desktop.one_screen = true;
-        assert!(screens.arrange(ScreenContext::Desktop, Arrangement::Stacked));
-        assert!(!screens.desktop.one_screen);
-        assert!(!screens.arrange(ScreenContext::Desktop, Arrangement::Stacked));
+        assert!(phone.gap && !phone.separate_tabs);
     }
 
     #[test]
@@ -383,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn the_only_screen_switch_names_the_screen_it_keeps() {
+    fn one_screen_chips_name_the_screen_they_keep() {
         let top = Placement {
             one_screen: true,
             ..Placement::default()
@@ -392,8 +405,6 @@ mod tests {
             swapped: true,
             ..top
         };
-        assert_eq!(top.only_label(), "Only the top screen");
-        assert_eq!(bottom.only_label(), "Only the bottom screen");
         assert_eq!(top.chip().1, "Top only");
         assert_eq!(bottom.chip().1, "Bottom only");
         assert!(top.touch_hidden() && !bottom.touch_hidden());

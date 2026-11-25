@@ -71,6 +71,52 @@ impl Mbc {
         }
     }
 
+    #[cfg(feature = "persistence")]
+    pub(crate) fn keep_sizes_of(&mut self, like: &Self) -> bool {
+        match (self, like) {
+            (Self::None, Self::None) => {}
+            (Self::Mbc1(mbc), Self::Mbc1(like)) => {
+                mbc.rom_bank_count = like.rom_bank_count;
+                mbc.ram_bank_count = like.ram_bank_count;
+                mbc.multicart = like.multicart;
+            }
+            (Self::Mbc2(mbc), Self::Mbc2(like)) => mbc.rom_bank_count = like.rom_bank_count,
+            (Self::Mbc3(mbc), Self::Mbc3(like)) => {
+                mbc.rom_bank_count = like.rom_bank_count;
+                mbc.ram_bank_count = like.ram_bank_count;
+                mbc.has_rtc = like.has_rtc;
+                mbc.mbc30 = like.mbc30;
+            }
+            (Self::Mbc5(mbc), Self::Mbc5(like)) => {
+                mbc.rom_bank_count = like.rom_bank_count;
+                mbc.ram_bank_count = like.ram_bank_count;
+                mbc.rumble = like.rumble;
+            }
+            (Self::Mbc7(mbc), Self::Mbc7(like)) => mbc.rom_bank_count = like.rom_bank_count,
+            (Self::Huc1(mbc), Self::Huc1(like)) => {
+                mbc.rom_bank_count = like.rom_bank_count;
+                mbc.ram_bank_count = like.ram_bank_count;
+            }
+            (Self::Huc3(mbc), Self::Huc3(like)) => {
+                mbc.rom_bank_count = like.rom_bank_count;
+                mbc.ram_bank_count = like.ram_bank_count;
+            }
+            (Self::Camera(mbc), Self::Camera(like)) => {
+                mbc.rom_bank_count = like.rom_bank_count;
+                mbc.ram_bank_count = like.ram_bank_count;
+            }
+            (Self::Tama5(mbc), Self::Tama5(like)) => mbc.rom_bank_count = like.rom_bank_count,
+            (Self::Mbc6(mbc), Self::Mbc6(like)) => mbc.keep_sizes_of(like),
+            (Self::Mmm01(mbc), Self::Mmm01(like)) => {
+                mbc.rom_bank_count = like.rom_bank_count;
+                mbc.ram_bank_count = like.ram_bank_count;
+            }
+            (Self::WisdomTree(mbc), Self::WisdomTree(like)) => mbc.bank_count = like.bank_count,
+            _ => return false,
+        }
+        true
+    }
+
     pub fn get_internal_data(&self, now: u64) -> Option<Vec<u8>> {
         match self {
             Self::Tama5(mbc) => Some(mbc.save(now)),

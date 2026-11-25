@@ -7,7 +7,7 @@ use web_time::Instant;
 
 pub const VAR: &str = "CITRINE_FRAME_LOG";
 const FILE_NAME: &str = "citrine-frame-log.csv";
-const HEADER: &str = "second,app_frames,interval_ms,interval_max_ms,cpu_ms,cpu_max_ms,wait_ms,wait_max_ms,update_ms,update_max_ms,game_frames,shown_twice_per_s,dropped_per_s,pacer_hz,upscaling,gpu_clock,gpu_frames,gpu_ms,gpu_done_ms,gpu_work_ms,surface_errors,drawable_w,drawable_h,pixels_per_point,focused,fullscreen,present_mode,frame_latency,gpu_reference_ms,gpu_upscaled_ms,gpu_centers_ms,gpu_edges_ms,gpu_finish_ms,gpu_present_ms,gpu_composite_ms";
+const HEADER: &str = "second,app_frames,interval_ms,interval_max_ms,cpu_ms,cpu_max_ms,wait_ms,wait_max_ms,update_ms,update_max_ms,game_frames,shown_twice_per_s,dropped_per_s,pacer_hz,upscaling,gpu_clock,gpu_frames,gpu_ms,gpu_done_ms,gpu_work_ms,surface_errors,drawable_w,drawable_h,pixels_per_point,focused,fullscreen,present_mode,frame_latency,gpu_reference_ms,gpu_opaque_ms,gpu_tail_ms,gpu_edges_ms,gpu_finish_ms,gpu_present_ms,gpu_mipmaps_ms,gpu_composite_ms";
 
 #[derive(Debug, Clone, Copy)]
 pub struct PacingSample {
@@ -129,6 +129,10 @@ impl PacingLog<BufWriter<File>> {
 }
 
 fn default_path() -> Option<PathBuf> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the frame log goes to the desktop so it is easy to find and send"
+    )]
     let dirs = directories::UserDirs::new()?;
     let dir = dirs.desktop_dir().unwrap_or(dirs.home_dir());
     Some(dir.join(FILE_NAME))
@@ -294,7 +298,7 @@ mod tests {
                     done: Duration::from_millis(gpu_ms * 3),
                     frames: gpu_frames,
                     work: Some(Duration::from_millis(4)),
-                    passes: [0, 0, 1, 2, 0, 0, 1]
+                    passes: [0, 0, 1, 2, 0, 0, 0, 1]
                         .map(|share| Duration::from_millis(gpu_ms * share / 5)),
                 },
                 ..LoadReading::default()
@@ -334,7 +338,7 @@ mod tests {
         assert_eq!(
             row[28..],
             [
-                "0.000", "0.000", "1.000", "2.000", "0.000", "0.000", "1.000"
+                "0.000", "0.000", "1.000", "2.000", "0.000", "0.000", "0.000", "1.000"
             ]
         );
     }

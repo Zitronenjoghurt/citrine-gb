@@ -1,5 +1,5 @@
 use crate::app::tabs::Tab;
-use crate::app::ui_state::settings::SettingsTab;
+use crate::app::ui_state::settings_tree::SettingsTab;
 use crate::icons;
 
 const MAX_STEPS: usize = 32;
@@ -35,7 +35,7 @@ impl Place {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Place::Games => icons::GAME_CONTROLLER,
+            Place::Games => icons::CARTRIDGE,
             Place::Friends => icons::USERS,
             Place::Media => icons::IMAGES,
             Place::Settings => icons::GEAR,
@@ -170,6 +170,15 @@ impl Nav {
         }
         self.pages[Place::Games.index()].clear();
         self.on_game = true;
+    }
+
+    pub fn go_library(&mut self) {
+        self.more = false;
+        if self.place != Place::Games {
+            self.visit(Place::Games);
+        }
+        self.pages[Place::Games.index()].clear();
+        self.on_game = false;
     }
 
     pub fn leave_game(&mut self) {

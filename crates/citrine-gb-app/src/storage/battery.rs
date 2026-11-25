@@ -4,6 +4,9 @@ use citrine_gb::console::Console;
 use citrine_gb::gba::save::SaveType;
 use citrine_gb::persistence::battery_save::BatterySave;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) const MAX_LEGACY_SAVE_BYTES: u64 = 32 << 20;
+
 #[cfg(feature = "gba")]
 const CHIPS: [SaveType; 7] = [
     SaveType::Sram32K,
@@ -15,7 +18,33 @@ const CHIPS: [SaveType; 7] = [
     SaveType::Eeprom8K,
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatteryFiles {
+    pub sav: Vec<u8>,
+    pub meta: Option<Vec<u8>>,
+}
+
 impl SaveStore {
+    pub fn battery_files(&self, rom_key: &str) -> Option<BatteryFiles> {
+        Some(BatteryFiles {
+            sav: self.load_battery(rom_key)?,
+            meta: self.backend.read(rom_key, BATTERY_META),
+        })
+    }
+
+    pub fn put_battery_files(&self, rom_key: &str, files: &BatteryFiles) -> std::io::Result<()> {
+        self.write(rom_key, BATTERY, &files.sav)?;
+        match &files.meta {
+            Some(meta) => self.write(rom_key, BATTERY_META, meta),
+            None => self.delete(rom_key, BATTERY_META),
+        }
+    }
+
+    pub fn remove_battery(&self, rom_key: &str) -> std::io::Result<()> {
+        self.delete(rom_key, BATTERY_META)?;
+        self.delete(rom_key, BATTERY)
+    }
+
     pub fn load_battery(&self, rom_key: &str) -> Option<Vec<u8>> {
         self.backend.read(rom_key, BATTERY)
     }
@@ -58,17 +87,34 @@ impl SaveStore {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn legacy_save_path(rom_path: &std::path::Path) -> std::path::PathBuf {
-        rom_path.with_extension("sav")
+        use crate::utils::zip_games;
+        let zipped = zip_games::split_entry(rom_path).filter(|_| !rom_path.is_file());
+        let (Some((zip, _)), Some(name)) = (zipped, rom_path.file_name()) else {
+            return rom_path.with_extension("sav");
+        };
+        let game = zip.with_file_name(name).with_extension("sav");
+        let pack = zip.with_extension("sav");
+        let alone = || zip_games::entries(&zip).is_ok_and(|games| games.len() == 1);
+        if !Self::is_legacy_save_file(&game) && Self::is_legacy_save_file(&pack) && alone() {
+            return pack;
+        }
+        game
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn has_legacy_save(rom_path: &std::path::Path) -> bool {
-        Self::legacy_save_path(rom_path).is_file()
+        Self::is_legacy_save_file(&Self::legacy_save_path(rom_path))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_legacy_save_file(path: &std::path::Path) -> bool {
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_LEGACY_SAVE_BYTES)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn import_legacy_save(&self, rom_key: &str, rom_path: &std::path::Path) -> bool {
-        let Ok(data) = std::fs::read(Self::legacy_save_path(rom_path)) else {
+        let Some(data) = read_legacy_save(&Self::legacy_save_path(rom_path)) else {
             return false;
         };
         self.store_battery(rom_key, &data).is_ok()
@@ -81,6 +127,24 @@ impl SaveStore {
         }
         self.import_legacy_save(rom_key, rom_path)
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_legacy_save(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !SaveStore::is_legacy_save_file(path) {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_LEGACY_SAVE_BYTES {
+        return None;
+    }
+    let mut data = Vec::new();
+    file.take(MAX_LEGACY_SAVE_BYTES + 1)
+        .read_to_end(&mut data)
+        .ok()?;
+    (data.len() as u64 <= MAX_LEGACY_SAVE_BYTES).then_some(data)
 }
 
 pub(super) fn battery_meta(save: &BatterySave, saved_at: u64) -> Vec<u8> {

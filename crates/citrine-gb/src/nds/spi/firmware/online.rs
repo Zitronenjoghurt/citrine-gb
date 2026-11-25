@@ -17,6 +17,9 @@ const CHECKSUM: usize = 0xFE;
 const STATUS_NORMAL: u8 = 0x00;
 const STATUS_EMPTY: u8 = 0xFF;
 const MAX_WIFI_CONFIG: usize = 0x1D4;
+const WIFI_INFO_SLOTS: usize = 2;
+const USER_ID_BITS: u32 = 43;
+const USER_ID_MASK: u128 = (1 << USER_ID_BITS) - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessPointSlot {
@@ -102,6 +105,27 @@ pub fn user_id(slot: &[u8]) -> Option<u64> {
     bytes[..6].copy_from_slice(&slot[USER_ID..USER_ID + 6]);
     let id = u64::from_le_bytes(bytes) & 0x07FF_FFFF_FFFF;
     (slot_valid(slot) && slot[STATUS] != STATUS_EMPTY && id != 0).then_some(id)
+}
+
+pub fn attested_user_id(image: &[u8]) -> u64 {
+    (wifi_info(&connections(image)[..SLOT_BYTES]) & USER_ID_MASK) as u64
+}
+
+pub fn set_user_id(image: &mut [u8], id: u64) {
+    let base = connections_base(image.len());
+    let id = u128::from(id) & USER_ID_MASK;
+    for slot in image[base..base + SLOT_BYTES * WIFI_INFO_SLOTS].chunks_mut(SLOT_BYTES) {
+        let kept = wifi_info(slot) & !(USER_ID_MASK | (USER_ID_MASK << USER_ID_BITS));
+        let info = kept | id | (id << USER_ID_BITS);
+        slot[USER_ID..CHECKSUM].copy_from_slice(&info.to_le_bytes()[..CHECKSUM - USER_ID]);
+        seal(slot);
+    }
+}
+
+fn wifi_info(slot: &[u8]) -> u128 {
+    let mut bytes = [0; 16];
+    bytes[..CHECKSUM - USER_ID].copy_from_slice(&slot[USER_ID..CHECKSUM]);
+    u128::from_le_bytes(bytes)
 }
 
 fn slot_valid(slot: &[u8]) -> bool {
@@ -216,6 +240,44 @@ mod tests {
         let slot = &image[0x3FA00..0x3FB00];
         assert_eq!(user_id(slot), Some(0x0298_7654_3210));
         assert_eq!(&slot[0xC8..0xCC], &[0; 4]);
+    }
+
+    #[test]
+    fn a_new_user_id_goes_into_both_wifi_pages_and_keeps_the_rest() {
+        let mut image = built(&Online {
+            access_point: Some(ours()),
+            ..Online::default()
+        });
+        let base = 0x3FA00;
+        for slot in image[base..base + 0x200].chunks_mut(0x100) {
+            slot[0xF0..0xFE].copy_from_slice(&[
+                0x10, 0x32, 0x54, 0x76, 0x98, 0x92, 0x01, 0x2A, 0xB3, 0x4C, 0x15, 0x57, 0x59, 0x00,
+            ]);
+            let checksum = crc16(0, &slot[..0xFE]);
+            slot[0xFE..].copy_from_slice(&checksum.to_le_bytes());
+        }
+        let rest = |image: &[u8]| {
+            u128::from_le_bytes({
+                let mut bytes = [0; 16];
+                bytes[..14].copy_from_slice(&image[base + 0xF0..base + 0xFE]);
+                bytes
+            }) >> 86
+        };
+        let before = rest(&image);
+        set_user_id(&mut image, 0x0123_4567_89AB);
+        assert_eq!(attested_user_id(&image), 0x0123_4567_89AB);
+        assert_eq!(rest(&image), before);
+        for slot in image[base..base + 0x200].chunks(0x100) {
+            assert!(slot_valid(slot));
+            let info = u128::from_le_bytes({
+                let mut bytes = [0; 16];
+                bytes[..14].copy_from_slice(&slot[0xF0..0xFE]);
+                bytes
+            });
+            assert_eq!(info & ((1 << 43) - 1), 0x0123_4567_89AB);
+            assert_eq!((info >> 43) & ((1 << 43) - 1), 0x0123_4567_89AB);
+        }
+        assert_eq!(image[0x3FC00 + 0xF0..0x3FC00 + 0xFE], [0; 14]);
     }
 
     #[test]

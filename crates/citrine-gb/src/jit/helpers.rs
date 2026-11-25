@@ -12,6 +12,13 @@ pub const THUMB: u32 = 2;
 pub const IDLES_SHIFT: u32 = 8;
 pub const RUN_DONE_SHIFT: u32 = 32;
 pub const RUN_LAST_SHIFT: u32 = 48;
+pub const RUN_COUNT_MASK: u32 = 0xFF;
+pub const RUN_FIRST_SHIFT: u32 = 2;
+pub const RUN_FIRST_MASK: u32 = 0x1F;
+pub const RUN_CYCLES_SHIFT: u32 = 16;
+const _: () = assert!(RUN_FIRST_MASK << RUN_FIRST_SHIFT & (SEQUENTIAL | THUMB) == 0);
+const _: () = assert!(RUN_FIRST_MASK << RUN_FIRST_SHIFT < 1 << 7);
+const _: () = assert!(RUN_COUNT_MASK << IDLES_SHIFT < 1 << RUN_CYCLES_SHIFT);
 
 #[derive(Clone, Copy)]
 pub struct Helpers {
@@ -99,6 +106,24 @@ fn fetched<const V5: bool, B: JitBus>(core: &mut Core<V5>, bus: &mut B) {
     }
 }
 
+#[inline(always)]
+fn put<const V5: bool, B: JitBus>(
+    core: &mut Core<V5>,
+    bus: &mut B,
+    addr: u32,
+    width: Width,
+    value: u32,
+    access: Access,
+) {
+    let cycles = bus.jit_write(addr, width, value, access);
+    if V5 {
+        core.data += cycles;
+    } else {
+        core.cycles += cycles;
+    }
+    core.next_fetch = Access::NonSequential;
+}
+
 fn settle<const V5: bool, B: JitBus>(core: &mut Core<V5>, bus: &mut B) -> u32 {
     if !V5 {
         core.cycles = bus.settle(core.cycles);
@@ -151,7 +176,11 @@ unsafe extern "C" fn store<const V5: bool, B: JitBus>(
     let (core, bus) = unsafe { (&mut *core, &mut *bus) };
     core.cycles = 0;
     fetched(core, bus);
-    core.store(bus, addr, width(kind), value, Access::NonSequential);
+    match width(kind) {
+        Width::Word => put(core, bus, addr, Width::Word, value, Access::NonSequential),
+        Width::Half => put(core, bus, addr, Width::Half, value, Access::NonSequential),
+        Width::Byte => put(core, bus, addr, Width::Byte, value, Access::NonSequential),
+    }
     let exit = if bus.take_code_hit() || must_exit(core, bus, addr, true) {
         EXIT
     } else {
@@ -250,7 +279,7 @@ unsafe extern "C" fn store_word<const V5: bool, B: JitBus>(
 ) -> u64 {
     let (core, bus) = unsafe { (&mut *core, &mut *bus) };
     core.cycles = 0;
-    core.store(bus, addr, Width::Word, value, access(sequential));
+    put(core, bus, addr, Width::Word, value, access(sequential));
     let exit = if bus.take_code_hit() || must_exit(core, bus, addr, true) {
         EXIT
     } else {
@@ -333,7 +362,7 @@ unsafe extern "C" fn fetch_run<B: JitBus>(
         (Width::Word, 4)
     };
     let room = budget.saturating_sub(total);
-    if bus.fetch_flat(addr, width, count, room) {
+    if bus.fetch_flat(addr, width, count, count, room) {
         return u64::from(count) | u64::from(count + 1) << RUN_DONE_SHIFT | 1 << RUN_LAST_SHIFT;
     }
     let mut access = access(packed);
@@ -361,12 +390,18 @@ unsafe extern "C" fn fetch_flat<B: JitBus>(bus: *mut B, addr: u32, packed: u32, 
     } else {
         Width::Word
     };
-    let count = packed >> IDLES_SHIFT;
-    if bus.fetch_flat(addr, width, count, room.max(0) as u32) {
-        return u64::from(count) | 1 << 32;
+    let count = (packed >> IDLES_SHIFT & RUN_COUNT_MASK) + 1;
+    let cycles = packed >> RUN_CYCLES_SHIFT;
+    if bus.fetch_flat(addr, width, count, cycles, room.max(0) as u32) {
+        return u64::from(cycles) | 1 << 32;
     }
-    let (cycles, _) = bus.timed_fetch(addr, width, access(packed));
-    u64::from(cycles) | u64::from(cycles) << 32
+    let (fetched, _) = bus.timed_fetch(addr, width, access(packed));
+    let idles = packed >> RUN_FIRST_SHIFT & RUN_FIRST_MASK;
+    for _ in 0..idles {
+        bus.idle();
+    }
+    let spent = fetched + idles;
+    u64::from(spent) | u64::from(spent) << 32
 }
 
 extern "C" fn shift(kind: u32, value: u32, amount: u32, carry: u32) -> u64 {

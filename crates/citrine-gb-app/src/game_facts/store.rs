@@ -1,10 +1,11 @@
 use super::facts::{Facts, Sheet};
 use super::wiki::Page;
 use crate::covers::System;
-use crate::storage::Backend;
+use crate::storage::Folders;
+use crate::storage::kinds::Folder;
 
-const FACTS: &str = "game-facts";
-const PAGES: &str = "game-pages";
+const FACTS: Folder = Folder::GameFacts;
+const PAGES: Folder = Folder::GamePages;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -29,20 +30,22 @@ struct Keep<'a> {
 
 #[derive(Clone)]
 pub struct InfoStore {
-    backend: Backend,
+    backend: Folders,
 }
 
 impl InfoStore {
-    pub(crate) fn on(backend: Backend) -> Self {
+    pub(crate) fn on(backend: Folders) -> Self {
         Self { backend }
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn at(root: std::path::PathBuf) -> Self {
-        Self::on(Backend::at(root))
+        Self::on(Folders::at(root))
     }
 
     pub fn sheet(&self, system: System) -> Option<(u64, Sheet)> {
+        #[cfg(test)]
+        super::facts::count_parse();
         let kept: Kept = serde_json::from_slice(&self.backend.read(FACTS, system.short())?).ok()?;
         Some((kept.fetched, kept.sheet))
     }

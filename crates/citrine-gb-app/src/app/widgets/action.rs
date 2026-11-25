@@ -22,8 +22,10 @@ pub fn add_centered(ui: &mut Ui, button: Button) -> Response {
     }
 }
 
+pub const ICON_SIZE: f32 = 18.0;
+
 pub fn icon_text(icon: impl Into<String>) -> RichText {
-    RichText::new(icon).size(18.0)
+    RichText::new(icon).size(ICON_SIZE)
 }
 
 pub fn icon_button(icon: impl Into<String>, side: f32) -> Button<'static> {

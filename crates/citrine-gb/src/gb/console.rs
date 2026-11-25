@@ -125,7 +125,7 @@ impl Console for GameBoy {
     #[cfg(feature = "persistence")]
     fn state_body(&mut self, now: u64) -> GbResult<StateBody> {
         let sram = self.poll_sram_dump(true, now);
-        let data = crate::persistence::full_dump::FullDumpRef { gb: self, sram }.to_rmp()?;
+        let data = self.full_dump(sram).to_rmp()?;
         Ok(StateBody {
             kind: self.kind(),
             data,

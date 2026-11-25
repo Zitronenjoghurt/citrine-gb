@@ -4,6 +4,7 @@
 )]
 
 mod admin;
+mod archive;
 mod client_ip;
 pub mod config;
 mod connections;
@@ -20,8 +21,11 @@ mod screens;
 mod settings;
 mod stats;
 mod storage;
+mod stun;
+mod tasks;
 mod two_factor;
 
+pub use archive::{AddError, Added};
 pub use config::{Config, ConfigError};
 
 use axum::Router;
@@ -49,6 +53,7 @@ use tower_http::services::ServeDir;
 const EMPTY_ACCOUNT_SECS: u64 = 30 * 86_400;
 const KEEP_BACKUPS: usize = 14;
 const REPORT_BYTES: usize = 64 * 1024;
+const STOP_GRACE: Duration = Duration::from_secs(10);
 
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -68,6 +73,12 @@ pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let year = yoe + era * 400 + i64::from(month <= 2);
     (year, month, day)
+}
+
+fn rand_id() -> [u8; 16] {
+    let mut id = [0; 16];
+    getrandom::getrandom(&mut id).expect("no system random source");
+    id
 }
 
 fn backup_name(now: u64) -> String {
@@ -93,12 +104,15 @@ pub struct App {
     admin_setup: Mutex<Option<Vec<u8>>>,
     files_dir: PathBuf,
     storage: Arc<Storage>,
+    archive: Arc<archive::Archive>,
     connections: Arc<Connections>,
     rates: Rates,
     relay_secret: RelaySecret,
     push: push::Push,
     gts: gts::Gts,
+    stun_port: Option<u16>,
     ds_ports: Arc<ds_net::Ports>,
+    tasks: Arc<tasks::Tasks>,
 }
 
 impl App {
@@ -130,6 +144,8 @@ pub struct Running {
     task: JoinHandle<std::io::Result<()>>,
     purge: JoinHandle<()>,
     sims: JoinHandle<()>,
+    stun: Option<JoinHandle<()>>,
+    pub stun_port: Option<u16>,
 }
 
 async fn delete_empty_accounts(app: &App, now: u64) {
@@ -235,12 +251,60 @@ impl Running {
         self.app.relay_key()
     }
 
+    pub async fn put_archive_cover(
+        &self,
+        id: citrine_gb_net::ArchiveId,
+        png: &[u8],
+    ) -> std::io::Result<()> {
+        self.app.archive.put_cover(id, png).await
+    }
+
+    pub async fn add_to_archive(&self, file_name: &str, data: &[u8]) -> Result<Added, AddError> {
+        let upload = self
+            .app
+            .archive
+            .dir()
+            .join(format!("{}.upload", citrine_gb_net::ArchiveId(rand_id())));
+        tokio::fs::write(&upload, data).await?;
+        let added = self
+            .app
+            .archive
+            .add_file(
+                &self.app.db,
+                &self.app.storage,
+                &upload,
+                file_name,
+                now(),
+                |_| true,
+            )
+            .await;
+        let _ = tokio::fs::remove_file(&upload).await;
+        if matches!(added, Ok(Added { new: true, .. })) {
+            self.app.tell_archive_all().await;
+        }
+        added
+    }
+
     pub async fn stop(self) {
         self.app.hub.close_all(Notice::ShuttingDown);
-        self.purge.abort();
-        self.sims.abort();
         let _ = self.shutdown.send(());
-        let _ = tokio::time::timeout(Duration::from_secs(10), self.task).await;
+        let mut background = vec![self.purge, self.sims];
+        background.extend(self.stun);
+        for task in &background {
+            task.abort();
+        }
+        for task in background {
+            let _ = task.await;
+        }
+        let mut serve = self.task;
+        if tokio::time::timeout(STOP_GRACE, &mut serve).await.is_err() {
+            serve.abort();
+            let _ = serve.await;
+        }
+        self.app.hub.close_all(Notice::ShuttingDown);
+        self.app.tasks.end(STOP_GRACE).await;
+        self.app.push.stop().await;
+        self.app.db.close().await;
     }
 }
 
@@ -287,6 +351,15 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         }
     }
     let db = Arc::new(Db::open(&config.data_dir.join("citrine.db")).await?);
+    let archive = Arc::new(
+        archive::Archive::open(
+            config.archive_key_file.as_deref(),
+            &config.data_dir,
+            &config.limits,
+            config.archive_covers,
+        )
+        .await?,
+    );
     if config.admin_2fa_reset {
         if db.clear_admin_totp().await? {
             log::warn!(
@@ -311,6 +384,11 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
             "CITRINE_GAME_SHARING is on, but the relay passes games on only while new accounts need an invite code. Set CITRINE_INVITES=true, or turn on invite codes in the admin panel's Settings"
         );
     }
+    let stun = stun::bind(config.bind, config.stun_port).await;
+    let stun_port = stun
+        .as_ref()
+        .and_then(|socket| socket.local_addr().ok())
+        .map(|addr| addr.port());
     let app = Arc::new(App {
         admin_hash: config.admin_password.as_deref().map(settings::hash),
         config: config.clone(),
@@ -337,12 +415,14 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         reports: isolation::Reports::default(),
         admin_setup: Mutex::new(None),
         storage: Arc::new(Storage::new(config.data_dir.clone(), &config.limits)),
+        archive,
         connections: Arc::new(Connections::new(&config.limits)),
         rates: Rates::new(&config.limits),
         files_dir,
         relay_secret,
         push: push::Push::start(config.fcm_key_file.as_deref(), &config.fcm_url, db.clone()),
         gts: gts::Gts::default(),
+        stun_port,
         ds_ports: Arc::new(ds_net::Ports::new(
             config.limits.ds_net_account_bytes_per_second,
             config.limits.ds_net_account_packets_per_second,
@@ -352,7 +432,9 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
                 .chain(ds_net::route_ip())
                 .collect(),
         )),
+        tasks: Arc::default(),
     });
+    let stun = stun.map(|socket| stun::serve(socket, app.clone()));
 
     let mut router = Router::new()
         .route("/relay", get(relay::upgrade))
@@ -449,6 +531,8 @@ pub async fn start(config: Config) -> Result<Running, StartError> {
         task,
         purge,
         sims,
+        stun,
+        stun_port,
     })
 }
 

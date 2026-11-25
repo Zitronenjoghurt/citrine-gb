@@ -4,7 +4,7 @@ use super::{
     key_card, primary,
 };
 use crate::app::ui_state::settings::Settings;
-use crate::app::widgets::field::{code_field, row_field};
+use crate::app::widgets::field::{code_field, row_field, row_field_width};
 use crate::app::widgets::problem::problem_line;
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::settings::page::{Heading, Page};
@@ -49,7 +49,7 @@ pub(super) fn address_step(
                     let response = ui.add(
                         row_field(ui, &mut s.online.address)
                             .hint_text("gb.lemon.industries")
-                            .desired_width(ui.available_width()),
+                            .desired_width(row_field_width(ui)),
                     );
                     if response.changed() {
                         form.address_error = None;
@@ -74,7 +74,7 @@ pub(super) fn address_step(
                             } else {
                                 ""
                             })
-                            .desired_width(ui.available_width()),
+                            .desired_width(row_field_width(ui)),
                     );
                     connect |=
                         response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -210,7 +210,7 @@ pub(super) fn account_step(
                             row_field(ui, &mut form.pasted)
                                 .hint_text(RELAY_ID_PLACEHOLDER)
                                 .font(egui::TextStyle::Monospace)
-                                .desired_width(ui.available_width()),
+                                .desired_width(row_field_width(ui)),
                         );
                         if response.changed() {
                             form.paste_error = None;
@@ -224,7 +224,7 @@ pub(super) fn account_step(
                     }
                     if form.code_asked {
                         f.row("Code", |ui| {
-                            let width = ui.available_width();
+                            let width = row_field_width(ui);
                             let focus = phase == Phase::Stopped(Problem::CodeNeeded);
                             go |= code_field(ui, &mut form.code, CODE_HINT, width, focus);
                         });
@@ -305,7 +305,7 @@ pub(super) fn name_step(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, n
                             row_field(ui, &mut form.invite)
                                 .char_limit(24)
                                 .font(egui::TextStyle::Monospace)
-                                .desired_width(ui.available_width()),
+                                .desired_width(row_field_width(ui)),
                         );
                         if response.changed() {
                             form.invite_error = None;
@@ -321,7 +321,7 @@ pub(super) fn name_step(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, n
                     let response = ui.add(
                         row_field(ui, &mut form.name)
                             .char_limit(DISPLAY_NAME_MAX_CHARS)
-                            .desired_width(ui.available_width()),
+                            .desired_width(row_field_width(ui)),
                     );
                     if response.changed() {
                         form.name_error = None;

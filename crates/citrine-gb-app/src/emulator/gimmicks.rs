@@ -1,7 +1,11 @@
+use super::runner::Core;
+use crate::app::ui_state::keybinds::Tilt;
 use citrine_gb::console::Console;
 use citrine_gb::gb::GameBoy;
 use citrine_gb::gb::printer::PrintedImage;
 use citrine_gb::machine::Machine;
+use citrine_gb_replay::Input;
+use strum::IntoEnumIterator;
 
 pub mod camera;
 pub mod clock;
@@ -54,7 +58,7 @@ impl Cart {
             return Self::default();
         }
         Self {
-            clock: gb.has_clock() || clock::has_huc3_clock(gb),
+            clock: gb.has_clock() || gb.has_huc3_clock(),
             clock_back: gb.has_clock(),
             rumble: gb.has_rumble(),
             tilt: gb.has_tilt(),
@@ -65,6 +69,7 @@ impl Cart {
         }
     }
 
+    #[cfg(test)]
     pub fn any(&self) -> bool {
         self.clock || self.rumble || self.motion() || self.light || self.camera || self.printer
     }
@@ -98,12 +103,6 @@ impl Motion {
     }
 }
 
-const TILT_KEYS: [(egui::Key, f32, f32); 4] = [
-    (egui::Key::J, -1.0, 0.0),
-    (egui::Key::L, 1.0, 0.0),
-    (egui::Key::I, 0.0, -1.0),
-    (egui::Key::K, 0.0, 1.0),
-];
 const KEY_TILT_PER_SECOND: f32 = 4.0;
 
 #[derive(Default)]
@@ -122,12 +121,8 @@ pub struct Gimmicks {
 }
 
 impl Gimmicks {
-    pub fn tilt_key(&mut self, key: egui::Key, down: bool) -> bool {
-        let Some(index) = TILT_KEYS.iter().position(|(k, ..)| *k == key) else {
-            return false;
-        };
-        self.keys[index] = down;
-        true
+    pub fn tilt(&mut self, tilt: Tilt, down: bool) {
+        self.keys[tilt as usize] = down;
     }
 
     pub fn stick(&mut self, x: Option<f32>, y: Option<f32>) {
@@ -145,11 +140,10 @@ impl Gimmicks {
 
     pub fn update_motion(&mut self, seconds: f32) {
         let mut target = [0.0f32; 2];
-        for ((_, x, y), down) in TILT_KEYS.iter().zip(self.keys) {
-            if down {
-                target[0] += x;
-                target[1] += y;
-            }
+        for tilt in Tilt::iter().filter(|tilt| self.keys[*tilt as usize]) {
+            let [x, y] = tilt.push();
+            target[0] += x;
+            target[1] += y;
         }
         let step = KEY_TILT_PER_SECOND * seconds.clamp(0.0, 0.25);
         for (tilt, target) in self.key_tilt.iter_mut().zip(target) {
@@ -201,26 +195,26 @@ impl Gimmicks {
         self.clock_offset = 0;
     }
 
-    pub(crate) fn start_clock(&mut self, machine: &mut Machine, offset: i64, now: u64) {
+    pub(crate) fn start_clock(&mut self, core: &mut Core, offset: i64, now: u64) {
         self.clock_offset = offset;
         self.clock_seen = Some(now);
         if let Some(local) = clock::local_unix(now) {
-            clock::set_absolute(machine, local + offset);
+            core.feed(Input::SetClock(local + offset));
         }
     }
 
-    pub(crate) fn set_clock_offset(&mut self, machine: &mut Machine, offset: i64, now: u64) {
+    pub(crate) fn set_clock_offset(&mut self, core: &mut Core, offset: i64, now: u64) {
         let delta = offset - self.clock_offset;
         self.clock_offset = offset;
         if delta == 0 {
             return;
         }
-        if clock::is_absolute(machine) {
+        if core.machine.has_absolute_clock() {
             if let Some(local) = clock::local_unix(now) {
-                clock::set_absolute(machine, local + offset);
+                core.feed(Input::SetClock(local + offset));
             }
         } else {
-            clock::shift(machine, delta, now);
+            core.feed(Input::ShiftClock(delta, now));
         }
     }
 
@@ -229,7 +223,7 @@ impl Gimmicks {
         self.clock_offset = offset;
     }
 
-    pub(crate) fn follow_clock(&mut self, machine: &mut Machine, now: u64) {
+    pub(crate) fn follow_clock(&mut self, core: &mut Core, now: u64) {
         let Some(seen) = self.clock_seen.replace(now) else {
             return;
         };
@@ -237,39 +231,21 @@ impl Gimmicks {
         if gap < CATCH_UP_AFTER {
             return;
         }
-        if clock::is_absolute(machine) {
+        if core.machine.has_absolute_clock() {
             if let Some(local) = clock::local_unix(now) {
-                clock::set_absolute(machine, local + self.clock_offset);
+                core.feed(Input::SetClock(local + self.clock_offset));
             }
         } else {
-            clock::shift(machine, gap as i64, now);
+            core.feed(Input::ShiftClock(gap as i64, now));
         }
     }
 
-    pub(crate) fn feed(&self, machine: &mut Machine) {
+    pub(crate) fn feed(&self, core: &mut Core) {
         let motion = self.motion.clamped();
-        match machine {
-            Machine::Gb(gb) => {
-                if gb.has_tilt() {
-                    gb.set_tilt(motion.x, motion.y);
-                }
-                if gb.has_camera()
-                    && let Some(frame) = &self.camera
-                {
-                    gb.set_camera_frame(frame);
-                }
-            }
-            #[cfg(feature = "gba")]
-            Machine::Gba(gba) => {
-                gba.set_tilt(motion.x, motion.y);
-                gba.set_turn(motion.turn);
-                gba.set_sunlight(self.light);
-            }
-            #[cfg(feature = "nds")]
-            Machine::Nds(_) => {}
-            #[cfg(not(feature = "nds"))]
-            #[allow(unreachable_patterns)]
-            _ => {}
+        core.feed(Input::Motion(motion.x, motion.y, motion.turn));
+        core.feed(Input::Sun(self.light));
+        if let Some(frame) = &self.camera {
+            core.feed(Input::Camera(frame.clone()));
         }
     }
 
@@ -342,11 +318,8 @@ impl super::Emulator {
             return;
         };
         let offset = self.clock_offset(&key);
-        self.gimmicks.set_clock_offset(
-            &mut self.seat.core_mut().machine,
-            offset,
-            crate::storage::now_unix(),
-        );
+        self.gimmicks
+            .set_clock_offset(self.seat.core_mut(), offset, crate::storage::now_unix());
         self.attach_printer();
     }
 
@@ -364,10 +337,10 @@ impl super::Emulator {
             return;
         }
         self.ds_clock = offset;
-        let machine = &mut self.seat.core_mut().machine;
-        if matches!(machine, Machine::Nds(_)) && self.rom_key.is_some() {
+        let core = self.seat.core_mut();
+        if matches!(core.machine, Machine::Nds(_)) && self.rom_key.is_some() {
             self.gimmicks
-                .set_clock_offset(machine, offset, crate::storage::now_unix());
+                .set_clock_offset(core, offset, crate::storage::now_unix());
         }
     }
 
@@ -409,11 +382,8 @@ impl super::Emulator {
             return;
         };
         let offset = self.clock_offset(&key);
-        self.gimmicks.start_clock(
-            &mut self.seat.core_mut().machine,
-            offset,
-            crate::storage::now_unix(),
-        );
+        self.gimmicks
+            .start_clock(self.seat.core_mut(), offset, crate::storage::now_unix());
         self.attach_printer();
     }
 
@@ -451,7 +421,7 @@ pub(crate) mod tests {
     pub(super) const NOW: u64 = 1_761_400_000;
 
     pub(super) fn emulator(name: &str) -> Emulator {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::storage::scratch_dir().join(format!(
             "citrine-gimmick-test-{}-{name}",
             std::process::id()
         ));
@@ -544,14 +514,14 @@ pub(crate) mod tests {
         let before = rtc_seconds(&emulator);
         emulator
             .gimmicks
-            .follow_clock(&mut emulator.seat.core_mut().machine, NOW);
+            .follow_clock(emulator.seat.core_mut(), NOW);
         emulator
             .gimmicks
-            .follow_clock(&mut emulator.seat.core_mut().machine, NOW + 1);
+            .follow_clock(emulator.seat.core_mut(), NOW + 1);
         assert_eq!(rtc_seconds(&emulator), before);
         emulator
             .gimmicks
-            .follow_clock(&mut emulator.seat.core_mut().machine, NOW + 601);
+            .follow_clock(emulator.seat.core_mut(), NOW + 601);
         assert_eq!(rtc_seconds(&emulator), before + 600);
     }
 
@@ -581,9 +551,7 @@ pub(crate) mod tests {
         emulator.gimmicks.set_camera_frame(vec![1; 3]);
         assert!(emulator.gimmicks.camera_frame().is_none());
         emulator.gimmicks.set_camera_frame(vec![200; CAMERA_PIXELS]);
-        emulator
-            .gimmicks
-            .feed(&mut emulator.seat.core_mut().machine);
+        emulator.gimmicks.feed(emulator.seat.core_mut());
         assert_eq!(
             emulator.gimmicks.camera_frame().map(<[u8]>::len),
             Some(CAMERA_PIXELS)
@@ -719,9 +687,7 @@ pub(crate) mod tests {
                 y: -0.5,
                 turn: 0.3,
             };
-            emulator
-                .gimmicks
-                .feed(&mut emulator.seat.core_mut().machine);
+            emulator.gimmicks.feed(emulator.seat.core_mut());
             {
                 let core = emulator.seat.core_mut();
                 core.catch.collect(&mut core.machine);
@@ -809,8 +775,8 @@ pub(crate) mod tests {
         fn an_own_time_runs_on_after_a_pause() {
             let mut emulator = ds_emulator("pause", -YEAR);
             let now = crate::storage::now_unix();
-            let machine = &mut emulator.seat.core_mut().machine;
-            emulator.gimmicks.follow_clock(machine, now + 600);
+            let core = emulator.seat.core_mut();
+            emulator.gimmicks.follow_clock(core, now + 600);
             let expected = clock::local_unix(now + 600).unwrap() - YEAR;
             assert!(near(ds_clock(&mut emulator), expected));
         }
@@ -827,8 +793,8 @@ pub(crate) mod tests {
             assert!(near(offset, set - device_time()));
             assert_eq!(emulator.take_ds_clock_set(), None);
             let now = crate::storage::now_unix();
-            let machine = &mut emulator.seat.core_mut().machine;
-            emulator.gimmicks.follow_clock(machine, now + 600);
+            let core = emulator.seat.core_mut();
+            emulator.gimmicks.follow_clock(core, now + 600);
             assert!(near(ds_clock(&mut emulator), set + 600));
         }
 

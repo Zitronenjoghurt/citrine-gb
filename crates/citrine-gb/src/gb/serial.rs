@@ -13,6 +13,7 @@ const BYTE_DOTS: u32 = 8 * 512;
 const FAST_BYTE_DOTS: u32 = 8 * 16;
 const FRAME_DOTS: u64 = 70224;
 const PENDING_LIMIT: usize = 16;
+const HELD_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -458,6 +459,9 @@ impl Serial {
                 seq,
                 since,
             } => {
+                if self.link.held.len() == HELD_LIMIT {
+                    self.link.held.pop_front();
+                }
                 self.link.held.push_back(HeldTransfer {
                     id,
                     byte,
@@ -633,6 +637,9 @@ impl Serial {
             }) {
                 Some(First::Ours) => return,
                 Some(First::Theirs) => {
+                    if self.link.late.len() == HELD_LIMIT {
+                        self.link.late.pop_front();
+                    }
                     self.link.late.push_back(LateByte {
                         byte: held.byte,
                         cycles_left: HOLD_CYCLES,
@@ -1079,6 +1086,16 @@ mod tests {
         assert_eq!(read(&mut gb, 0xFF01), 0x3C);
         assert_eq!(read(&mut gb, 0xFF02), 0x7F);
         assert_eq!(read(&mut gb, 0xFF0F) & 0x08, 0x08);
+    }
+
+    #[test]
+    fn a_flood_of_peer_transfers_stays_bounded() {
+        let mut gb = plugged(GbModel::Dmg, 0x00, &[]);
+        for id in 0..50_000u16 {
+            gb.receive_link_message(transfer(id, 0x42));
+        }
+        assert!(gb.serial.link.held.len() <= super::HELD_LIMIT);
+        assert_eq!(gb.serial.link.held.back().map(|held| held.id), Some(49_999));
     }
 
     #[test]

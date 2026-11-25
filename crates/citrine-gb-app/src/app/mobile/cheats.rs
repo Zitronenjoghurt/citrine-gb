@@ -49,6 +49,16 @@ pub(crate) fn body(
     });
 }
 
+pub(crate) fn hardcore_note(ui: &mut Ui, text: &str) -> bool {
+    ui.add_space(16.0);
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new(text).size(NAME_SIZE).weak());
+        ui.add_space(12.0);
+        kit::pill(ui, crate::app::hardcore::TURN_OFF, false).clicked()
+    })
+    .inner
+}
+
 fn line(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
     ui.allocate_ui_with_layout(
         vec2(ui.available_width(), kit::ROW_HEIGHT),
@@ -211,7 +221,8 @@ fn code_box(ui: &mut Ui, code: &mut String, hint: &str) -> egui::Response {
             state.corner_radius = CornerRadius::same(10);
         }
         let width = ui.available_width();
-        ui.add(
+        crate::app::widgets::field::framed(
+            ui,
             TextEdit::multiline(code)
                 .hint_text(hint)
                 .font(FontId::monospace(15.0))
@@ -219,6 +230,7 @@ fn code_box(ui: &mut Ui, code: &mut String, hint: &str) -> egui::Response {
                 .desired_rows(3)
                 .desired_width(width),
         )
+        .response
     })
     .inner
 }

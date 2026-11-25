@@ -1,19 +1,16 @@
 use crate::app::events::AppEventQueue;
 use crate::app::ui_state::settings::Settings;
 use crate::app::widgets::camera_view;
-use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::reset_slider::ResetSlider;
 use crate::app::widgets::reset_slider::reset_width;
 use crate::app::widgets::settings::form::Form;
-use crate::app::widgets::settings::page::{Heading, Page};
 use crate::app::widgets::tilt::TiltIndicator;
 use crate::emulator::gimmicks::camera::{CameraView, Feed};
 use crate::emulator::gimmicks::clock::hours_label;
 use crate::emulator::gimmicks::settings::{
-    CLOCK_FORWARD_HINT, CLOCK_HINT, DEFAULT_LIGHT, MAX_CLOCK_OFFSET, PRINTER_HINT, PRINTER_LINKED,
-    RECENTER,
+    CLOCK_FORWARD_HINT, CLOCK_HINT, MAX_CLOCK_OFFSET, PRINTER_HINT, PRINTER_LINKED, RECENTER,
 };
-use crate::emulator::gimmicks::{CameraSource, Cart, LightSource, Motion};
+use crate::emulator::gimmicks::{Cart, Motion};
 use egui::{Align, Layout, Ui, Widget, vec2};
 
 const HOUR: i64 = 3600;
@@ -25,76 +22,45 @@ pub struct CartridgeState<'a> {
     pub cart: Cart,
     pub motion: Motion,
     pub printer_free: bool,
-    pub camera_error: Option<&'a str>,
-    pub camera_feed: Option<(&'a Feed, u64)>,
-    pub light_sensor: bool,
-    pub live_camera: bool,
     pub touch: bool,
 }
 
-pub fn show(
-    page: &mut Page,
-    s: &mut Settings,
-    state: CartridgeState,
+pub(crate) fn motion_row(
+    form: &mut Form,
+    state: &CartridgeState,
     events: &mut Option<&mut AppEventQueue>,
 ) {
-    let cart = state.cart;
-    page.section(
-        Heading::new(crate::icons::GAME_CONTROLLER, "Cartridge"),
-        |ui| {
-            Form::show(ui, "general", |form| {
-                if cart.clock {
-                    clock_row(form, s, &state);
-                }
-                if cart.rumble {
-                    form.row("Rumble", |ui| {
-                        s.dirty |=
-                            crate::app::widgets::check::checkbox(ui, &mut s.gimmicks.rumble, "")
-                                .changed();
-                    });
-                }
-                if cart.motion() {
-                    let label = if cart.tilt { "Tilt" } else { "Rotate" };
-                    let row = |ui: &mut Ui| {
-                        ui.horizontal(|ui| {
-                            let side = ui.spacing().interact_size.y;
-                            let level = (state.touch
-                                && TiltIndicator::new(state.motion).side(side).ui(ui).clicked())
-                                | ui.button(RECENTER).clicked();
-                            if level && let Some(events) = events.as_deref_mut() {
-                                events.centre_tilt();
-                            }
-                        });
-                    };
-                    if state.touch {
-                        form.row(label, row);
-                    } else {
-                        form.row_with_hint(label, TILT_HINT, row);
-                    }
-                }
-                if cart.light {
-                    light_rows(form, s, state.light_sensor);
-                }
-                if cart.camera {
-                    camera_rows(form, s, &state, events.as_deref_mut());
-                }
-                if cart.printer {
-                    let mut on = s.gimmicks.printer(state.rom_key);
-                    if form.toggle_when("Printer", Some(PRINTER_HINT), state.printer_free, &mut on)
-                    {
-                        s.gimmicks.set_printer(state.rom_key, on);
-                        s.dirty = true;
-                    }
-                    if !state.printer_free {
-                        form.hint(PRINTER_LINKED);
-                    }
-                }
-            });
-        },
-    );
+    let label = if state.cart.tilt { "Tilt" } else { "Rotate" };
+    let row = |ui: &mut Ui| {
+        ui.horizontal(|ui| {
+            let side = ui.spacing().interact_size.y;
+            let level = (state.touch
+                && TiltIndicator::new(state.motion).side(side).ui(ui).clicked())
+                | ui.button(RECENTER).clicked();
+            if level && let Some(events) = events.as_deref_mut() {
+                events.centre_tilt();
+            }
+        });
+    };
+    if state.touch {
+        form.row(label, row);
+    } else {
+        form.row_with_hint(label, TILT_HINT, row);
+    }
 }
 
-fn clock_row(form: &mut Form, s: &mut Settings, state: &CartridgeState) {
+pub(crate) fn printer_row(form: &mut Form, s: &mut Settings, state: &CartridgeState, label: &str) {
+    let mut on = s.gimmicks.printer(state.rom_key);
+    if form.toggle_when(label, Some(PRINTER_HINT), state.printer_free, &mut on) {
+        s.gimmicks.set_printer(state.rom_key, on);
+        s.dirty = true;
+    }
+    if !state.printer_free {
+        form.hint(PRINTER_LINKED);
+    }
+}
+
+pub(crate) fn clock_row(form: &mut Form, s: &mut Settings, state: &CartridgeState, label: &str) {
     let saved = s.gimmicks.clock_offset(state.rom_key) / HOUR;
     let most = MAX_CLOCK_OFFSET / HOUR;
     let (least, default) = if state.cart.clock_back {
@@ -107,7 +73,7 @@ fn clock_row(form: &mut Form, s: &mut Settings, state: &CartridgeState) {
     } else {
         CLOCK_FORWARD_HINT
     };
-    form.row_with_hint("Clock", hint, |ui| {
+    form.row_with_hint(label, hint, |ui| {
         let mut hours = saved;
         let response = ResetSlider::new(&mut hours, least..=most)
             .default_value(default)
@@ -122,77 +88,7 @@ fn clock_row(form: &mut Form, s: &mut Settings, state: &CartridgeState) {
     });
 }
 
-fn light_rows(form: &mut Form, s: &mut Settings, light_sensor: bool) {
-    if light_sensor {
-        form.row("Light sensor", |ui| {
-            let mut sensor = s.gimmicks.light_source == LightSource::Sensor;
-            if crate::app::widgets::check::checkbox(ui, &mut sensor, "").changed() {
-                s.gimmicks.light_source = if sensor {
-                    LightSource::Sensor
-                } else {
-                    LightSource::Slider
-                };
-                s.dirty = true;
-            }
-        });
-    }
-    if light_sensor && s.gimmicks.light_source == LightSource::Sensor {
-        return;
-    }
-    form.row("Sunlight", |ui| {
-        let mut percent = (s.gimmicks.light * 100.0).round() as u32;
-        let response = ResetSlider::new(&mut percent, 0..=100)
-            .default_value((DEFAULT_LIGHT * 100.0) as u32)
-            .suffix(" %")
-            .ui(ui);
-        if response.changed() {
-            s.gimmicks.light = percent as f32 / 100.0;
-        }
-        if response.drag_stopped() || (response.changed() && !response.dragged()) {
-            s.dirty = true;
-        }
-    });
-}
-
-fn camera_rows(
-    form: &mut Form,
-    s: &mut Settings,
-    state: &CartridgeState,
-    mut events: Option<&mut AppEventQueue>,
-) {
-    let choose = |ui: &mut Ui| {
-        if ui.button("Choose picture").clicked()
-            && let Some(events) = events.as_deref_mut()
-        {
-            events.pick_camera_picture();
-        }
-    };
-    if !state.live_camera {
-        form.row("Camera", choose);
-        return;
-    }
-    let live = s.gimmicks.camera == CameraSource::Camera && state.camera_error.is_none();
-    let select = |ui: &mut Ui| {
-        s.dirty |= GenericSelect::from_enum(&mut s.gimmicks.camera, "enum_select_camera_source")
-            .default_value(CameraSource::default())
-            .ui(ui)
-            .changed();
-    };
-    if live {
-        form.row_with_hint("Camera", camera_view::DESKTOP_HINT, select);
-    } else {
-        form.row("Camera", select);
-    }
-    if s.gimmicks.camera == CameraSource::Picture {
-        form.under(choose);
-    } else if let Some(error) = state.camera_error {
-        form.hint(error);
-    } else {
-        form.full(|ui| camera_frame(ui, s, state.camera_feed));
-    }
-}
-
-fn camera_frame(ui: &mut Ui, s: &mut Settings, feed: Option<(&Feed, u64)>) {
+pub(crate) fn camera_frame(ui: &mut Ui, s: &mut Settings, feed: Option<(&Feed, u64)>) {
     s.dirty |= camera_view::show(ui, feed, &mut s.gimmicks.camera_view);
     if feed.is_none() {
         return;

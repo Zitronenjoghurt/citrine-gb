@@ -7,10 +7,7 @@ pub(crate) struct MachineMemory<'a>(&'a Machine);
 
 impl Memory for MachineMemory<'_> {
     fn read(&mut self, address: u32, buffer: &mut [u8]) -> usize {
-        match self.0.as_gb() {
-            Some(gb) => gb.achievement_read(address, buffer),
-            None => 0,
-        }
+        self.0.achievement_read(address, buffer)
     }
 }
 
@@ -31,6 +28,10 @@ impl AchievementSeat<'_> {
         (&mut *self.client, MachineMemory(self.machine))
     }
 
+    pub(crate) fn console(&self) -> Option<Console> {
+        console_of(self.machine)
+    }
+
     pub(crate) fn load_running_game(&mut self) {
         let Some(console) = console_of(self.machine) else {
             self.client.unload_game();
@@ -43,11 +44,15 @@ impl AchievementSeat<'_> {
 }
 
 fn console_of(machine: &Machine) -> Option<Console> {
+    match machine.kind() {
+        ConsoleKind::Gba => return Some(Console::GameBoyAdvance),
+        ConsoleKind::Nds => return Some(Console::NintendoDs),
+        _ => {}
+    }
     let gb = machine.as_gb().filter(|gb| gb.cartridge.has_rom_loaded)?;
     match machine.kind() {
         ConsoleKind::Gbc if gb.cartridge.header.cgb_mode.is_cgb() => Some(Console::GameBoyColor),
-        ConsoleKind::Gb | ConsoleKind::Gbc => Some(Console::GameBoy),
-        _ => None,
+        _ => Some(Console::GameBoy),
     }
 }
 

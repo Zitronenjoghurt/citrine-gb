@@ -2,7 +2,7 @@ use citrine_gb::console::ConsoleKind;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::rom::Rom;
 use citrine_gb_app::online::cloud::{AccountCopy, Choice, LocalSave, SaveStore, SyncState};
-use citrine_gb_app::online::{Online, OnlineSettings, Phase, ServerAddress, Trust};
+use citrine_gb_app::online::{KeepSaves, Online, OnlineSettings, Phase, ServerAddress, Trust};
 use citrine_gb_net::{RelayId, SavePayload};
 use citrine_gb_server::{Config, Running, start};
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ use web_time::Instant;
 const PASSWORD: &str = "lemon tree";
 const ROM: &str = "5a17c0de5a17c0de5a17c0de5a17c0de5a17c0de5a17c0de5a17c0de5a17c0de";
 const TITLE: &str = "Test Game";
+const OTHER_ROM: &str = "0be1de0b0be1de0b0be1de0b0be1de0b0be1de0b0be1de0b0be1de0b0be1de0b";
 const MARKER: &[u8] = b"PLAIN-SAVE-MARKER-1234567890";
 
 struct Relay {
@@ -29,6 +30,7 @@ impl Relay {
             ("CITRINE_BIND", "127.0.0.1".into()),
             ("CITRINE_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_MB", "0".into()),
+            ("CITRINE_STUN_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
             (
                 "CITRINE_DATA_DIR",
@@ -254,6 +256,13 @@ fn a_save_made_on_one_device_arrives_on_the_other() {
         .store_snapshot(ROM, 0, &noise(30_000, 1), &frame(), ConsoleKind::Gbc)
         .unwrap();
     a.store.set_snapshot_name(ROM, 0, "Boss door").unwrap();
+    a.store
+        .store_snapshot(ROM, 1, &noise(30_000, 3), &frame(), ConsoleKind::Gbc)
+        .unwrap();
+    a.store
+        .set_snapshot_name(ROM, 1, "Mika's autosave")
+        .unwrap();
+    a.store.file_as_autosave(ROM, 1).unwrap();
     let auto = a
         .store
         .store_autosave(ROM, &noise(30_000, 2), &frame(), ConsoleKind::Gbc, 5)
@@ -262,6 +271,7 @@ fn a_save_made_on_one_device_arrives_on_the_other() {
     a.synced(&[
         LocalSave::Battery,
         LocalSave::Snapshot(0),
+        LocalSave::Snapshot(1),
         LocalSave::Autosave(auto),
     ]);
     a.go_offline();
@@ -270,30 +280,45 @@ fn a_save_made_on_one_device_arrives_on_the_other() {
     b.sign_in(&settings);
     b.online.cloud_game(Some((ROM.into(), TITLE.into())));
     b.online.cloud_hold(ROM);
-    b.until("all three saves on the second device", |d| {
+    b.until("all four saves on the second device", |d| {
         d.battery().is_some()
             && d.store.snapshot_name(ROM, 0).is_some()
+            && d.store.snapshot_name(ROM, 1).is_some()
             && !d.store.autosave_ids(ROM).is_empty()
     });
     assert_eq!(b.battery().unwrap(), battery_bytes(1));
     assert_eq!(b.store.load_snapshot(ROM, 0).unwrap(), noise(30_000, 1));
     assert_eq!(b.store.snapshot_name(ROM, 0).as_deref(), Some("Boss door"));
+    assert!(!b.store.is_filed_autosave(ROM, 0));
+    assert!(b.store.is_filed_autosave(ROM, 1));
+    assert_eq!(
+        b.store.snapshot_name(ROM, 1).as_deref(),
+        Some("Mika's autosave")
+    );
     let id = b.store.autosave_ids(ROM)[0];
     assert_eq!(b.store.load_autosave(ROM, id).unwrap(), noise(30_000, 2));
     b.synced(&[
         LocalSave::Battery,
         LocalSave::Snapshot(0),
+        LocalSave::Snapshot(1),
         LocalSave::Autosave(id),
     ]);
 
     let games = b.online.cloud_games();
     assert_eq!(games.len(), 1);
     assert_eq!(games[0].title, TITLE);
-    assert_eq!(games[0].saves, 3);
+    assert_eq!(games[0].saves, 4);
 
     let keys = relay_id(&settings).keys();
     let stored = relay.stored_files();
-    assert_eq!(stored.len(), 3);
+    let game_saves = stored
+        .iter()
+        .filter(|bytes| {
+            keys.open_save(bytes)
+                .is_ok_and(|p| p.file("data").is_none())
+        })
+        .count();
+    assert_eq!(game_saves, 4);
     for bytes in &stored {
         assert!(!bytes.windows(MARKER.len()).any(|w| w == MARKER));
         assert!(!bytes.windows(9).any(|w| w == b"Boss door"));
@@ -662,6 +687,105 @@ fn a_save_for_another_console_stays_in_the_cloud() {
     assert_eq!(b.battery(), None);
     assert!(!b.online.cloud_take_reload());
     assert_eq!(b.online.cloud_games()[0].saves, 1);
+}
+
+fn upload_with_its_games_list(a: &mut Device) -> String {
+    a.store.store_battery(ROM, &battery_bytes(1)).unwrap();
+    a.online.cloud_game(Some((ROM.into(), TITLE.into())));
+    a.synced(&[LocalSave::Battery]);
+    a.until("the games list to upload", |d| {
+        d.online.account_state("games") == Some(SyncState::Synced)
+    });
+    let name = a.online.device_name();
+    a.go_offline();
+    name
+}
+
+fn settle(device: &mut Device) {
+    device.until("this device's games list to upload", |d| {
+        d.online.account_state("games") == Some(SyncState::Synced)
+    });
+    let limit = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < limit {
+        device.online.update(Instant::now());
+        device.online.cloud_flush();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn another_games_save_stays_in_the_cloud_until_asked_for() {
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    let a_name = upload_with_its_games_list(&mut a);
+
+    let mut b = Device::new(&settings);
+    b.store.store_battery(OTHER_ROM, &battery_bytes(2)).unwrap();
+    b.sign_in(&settings);
+    b.until("a's game listed as elsewhere", |d| {
+        d.online
+            .cloud_elsewhere()
+            .iter()
+            .any(|e| e.rom.as_deref() == Some(ROM))
+    });
+    b.until("b's own save to upload", |d| {
+        d.online.cloud_state(OTHER_ROM, &LocalSave::Battery) == Some(SyncState::Synced)
+    });
+    settle(&mut b);
+    assert_eq!(b.battery(), None);
+    let elsewhere = b.online.cloud_elsewhere();
+    assert_eq!(elsewhere.len(), 1);
+    let game = &elsewhere[0];
+    assert_eq!(game.title, TITLE);
+    assert_eq!(game.devices, vec![a_name]);
+    assert_eq!(game.saves, 1);
+    assert!(game.bytes > 0);
+    assert_eq!(game.fetched, None);
+
+    assert!(b.online.cloud_fetch_game(game.game));
+    b.until("the asked-for save", |d| d.battery().is_some());
+    assert_eq!(b.battery().unwrap(), battery_bytes(1));
+    b.synced(&[LocalSave::Battery]);
+    assert!(b.online.cloud_elsewhere().is_empty());
+}
+
+#[test]
+fn all_games_brings_a_game_this_device_never_had() {
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    upload_with_its_games_list(&mut a);
+
+    let mut b = Device::new(&settings);
+    b.online.cloud_keep(KeepSaves::All, Vec::new());
+    b.sign_in(&settings);
+    b.until("a's save on b", |d| d.battery().is_some());
+    assert_eq!(b.battery().unwrap(), battery_bytes(1));
+    b.synced(&[LocalSave::Battery]);
+    assert!(b.online.cloud_elsewhere().is_empty());
+}
+
+#[test]
+fn a_library_game_gets_its_saves_before_it_is_opened() {
+    let relay = Relay::start(50);
+    let (mut a, settings) = first_account(&relay);
+    upload_with_its_games_list(&mut a);
+
+    let mut b = Device::new(&settings);
+    b.online
+        .cloud_keep(KeepSaves::Library, [ROM.to_string(), "not a rom".into()]);
+    b.sign_in(&settings);
+    b.until("a's save on b", |d| d.battery().is_some());
+    assert_eq!(b.battery().unwrap(), battery_bytes(1));
+
+    let mut c = Device::new(&settings);
+    c.sign_in(&settings);
+    c.until("a's game listed as elsewhere", |d| {
+        !d.online.cloud_elsewhere().is_empty()
+    });
+    c.online.cloud_keep(KeepSaves::Library, [ROM.to_string()]);
+    c.until("a's save on c once it is in the library", |d| {
+        d.battery().is_some()
+    });
 }
 
 #[cfg(feature = "gba")]

@@ -1,8 +1,10 @@
+mod archive;
 mod dashboard;
 mod invites;
 mod page;
 mod settings_page;
 mod two_factor;
+mod upload;
 mod users;
 
 use dashboard::{dashboard, kill, relay, sign_ups, stats};
@@ -61,6 +63,12 @@ pub fn router() -> Router<Arc<App>> {
         .route("/blocks/unblock", post(unblock))
         .route("/invites", get(invites::list).post(invites::create))
         .route("/invites/{id}/revoke", post(invites::revoke))
+        .route("/archive", get(archive::page))
+        .route("/archive/upload", post(upload::upload))
+        .route("/archive/{id}/delete", post(archive::delete))
+        .route("/archive/{id}/cover", get(archive::cover))
+        .route("/archive/access", post(archive::grant))
+        .route("/archive/access/{account}/remove", post(archive::revoke))
         .route("/settings", get(settings_page).post(settings_save))
         .route("/settings/reset", post(settings_reset))
         .route("/password", post(password))
@@ -135,7 +143,10 @@ fn flash(done: &Done) -> Option<Flash> {
         "too-many" => (false, "Too many tries. Wait a minute and try again."),
         _ => return None,
     };
-    Some(Flash { ok, text })
+    Some(Flash {
+        ok,
+        text: text.into(),
+    })
 }
 
 pub(crate) async fn icon_png() -> impl IntoResponse {

@@ -1,0 +1,7 @@
+gba.rs, gba/gameshark.rs, gba/parv3.rs and gba/codebreaker.rs in this folder, the cheat operations in ops.rs and the Game Genie decoder in gb.rs follow mGBA's cheat code (src/gba/cheats.c, src/gba/cheats/gameshark.c, parv3.c and codebreaker.c, src/core/cheats.c, src/gb/cheats.c and their headers and tests).
+
+Copyright (c) 2013-2017 Jeffrey Pfau
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at http://mozilla.org/MPL/2.0/.

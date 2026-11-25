@@ -26,7 +26,7 @@ impl Citrine {
                 rom_key: self.emulator.rom_key().map(str::to_owned),
                 was_running: self.emulator.running,
             });
-            self.emulator.running = false;
+            self.emulator.try_pause();
             self.emulator.release_all();
         }
     }
@@ -39,7 +39,7 @@ impl Citrine {
             self.pending_console = None;
             return;
         }
-        let choice = widgets::confirm::confirm(
+        let choice = widgets::confirm::confirm_losing_progress(
             ctx,
             "console_confirm",
             &format!("Restart the game on {}?", console_name(pending.model)),

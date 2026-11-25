@@ -26,12 +26,21 @@ pub struct Browse {
     pub bar_hidden: bool,
 }
 
+pub struct Rendering {
+    pub id: MediaId,
+    pub progress: crate::progress::Progress,
+}
+
 #[derive(Default)]
 pub struct MediaTabState {
     textures: HashMap<MediaId, TextureHandle>,
     pub browse: Browse,
     pub confirm_delete: Option<MediaId>,
     pub send: Option<MediaId>,
+    pub render: Option<MediaId>,
+    pub stop_render: Option<MediaId>,
+    pub play: Option<MediaId>,
+    pub rendering: Option<Rendering>,
     highlight: Option<(MediaId, Option<f64>)>,
     #[cfg(not(target_arch = "wasm32"))]
     refreshed_at: Option<web_time::Instant>,
@@ -105,7 +114,8 @@ fn color_image(frame: &Frame) -> ColorImage {
 }
 
 pub fn matches(item: &MediaItem, kind: Option<MediaKind>, game: Option<&str>) -> bool {
-    kind.is_none_or(|kind| item.info.kind == kind) && game.is_none_or(|game| item.info.game == game)
+    kind.is_none_or(|kind| item.info.kind.shelf() == kind)
+        && game.is_none_or(|game| item.info.game == game)
 }
 
 pub fn games(items: &[MediaItem]) -> Vec<String> {
@@ -146,37 +156,65 @@ fn kind_icon(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Screenshot => icons::CAMERA,
         MediaKind::Print => icons::PRINTER,
-        MediaKind::Recording => icons::VIDEO_CAMERA,
+        MediaKind::Recording | MediaKind::Replay => icons::VIDEO_CAMERA,
     }
 }
 
-pub fn empty_line(
-    mobile: bool,
-    screenshot_key: Option<String>,
-    record_key: Option<String>,
-) -> String {
-    if mobile {
-        return format!(
-            "While playing, tap {} More, then {} Screenshot or {} Record video.",
-            icons::DOTS_THREE_VERTICAL,
-            icons::CAMERA,
-            icons::RECORD
-        );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Controls {
+    Keys,
+    Touch,
+    Pad,
+}
+
+pub fn empty_line(controls: Controls, keys: [Option<String>; 3]) -> String {
+    match controls {
+        Controls::Pad => {
+            return format!(
+                "While playing, press Home, then choose {} Screenshot, {} Record or {} Save a clip.",
+                icons::CAMERA,
+                icons::RECORD,
+                icons::SCISSORS
+            );
+        }
+        Controls::Touch => {
+            return format!(
+                "While playing, tap {} More, then {} Screenshot, {} Record or {} Save a clip.",
+                icons::DOTS_THREE_VERTICAL,
+                icons::CAMERA,
+                icons::RECORD,
+                icons::SCISSORS
+            );
+        }
+        Controls::Keys => {}
     }
+    let [screenshot, record, clip] = keys;
     let press = |key: Option<String>, icon: &str| match key {
         Some(key) => format!("{key} or {icon}"),
         None => icon.to_string(),
     };
     format!(
-        "Press {} for a screenshot, {} to record.",
-        press(screenshot_key, icons::CAMERA),
-        press(record_key, icons::RECORD)
+        "Press {} for a screenshot, {} to record, {} to save the last seconds as a clip.",
+        press(screenshot, icons::CAMERA),
+        press(record, icons::RECORD),
+        press(clip, icons::SCISSORS)
     )
 }
+
+pub const EXPORT_FRAME_TIMES: &str = "Export performance data";
+pub const EXPORT_VIDEO: &str = "Export video";
+pub const RENDER_VIDEO: &str = "Render video";
+pub const PLAY: &str = "Play";
+pub const RENDERING: &str = "Rendering video";
 
 enum Action {
     Pass(MediaId, crate::media::clipboard::Way),
     Export(MediaId),
+    ExportFrameTimes(MediaId),
+    ExportVideo(MediaId),
+    Render(MediaId),
+    StopRender(MediaId),
+    Play(MediaId),
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     Reveal(MediaId),
     AskDelete(MediaId),
@@ -194,11 +232,20 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
 
     if items.is_empty() {
         let key = |action| viewer.ui.settings.hotkeys.key_name(action);
-        let mobile = viewer.ui.settings.layout.is_touch(ui.ctx());
+        let controls = if viewer.ui.settings.big_screen.on || crate::platform::is_tv() {
+            Controls::Pad
+        } else if viewer.ui.settings.layout.is_touch(ui.ctx()) {
+            Controls::Touch
+        } else {
+            Controls::Keys
+        };
         ui.label(empty_line(
-            mobile,
-            key(HotkeyAction::Screenshot),
-            key(HotkeyAction::ToggleRecording),
+            controls,
+            [
+                key(HotkeyAction::Screenshot),
+                key(HotkeyAction::ToggleRecording),
+                key(HotkeyAction::SaveClip),
+            ],
         ));
         return;
     }
@@ -345,7 +392,7 @@ pub fn kind_label(kind: Option<MediaKind>) -> &'static str {
     match kind {
         None => "All kinds",
         Some(MediaKind::Screenshot) => "Screenshots",
-        Some(MediaKind::Recording) => "Recordings",
+        Some(MediaKind::Recording | MediaKind::Replay) => "Recordings",
         Some(MediaKind::Print) => "Prints",
     }
 }
@@ -553,7 +600,7 @@ pub fn thumbnail(
             );
         }
     }
-    if item.info.kind == MediaKind::Recording && texture.is_some() {
+    if (item.info.kind == MediaKind::Recording || item.info.video) && texture.is_some() {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -585,6 +632,21 @@ fn buttons_that_fit(widths: &[f32], room: f32, gap: f32) -> usize {
         .count()
 }
 
+fn rendering_line(ui: &mut Ui, rendering: &Rendering) -> bool {
+    let side = crate::app::mobile::touch_square(ui);
+    let gap = ui.spacing().item_spacing.x;
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - side - gap).max(0.0);
+        let bar = widgets::progress::ProgressBar::new(RENDERING, rendering.progress);
+        let height = bar.height(ui, width);
+        ui.allocate_ui(vec2(width, height), |ui| ui.add(bar));
+        ui.add(egui::Button::new(icons::X).min_size(vec2(side, side)))
+            .on_hover_text("Stop rendering")
+            .clicked()
+    })
+    .inner
+}
+
 fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool) -> Option<Action> {
     let mut action = None;
     let texture = state.texture(ui.ctx(), item);
@@ -608,7 +670,24 @@ fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool)
                 .on_hover_text(item.id.file_name());
             });
             ui.add(egui::Label::new(egui::RichText::new(facts_line(item)).small()).truncate());
+            if let Some(rendering) = state.rendering.as_ref().filter(|r| r.id == item.id) {
+                if rendering_line(ui, rendering) {
+                    action = Some(Action::StopRender(item.id.clone()));
+                }
+                return;
+            }
             let mut buttons = Vec::new();
+            if item.info.kind == MediaKind::Replay {
+                buttons.push((icons::PLAY, PLAY, PLAY, Action::Play(item.id.clone())));
+            }
+            if item.info.kind == MediaKind::Replay && !item.info.video {
+                buttons.push((
+                    icons::FILM_REEL,
+                    RENDER_VIDEO,
+                    RENDER_VIDEO,
+                    Action::Render(item.id.clone()),
+                ));
+            }
             buttons.push((
                 icons::DOWNLOAD_SIMPLE,
                 "Export",
@@ -623,7 +702,7 @@ fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool)
                     Action::Pass(item.id.clone(), way),
                 ));
             }
-            if can_send {
+            if can_send && (item.info.kind != MediaKind::Replay || item.info.video) {
                 buttons.push((
                     icons::PAPER_PLANE_TILT,
                     "Send",
@@ -668,6 +747,22 @@ fn row(ui: &mut Ui, state: &mut MediaTabState, item: &MediaItem, can_send: bool)
                                 action = Some(act);
                             }
                         }
+                        if item.info.kind == MediaKind::Replay
+                            && item.info.video
+                            && ui
+                                .button(format!("{} {EXPORT_VIDEO}", icons::FILE_VIDEO))
+                                .clicked()
+                        {
+                            action = Some(Action::ExportVideo(item.id.clone()));
+                        }
+                        if item.info.kind == MediaKind::Replay
+                            && item.info.frame_times
+                            && ui
+                                .button(format!("{} {EXPORT_FRAME_TIMES}", icons::CHART_LINE))
+                                .clicked()
+                        {
+                            action = Some(Action::ExportFrameTimes(item.id.clone()));
+                        }
                         if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
                             action = Some(Action::AskDelete(item.id.clone()));
                         }
@@ -702,6 +797,15 @@ fn apply(viewer: &mut TabViewer, action: Action) {
             crate::media::clipboard::run(way, viewer.media, &id, viewer.files.copy_tx.clone())
         }
         Action::Export(id) => crate::media::export(viewer.media, &id, viewer.files),
+        Action::ExportFrameTimes(id) => {
+            crate::app::recording::export_frame_times(viewer.media, &id, viewer.files)
+        }
+        Action::ExportVideo(id) => {
+            crate::app::recording::export_video(viewer.media, &id, viewer.files)
+        }
+        Action::Render(id) => viewer.ui.media.render = Some(id),
+        Action::StopRender(id) => viewer.ui.media.stop_render = Some(id),
+        Action::Play(id) => viewer.ui.media.play = Some(id),
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         Action::Reveal(id) => {
             if let Err(err) =
@@ -724,7 +828,7 @@ fn apply(viewer: &mut TabViewer, action: Action) {
 pub fn delete_question(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Screenshot => "Delete this screenshot? It can't be undone.",
-        MediaKind::Recording => "Delete this recording? It can't be undone.",
+        MediaKind::Recording | MediaKind::Replay => "Delete this recording? It can't be undone.",
         MediaKind::Print => "Delete this print? It can't be undone.",
     }
 }
@@ -792,6 +896,9 @@ mod tests {
             width: 160,
             height: 144,
             length_ms: (kind == MediaKind::Recording).then_some(65_000),
+            frame_times: false,
+            video: false,
+            replay: None,
             frame: Frame {
                 width: 1,
                 height: 1,
@@ -800,8 +907,8 @@ mod tests {
         };
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("citrine-media-tab-{n}-{}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-media-tab-{n}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut store = MediaStore::at(root.clone());
         let item = match kind {
@@ -811,6 +918,7 @@ mod tests {
                 std::fs::write(&temp, vec![0; 2048]).unwrap();
                 store.add_recording(&temp, new).unwrap()
             }
+            MediaKind::Replay => store.add_file(new, b"replay").unwrap(),
         };
         let _ = std::fs::remove_dir_all(root);
         item
@@ -832,6 +940,16 @@ mod tests {
         assert!(!matches(&shot, Some(MediaKind::Recording), None));
         assert!(!matches(&clip, None, Some("TETRIS")));
         assert_eq!(games(&[clip, shot]), vec!["TETRIS", "ZELDA"]);
+    }
+
+    #[test]
+    fn a_replay_shows_with_the_recordings_and_asks_before_it_goes() {
+        let replay = item(MediaKind::Replay, "TOBU", 3);
+        assert!(matches(&replay, Some(MediaKind::Recording), None));
+        assert!(!matches(&replay, Some(MediaKind::Screenshot), None));
+        assert_eq!(replay.id.kind(), Some(MediaKind::Replay));
+        assert!(replay.id.file_name().ends_with(".replay"));
+        assert!(delete_question(MediaKind::Replay).starts_with("Delete this recording?"));
     }
 
     #[test]
@@ -880,22 +998,29 @@ mod tests {
 
     #[test]
     fn the_empty_list_says_how_to_make_the_first_one() {
-        let line = empty_line(
-            false,
-            Some("F12".to_string()),
-            Some("Shift+F12".to_string()),
-        );
+        let keys = || {
+            [
+                Some("F12".to_string()),
+                Some("Shift+F12".to_string()),
+                Some("Ctrl+F12".to_string()),
+            ]
+        };
+        let line = empty_line(Controls::Keys, keys());
         assert!(line.starts_with("Press F12 or "), "got {line}");
         assert!(
             line.contains(" for a screenshot, Shift+F12 or "),
             "got {line}"
         );
-        assert!(line.ends_with(" to record."));
-        let phone = empty_line(true, Some("F12".to_string()), Some("Shift+F12".to_string()));
-        assert!(phone.contains(" Screenshot or "), "got {phone}");
+        assert!(line.contains(" to record, Ctrl+F12 or "), "got {line}");
+        assert!(line.ends_with(" to save the last seconds as a clip."));
+        let phone = empty_line(Controls::Touch, keys());
+        assert!(phone.contains(" Screenshot, "), "got {phone}");
         assert!(phone.contains(" More, then "), "got {phone}");
-        assert!(phone.ends_with(" Record video."), "got {phone}");
+        assert!(phone.ends_with(" Save a clip."), "got {phone}");
         assert!(!phone.contains("F12"));
+        let pad = empty_line(Controls::Pad, keys());
+        assert!(pad.contains("press Home, then choose "), "got {pad}");
+        assert!(!pad.contains("More") && !pad.contains("F12"), "got {pad}");
     }
 
     #[test]

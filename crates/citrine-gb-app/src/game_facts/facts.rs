@@ -78,6 +78,70 @@ impl Facts {
     }
 }
 
+const WIKIDATA_GENRES: [(&str, &str); 44] = [
+    ("role-playing video game", "Role-playing (RPG)"),
+    ("action role-playing game", "Role-playing (RPG)"),
+    ("tactical role-playing game", "Role-playing (RPG)"),
+    ("japanese role-playing game", "Role-playing (RPG)"),
+    ("platform game", "Platform"),
+    ("action game", "Action"),
+    ("action-adventure game", "Adventure"),
+    ("adventure game", "Adventure"),
+    ("graphic adventure game", "Adventure"),
+    ("point-and-click adventure game", "Adventure"),
+    ("sports video game", "Sports"),
+    ("sports game", "Sports"),
+    ("racing video game", "Racing"),
+    ("racing game", "Racing"),
+    ("kart racing game", "Racing"),
+    ("puzzle video game", "Puzzle"),
+    ("puzzle game", "Puzzle"),
+    ("strategy video game", "Strategy"),
+    ("strategy game", "Strategy"),
+    ("turn-based strategy video game", "Strategy"),
+    ("turn-based strategy", "Strategy"),
+    ("real-time strategy", "Strategy"),
+    ("simulation video game", "Simulation"),
+    ("simulation game", "Simulation"),
+    ("life simulation game", "Simulation"),
+    ("board game", "Board"),
+    ("digital board game", "Board"),
+    ("shooter game", "Shooter"),
+    ("shooter video game", "Shooter"),
+    ("first-person shooter", "Shooter"),
+    ("third-person shooter", "Shooter"),
+    ("shoot 'em up", "Shoot'em Up"),
+    ("beat 'em up", "Beat'em Up"),
+    ("fighting game", "Fighting"),
+    ("card game", "Card"),
+    ("collectible card game", "Card"),
+    ("digital collectible card game", "Card"),
+    ("pinball video game", "Pinball"),
+    ("educational video game", "Educational"),
+    ("educational game", "Educational"),
+    ("quiz game", "Quiz"),
+    ("music video game", "Music / Dancing"),
+    ("rhythm game", "Music / Dancing"),
+    ("casual game", "Casual Game"),
+];
+
+pub fn genre_name(label: &str) -> String {
+    let label = label.trim();
+    let lower = label.to_lowercase();
+    WIKIDATA_GENRES
+        .iter()
+        .find(|(wikidata, _)| *wikidata == lower)
+        .map_or_else(|| upper_first(label), |(_, name)| (*name).to_owned())
+}
+
+fn upper_first(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Sheet {
@@ -86,6 +150,8 @@ pub struct Sheet {
 
 impl Sheet {
     pub fn read(&mut self, field: Field, dat: &str) {
+        #[cfg(test)]
+        count_parse();
         let mut value: Option<String> = None;
         for line in dat.lines() {
             let line = line.trim();
@@ -109,6 +175,21 @@ impl Sheet {
     pub fn is_empty(&self) -> bool {
         self.games.is_empty()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn count_parse() {
+    PARSES.with(|parses| parses.set(parses.get() + 1));
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) fn parses_here() -> usize {
+    PARSES.with(std::cell::Cell::get)
 }
 
 fn unquote(text: &str) -> Option<String> {
@@ -176,6 +257,21 @@ mod tests {
         assert_eq!(facts.publisher.as_deref(), Some("Konami"));
         assert_eq!((facts.year, facts.month), (Some(2003), Some(5)));
         assert!(!facts.is_whole());
+    }
+
+    #[test]
+    fn a_genre_shows_one_name_from_either_source() {
+        for (libretro, wikidata) in [
+            ("Role-playing (RPG)", "role-playing video game"),
+            ("Role-playing (RPG)", "action role-playing game"),
+            ("Platform", "platform game"),
+            ("Shoot'em Up", "shoot 'em up"),
+            ("Music / Dancing", "rhythm game"),
+        ] {
+            assert_eq!(genre_name(libretro), libretro);
+            assert_eq!(genre_name(wikidata), libretro, "{wikidata}");
+        }
+        assert_eq!(genre_name("survival horror"), "Survival horror");
     }
 
     #[test]

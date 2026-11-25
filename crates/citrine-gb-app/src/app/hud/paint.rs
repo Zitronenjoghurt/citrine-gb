@@ -78,6 +78,7 @@ impl Look {
             Group::Sound => ((190, 150, 255), (116, 52, 176)),
             Group::Game => ((255, 145, 100), (168, 58, 18)),
             Group::Device => ((190, 190, 190), (80, 80, 80)),
+            Group::Online => ((64, 206, 214), (0, 116, 128)),
         };
         let (r, g, b) = if self.dark { dark } else { light };
         Color32::from_rgb(r, g, b)
@@ -137,6 +138,82 @@ pub fn lay(painter: &Painter, hud: &Hud, facts: &Facts, look: Look, room: Vec2) 
     laid
 }
 
+const TITLE_WIDTH: f32 = 170.0;
+
+pub fn lay_lines(
+    painter: &Painter,
+    hud: &Hud,
+    lines: &[(String, String)],
+    look: Look,
+    room: Vec2,
+) -> Laid {
+    let mut scale = hud.scale();
+    let mut laid = lay_lines_at(painter, lines, look, scale);
+    for _ in 0..4 {
+        let fit = (room.x / laid.size.x).min(room.y / laid.size.y);
+        if fit >= 1.0 || !fit.is_finite() {
+            break;
+        }
+        scale *= fit * 0.98;
+        laid = lay_lines_at(painter, lines, look, scale);
+    }
+    laid
+}
+
+fn lay_lines_at(painter: &Painter, lines: &[(String, String)], look: Look, scale: f32) -> Laid {
+    let pad = vec2(9.0, 6.0) * scale;
+    let gap = 8.0 * scale;
+    let row_gap = 4.0 * scale;
+    let rows: Vec<(Arc<Galley>, Arc<Galley>)> = lines
+        .iter()
+        .map(|(title, score)| {
+            let mut job = LayoutJob::single_section(
+                title.clone(),
+                format(LABEL * scale, look.group(Group::Game)),
+            );
+            job.wrap.max_width = TITLE_WIDTH * scale;
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            let title = painter.layout_job(job);
+            let mut job = LayoutJob::default();
+            number_job(&mut job, score, "", scale, look, 0.0);
+            (title, painter.layout_job(job))
+        })
+        .collect();
+    let title_width = rows
+        .iter()
+        .map(|(title, _)| title.size().x)
+        .fold(0.0, f32::max);
+    let score_width = rows
+        .iter()
+        .map(|(_, score)| score.size().x)
+        .fold(0.0, f32::max);
+    let mut pieces = Vec::with_capacity(rows.len() * 2);
+    let mut y = pad.y;
+    for (title, score) in rows {
+        let height = title.size().y.max(score.size().y);
+        let score_x = pad.x + title_width + gap + score_width - score.size().x;
+        pieces.push(Piece::Text {
+            at: vec2(pad.x, y + (height - title.size().y) / 2.0),
+            galley: title,
+        });
+        pieces.push(Piece::Text {
+            at: vec2(score_x, y + (height - score.size().y) / 2.0),
+            galley: score,
+        });
+        y += height + row_gap;
+    }
+    Laid {
+        size: vec2(
+            pad.x * 2.0 + title_width + gap + score_width,
+            y - row_gap + pad.y,
+        ),
+        radius: 8.0 * scale,
+        scale,
+        pieces,
+    }
+}
+
 fn lay_at(
     painter: &Painter,
     direction: Direction,
@@ -190,7 +267,7 @@ fn lay_row(
             0.0,
             format(LABEL * scale, look.group(value.group())),
         );
-        number_job(&mut job, &cell.value, cell.unit, scale, look, 4.0 * scale);
+        number_job(&mut job, &cell.value, &cell.unit, scale, look, 4.0 * scale);
         let galley = painter.layout_job(job);
         let size = galley.size();
         items.push((Some(galley), size));
@@ -250,7 +327,7 @@ fn lay_column(
             format(LABEL * scale, look.group(value.group())),
         ));
         let mut job = LayoutJob::default();
-        number_job(&mut job, &cell.value, cell.unit, scale, look, 0.0);
+        number_job(&mut job, &cell.value, &cell.unit, scale, look, 0.0);
         rows.push(Some((label, painter.layout_job(job))));
     }
     let labels = rows

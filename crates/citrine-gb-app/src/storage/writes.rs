@@ -30,6 +30,7 @@ pub enum Write {
         slot: usize,
         state: StateBody,
         frame: Vec<u8>,
+        progress: Option<Vec<u8>>,
     },
     #[cfg(feature = "nds")]
     JitCache(std::sync::Arc<citrine_gb::nds::machine::JitCache>),
@@ -75,8 +76,12 @@ impl Write {
                 slot,
                 state,
                 frame,
+                progress,
             } => pack(&state)
-                .and_then(|packed| store.store_snapshot(&key, slot, &packed, &frame, state.kind))
+                .and_then(|packed| {
+                    store.store_snapshot(&key, slot, &packed, &frame, state.kind)?;
+                    store.store_snapshot_progress(&key, slot, &packed, progress.as_deref())
+                })
                 .map(|()| Written::Snapshot(slot))
                 .map_err(|err| format!("Saving the state failed: {err}")),
             #[cfg(feature = "nds")]
@@ -182,8 +187,8 @@ mod tests {
     const KEY: &str = "GAME";
 
     fn root(name: &str) -> std::path::PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("citrine-writes-test-{}-{name}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-writes-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&root);
         root
@@ -203,6 +208,7 @@ mod tests {
             slot,
             state: state(),
             frame: vec![0; 160 * 144 * 4],
+            progress: None,
         }
     }
 

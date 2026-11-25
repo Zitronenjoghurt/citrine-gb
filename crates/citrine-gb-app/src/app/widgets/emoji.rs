@@ -381,6 +381,12 @@ fn spaced_galley(
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
+pub fn line_width(ui: &Ui, text: &str, style: TextStyle) -> f32 {
+    spaced_galley(ui, text, style, Color32::PLACEHOLDER, f32::INFINITY)
+        .size()
+        .x
+}
+
 pub fn line(ui: &mut Ui, text: &str, style: TextStyle, color: Color32) -> Response {
     let measure = |t: &str| {
         spaced_galley(ui, t, style.clone(), color, f32::INFINITY)
@@ -438,18 +444,77 @@ pub fn image(ui: &mut Ui, index: usize, size: f32) -> Response {
     response
 }
 
+const PICKER_SPACING: f32 = 2.0;
+const PICKER_PAD: f32 = 4.0;
+
+struct PickerGrid {
+    columns: usize,
+    cell: f32,
+    gap: f32,
+}
+
+impl PickerGrid {
+    fn of(width: f32, size: f32) -> Self {
+        let room = width + PICKER_SPACING;
+        let columns = (room / (size + PICKER_PAD * 2.0 + PICKER_SPACING))
+            .floor()
+            .max(4.0);
+        let cell = (room / columns - PICKER_SPACING).min(size + PICKER_PAD * 2.0);
+        let gap = if columns > 1.0 {
+            ((width - columns * cell) / (columns - 1.0)).max(PICKER_SPACING)
+        } else {
+            PICKER_SPACING
+        };
+        Self {
+            columns: columns as usize,
+            cell,
+            gap,
+        }
+    }
+}
+
+pub fn picker_rows_height(width: f32, size: f32, room: f32) -> f32 {
+    let cell = PickerGrid::of(width, size).cell;
+    let rows = ((room + PICKER_SPACING) / (cell + PICKER_SPACING)).floor();
+    if rows < 1.0 {
+        return room.max(0.0);
+    }
+    rows * (cell + PICKER_SPACING) - PICKER_SPACING
+}
+
+pub struct PickerLayout {
+    pub rows_height: f32,
+    pub row_spacing: f32,
+    pub edge: f32,
+}
+
+pub fn picker_layout(width: f32, size: f32, span: f32) -> Option<PickerLayout> {
+    let grid = PickerGrid::of(width, size);
+    let glyph = grid.cell - PICKER_PAD * 2.0;
+    let least = grid.gap + PICKER_PAD * 2.0;
+    let rows = ((span - least) / (glyph + least)).floor();
+    if rows < 1.0 {
+        return None;
+    }
+    let even = (span - rows * glyph) / (rows + 1.0);
+    let row_spacing = even - PICKER_PAD * 2.0;
+    Some(PickerLayout {
+        rows_height: rows * grid.cell + (rows - 1.0) * row_spacing,
+        row_spacing,
+        edge: even - PICKER_PAD,
+    })
+}
+
 pub fn picker(ui: &mut Ui, size: f32) -> Option<&'static str> {
+    picker_spaced(ui, size, PICKER_SPACING)
+}
+
+pub fn picker_spaced(ui: &mut Ui, size: f32, spacing: f32) -> Option<&'static str> {
     let mut picked = None;
-    let spacing = 2.0;
-    let pad = 4.0;
-    let room = ui.available_width() + spacing;
-    let columns = (room / (size + pad * 2.0 + spacing))
-        .floor()
-        .clamp(4.0, 8.0);
-    let cell = (room / columns - spacing).min(size + pad * 2.0);
-    let columns = columns as usize;
+    let pad = PICKER_PAD;
+    let PickerGrid { columns, cell, gap } = PickerGrid::of(ui.available_width(), size);
     egui::Grid::new("emoji_picker")
-        .spacing(Vec2::splat(spacing))
+        .spacing(Vec2::new(gap, spacing))
         .min_col_width(cell)
         .max_col_width(cell)
         .min_row_height(cell)
@@ -497,6 +562,80 @@ mod tests {
         ctx.set_fonts(fonts);
         let _ = ctx.run(Default::default(), |_| {});
         ctx
+    }
+
+    #[test]
+    fn the_picker_shows_whole_rows_and_never_more_than_its_room() {
+        for width in [180.0, 300.0, 392.0, 600.0] {
+            let cell = PickerGrid::of(width, 28.0).cell;
+            for room in [0.0, 4.0, cell - 1.0, cell, cell * 2.5, 300.0] {
+                let shown = picker_rows_height(width, 28.0, room);
+                assert!(shown <= room + 0.01, "{shown} over {room} at {width}");
+                if room >= cell {
+                    let rows = (shown + PICKER_SPACING) / (cell + PICKER_SPACING);
+                    assert!(
+                        (rows - rows.round()).abs() < 0.01,
+                        "{rows} rows at {width}, {room}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_picker_spaces_whole_rows_evenly_over_its_span() {
+        for width in [180.0, 300.0, 392.0, 600.0] {
+            let grid = PickerGrid::of(width, 28.0);
+            let glyph = grid.cell - PICKER_PAD * 2.0;
+            let least = glyph + (grid.gap + PICKER_PAD * 2.0) * 2.0;
+            assert!(picker_layout(width, 28.0, least - 0.5).is_none());
+            for span in [least, 120.0, 224.0, 324.0, 464.0] {
+                let layout = picker_layout(width, 28.0, span).expect("a row fits");
+                let rows =
+                    (layout.rows_height + layout.row_spacing) / (grid.cell + layout.row_spacing);
+                assert!(
+                    (rows - rows.round()).abs() < 0.01,
+                    "{rows} rows at {width}, {span}"
+                );
+                let edge = layout.edge + PICKER_PAD;
+                let between = layout.row_spacing + PICKER_PAD * 2.0;
+                assert!(
+                    (edge - between).abs() < 0.01,
+                    "edge {edge}, between {between}"
+                );
+                assert!(between >= grid.gap + PICKER_PAD * 2.0 - 0.01);
+                let used = layout.edge * 2.0 + layout.rows_height;
+                assert!((used - span).abs() < 0.01, "{used} of {span}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_picker_rows_reach_both_edges_at_every_width() {
+        let ctx = context_with_the_font();
+        for width in [180.0, 300.0, 370.0, 392.0, 600.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(width, 2000.0),
+                )),
+                ..Default::default()
+            };
+            let mut used = egui::Rect::NOTHING;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        picker(ui, 28.0);
+                        used = ui.min_rect();
+                    });
+            });
+            assert!(
+                (used.width() - width).abs() < 1.0,
+                "the rows end at {} of {width}",
+                used.width()
+            );
+        }
     }
 
     #[test]

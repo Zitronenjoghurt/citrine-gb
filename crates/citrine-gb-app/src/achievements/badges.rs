@@ -1,10 +1,11 @@
 use crate::covers::net::{Answer, Net};
-use crate::storage::Backend;
+use crate::storage::Folders;
+use crate::storage::kinds::Folder;
 use egui::{Context, TextureHandle};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-const NAMESPACE: &str = "badges";
+const NAMESPACE: Folder = Folder::Badges;
 const IN_FLIGHT: usize = 6;
 const OPENS_PER_FRAME: usize = 8;
 
@@ -17,14 +18,14 @@ enum Badge {
 
 pub struct Badges {
     net: Box<dyn Net>,
-    cache: Backend,
+    cache: Folders,
     badges: HashMap<String, Badge>,
     opened: usize,
     frame: u64,
 }
 
 impl Badges {
-    pub fn new(net: Box<dyn Net>, cache: Backend) -> Self {
+    pub fn new(net: Box<dyn Net>, cache: Folders) -> Self {
         Self {
             net,
             cache,

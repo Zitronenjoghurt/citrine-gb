@@ -1,7 +1,6 @@
-use super::device::device_name;
 use super::{Op, Remote, SETTLE, SyncState};
 use crate::online::Online;
-use citrine_gb_net::{ClientMsg, ErrorCode, GameKey, Keys, SaveInfo, SaveLabel, SavePayload};
+use citrine_gb_net::{ErrorCode, GameKey, Keys, SaveInfo, SaveLabel, SavePayload};
 use std::collections::{BTreeMap, BTreeSet};
 use web_time::Instant;
 
@@ -158,6 +157,10 @@ impl Online {
         );
     }
 
+    pub(super) fn account_follow(&mut self, name: &str) {
+        self.cloud.account.active.insert(name.to_string());
+    }
+
     pub fn account_stop(&mut self, name: &str) {
         let slots = &mut self.cloud.account;
         slots.active.remove(name);
@@ -213,60 +216,56 @@ impl Online {
         if self.cloud.ledger.is_none() {
             self.cloud.ledger_dirty = true;
         }
-        let device = self.cloud.device();
-        let (Some(keys), Some(listing)) = (self.keys.as_ref(), self.cloud.listing.as_ref()) else {
-            return false;
-        };
-        let game = account_key(keys);
-        let Some(next) = self.cloud.account.next(listing, game, &device, now) else {
-            return false;
-        };
-        match next {
-            Next::Put { name, slot, base } => {
-                let wanted = &self.cloud.account.wanted[&name];
-                let label = SaveLabel {
-                    game: String::new(),
-                    name: name.clone(),
-                    device: device_name(),
-                    saved_at: crate::storage::now_unix(),
-                    hash: wanted.hash,
-                };
-                let sealed_label = keys.seal_label(&label);
-                let data = keys.seal_save(&wanted.payload);
-                let hash = wanted.hash;
-                if !self.fits_cloud(data.len() + sealed_label.len()) {
-                    self.cloud
-                        .account
-                        .refused
-                        .insert(name, (hash, SyncState::TooLarge));
-                    self.cloud.changed = true;
-                    return true;
+        loop {
+            let device = self.cloud.device();
+            let (Some(keys), Some(listing)) = (self.keys.as_ref(), self.cloud.listing.as_ref())
+            else {
+                return false;
+            };
+            let game = account_key(keys);
+            let Some(next) = self.cloud.account.next(listing, game, &device, now) else {
+                return false;
+            };
+            match next {
+                Next::Put { name, slot, base } => {
+                    let wanted = &self.cloud.account.wanted[&name];
+                    let label = SaveLabel {
+                        game: String::new(),
+                        name: name.clone(),
+                        device: self.device_name(),
+                        saved_at: crate::storage::now_unix(),
+                        hash: wanted.hash,
+                    };
+                    let sealed_label = keys.seal_label(&label);
+                    let data = keys.seal_save(&wanted.payload);
+                    let hash = wanted.hash;
+                    if !self.fits_cloud(data.len() + sealed_label.len()) {
+                        self.cloud
+                            .account
+                            .refused
+                            .insert(name, (hash, SyncState::TooLarge));
+                        self.cloud.changed = true;
+                        continue;
+                    }
+                    let remote = listing.get(&(game, slot.clone()));
+                    if let Some(error) = self.cloud.doomed(data.len(), sealed_label.len(), remote) {
+                        self.account_refused(name, hash, error);
+                        continue;
+                    }
+                    let tag = self.cloud.tag();
+                    self.put_save(tag, game, slot.clone(), base, sealed_label, data);
+                    self.cloud.start(Op::AccountPut {
+                        tag,
+                        name,
+                        slot,
+                        hash,
+                        label,
+                    });
                 }
-                let remote = listing.get(&(game, slot.clone()));
-                if let Some(error) = self.cloud.doomed(data.len(), sealed_label.len(), remote) {
-                    self.account_refused(name, hash, error);
-                    return true;
-                }
-                let tag = self.cloud.tag();
-                self.put_save(tag, game, slot.clone(), base, sealed_label, data);
-                self.cloud.start(Op::AccountPut {
-                    tag,
-                    name,
-                    slot,
-                    hash,
-                    label,
-                });
+                Next::Get { slot } => self.cloud_get(game, slot),
             }
-            Next::Get { slot } => {
-                self.cloud.parts.clear();
-                self.send(ClientMsg::GetSave {
-                    game,
-                    slot: slot.clone(),
-                });
-                self.cloud.start(Op::Get { game, slot });
-            }
+            return true;
         }
-        true
     }
 
     pub(super) fn account_stored(&mut self, name: String, info: SaveInfo, label: SaveLabel) {

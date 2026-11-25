@@ -50,7 +50,7 @@ pub fn status(stage: Stage, desk: Desk, fresh_trade: bool, name: &str) -> Status
                 Desk::CableClub => "Pick Trade Center, then sit at the table and press A.",
                 Desk::Trade | Desk::TimeCapsule => "Sit at the table and press A.",
             };
-            line(crate::icons::LINK, "Linked", Some(detail.to_owned()))
+            line(crate::icons::LINK_CABLE, "Linked", Some(detail.to_owned()))
         }
         Stage::Exchanging | Stage::Choosing => line(
             crate::icons::ARROWS_LEFT_RIGHT,

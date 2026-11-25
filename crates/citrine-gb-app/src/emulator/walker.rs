@@ -1,7 +1,18 @@
 use crate::online::Online;
-use crate::walker::{Hold, talks_to_walker};
+use crate::walker::{Hold, Home, KeptCard, Place, StepsFrom, Summary, talks_to_walker};
 use citrine_gb::machine::Machine;
-use citrine_gb_walker::{Button, Event, Link, Screen, Walker};
+use citrine_gb_walker::{App, Button, Event, Link, Screen, Walker};
+
+const OPEN_PRESSES: usize = 16;
+const BORROW_WAIT_SECS: u64 = 30;
+
+fn game_name(game_code: [u8; 4]) -> &'static str {
+    if game_code.starts_with(b"IPG") {
+        "SoulSilver"
+    } else {
+        "HeartGold"
+    }
+}
 
 impl super::Emulator {
     pub fn attach_ir(&mut self, game_code: [u8; 4]) -> bool {
@@ -16,7 +27,90 @@ impl super::Emulator {
         };
         self.seat.core_mut().walker = Some(link);
         self.walker_linked = true;
+        self.walker_game = Some(game_name(game_code));
         true
+    }
+
+    pub fn walker_game(&self) -> Option<&'static str> {
+        self.walker_game
+    }
+
+    pub fn walker_place(&self) -> Place {
+        self.pokewalker.place()
+    }
+
+    pub fn borrow_walker(&mut self, online: &Online) {
+        let Some(game) = self.walker_game else {
+            return;
+        };
+        let Hold::Elsewhere(holder) = self.pokewalker.hold().clone() else {
+            return;
+        };
+        let home = self
+            .pokewalker
+            .summary()
+            .and_then(|summary| summary.home)
+            .or_else(|| {
+                let (devices, _) = online.devices();
+                devices
+                    .iter()
+                    .find(|device| device.name == holder)
+                    .map(|device| Home {
+                        id: device.id,
+                        name: device.name.clone(),
+                    })
+            });
+        match home {
+            Some(home) => {
+                self.pokewalker.borrow(game, home);
+            }
+            None => self.pokewalker.take(),
+        }
+        self.walker_connect = Some((self.walker_clock)() + BORROW_WAIT_SECS);
+    }
+
+    pub fn open_walker(&mut self, app: App) {
+        for _ in 0..OPEN_PRESSES {
+            let Some(walker) = self.walker_mut() else {
+                return;
+            };
+            if walker.asleep() {
+                self.press_walker(Button::Middle);
+                continue;
+            }
+            let press = match (walker.screen(), app) {
+                (Screen::Collected { .. }, _) => Button::Middle,
+                (Screen::Home, App::Connect) => Button::Middle,
+                (Screen::Home, _) => Button::Right,
+                (Screen::Menu { app: shown, .. }, wanted) if shown == wanted => {
+                    self.press_walker(Button::Middle);
+                    return;
+                }
+                (Screen::Menu { .. }, _) => Button::Right,
+                _ => return,
+            };
+            self.press_walker(press);
+        }
+    }
+
+    fn follow_borrow(&mut self) {
+        let Some(deadline) = self.walker_connect else {
+            return;
+        };
+        let held = matches!(self.pokewalker.hold(), Hold::Here | Hold::Local);
+        let idle = self
+            .seat
+            .core()
+            .walker
+            .as_ref()
+            .is_some_and(|link| link.walker().link() == Link::Idle);
+        if held && idle {
+            self.walker_connect = None;
+            self.open_walker(App::Connect);
+        } else if (self.walker_clock)() >= deadline {
+            self.walker_connect = None;
+            self.pokewalker.cancel_borrow();
+        }
     }
 
     pub fn take_walker_linked(&mut self) -> bool {
@@ -53,8 +147,24 @@ impl super::Emulator {
             .map(|link| link.walker().clone());
     }
 
-    pub fn walker_hold(&self) -> &Hold {
-        self.pokewalker.hold()
+    pub fn walker_summary(&self) -> Option<Summary> {
+        self.pokewalker.summary()
+    }
+
+    pub fn walker_kept(&mut self) -> Option<KeptCard> {
+        self.pokewalker.kept_card()
+    }
+
+    pub fn use_kept_walker(&mut self) {
+        self.pokewalker.use_kept();
+    }
+
+    pub fn close_kept_walker(&mut self) {
+        self.pokewalker.close_kept();
+    }
+
+    pub fn walker_steps_from(&self) -> StepsFrom {
+        self.pokewalker.steps_from()
     }
 
     pub fn take_walker(&mut self) {
@@ -62,27 +172,40 @@ impl super::Emulator {
     }
 
     pub fn sync_walker(&mut self, online: &mut Online, on: bool) {
-        online.walker_sync(on);
-        if !on {
-            self.pokewalker.cloud_off();
-            return;
+        if on {
+            let (_, this) = online.devices();
+            let device = this.map(|id| Home {
+                id,
+                name: online.device_name(),
+            });
+            self.pokewalker.set_device(device);
         }
-        self.pokewalker.cloud_on();
-        for reply in online.walker_replies() {
-            let Some(walker) = self.pokewalker.cloud_reply(reply) else {
-                continue;
-            };
-            if self.seat.facts().walker
-                && let Some(link) = self.seat.core_mut().walker.as_mut()
-                && link.walker().link() == Link::Idle
+        let route = self.pokewalker.follow_route(on);
+        let active = on || route.uses_cloud();
+        online.walker_sync(active);
+        if active {
+            for reply in online.walker_replies() {
+                if let Some(walker) = self.pokewalker.cloud_reply(reply) {
+                    self.replace_lent_walker(walker);
+                }
+            }
+            if online.walker_ready()
+                && let Some(request) = self.pokewalker.cloud_request()
             {
-                *link.walker_mut() = walker;
+                online.walker_send(request);
             }
         }
-        if online.walker_ready()
-            && let Some(request) = self.pokewalker.cloud_request()
+        if let Some(walker) = self.pokewalker.settle_here() {
+            self.replace_lent_walker(walker);
+        }
+    }
+
+    pub(crate) fn replace_lent_walker(&mut self, walker: Walker) {
+        if self.seat.facts().walker
+            && let Some(link) = self.seat.core_mut().walker.as_mut()
+            && link.walker().link() == Link::Idle
         {
-            online.walker_send(request);
+            *link.walker_mut() = walker;
         }
     }
 
@@ -107,10 +230,10 @@ impl super::Emulator {
         if self.seat.facts().walker {
             self.walker_ms = Some(now_ms);
         } else {
-            self.pokewalker.tick(now_ms);
             if let Some(credit) = self.pokewalker.credit((self.walker_clock)()) {
                 log::info!("walker: {} steps credited", credit.steps);
             }
+            self.pokewalker.tick(now_ms);
         }
     }
 
@@ -125,6 +248,7 @@ impl super::Emulator {
             self.game_steps.forget();
         }
         self.steps_in_game = on;
+        self.pokewalker.set_game_steps(on);
     }
 
     pub fn detach_ir(&mut self) {
@@ -133,6 +257,11 @@ impl super::Emulator {
             self.pokewalker.credit_game_steps(link.walker_mut(), steps);
             self.pokewalker.give_back(link);
         }
+        self.walker_game = None;
+        if self.walker_connect.take().is_some() {
+            self.pokewalker.cancel_borrow();
+        }
+        self.pokewalker.send_home();
         self.game_steps.forget();
     }
 
@@ -152,6 +281,7 @@ impl super::Emulator {
     pub(crate) fn follow_walker(&mut self) {
         let now_ms = self.walker_ms.take();
         self.count_game_steps();
+        self.follow_borrow();
         let Some(link) = self.seat.core_mut().walker.as_mut() else {
             return;
         };
@@ -180,6 +310,7 @@ impl super::Emulator {
         }
         if events.iter().any(|event| matches!(event, Event::Ended(_))) {
             self.pokewalker.save(link.walker());
+            self.pokewalker.send_home();
         }
     }
 }
@@ -188,7 +319,7 @@ impl super::Emulator {
 mod tests {
     use super::super::Emulator;
     use crate::storage::SaveStore;
-    use crate::walker::{Counter, FileStore, Pokewalker, StepSource, decode};
+    use crate::walker::{Counter, FileStore, Pokewalker, StepSource, Taken, decode};
     use citrine_gb::console::ConsoleKind;
     use citrine_gb::gba::wait::Width;
     use citrine_gb::machine::Machine;
@@ -221,8 +352,8 @@ mod tests {
     const LEVEL: u8 = 15;
 
     fn root(name: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("citrine-walker-link-{}-{name}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-walker-link-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         root
     }
@@ -637,8 +768,11 @@ mod tests {
             Counter::StepSensor
         }
 
-        fn steps(&mut self, _from: u64, _to: u64) -> Option<u32> {
-            Some(self.0.take())
+        fn steps(&mut self, _from: u64, to: u64) -> Option<Vec<Taken>> {
+            Some(vec![Taken {
+                at: to,
+                steps: self.0.take(),
+            }])
         }
     }
 

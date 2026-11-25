@@ -1,10 +1,11 @@
-use super::{AirPort, Fault, Nds};
-use crate::error::GbResult;
+use super::{AirPort, FRAME_BYTES, Fault, Nds};
+use crate::error::{GbError, GbResult};
 use crate::gba::cpu::{Arm9, Cpu as Arm7};
 use crate::nds::bus::Buses;
 use crate::nds::download::Download;
 use crate::nds::sound::output::Output;
-use crate::persistence::state::nds_state_body;
+use crate::persistence::state::{check_game, nds_state_body};
+use crate::utils::digest::game_key;
 use std::sync::Arc;
 
 #[derive(serde::Serialize)]
@@ -20,10 +21,9 @@ struct Saved<'a> {
     frame: &'a [u8],
     faults: [Option<Fault>; 2],
     audio_level: [i16; 2],
-    #[serde(skip_serializing_if = "Option::is_none")]
     air_epoch: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     download: Option<&'a Download>,
+    game: u64,
 }
 
 pub struct StateCopy {
@@ -39,6 +39,7 @@ pub struct StateCopy {
     audio_level: [i16; 2],
     air_epoch: Option<u64>,
     download: Option<Box<Download>>,
+    game: u64,
 }
 
 impl StateCopy {
@@ -56,6 +57,7 @@ impl StateCopy {
             audio_level,
             air_epoch,
             download,
+            game,
         } = self;
         arm9.clone_from(&nds.arm9);
         arm7.clone_from(&nds.arm7);
@@ -69,6 +71,7 @@ impl StateCopy {
         *audio_level = nds.audio.level();
         *air_epoch = nds.air.as_ref().map(|air| air.epoch);
         download.clone_from(&nds.download);
+        *game = game_key(&nds.rom);
     }
 
     pub fn encode_into(&self, out: &mut Vec<u8>) -> GbResult<()> {
@@ -87,6 +90,7 @@ impl StateCopy {
                 audio_level: self.audio_level,
                 air_epoch: self.air_epoch,
                 download: self.download.as_deref(),
+                game: self.game,
             },
         )?)
     }
@@ -125,6 +129,8 @@ struct Loaded {
     air_epoch: Option<u64>,
     #[serde(default)]
     download: Option<Download>,
+    #[serde(default)]
+    game: u64,
 }
 
 impl Nds {
@@ -169,6 +175,7 @@ impl Nds {
                 audio_level: self.audio.level(),
                 air_epoch: self.air.as_ref().map(|air| air.epoch),
                 download: self.download.as_deref(),
+                game: game_key(&self.rom),
             },
         )?)
     }
@@ -190,6 +197,7 @@ impl Nds {
                     audio_level: self.audio.level(),
                     air_epoch: self.air.as_ref().map(|air| air.epoch),
                     download: self.download.clone(),
+                    game: game_key(&self.rom),
                 }))
             }
         }
@@ -197,7 +205,11 @@ impl Nds {
 
     pub fn decode_state(&self, data: &[u8]) -> GbResult<Nds> {
         let loaded: Loaded = rmp_serde::from_slice(data)?;
+        check_game(loaded.game, &self.rom)?;
         let mut buses = loaded.buses;
+        if !buses.has_hardware_sizes() || loaded.frame.len() != FRAME_BYTES {
+            return Err(GbError::DamagedState);
+        }
         buses.adopt_fixed(&self.buses);
         let torn = buses.lcd().mid_draw();
         Ok(Nds {
@@ -267,6 +279,7 @@ mod tests {
     use crate::console::Console;
     use crate::nds::machine::NdsFirmware;
     use crate::nds::machine::test_rom::{BRANCH_TO_SELF, rom};
+    use crate::nds::ram::Ram;
     const COUNT: [u32; 6] = [0xE3A0_0000, 0xE280_0001, 0xE58F_0004, 0xEAFF_FFFC, 0, 0];
     const WAKE_ON_VBLANK: [u32; 11] = [
         0xE3A0_0301,
@@ -293,6 +306,45 @@ mod tests {
             })
             .collect();
         (frames, audio)
+    }
+
+    fn sent(nds: &mut Nds, bytes: &[u8]) {
+        let aux = nds.buses_mut().cart_mut().aux_mut();
+        for &byte in bytes {
+            aux.transfer(byte, 0);
+        }
+        aux.deselect(0);
+    }
+
+    #[test]
+    fn a_battery_flush_leaves_the_check_hash_alone() {
+        let mut nds = Nds::new(rom(&COUNT, &WAKE_ON_VBLANK), NdsFirmware::default()).unwrap();
+        nds.buses_mut().cart_mut().aux_mut().load(&[0xFF; 0x2000]);
+        sent(&mut nds, &[0x06]);
+        sent(&mut nds, &[0x02, 0x00, 0x10, 0xAB]);
+        let unsaved = nds.check_hash();
+        assert!(nds.battery(false, 0).is_some());
+        assert_eq!(nds.check_hash(), unsaved);
+    }
+
+    #[test]
+    fn a_firmware_flush_leaves_the_check_hash_alone() {
+        let mut nds = Nds::new(rom(&COUNT, &WAKE_ON_VBLANK), NdsFirmware::default()).unwrap();
+        let firmware = &mut nds.buses_mut().spi_mut().devices_mut().firmware;
+        for bytes in [&[0x06][..], &[0x0A, 0x03, 0xFE, 0x00, 0x12, 0x34]] {
+            for &byte in bytes {
+                firmware.transfer(byte);
+            }
+            firmware.deselect();
+        }
+        assert!(firmware.dirty());
+        let unsaved = nds.check_hash();
+        nds.buses_mut()
+            .spi_mut()
+            .devices_mut()
+            .firmware
+            .clear_dirty();
+        assert_eq!(nds.check_hash(), unsaved);
     }
 
     #[test]
@@ -344,6 +396,50 @@ mod tests {
         let restored = nds.restore(&state).unwrap();
         let backup = restored.buses().cart().backup().unwrap();
         assert_eq!(backup.bytes(), &[0x3C; 0x2000][..]);
+    }
+
+    #[test]
+    fn a_state_whose_ram_sizes_differ_from_the_hardware_is_refused() {
+        let fresh = || Nds::new(rom(&COUNT, &WAKE_ON_VBLANK), NdsFirmware::default()).unwrap();
+        let count = fresh().buses_mut().rams_mut().count();
+        for index in 0..count {
+            for wrong in [Ram::empty(), Ram::new(0x1000), Ram::new(0x80_0000)] {
+                let mut nds = fresh();
+                let len = wrong.bytes().len();
+                *nds.buses_mut().rams_mut().nth(index).unwrap() = wrong;
+                let state = nds.save_state(0).unwrap();
+                assert!(fresh().restore(&state).is_err(), "ram {index} at {len:#x}");
+            }
+        }
+        let mut nds = fresh();
+        nds.frame = vec![0; 0x10].into_boxed_slice();
+        let state = nds.save_state(0).unwrap();
+        assert!(fresh().restore(&state).is_err(), "frame");
+        let state = fresh().save_state(0).unwrap();
+        assert!(fresh().restore(&state).is_ok());
+    }
+
+    #[test]
+    fn a_ds_state_loads_only_into_its_own_game() {
+        use crate::error::GbError;
+        let mut other = rom(&COUNT, &WAKE_ON_VBLANK).to_vec();
+        other[0] = b'X';
+        let here = Nds::new(rom(&COUNT, &WAKE_ON_VBLANK), NdsFirmware::default()).unwrap();
+        let elsewhere = Nds::new(other.into(), NdsFirmware::default()).unwrap();
+        let state = here.encode_state().unwrap();
+        assert!(matches!(
+            elsewhere.decode_state(&state),
+            Err(GbError::OtherGame)
+        ));
+        assert!(here.decode_state(&state).is_ok());
+        let key = rmp_serde::to_vec(&game_key(&here.rom)).unwrap();
+        let mut old = state
+            .strip_suffix(&key[..])
+            .expect("the key ends the state")
+            .to_vec();
+        assert_eq!(old[0] & 0xF0, 0x90, "a short array");
+        old[0] -= 1;
+        assert!(elsewhere.decode_state(&old).is_ok());
     }
 
     #[test]

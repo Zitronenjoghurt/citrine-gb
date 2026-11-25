@@ -34,7 +34,7 @@ pub struct Backend {
 pub async fn open_saves() {
     SAVES.with_borrow_mut(|saves| saves.adopt_local(local_entries()));
     match load(DB_NAME).await {
-        Ok(stored) => SAVES.with_borrow_mut(|saves| saves.fill(stored)),
+        Ok(stored) => SAVES.with_borrow_mut(|saves| saves.fill_and_recover(stored, back_to_local)),
         Err(err) => {
             log::error!("couldn't open the saves database, saves stay in local storage: {err:?}");
             WITHOUT_DATABASE.set(true);
@@ -109,6 +109,16 @@ pub fn keep_crash_save(raw: &str) {
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
+}
+
+fn back_to_local(key: &str, encoded: &str) -> bool {
+    let Some(storage) = storage() else {
+        return false;
+    };
+    if storage.get_item(key).ok().flatten().is_some() {
+        return true;
+    }
+    mirror::fits_local(encoded) && storage.set_item(key, encoded).is_ok()
 }
 
 fn local_entries() -> Vec<(String, String)> {
@@ -297,6 +307,13 @@ impl Backend {
     pub fn clear(&self, namespace: &str) -> std::io::Result<()> {
         for name in self.list(namespace) {
             self.delete(namespace, &name)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_all(&self) -> std::io::Result<()> {
+        for namespace in self.namespaces() {
+            self.clear(&namespace)?;
         }
         Ok(())
     }

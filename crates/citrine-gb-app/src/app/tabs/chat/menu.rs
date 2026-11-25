@@ -13,6 +13,7 @@ const MORE_SIDE: f32 = 24.0;
 const MORE_GAP: f32 = 4.0;
 
 struct Items<'a> {
+    reply: bool,
     copy: Option<&'a str>,
     edit: bool,
     delete: bool,
@@ -28,6 +29,7 @@ impl<'a> Items<'a> {
     ) -> Self {
         let own = entry.mine && !entry.is_deleted() && online.can_chat(friend);
         Self {
+            reply: can_reply(online, friend, entry),
             copy: match &entry.body {
                 Body::Text(text) if !entry.is_deleted() => Some(text),
                 _ => None,
@@ -40,8 +42,17 @@ impl<'a> Items<'a> {
     }
 
     fn any(&self) -> bool {
-        self.copy.is_some() || self.edit || self.delete || self.add_palette
+        self.reply || self.copy.is_some() || self.edit || self.delete || self.add_palette
     }
+}
+
+pub(super) fn can_reply(online: &Online, friend: OnlineId, entry: &ChatEntry) -> bool {
+    !entry.is_deleted()
+        && online.can_chat(friend)
+        && matches!(
+            entry.body,
+            Body::Text(_) | Body::Share(_) | Body::Palette(_)
+        )
 }
 
 pub(super) fn menu_id(entry: u64) -> egui::Id {
@@ -84,24 +95,37 @@ pub(super) fn message_menu(
     }
     if !state.touch {
         let side = if entry.mine { -1.0 } else { 1.0 };
-        let reach = MORE_SIDE + MORE_GAP;
+        let buttons = if items.reply { 2.0 } else { 1.0 };
+        let reach = (MORE_SIDE + MORE_GAP) * buttons;
         let row = bubble.union(bubble.translate(vec2(side * reach, 0.0)));
         if open || ui.rect_contains_pointer(row) {
-            let edge = if entry.mine {
-                bubble.left() - MORE_GAP - MORE_SIDE / 2.0
-            } else {
-                bubble.right() + MORE_GAP + MORE_SIDE / 2.0
-            };
             let middle = bubble.top() + bubble.height().min(MORE_SIDE * 1.5) / 2.0;
-            let spot = Rect::from_center_size(egui::pos2(edge, middle), vec2(MORE_SIDE, MORE_SIDE));
-            let more = ui
-                .new_child(egui::UiBuilder::new().max_rect(spot))
-                .add_sized(
-                    spot.size(),
-                    egui::Button::new(icons::DOTS_THREE)
-                        .frame_when_inactive(false)
-                        .selected(open),
-                )
+            let spot = |slot: f32| {
+                let out = MORE_GAP + MORE_SIDE / 2.0 + slot * (MORE_SIDE + MORE_GAP);
+                let edge = if entry.mine {
+                    bubble.left() - out
+                } else {
+                    bubble.right() + out
+                };
+                Rect::from_center_size(egui::pos2(edge, middle), vec2(MORE_SIDE, MORE_SIDE))
+            };
+            let hover_button = |ui: &mut Ui, spot: Rect, icon: &str, selected: bool| {
+                ui.new_child(egui::UiBuilder::new().max_rect(spot))
+                    .add_sized(
+                        spot.size(),
+                        egui::Button::new(icon)
+                            .frame_when_inactive(false)
+                            .selected(selected),
+                    )
+            };
+            if items.reply
+                && hover_button(ui, spot(0.0), icons::ARROW_BEND_UP_LEFT, false)
+                    .on_hover_text("Reply")
+                    .clicked()
+            {
+                actions.push(Action::Reply(entry.id));
+            }
+            let more = hover_button(ui, spot(buttons - 1.0), icons::DOTS_THREE, open)
                 .on_hover_text("More");
             if more.clicked() {
                 command = Some(SetOpenCommand::Toggle);
@@ -121,6 +145,13 @@ pub(super) fn message_menu(
         .gap(4.0)
         .open_memory(command)
         .show(|ui| {
+            if items.reply
+                && ui
+                    .button(format!("{}  Reply", icons::ARROW_BEND_UP_LEFT))
+                    .clicked()
+            {
+                actions.push(Action::Reply(entry.id));
+            }
             if let Some(text) = items.copy
                 && ui.button(format!("{}  Copy text", icons::COPY)).clicked()
             {

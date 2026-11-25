@@ -1,6 +1,9 @@
 use super::Value;
+use super::online::{Link, Ping, Wants, Watch};
 use crate::frame_log::readout::{FPS_WINDOW, StripFrame};
 use crate::frame_log::{FrameSample, Readout};
+use citrine_gb_net::LinkPath;
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -22,18 +25,20 @@ pub struct Facts {
     pub resolution: String,
     pub played: Option<u64>,
     pub clock: String,
+    pub link: Link,
 }
 
 pub struct Cell {
     pub label: &'static str,
     pub value: String,
-    pub unit: &'static str,
+    pub unit: Cow<'static, str>,
 }
 
 #[derive(Default)]
 pub struct Cache {
     clock: Option<(u64, String)>,
     speed: Option<(Duration, Option<f64>)>,
+    link: Watch,
 }
 
 impl Cache {
@@ -82,6 +87,25 @@ fn ms(duration: Duration) -> String {
 
 fn or_missing(value: Option<String>) -> String {
     value.unwrap_or_else(|| MISSING.into())
+}
+
+fn ping(ping: &Ping) -> (String, &'static str) {
+    match ping {
+        Ping::Server(ms) => (ms.to_string(), "ms to the server"),
+        Ping::Partner(Some(ms)) => (ms.to_string(), "ms"),
+        Ping::Partners(partners) if !partners.is_empty() => (
+            partners
+                .iter()
+                .map(|(name, ms)| match ms {
+                    Some(ms) => format!("{name} {ms}"),
+                    None => format!("{name} {MISSING}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            "ms",
+        ),
+        _ => (MISSING.into(), ""),
+    }
 }
 
 pub fn cell(value: Value, facts: &Facts) -> Cell {
@@ -133,12 +157,36 @@ pub fn cell(value: Value, facts: &Facts) -> Cell {
             "Hz",
         ),
         Value::Clock => (facts.clock.clone(), ""),
+        Value::Ping => ping(&facts.link.ping),
+        Value::Delay => {
+            if let Some(delay) = facts.link.delay {
+                let frames = if delay.frames == 1 { "frame" } else { "frames" };
+                return Cell {
+                    label: value.name(),
+                    value: delay.frames.to_string(),
+                    unit: format!("{frames}, {} ms", delay.ms).into(),
+                };
+            }
+            (MISSING.into(), "")
+        }
+        Value::Connection => (
+            match facts.link.path {
+                Some(LinkPath::Direct) => "Direct".into(),
+                Some(LinkPath::Relay) => "Relay".into(),
+                None => MISSING.into(),
+            },
+            "",
+        ),
+        Value::Waits => (
+            or_missing(facts.link.waits.map(|waits| waits.to_string())),
+            "in 1 min",
+        ),
     };
     let unit = if text == MISSING { "" } else { unit };
     Cell {
         label: value.name(),
         value: text,
-        unit,
+        unit: unit.into(),
     }
 }
 
@@ -147,10 +195,12 @@ pub struct Sources<'a> {
     pub load: crate::app::widgets::performance::LoadView,
     pub emulator: &'a crate::emulator::Emulator,
     pub stats: &'a crate::stats::Stats,
+    pub play: &'a crate::play::Play,
+    pub online: &'a mut crate::online::Online,
 }
 
 pub fn gather(sources: Sources, cache: &mut Cache, huds: &super::HudSettings) -> Facts {
-    let ds = sources.emulator.kind() == citrine_gb::console::ConsoleKind::Nds;
+    let ds = sources.emulator.played_kind() == citrine_gb::console::ConsoleKind::Nds;
     let wants = |value: Value| {
         huds.huds
             .iter()
@@ -184,15 +234,26 @@ pub fn gather(sources: Sources, cache: &mut Cache, huds: &super::HudSettings) ->
     } else {
         None
     };
+    let online = [Value::Ping, Value::Delay, Value::Connection, Value::Waits];
+    let link = cache.link.read(
+        sources.play,
+        sources.online,
+        Wants {
+            ping: wants(Value::Ping),
+            any: online.into_iter().any(wants),
+        },
+        web_time::Instant::now(),
+    );
     Facts {
         readout: sources.frame_log.readout(),
         speed,
         strip,
         gpu,
         ds,
-        jit: sources.emulator.ds_jit,
+        jit: sources.emulator.jit_switch(),
         resolution: sources.emulator.ds_3d.resolution.to_string(),
         played,
         clock,
+        link,
     }
 }

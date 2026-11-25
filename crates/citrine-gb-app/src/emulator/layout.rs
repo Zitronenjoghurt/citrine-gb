@@ -1,6 +1,7 @@
 use crate::app::ui_state::ds_screens::{
     Arrangement, Corner, DsScreens, MAX_GAP, Placement, ScreenContext,
 };
+use crate::app::ui_state::screen_layouts::{Spot, place_screens};
 use citrine_gb::console::{Screen, Touch, VideoSpec};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 
@@ -10,6 +11,13 @@ pub struct Placed {
     pub uv: Rect,
     pub rect: Rect,
     pub turns: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenSpots {
+    pub room: Rect,
+    pub screen: Option<Spot>,
+    pub touch: Option<Spot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,6 +31,7 @@ pub struct ScreenLayout {
     only: Option<usize>,
     beside: bool,
     inset: f32,
+    moved: [Option<Rect>; 2],
 }
 
 impl From<VideoSpec> for ScreenLayout {
@@ -43,7 +52,33 @@ impl ScreenLayout {
             only: None,
             beside: true,
             inset: 0.0,
+            moved: [None, None],
         }
+    }
+
+    pub fn moved(self, screen: Option<Rect>, touch: Option<Rect>) -> Self {
+        Self {
+            moved: [screen, touch],
+            ..self
+        }
+    }
+
+    pub fn spotted(self, target: Rect, spots: &ScreenSpots) -> Self {
+        let shown: Vec<(bool, Spot, Vec2)> = self
+            .moved(None, None)
+            .place(target)
+            .filter_map(|placed| {
+                let touch = placed.screen.touch;
+                let spot = if touch { spots.touch } else { spots.screen }?;
+                Some((touch, spot, placed.rect.size()))
+            })
+            .collect();
+        let group: Vec<(Spot, Vec2)> = shown.iter().map(|&(_, spot, size)| (spot, size)).collect();
+        let mut moved = [None, None];
+        for (&(touch, ..), rect) in shown.iter().zip(place_screens(&group, spots.room)) {
+            moved[usize::from(touch)] = Some(rect);
+        }
+        self.moved(moved[0], moved[1])
     }
 
     pub fn only(self, index: usize) -> Self {
@@ -239,10 +274,10 @@ impl ScreenLayout {
                     ((from + Vec2::splat(self.inset)) / source).to_pos2(),
                     ((end - Vec2::splat(self.inset)) / source).to_pos2(),
                 ),
-                rect: Rect::from_min_max(
+                rect: self.moved[usize::from(screen.touch)].unwrap_or(Rect::from_min_max(
                     target.min + at.min.to_vec2() * scale,
                     target.min + at.max.to_vec2() * scale,
-                ),
+                )),
                 turns,
             }
         })
@@ -269,8 +304,12 @@ impl ScreenLayout {
         if !self.placed_touch(target) {
             return None;
         }
+        let area = match self.moved[1] {
+            Some(touch) => touch,
+            None => target,
+        };
         let response = ui.interact(
-            target,
+            area,
             ui.id().with("touch_screen"),
             egui::Sense::click_and_drag(),
         );

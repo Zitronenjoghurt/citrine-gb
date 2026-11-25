@@ -5,15 +5,27 @@ use std::mem::offset_of;
 
 const BITS: u32 = 16;
 const SLOTS: usize = 1 << BITS;
-const NO_KEY: u32 = 2;
+pub const NO_KEY: u32 = 2;
+pub const NO_REACH: u32 = i32::MAX as u32;
+pub const HASH: u32 = 0x9E37_79B1;
+pub const HASH_SHIFT: u32 = 32 - BITS;
 const SPARSE: usize = SLOTS / 8;
 
 pub type Enter = (usize, u32, *const u32);
 
+pub const SLOT_TAG: u32 = offset_of!(Slot, tag) as u32;
+pub const SLOT_START: u32 = offset_of!(Slot, start) as u32;
 pub const SLOT_PIPELINE: u32 = offset_of!(Slot, pipeline) as u32;
+pub const SLOT_CODE: u32 = offset_of!(Slot, code) as u32;
+pub const SLOT_WORDS: u32 = offset_of!(Slot, words) as u32;
+pub const SLOT_SIZE: u32 = size_of::<Slot>() as u32;
 pub const SLOT_GENERATION: u32 = offset_of!(Slot, generation) as u32;
 pub const SLOT_LINKS: u32 = offset_of!(Slot, links) as u32;
-pub const LINKS: usize = 2;
+pub const LINKS: usize = 4;
+pub const LINK_SHIFT: u32 = size_of::<Link>().trailing_zeros();
+pub const CELL_BASE: i32 = SLOT_LINKS as i32 - size_of::<Link>() as i32;
+
+const _: () = assert!(size_of::<Link>() == 1 << LINK_SHIFT && CELL_BASE < 0);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +37,11 @@ pub struct Link {
     pub generation: u32,
     pub start: u32,
     pub entry: u32,
+    pub cost: u32,
+    pub pending: u32,
+    pub ahead: u32,
+    pub inverted: u32,
+    pub reach: u32,
 }
 
 impl Link {
@@ -36,6 +53,11 @@ impl Link {
         generation: 0,
         start: 0,
         entry: 0,
+        cost: u32::MAX,
+        pending: 0,
+        ahead: 0,
+        inverted: 0,
+        reach: NO_REACH,
     };
 }
 
@@ -53,6 +75,12 @@ struct Slot {
 
 unsafe impl Send for Slot {}
 unsafe impl Sync for Slot {}
+
+static NO_SLOT: Slot = Slot::EMPTY;
+
+pub fn no_slot() -> usize {
+    &NO_SLOT as *const Slot as usize
+}
 
 impl Slot {
     const EMPTY: Self = Self {
@@ -83,6 +111,10 @@ impl Lookup {
         self.find_slot(key, pipeline).map(|(enter, _)| enter)
     }
 
+    pub fn slots(&self) -> usize {
+        self.slots.as_ref().map_or(0, |slots| slots.as_ptr().addr())
+    }
+
     #[inline(always)]
     pub fn find_slot(&self, key: u32, pipeline: [u32; 2]) -> Option<(Enter, usize)> {
         let slot = &self.slots.as_ref()?[index(key)];
@@ -101,7 +133,16 @@ impl Lookup {
         };
         let generation = slots[to].generation;
         if let Some(cell) = slots[from].links.get_mut(cell) {
-            *cell = Link { generation, ..link };
+            let reach = if link.cost == u32::MAX {
+                NO_REACH
+            } else {
+                link.ahead
+            };
+            *cell = Link {
+                generation,
+                reach,
+                ..link
+            };
         }
     }
 
@@ -200,7 +241,7 @@ fn held(slots: &[Slot; SLOTS], at: usize) -> Option<usize> {
 }
 
 fn index(key: u32) -> usize {
-    (key.wrapping_mul(0x9E37_79B1) >> (32 - BITS)) as usize
+    (key.wrapping_mul(HASH) >> HASH_SHIFT) as usize
 }
 
 fn page_key(ram: CodeRam, page: usize) -> u32 {
@@ -302,6 +343,34 @@ mod tests {
             ..Link::NONE
         };
         lookup.link(from, cell, link);
+    }
+
+    #[test]
+    fn a_link_keeps_the_fetch_cost_it_was_made_with() {
+        let (from, to) = (0x0200_0000, 0x0200_1000);
+        let mut lookup = Lookup::default();
+        lookup.fill(from, [1, 2], enter(7), &[(CodeRam::Main, 0)]);
+        lookup.fill(to, [1, 2], enter(8), &[(CodeRam::Main, 1)]);
+        let (source, target) = (slot(&lookup, from), slot(&lookup, to));
+        assert_eq!(Link::NONE.cost, u32::MAX);
+        assert_eq!(Link::NONE.reach, NO_REACH);
+        for (cell, cost, reach) in [(0, 3, 6), (1, u32::MAX, NO_REACH)] {
+            lookup.link(
+                source,
+                cell,
+                Link {
+                    slot: target,
+                    cost,
+                    ahead: 6,
+                    reach: 0,
+                    ..Link::NONE
+                },
+            );
+            let slots = lookup.slots.as_ref().expect("slots");
+            let held = held(slots, source).expect("held");
+            assert_eq!(slots[held].links[cell].cost, cost);
+            assert_eq!(slots[held].links[cell].reach, reach);
+        }
     }
 
     #[test]

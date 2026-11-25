@@ -71,6 +71,15 @@ impl RecentRom {
         )
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn folder(&self) -> String {
+        crate::utils::zip_games::outside_zip(&self.path)
+            .parent()
+            .and_then(|folder| folder.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     pub fn display_name(&self) -> String {
         if self.title.is_empty() {
             self.path
@@ -156,9 +165,13 @@ impl RecentRoms {
     }
 
     pub fn prune(&mut self) -> usize {
+        self.prune_except(|_| false)
+    }
+
+    pub fn prune_except(&mut self, keep: impl Fn(&Path) -> bool) -> usize {
         let before = self.entries.len();
         self.entries
-            .retain(|e| crate::utils::zip_games::on_disk(&e.path));
+            .retain(|e| keep(&e.path) || crate::utils::zip_games::on_disk(&e.path));
         self.keep_icons();
         before - self.entries.len()
     }
@@ -168,7 +181,7 @@ impl RecentRoms {
             return;
         }
         for entry in &mut self.entries {
-            let Ok(data) = std::fs::read(&entry.path) else {
+            let Ok(data) = crate::utils::zip_games::read_game(&entry.path) else {
                 continue;
             };
             #[cfg(feature = "nds")]
@@ -262,8 +275,8 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("citrine-recent-{}-{name}", std::process::id()));
+        let dir = crate::storage::scratch_dir()
+            .join(format!("citrine-recent-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         dir
@@ -390,6 +403,38 @@ mod tests {
         assert!(!first.exists());
         assert!(outside.exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_zipped_game_gets_its_name_from_the_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rom = vec![0; 0x8000];
+        rom[0x104..0x134].copy_from_slice(&citrine_gb::rom::header::NINTENDO_LOGO);
+        rom[0x134..0x138].copy_from_slice(b"TOBU");
+        let zip = dir.path().join("pack.zip");
+        let packed = crate::utils::zip_games::tests::zip_of(
+            &[("roms/tobu.gb", &rom)],
+            zip::CompressionMethod::Deflated,
+        );
+        std::fs::write(&zip, packed).unwrap();
+
+        let mut recent = RecentRoms::default();
+        recent.record(&zip.join("roms").join("tobu.gb"), "   ", None);
+        recent.name_from_files();
+        assert_eq!(recent.entries()[0].title, "Tobu");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_zipped_game_shows_the_folder_its_zip_sits_in() {
+        let mut recent = RecentRoms::default();
+        recent.record(Path::new("/games/gba/pack.zip/roms/Game.gba"), "G", None);
+        assert_eq!(recent.entries()[0].folder(), "gba");
+        recent.record(Path::new("/games/gb/solo.zip/Tetris.gb"), "T", None);
+        assert_eq!(recent.entries()[0].folder(), "gb");
+        recent.record(Path::new("/games/gbc/Petris.gbc"), "P", None);
+        assert_eq!(recent.entries()[0].folder(), "gbc");
     }
 
     #[test]

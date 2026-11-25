@@ -3,6 +3,10 @@ disallowed-methods = [
     { path = "std::thread::Builder::spawn", reason = "start threads through citrine-gb-threads: Threads::start, Threads::background or Spawner" },
     { path = "std::thread::scope", reason = "run parallel steps with citrine-gb-threads' Scope" },
     { path = "wasm_bindgen_futures::spawn_local", reason = "use citrine_gb_threads::spawn_local or Spawner::run_future", allow-invalid = true },
+    { path = "directories::ProjectDirs::from", reason = "pick a folder with crate::storage::folder or crate::storage::root_file, so Settings > Storage counts it", allow-invalid = true },
+    { path = "directories::UserDirs::new", reason = "pick a folder with crate::storage::folder or crate::storage::root_file, so Settings > Storage counts it", allow-invalid = true },
+    { path = "std::env::temp_dir", reason = "write temporary files under crate::storage::folder(Folder::MediaTemp) or another cache folder; tests use crate::storage::scratch_dir" },
+    { path = "eframe::storage_dir", reason = "eframe keeps app.ron at crate::storage::root_file(RootFile::AppState)", allow-invalid = true },
 ]
 disallowed-types = [
     { path = "std::sync::Mutex", reason = "share state through citrine-gb-threads: Worker messages, latest or Pending" },

@@ -1,4 +1,6 @@
 use citrine_gb_net::{ClientHandshake, Opener, RelayKey, Sealer};
+use citrine_gb_websocket::{Event, Message};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use web_time::Instant;
@@ -147,9 +149,54 @@ impl<T: Transport> Transport for Secure<T> {
     }
 }
 
+const MAX_QUEUED_BYTES: usize = 256 << 20;
+const FLOODED: &str = "The relay sent more than the app can take";
+
+struct Inflow {
+    limit: usize,
+    queued: AtomicUsize,
+    flooded: AtomicBool,
+}
+
+impl Inflow {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            queued: AtomicUsize::new(0),
+            flooded: AtomicBool::new(false),
+        }
+    }
+
+    fn size(event: &Event) -> usize {
+        match event {
+            Event::Message(Message::Binary(bytes)) => bytes.len(),
+            Event::Message(Message::Text(text)) => text.len(),
+            _ => 0,
+        }
+    }
+
+    fn admit(&self, event: Event) -> Option<Event> {
+        if self.flooded.load(Ordering::Relaxed) {
+            return None;
+        }
+        let size = Self::size(&event);
+        if self.queued.fetch_add(size, Ordering::Relaxed) + size > self.limit {
+            self.queued.fetch_sub(size, Ordering::Relaxed);
+            self.flooded.store(true, Ordering::Relaxed);
+            return Some(Event::Failed(FLOODED.to_owned()));
+        }
+        Some(event)
+    }
+
+    fn release(&self, event: &Event) {
+        self.queued.fetch_sub(Self::size(event), Ordering::Relaxed);
+    }
+}
+
 struct WebSocket {
     sender: Option<Arc<Mutex<citrine_gb_websocket::Sender>>>,
-    events: Option<Receiver<(Instant, citrine_gb_websocket::Event)>>,
+    events: Option<Receiver<(Instant, Event)>>,
+    inflow: Arc<Inflow>,
     failed: Option<String>,
     arrived: Option<Instant>,
 }
@@ -164,19 +211,25 @@ impl WebSocket {
     )]
     fn open(url: &str) -> Self {
         let (tx, rx) = channel();
+        let inflow = Arc::new(Inflow::new(MAX_QUEUED_BYTES));
+        let counter = inflow.clone();
         let on_event = move |event| {
-            let _ = tx.send((Instant::now(), event));
+            if let Some(event) = counter.admit(event) {
+                let _ = tx.send((Instant::now(), event));
+            }
         };
         match citrine_gb_websocket::connect(url, citrine_gb_net::MAX_FRAME_BYTES + 1024, on_event) {
             Ok(sender) => Self {
                 sender: Some(Arc::new(Mutex::new(sender))),
                 events: Some(rx),
+                inflow,
                 failed: None,
                 arrived: None,
             },
             Err(err) => Self {
                 sender: None,
                 events: None,
+                inflow,
                 failed: Some(err),
                 arrived: None,
             },
@@ -189,7 +242,7 @@ impl Transport for WebSocket {
         if let Some(sender) = &self.sender
             && let Ok(mut sender) = sender.lock()
         {
-            sender.send(citrine_gb_websocket::Message::Binary(bytes));
+            sender.send(Message::Binary(bytes));
         }
     }
 
@@ -200,7 +253,7 @@ impl Transport for WebSocket {
             if let Some(sender) = sender.upgrade()
                 && let Ok(mut sender) = sender.lock()
             {
-                sender.send(citrine_gb_websocket::Message::Binary(bytes));
+                sender.send(Message::Binary(bytes));
             }
         }))
     }
@@ -211,15 +264,14 @@ impl Transport for WebSocket {
         }
         loop {
             let (at, event) = self.events.as_ref()?.try_recv().ok()?;
+            self.inflow.release(&event);
             self.arrived = Some(at);
             return Some(match event {
-                citrine_gb_websocket::Event::Opened => TransportEvent::Opened,
-                citrine_gb_websocket::Event::Message(citrine_gb_websocket::Message::Binary(
-                    bytes,
-                )) => TransportEvent::Message(bytes),
-                citrine_gb_websocket::Event::Message(_) => continue,
-                citrine_gb_websocket::Event::Failed(err) => TransportEvent::Failed(err),
-                citrine_gb_websocket::Event::Closed => TransportEvent::Closed,
+                Event::Opened => TransportEvent::Opened,
+                Event::Message(Message::Binary(bytes)) => TransportEvent::Message(bytes),
+                Event::Message(_) => continue,
+                Event::Failed(err) => TransportEvent::Failed(err),
+                Event::Closed => TransportEvent::Closed,
             });
         }
     }
@@ -230,5 +282,35 @@ impl Transport for WebSocket {
 
     fn clock(&self) -> Option<Instant> {
         Some(Instant::now())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relay_that_sends_faster_than_the_app_reads_is_cut_off() {
+        let inflow = Inflow::new(10);
+        let message = |n| Event::Message(Message::Binary(vec![0; n]));
+        let first = inflow.admit(message(6)).unwrap();
+        assert!(inflow.admit(Event::Opened).is_some());
+        assert_eq!(
+            inflow.admit(message(6)),
+            Some(Event::Failed(FLOODED.to_owned()))
+        );
+        inflow.release(&first);
+        assert_eq!(inflow.admit(message(1)), None);
+    }
+
+    #[test]
+    fn reading_makes_room_again() {
+        let inflow = Inflow::new(10);
+        let message = |n| Event::Message(Message::Binary(vec![0; n]));
+        for _ in 0..5 {
+            let event = inflow.admit(message(8)).unwrap();
+            inflow.release(&event);
+        }
+        assert_eq!(inflow.admit(message(10)), Some(message(10)));
     }
 }

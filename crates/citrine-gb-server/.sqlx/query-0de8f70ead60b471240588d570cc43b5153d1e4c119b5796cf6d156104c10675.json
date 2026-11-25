@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"games!: i64\", COALESCE(SUM(stored), 0) AS \"stored!: i64\"\n               FROM archive_games",
+  "describe": {
+    "columns": [
+      {
+        "name": "games!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "stored!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0de8f70ead60b471240588d570cc43b5153d1e4c119b5796cf6d156104c10675"
+}

@@ -1,6 +1,9 @@
+use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
 use crate::app::ui_state::keybinds::{
-    BindingCapture, BindingKind, DsButton, GbButton, KeyBindings, PadButton, Shoulder,
+    BindingCapture, BindingKind, DsButton, Fire, GameButton, GbButton, KeyBindings, PadButton,
+    Shoulder,
 };
+use crate::combo::{Bound, Chords, Edge, Mods};
 use crate::controller_debug::PadInfo;
 use std::fmt::{Display, Formatter};
 
@@ -126,6 +129,7 @@ pub enum Ignored {
     UnusedAxis,
     StateOnly,
     NotInput,
+    InCombo,
 }
 
 impl Display for Ignored {
@@ -137,6 +141,7 @@ impl Display for Ignored {
             Self::UnusedAxis => f.write_str("Citrine doesn't use this axis"),
             Self::StateOnly => f.write_str("Citrine reads presses and releases only"),
             Self::NotInput => f.write_str("not a button or axis"),
+            Self::InCombo => f.write_str("part of a combination"),
         }
     }
 }
@@ -151,7 +156,9 @@ pub enum PadAction {
         on: Option<GbButton>,
         off: &'static [GbButton],
     },
-    Capture(PadButton),
+    Button(PadButton, bool),
+    Shortcut(HotkeyAction, bool),
+    Capture(PadButton, bool),
     Unplugged,
     Ignore(Ignored),
 }
@@ -173,7 +180,11 @@ impl PadAction {
                 let off: Vec<String> = off.iter().map(|b| b.to_string()).collect();
                 format!("Game Boy {} up", off.join(" and "))
             }
-            Self::Capture(pad) => {
+            Self::Button(pad, true) => format!("{} down", pad.short_name()),
+            Self::Button(pad, false) => format!("{} up", pad.short_name()),
+            Self::Shortcut(action, true) => format!("{action} down"),
+            Self::Shortcut(action, false) => format!("{action} up"),
+            Self::Capture(pad, _) => {
                 return format!("taken by the binding being set ({})", pad.short_name());
             }
             Self::Unplugged => "Game Boy buttons it held up".to_string(),
@@ -192,36 +203,17 @@ pub fn route(
     bindings: &KeyBindings,
     capture: &BindingCapture,
     steering: Option<GbButton>,
-    ds: bool,
 ) -> PadAction {
     match input {
-        PadInput::Pressed(key) => {
-            let PadKey::Known(pad) = key else {
-                return PadAction::Ignore(Ignored::UnknownButton);
-            };
-            if capture.wants(BindingKind::Gamepad) {
-                return PadAction::Capture(pad);
-            }
-            if ds && let Some(button) = bindings.ds_for_pad(pad) {
-                return PadAction::Ds(button, true);
-            }
-            if let Some(shoulder) = bindings.shoulder_for_pad(pad) {
-                return PadAction::Shoulder(shoulder, true);
-            }
-            bound(pad, bindings).map_or_else(PadAction::Ignore, PadAction::Press)
+        PadInput::Pressed(PadKey::Known(pad)) if capture.wants(BindingKind::Gamepad) => {
+            PadAction::Capture(pad, true)
         }
-        PadInput::Released(key) => {
-            let PadKey::Known(pad) = key else {
-                return PadAction::Ignore(Ignored::UnknownButton);
-            };
-            if ds && let Some(button) = bindings.ds_for_pad(pad) {
-                return PadAction::Ds(button, false);
-            }
-            if let Some(shoulder) = bindings.shoulder_for_pad(pad) {
-                return PadAction::Shoulder(shoulder, false);
-            }
-            bound(pad, bindings).map_or_else(PadAction::Ignore, PadAction::Release)
+        PadInput::Released(PadKey::Known(pad)) if capture.holds_pad(pad) => {
+            PadAction::Capture(pad, false)
         }
+        PadInput::Pressed(PadKey::Known(pad)) => PadAction::Button(pad, true),
+        PadInput::Released(PadKey::Known(pad)) => PadAction::Button(pad, false),
+        PadInput::Pressed(_) | PadInput::Released(_) => PadAction::Ignore(Ignored::UnknownButton),
         PadInput::Moved(axis, value) => steer(axis, value, bindings, steering),
         PadInput::Repeated(_) | PadInput::Changed(..) => PadAction::Ignore(Ignored::StateOnly),
         PadInput::Disconnected => PadAction::Unplugged,
@@ -229,8 +221,117 @@ pub fn route(
     }
 }
 
-fn bound(pad: PadButton, bindings: &KeyBindings) -> Result<GbButton, Ignored> {
-    bindings.button_for_pad(pad).ok_or(Ignored::Unbound)
+pub type PadTable = Vec<Bound<PadButton, Fire<GameButton>>>;
+
+pub fn pad_table(bindings: &KeyBindings, hotkeys: &Hotkeys, ds: bool) -> PadTable {
+    let game: PadTable = bindings
+        .pad_table(ds)
+        .into_iter()
+        .map(|bound| bound.map(Fire::Button))
+        .collect();
+    let shortcuts: PadTable = hotkeys
+        .pad_table()
+        .into_iter()
+        .filter(|shortcut| game.iter().all(|bound| bound.combo != shortcut.combo))
+        .map(|bound| bound.map(Fire::Shortcut))
+        .collect();
+    game.into_iter().chain(shortcuts).collect()
+}
+
+#[derive(Debug, Default)]
+pub struct PadChords(Vec<(usize, Chords<PadButton, Fire<GameButton>>)>);
+
+impl PadChords {
+    pub fn change(
+        &mut self,
+        pad: usize,
+        button: PadButton,
+        down: bool,
+        table: &[Bound<PadButton, Fire<GameButton>>],
+    ) -> Vec<Edge<Fire<GameButton>>> {
+        let chords = match self.0.iter().position(|(index, _)| *index == pad) {
+            Some(at) => &mut self.0[at].1,
+            None => {
+                self.0.push((pad, Chords::default()));
+                &mut self.0.last_mut().expect("just pushed").1
+            }
+        };
+        if down {
+            chords.press(button, Mods::NONE, table)
+        } else {
+            chords.release(button)
+        }
+    }
+
+    pub fn forget(&mut self, pad: usize) {
+        self.0.retain(|(index, _)| *index != pad);
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn holds(&self, target: Fire<GameButton>) -> bool {
+        self.0.iter().any(|(_, chords)| chords.holds(target))
+    }
+}
+
+pub fn game_action(button: GameButton, down: bool) -> PadAction {
+    match (button, down) {
+        (GameButton::Button(button), true) => PadAction::Press(button),
+        (GameButton::Button(button), false) => PadAction::Release(button),
+        (GameButton::Shoulder(shoulder), down) => PadAction::Shoulder(shoulder, down),
+        (GameButton::Ds(button), down) => PadAction::Ds(button, down),
+    }
+}
+
+pub fn resolved(
+    button: PadButton,
+    down: bool,
+    edges: &[Edge<Fire<GameButton>>],
+    table: &[Bound<PadButton, Fire<GameButton>>],
+) -> PadAction {
+    let fired = |fire: Fire<GameButton>, down: bool| match fire {
+        Fire::Button(game) => game_action(game, down),
+        Fire::Shortcut(action) => PadAction::Shortcut(action, down),
+    };
+    let first_down = edges.iter().find_map(|edge| match edge {
+        Edge::Down(fire) => Some(*fire),
+        Edge::Up(_) => None,
+    });
+    if let Some(fire) = first_down {
+        return fired(fire, true);
+    }
+    if let Some(Edge::Up(fire)) = edges.first() {
+        return fired(*fire, false);
+    }
+    let single = table
+        .iter()
+        .find(|bound| bound.combo.only() == Some(button));
+    match single {
+        Some(bound) => fired(bound.target, down),
+        _ if table.iter().any(|bound| bound.combo.contains(&button)) => {
+            PadAction::Ignore(Ignored::InCombo)
+        }
+        _ => PadAction::Ignore(Ignored::Unbound),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn route_alone(
+    input: PadInput,
+    bindings: &KeyBindings,
+    capture: &BindingCapture,
+    ds: bool,
+) -> PadAction {
+    match route(input, bindings, capture, None) {
+        PadAction::Button(button, down) => {
+            let table = pad_table(bindings, &Hotkeys::default(), ds);
+            let edges = PadChords::default().change(0, button, down, &table);
+            resolved(button, down, &edges, &table)
+        }
+        action => action,
+    }
 }
 
 fn steer(
@@ -291,16 +392,47 @@ fn centre(button: GbButton) -> &'static [GbButton] {
 }
 
 #[cfg(test)]
+pub(crate) struct FakePads(pub(crate) std::collections::VecDeque<PadEvent>);
+
+#[cfg(test)]
+impl PadSource for FakePads {
+    fn next_event(&mut self) -> Option<PadEvent> {
+        self.0.pop_front()
+    }
+
+    fn pads(&self, _seen: &[usize]) -> Vec<PadInfo> {
+        Vec::new()
+    }
+
+    fn api(&self) -> String {
+        "fake".to_string()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fake(events: &[(usize, PadInput)]) -> FakePads {
+    FakePads(
+        events
+            .iter()
+            .map(|&(pad, input)| PadEvent {
+                pad,
+                input,
+                code: None,
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::ui_state::keybinds::BindingTarget;
 
     fn route_default(input: PadInput) -> PadAction {
-        route(
+        route_alone(
             input,
             &KeyBindings::default(),
             &BindingCapture::default(),
-            None,
             false,
         )
     }
@@ -324,11 +456,10 @@ mod tests {
     #[test]
     fn the_top_and_left_face_buttons_press_x_and_y_on_the_ds() {
         let route_on = |input: PadInput, ds: bool| {
-            route(
+            route_alone(
                 input,
                 &KeyBindings::default(),
                 &BindingCapture::default(),
-                None,
                 ds,
             )
         };
@@ -368,29 +499,83 @@ mod tests {
     }
 
     #[test]
-    fn a_waiting_binding_takes_presses_but_not_releases() {
+    fn a_waiting_binding_takes_the_buttons_it_saw_go_down() {
         let mut capture = BindingCapture::default();
         capture.start(BindingTarget::Button(GbButton::A), BindingKind::Any);
         let bindings = KeyBindings::default();
+        let south = PadKey::Known(PadButton::South);
         assert_eq!(
-            route(
-                PadInput::Pressed(PadKey::Known(PadButton::South)),
-                &bindings,
-                &capture,
-                None,
-                false,
-            ),
-            PadAction::Capture(PadButton::South)
+            route(PadInput::Pressed(south), &bindings, &capture, None),
+            PadAction::Capture(PadButton::South, true)
+        );
+        capture.press_pad(PadButton::South);
+        assert_eq!(
+            route(PadInput::Released(south), &bindings, &capture, None),
+            PadAction::Capture(PadButton::South, false)
         );
         assert_eq!(
-            route(
-                PadInput::Released(PadKey::Known(PadButton::South)),
+            route_alone(
+                PadInput::Released(PadKey::Known(PadButton::North)),
                 &bindings,
                 &capture,
-                None,
-                false,
+                false
             ),
-            PadAction::Release(GbButton::B)
+            PadAction::Release(GbButton::B),
+            "a button held from before the capture lets go in the game"
+        );
+    }
+
+    #[test]
+    fn a_combo_waits_and_then_takes_its_buttons_from_the_game() {
+        let mut bindings = KeyBindings::default();
+        let menu = crate::combo::Combo::new([
+            PadButton::LeftTrigger,
+            PadButton::RightTrigger,
+            PadButton::Select,
+        ])
+        .expect("a combo");
+        bindings.bind_pads(menu, GameButton::Button(GbButton::Start));
+        let table = pad_table(&bindings, &Hotkeys::default(), false);
+        let mut chords = PadChords::default();
+        let mut press = |button: PadButton| {
+            let edges = chords.change(1, button, true, &table);
+            resolved(button, true, &edges, &table)
+        };
+        assert_eq!(
+            press(PadButton::LeftTrigger),
+            PadAction::Shoulder(Shoulder::L, true)
+        );
+        assert_eq!(
+            press(PadButton::RightTrigger),
+            PadAction::Shoulder(Shoulder::R, true)
+        );
+        assert_eq!(press(PadButton::Select), PadAction::Press(GbButton::Start));
+        assert!(chords.holds(Fire::Button(GameButton::Button(GbButton::Start))));
+        assert!(!chords.holds(Fire::Button(GameButton::Shoulder(Shoulder::L))));
+        chords.forget(1);
+        assert!(!chords.holds(Fire::Button(GameButton::Button(GbButton::Start))));
+    }
+
+    #[test]
+    fn a_pad_shortcut_fires_only_on_a_button_the_game_does_not_use() {
+        let mut hotkeys = Hotkeys::default();
+        hotkeys.bind_pad(PadButton::Mode, HotkeyAction::ToggleMute);
+        hotkeys.bind_pad(PadButton::East, HotkeyAction::TogglePause);
+        let table = pad_table(&KeyBindings::default(), &hotkeys, false);
+        let mut chords = PadChords::default();
+        let edges = chords.change(0, PadButton::Mode, true, &table);
+        assert_eq!(
+            edges,
+            [Edge::Down(Fire::Shortcut(HotkeyAction::ToggleMute))]
+        );
+        assert_eq!(
+            resolved(PadButton::Mode, true, &edges, &table),
+            PadAction::Shortcut(HotkeyAction::ToggleMute, true)
+        );
+        let edges = chords.change(0, PadButton::East, true, &table);
+        assert_eq!(
+            edges,
+            [Edge::Down(Fire::Button(GameButton::Button(GbButton::A)))]
         );
     }
 
@@ -404,7 +589,6 @@ mod tests {
                 &bindings,
                 &capture,
                 None,
-                false,
             ),
             PadAction::Steer {
                 on: Some(GbButton::Left),
@@ -417,7 +601,6 @@ mod tests {
                 &bindings,
                 &capture,
                 None,
-                false,
             ),
             PadAction::Steer {
                 on: None,
@@ -430,7 +613,6 @@ mod tests {
                 &bindings,
                 &capture,
                 None,
-                false,
             ),
             PadAction::Ignore(Ignored::UnusedAxis)
         );
@@ -442,7 +624,6 @@ mod tests {
                 &bindings,
                 &capture,
                 None,
-                false,
             ),
             PadAction::Ignore(Ignored::StickOff)
         );
@@ -458,7 +639,6 @@ mod tests {
                 &bindings,
                 &capture,
                 steering,
-                false,
             )
         };
         let centred = PadAction::Steer {

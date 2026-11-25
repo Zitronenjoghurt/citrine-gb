@@ -140,6 +140,32 @@ impl std::fmt::Display for SlowSound {
     }
 }
 
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum_macros::EnumIter,
+)]
+pub enum FastForwardSound {
+    #[default]
+    Silent,
+    SpedUp,
+}
+
+impl std::fmt::Display for FastForwardSound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Silent => "Silent",
+            Self::SpedUp => "Sped up",
+        })
+    }
+}
+
 pub struct AudioFeed {
     writer: QueueWriter,
     resampler: Resampler,

@@ -192,13 +192,25 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
         ui.vertical_centered(|ui| ui.label(RichText::new("Open a game to add cheats").weak()));
         return;
     };
+    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
+    if viewer.emulator.hardcore() {
+        let text = "Cheats are off in hardcore";
+        let turn_off = if touch {
+            crate::app::mobile::cheats::hardcore_note(ui, text)
+        } else {
+            crate::app::hardcore::off_note(ui, text)
+        };
+        if turn_off {
+            crate::app::hardcore::turn_off(&mut viewer.ui.settings);
+        }
+        return;
+    }
     let game = Game {
         rom_key: &rom_key,
         console: viewer.emulator.kind(),
         now: ui.input(|i| i.time),
     };
     let paused = viewer.play.session().is_some_and(|s| s.runs_engine());
-    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
     let draw = if touch {
         crate::app::mobile::cheats::body
     } else {

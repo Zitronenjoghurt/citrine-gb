@@ -267,7 +267,7 @@ fn recovery_page(app: &App, codes: &[String], flash_text: &'static str) -> Respo
             Tab::Settings,
             Some(Flash {
                 ok: true,
-                text: flash_text,
+                text: flash_text.into(),
             }),
             &body,
         ))

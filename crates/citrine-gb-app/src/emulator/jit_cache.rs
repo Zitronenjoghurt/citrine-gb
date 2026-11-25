@@ -1,23 +1,25 @@
 use super::{Emulator, Machine};
 use crate::app::ui_state::settings::GBA_USES_JIT;
 use crate::storage::Write;
+use citrine_gb::jit_cache::{FILE_LIMIT, KEY_BYTES};
 use citrine_gb::nds::machine::{JIT_AVAILABLE, JitCache};
-use std::path::PathBuf;
+use std::io::{Read, Write as _};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 pub const SAVE_EVERY: Duration = Duration::from_secs(5 * 60);
 pub const FOLDER_LIMIT: u64 = 256 << 20;
-#[cfg(not(target_arch = "wasm32"))]
-const FOLDER: &str = "jit";
 const EXTENSION: &str = "jit";
 
 impl Emulator {
     pub(super) fn follow_jit_cache(&mut self) {
         let fresh = match &self.seat.core().machine {
-            Machine::Nds(nds) if JIT_AVAILABLE => JitCache::for_rom(&nds.rom_bytes()),
+            Machine::Nds(nds) if JIT_AVAILABLE => {
+                JitCache::for_rom(&nds.rom_bytes(), key().unwrap_or_default())
+            }
             Machine::Gba(gba) if JIT_AVAILABLE && GBA_USES_JIT => {
-                JitCache::for_rom(gba.bus().rom())
+                JitCache::for_rom(gba.bus().rom(), key().unwrap_or_default())
             }
             _ => {
                 self.save_jit_cache();
@@ -83,8 +85,11 @@ impl Emulator {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn folder() -> Option<PathBuf> {
-    let folder = crate::storage::cache_dir().join(FOLDER);
-    (!cfg!(test)).then_some(folder)
+    if cfg!(test) {
+        return None;
+    }
+    key()?;
+    Some(crate::storage::folder(crate::storage::kinds::Folder::Jit))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -92,11 +97,70 @@ fn folder() -> Option<PathBuf> {
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn key() -> Option<[u8; KEY_BYTES]> {
+    static KEY: std::sync::OnceLock<Option<[u8; KEY_BYTES]>> = std::sync::OnceLock::new();
+    *KEY.get_or_init(|| {
+        kept_key(&crate::storage::root_file(
+            crate::storage::kinds::RootFile::JitKey,
+        ))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn key() -> Option<[u8; KEY_BYTES]> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn kept_key(path: &Path) -> Option<[u8; KEY_BYTES]> {
+    if let Some(key) = read_capped(path, KEY_BYTES).and_then(|bytes| bytes.try_into().ok()) {
+        return Some(key);
+    }
+    let mut key = [0; KEY_BYTES];
+    getrandom::getrandom(&mut key).ok()?;
+    if let Err(err) = write_new(path, &key) {
+        log::warn!("couldn't save the JIT cache key: {err}");
+    }
+    Some(key)
+}
+
+fn read_capped(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= limit).then_some(bytes)
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let part = path.with_extension("part");
+    match std::fs::remove_file(&part) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+        _ => {}
+    }
+    let mut options = std::fs::File::options();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(&part)?.write_all(bytes)?;
+    std::fs::rename(&part, path)
+}
+
 fn load(cache: &JitCache) {
     let Some(path) = folder().map(|folder| folder.join(cache.file_name())) else {
         return;
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    if !path.exists() {
+        return;
+    }
+    let Some(bytes) = read_capped(&path, FILE_LIMIT) else {
+        drop_file(&path, "it is over the size limit or unreadable");
         return;
     };
     let began = web_time::Instant::now();
@@ -106,12 +170,14 @@ fn load(cache: &JitCache) {
             bytes.len() >> 10,
             began.elapsed().as_secs_f64() * 1000.0
         ),
-        Err(err) => {
-            log::warn!("dropped the JIT cache {}: {err}", path.display());
-            if let Err(err) = std::fs::remove_file(&path) {
-                log::warn!("couldn't remove {}: {err}", path.display());
-            }
-        }
+        Err(err) => drop_file(&path, &err.to_string()),
+    }
+}
+
+fn drop_file(path: &Path, why: &str) {
+    log::warn!("dropped the JIT cache {}: {why}", path.display());
+    if let Err(err) = std::fs::remove_file(path) {
+        log::warn!("couldn't remove {}: {err}", path.display());
     }
 }
 
@@ -125,15 +191,11 @@ pub fn store(cache: &JitCache) {
     evict(&folder, &cache.file_name(), FOLDER_LIMIT);
 }
 
-fn write(folder: &std::path::Path, cache: &JitCache) -> std::io::Result<()> {
-    std::fs::create_dir_all(folder)?;
-    let path = folder.join(cache.file_name());
-    let part = path.with_extension("part");
-    std::fs::write(&part, cache.encode())?;
-    std::fs::rename(&part, &path)
+fn write(folder: &Path, cache: &JitCache) -> std::io::Result<()> {
+    write_new(&folder.join(cache.file_name()), &cache.encode())
 }
 
-fn evict(folder: &std::path::Path, keep: &str, limit: u64) {
+fn evict(folder: &Path, keep: &str, limit: u64) {
     let mut games = files(folder);
     games.sort_by_key(|&(_, _, modified)| std::cmp::Reverse(modified));
     let mut total = 0;
@@ -149,7 +211,7 @@ fn evict(folder: &std::path::Path, keep: &str, limit: u64) {
     }
 }
 
-fn files(folder: &std::path::Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+fn files(folder: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
@@ -182,6 +244,39 @@ mod tests {
             .open(&path)
             .and_then(|file| file.set_modified(modified))
             .expect("the time sets");
+    }
+
+    #[test]
+    fn a_key_is_made_once_and_kept() {
+        let dir = tempfile::tempdir().expect("a temp folder");
+        let path = dir.path().join("jit.key");
+        let key = kept_key(&path).expect("a key");
+        assert_eq!(kept_key(&path), Some(key));
+        std::fs::write(&path, [1; 7]).expect("the file writes");
+        let fresh = kept_key(&path).expect("a new key");
+        assert_eq!(std::fs::read(&path).expect("the key reads"), fresh);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_part_link_is_replaced_not_followed() {
+        let dir = tempfile::tempdir().expect("a temp folder");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, b"keep").expect("the file writes");
+        let path = dir.path().join("game.jit");
+        std::os::unix::fs::symlink(&target, path.with_extension("part")).expect("a link");
+        write_new(&path, b"cache").expect("the cache writes");
+        assert_eq!(std::fs::read(&target).expect("the target reads"), b"keep");
+        assert_eq!(std::fs::read(&path).expect("the cache reads"), b"cache");
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_not_read() {
+        let dir = tempfile::tempdir().expect("a temp folder");
+        let path = dir.path().join("big.jit");
+        std::fs::write(&path, vec![0; 65]).expect("the file writes");
+        assert_eq!(read_capped(&path, 64), None);
+        assert_eq!(read_capped(&path, 65).map(|bytes| bytes.len()), Some(65));
     }
 
     #[test]

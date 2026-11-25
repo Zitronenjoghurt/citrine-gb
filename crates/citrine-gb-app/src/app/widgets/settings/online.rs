@@ -1,20 +1,25 @@
 use crate::app::mobile::kit::{self, Row};
 use crate::app::ui_state::settings::Settings;
+use crate::app::ui_state::settings_tree::GroupId;
+use crate::app::ui_state::settings_tree::rows::RowId;
 use crate::app::widgets;
 use crate::app::widgets::avatar;
 use crate::app::widgets::confirm;
-use crate::app::widgets::field::row_field;
+use crate::app::widgets::field::{row_field, row_field_width};
 use crate::app::widgets::generic_select::GenericSelect;
+use crate::app::widgets::reset_slider::with_reset;
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::settings::page::{Heading, Page};
 use crate::icons;
 use crate::online::cloud::SyncState;
 use crate::online::settings::InputDelay;
 use crate::online::{Online, Phase, Problem, Seen};
-use citrine_gb_net::{DISPLAY_NAME_MAX_CHARS, FileId, display_name};
+use citrine_gb_net::{DISPLAY_NAME_MAX_CHARS, FileId, MAX_TYPING_CHARS, display_name};
 use egui::{RichText, Ui, Widget};
 use join::{account_step, address_step, name_step};
-pub use phone_join::{JoinSheet, join_dialogs, join_sheet, open_sheet, signed_out_rows};
+pub use phone_join::{
+    JoinSheet, join_dialogs, join_sheet, open_sheet, server_set, signed_out_rows,
+};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -26,10 +31,14 @@ pub mod storage;
 mod two_factor;
 
 const KEY_ABOUT: &str = "Citrine remembers this key and warns you if the relay shows a different one. The relay's owner sees it in the admin panel.";
-pub const SHOW_PLAYING: &str = "Show friends what I'm playing";
+pub const SHOW_PLAYING: &str = "Friends see what I play";
 pub const TYPING: &str = "Typing indicators";
 pub const TYPING_HINT: &str = "Friends see when you're writing to them, and you see when they write to you. Off means neither.";
-pub const FOCUS_POPUPS: &str = "Messages and invites in focus mode";
+pub const TYPING_TEXT: &str = "Typing text";
+pub const TYPING_DEFAULT: &str = crate::app::widgets::typing::DEFAULT_TEXT;
+pub const FOCUS_POPUPS: &str = "Popups in focus mode";
+pub const FOCUS_POPUPS_HINT: &str =
+    "Shows friends' messages and play invites while focus mode is on.";
 pub const ALLOW: &str = "Allow notifications";
 pub const FRIEND_REQUESTS: &str = "Friend requests";
 pub const INVITES: &str = "Play invites";
@@ -77,6 +86,7 @@ pub struct JoinForm {
     trusting: bool,
     signed_out: Option<String>,
     signing_out: Option<(citrine_gb_net::DeviceId, String)>,
+    renaming: Option<String>,
     phone_connect: bool,
     codes_to_save: Option<String>,
 }
@@ -334,7 +344,7 @@ fn code_row(ui: &mut Ui, online: &mut Online, form: &mut JoinForm, now: Instant)
     Form::show(ui, "online_code", |f| {
         f.row("Code", |ui| {
             let button = 72.0;
-            let width = (ui.available_width() - button - ui.spacing().item_spacing.x).max(60.0);
+            let width = (row_field_width(ui) - button - ui.spacing().item_spacing.x).max(60.0);
             let response = ui.add(
                 row_field(ui, &mut form.code)
                     .hint_text(CODE_HINT)
@@ -435,7 +445,9 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
             Form::show(ui, "online_play", |f| {
                 s.dirty |= f.toggle(SHOW_PLAYING, &mut s.online.show_playing);
                 s.dirty |= f.toggle_with_hint(TYPING, TYPING_HINT, &mut s.online.typing_indicators);
-                s.dirty |= f.toggle(FOCUS_POPUPS, &mut s.online.focus_popups);
+                s.dirty |= f.tree_row(RowId::TypingText, |f| typing_text_row(f, &mut s.online));
+                s.dirty |=
+                    f.toggle_with_hint(FOCUS_POPUPS, FOCUS_POPUPS_HINT, &mut s.online.focus_popups);
             });
         });
         if crate::platform::push::available() {
@@ -443,14 +455,8 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
                 Form::show(ui, "online_push", |f| notifications(f, s));
             });
         }
-        page.section(
-            Heading::new(icons::GAME_CONTROLLER, "Play together"),
-            |ui| {
-                Form::show(ui, "online_delay", |f| input_delay(f, s));
-            },
-        );
-        page.section(Heading::new(icons::CLOUD, "Cloud"), |ui| {
-            Form::show(ui, "online_cloud", |f| cloud(f, s, online));
+        page.section(Heading::new(icons::USERS, "Play together"), |ui| {
+            Form::show(ui, "online_delay", |f| play_together(f, s));
         });
         if online.account().is_some() {
             page.section(
@@ -472,23 +478,32 @@ fn joined(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinFor
                 Heading::new(icons::DEVICES, "Devices").hint(devices::ABOUT),
                 |ui| {
                     Form::show(ui, "online_devices", |f| {
-                        f.custom(|ui| devices::devices(ui, online, form))
+                        f.custom(|ui| {
+                            s.dirty |=
+                                devices::devices(ui, online, form, &mut s.online.device_name);
+                        })
                     })
                 },
             );
         }
         if storage::has_storage(online) {
-            page.section(Heading::new(icons::HARD_DRIVES, "Storage"), |ui| {
-                Form::show(ui, "online_storage_page", |f| {
-                    f.custom(|ui| storage::storage_body(ui, online, form, now))
-                })
-            });
+            page.section(
+                Heading::new(GroupId::Storage.icon(), GroupId::Storage.title()),
+                |ui| {
+                    Form::show(ui, "online_storage_page", |f| {
+                        f.custom(|ui| storage::storage_body(ui, online, form, now))
+                    })
+                },
+            );
         }
-        page.plain(|ui| {
-            Form::show(ui, "online_leave", |f| {
-                f.buttons(|ui| leave_and_delete(ui, s, online, form, &facts, false));
-            });
-        });
+        page.section(
+            Heading::new(GroupId::Leave.icon(), GroupId::Leave.title()),
+            |ui| {
+                Form::show(ui, "online_leave", |f| {
+                    f.buttons(|ui| leave_and_delete(ui, s, online, form, &facts, false));
+                });
+            },
+        );
     });
 }
 
@@ -634,7 +649,7 @@ fn display_name_row(f: &mut Form, online: &mut Online, form: &mut JoinForm, fact
             online.is_connected(),
             row_field(ui, editing)
                 .char_limit(DISPLAY_NAME_MAX_CHARS)
-                .desired_width(ui.available_width()),
+                .desired_width(row_field_width(ui)),
         );
         if response.lost_focus() {
             match display_name(editing) {
@@ -654,32 +669,42 @@ fn display_name_row(f: &mut Form, online: &mut Online, form: &mut JoinForm, fact
     }
 }
 
-fn input_delay(f: &mut Form, s: &mut Settings) {
+fn play_together(f: &mut Form, s: &mut Settings) {
     f.row_with_hint("Input delay", DELAY_HINT, |ui| {
         s.dirty |= GenericSelect::from_enum(&mut s.online.input_delay, "enum_select_input_delay")
             .default_value(InputDelay::Auto)
             .ui(ui)
             .changed();
     });
+    s.dirty |= f.toggle_with_hint("Direct connection", DIRECT_HINT, &mut s.online.direct);
 }
 
-fn cloud(f: &mut Form, s: &mut Settings, online: &mut Online) {
-    s.dirty |= f.toggle_with_hint("Cloud saves", CLOUD_HINT, &mut s.online.cloud_saves);
-    let cloud = s.online.cloud_saves;
-    let mut on = cloud && s.online.sync_settings;
-    if f.toggle_when("Sync settings", Some(SYNC_HINT), cloud, &mut on) {
-        s.online.sync_settings = on;
-        s.dirty = true;
-    }
-    for text in no_storage(s, online)
-        .into_iter()
-        .chain(cloud_problems(s, online))
-    {
-        f.hint(text);
-    }
+fn typing_text_row(f: &mut Form, online: &mut crate::online::settings::OnlineSettings) -> bool {
+    let enabled = online.typing_indicators;
+    let text = &mut online.typing_text;
+    f.row(TYPING_TEXT, |ui| {
+        let mut dirty = false;
+        let reset = ui
+            .add_enabled_ui(enabled, |ui| {
+                with_reset(ui, !text.is_empty(), TYPING_DEFAULT, |ui| {
+                    let field = row_field(ui, text)
+                        .hint_text(TYPING_DEFAULT)
+                        .char_limit(MAX_TYPING_CHARS)
+                        .desired_width(f32::INFINITY);
+                    dirty |= ui.add(field).changed();
+                })
+            })
+            .inner;
+        if reset {
+            text.clear();
+            dirty = true;
+        }
+        dirty
+    })
 }
 
 pub const DELAY_HINT: &str = "Your presses count this many frames later, so online play rewinds less, and Auto picks the number from the ping.";
+pub const DIRECT_HINT: &str = "Connects you straight to other players who turn this on too, instead of through the relay. That usually lowers the ping. Those players can see your internet address.";
 pub const CLOUD_HINT: &str = "Keeps your saves on the relay so your other devices can load them. They're encrypted, so only your devices can read them.";
 pub const SYNC_HINT: &str = "Your theme, palettes, key bindings and screen effects copy to your other devices on this relay ID, encrypted like your saves. The latest change wins. Volume, controllers, touch controls and the UI size stay on each device. Needs Cloud saves.";
 
@@ -865,8 +890,8 @@ pub fn two_factor_phone(
     );
 }
 
-pub fn devices_body(ui: &mut Ui, online: &mut Online, form: &mut JoinForm) {
-    devices::devices(ui, online, form);
+pub fn devices_body(ui: &mut Ui, s: &mut Settings, online: &mut Online, form: &mut JoinForm) {
+    s.dirty |= devices::devices(ui, online, form, &mut s.online.device_name);
 }
 
 pub fn ask_sign_out(form: &mut JoinForm) {

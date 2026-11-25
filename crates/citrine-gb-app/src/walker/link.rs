@@ -1,6 +1,8 @@
 use citrine_gb::nds::ir::IrPort;
-use citrine_gb_walker::{Event, Link, Walker};
+use citrine_gb_walker::{CYCLES_PER_SECOND, Event, Link, Walker};
 use std::fmt::Write;
+
+const CONNECT_FOR: u64 = 30 * CYCLES_PER_SECOND;
 
 pub struct WalkerLink {
     walker: Walker,
@@ -38,7 +40,7 @@ impl WalkerLink {
     fn follow_connect(&mut self, now: u64) {
         if std::mem::take(&mut self.connect) && self.walker.link() == Link::Idle {
             log::debug!("walker ir {now}: advertising");
-            self.walker.connect(now);
+            self.walker.connect_until(now, now + CONNECT_FOR);
         }
     }
 }
@@ -72,7 +74,6 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use citrine_gb_walker::CYCLES_PER_SECOND;
 
     #[test]
     fn a_connect_request_starts_advertising_at_the_next_ir_access() {
@@ -82,6 +83,27 @@ mod tests {
         let now = CYCLES_PER_SECOND;
         assert_eq!(link.take(now), Some(vec![0x56]));
         assert_eq!(link.walker().link(), Link::Advertising);
+    }
+
+    #[test]
+    fn one_connect_request_keeps_advertising_for_thirty_seconds() {
+        let mut link = WalkerLink::new(Walker::new(1));
+        link.request_connect();
+        let start = CYCLES_PER_SECOND;
+        let mut last = 0;
+        let mut at = start;
+        while at < start + 35 * CYCLES_PER_SECOND {
+            if link.take(at).is_some() {
+                last = at;
+            }
+            at += CYCLES_PER_SECOND / 1_000;
+        }
+        let seconds = (last - start) / CYCLES_PER_SECOND;
+        assert!(
+            (29..=30).contains(&seconds),
+            "last advertisement after {seconds} s"
+        );
+        assert_eq!(link.walker().link(), Link::Idle);
     }
 
     #[test]

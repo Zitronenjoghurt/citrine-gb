@@ -8,6 +8,7 @@ use std::io::Write;
 pub struct FullDumpRef<'a> {
     pub gb: &'a GameBoy,
     pub sram: Option<SramDump>,
+    pub game: u64,
 }
 
 impl<'a> FullDumpRef<'a> {
@@ -40,6 +41,8 @@ impl<'a> FullDumpRef<'a> {
 pub struct FullDump {
     pub gb: GameBoy,
     pub sram: Option<SramDump>,
+    #[serde(default)]
+    pub game: u64,
 }
 
 impl FullDump {
@@ -49,9 +52,7 @@ impl FullDump {
 
     #[cfg(feature = "brotli")]
     pub fn from_brotli(data: &[u8]) -> GbResult<Self> {
-        let mut decompressed = Vec::new();
-        let mut decompressor = brotli::Decompressor::new(data, 4096);
-        std::io::Read::read_to_end(&mut decompressor, &mut decompressed)?;
+        let decompressed = super::state::unbrotli(data, super::state::STATE_LIMIT)?;
         Self::from_rmp(&decompressed)
     }
 

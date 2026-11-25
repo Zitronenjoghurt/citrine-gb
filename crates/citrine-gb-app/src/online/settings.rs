@@ -1,4 +1,5 @@
 use crate::online::address::ServerAddress;
+use crate::online::pins::FriendPins;
 use citrine_gb_net::{Account, DeviceKey, Fingerprint, PushKinds, RelayId, RelayKey};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -12,16 +13,22 @@ pub struct OnlineSettings {
     pub relays: BTreeMap<String, RelayEntry>,
     pub show_playing: bool,
     pub typing_indicators: bool,
+    pub typing_text: String,
     pub cloud_saves: bool,
     pub sync_settings: bool,
+    pub keep_saves: KeepSaves,
+    pub network_saves: bool,
+    pub network_allowed: Vec<RelayKey>,
     pub friend_volume: f32,
     pub friend_muted: bool,
     pub input_delay: InputDelay,
+    pub direct: bool,
     pub notify_friend_requests: bool,
     pub notify_invites: bool,
     pub notify_chats: bool,
     pub notify_asked: bool,
     pub focus_popups: bool,
+    pub device_name: String,
 }
 
 impl OnlineSettings {
@@ -44,17 +51,41 @@ impl Default for OnlineSettings {
             relays: BTreeMap::new(),
             show_playing: true,
             typing_indicators: true,
+            typing_text: String::new(),
             cloud_saves: true,
             sync_settings: true,
+            keep_saves: KeepSaves::Library,
+            network_saves: true,
+            network_allowed: Vec::new(),
             friend_volume: Self::DEFAULT_FRIEND_VOLUME,
             friend_muted: false,
             input_delay: InputDelay::Auto,
+            direct: false,
             notify_friend_requests: true,
             notify_invites: true,
             notify_chats: true,
             notify_asked: false,
             focus_popups: true,
+            device_name: String::new(),
         }
+    }
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, EnumIter,
+)]
+pub enum KeepSaves {
+    #[default]
+    Library,
+    All,
+}
+
+impl fmt::Display for KeepSaves {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Library => "Your library",
+            Self::All => "All games",
+        })
     }
 }
 
@@ -109,6 +140,8 @@ pub struct RelayEntry {
     pub device: Option<DeviceKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub others: Vec<SavedAccount>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub friend_keys: BTreeMap<String, FriendPins>,
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -150,6 +183,7 @@ pub struct Trust {
     pub relay_key: Option<RelayKey>,
     pub expected: Option<Fingerprint>,
     pub device: Option<DeviceKey>,
+    pub friend_keys: FriendPins,
 }
 
 impl fmt::Debug for RelayEntry {
@@ -223,6 +257,21 @@ impl RelayEntry {
             relay_key: self.relay_key,
             expected: None,
             device: self.device.clone(),
+            friend_keys: self
+                .online_id
+                .as_ref()
+                .and_then(|id| self.friend_keys.get(id))
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    fn keep_friend_keys(&mut self, trust: &Trust) {
+        if let Some(id) = &self.online_id
+            && !trust.friend_keys.is_empty()
+        {
+            self.friend_keys
+                .insert(id.clone(), trust.friend_keys.clone());
         }
     }
 }
@@ -284,6 +333,7 @@ impl OnlineSettings {
                 relay_key: None,
                 device: None,
                 others: Vec::new(),
+                friend_keys: BTreeMap::new(),
             });
         entry.password = password.to_owned();
         entry.relay_key = trust.relay_key;
@@ -293,6 +343,7 @@ impl OnlineSettings {
             display_name: Some(account.display_name.clone()),
             device: trust.device.clone(),
         });
+        entry.keep_friend_keys(trust);
         self.address = key.clone();
         self.joined = Some(key);
     }
@@ -331,7 +382,11 @@ impl OnlineSettings {
             return;
         };
         let current = entry.relay_id == relay_id;
-        entry.take(relay_id);
+        if let Some(gone) = entry.take(relay_id)
+            && let Some(id) = gone.online_id
+        {
+            entry.friend_keys.remove(&id);
+        }
         if current && self.joined.as_deref() == Some(key) {
             self.joined = None;
         }
@@ -364,6 +419,7 @@ impl OnlineSettings {
         {
             entry.relay_key = trust.relay_key;
             entry.device = trust.device.clone();
+            entry.keep_friend_keys(trust);
         }
     }
 
@@ -447,6 +503,7 @@ mod tests {
             relay_key: Some(RelayKey([4; 32])),
             expected: None,
             device: Some(DeviceKey([byte; 32])),
+            friend_keys: Default::default(),
         };
         settings.remember(&lemon, &ana, "pw", &account("Ana"), &trust(1));
         settings.leave();
@@ -510,6 +567,7 @@ mod tests {
             relay_key: Some(RelayKey([4; 32])),
             expected: None,
             device: Some(DeviceKey([5; 32])),
+            friend_keys: Default::default(),
         };
         settings.online.remember(
             &address("gb.lemon.industries"),
@@ -520,8 +578,8 @@ mod tests {
         );
         settings.online.show_playing = false;
 
-        let root =
-            std::env::temp_dir().join(format!("citrine-online-settings-{}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-online-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = crate::storage::SettingsStore::at(root.clone());
         store.store(&settings).unwrap();
@@ -548,6 +606,71 @@ mod tests {
     }
 
     #[test]
+    fn friend_keys_stay_with_their_own_account() {
+        let mut settings = OnlineSettings::default();
+        let lemon = address("gb.lemon.industries");
+        let first = RelayId::random();
+        let second = RelayId::random();
+        let ana = OnlineId::new(7).unwrap();
+        let mut trust = Trust::default();
+        trust
+            .friend_keys
+            .check(ana, citrine_gb_net::PublicKey([3; 32]));
+        settings.remember(&lemon, &first, "pw", &account("Clara"), &trust);
+        let text = serde_json::to_string(&settings).unwrap();
+        let mut settings: OnlineSettings = serde_json::from_str(&text).unwrap();
+        let pins = settings.joined_relay().unwrap().trust.friend_keys;
+        assert_eq!(pins.get(ana), Some(citrine_gb_net::PublicKey([3; 32])));
+
+        let other = Account {
+            online_id: OnlineId::new(0x99).unwrap(),
+            ..account("Bea")
+        };
+        settings.remember(&lemon, &second, "pw", &other, &Trust::default());
+        assert!(
+            settings
+                .joined_relay()
+                .unwrap()
+                .trust
+                .friend_keys
+                .is_empty()
+        );
+        let back = settings
+            .switch_to(&lemon.key(), &first.to_string())
+            .unwrap();
+        assert_eq!(
+            back.trust.friend_keys.get(ana),
+            Some(citrine_gb_net::PublicKey([3; 32]))
+        );
+        settings.forget_current(&lemon.key());
+        assert!(settings.relays[&lemon.key()].friend_keys.is_empty());
+    }
+
+    #[test]
+    fn a_v012_entry_loads_with_no_pins_and_keeps_the_first_ones_seen() {
+        let mut settings: OnlineSettings = serde_json::from_str(
+            r#"{"joined": "x.org", "relays": {"x.org": {"relay_id": "cgb1-x", "password": "pw", "online_id": "AAAA-AAAA", "relay_key": [4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]}}}"#,
+        )
+        .unwrap();
+        let mut trust = settings.joined_entry().unwrap().trust();
+        assert!(trust.friend_keys.is_empty());
+        let ana = OnlineId::new(7).unwrap();
+        trust
+            .friend_keys
+            .check(ana, citrine_gb_net::PublicKey([3; 32]));
+        settings.set_trust(&trust);
+        assert_eq!(
+            settings
+                .joined_entry()
+                .unwrap()
+                .trust()
+                .friend_keys
+                .get(ana),
+            Some(citrine_gb_net::PublicKey([3; 32]))
+        );
+    }
+
+    #[test]
     fn older_settings_without_online_still_load() {
         let settings: crate::app::ui_state::settings::Settings =
             serde_json::from_str(r#"{"ui_scale": 1.5}"#).unwrap();
@@ -563,6 +686,7 @@ mod tests {
             relay_key: None,
             expected: None,
             device: Some(DeviceKey([0xEE; 32])),
+            friend_keys: Default::default(),
         };
         settings.remember(&address("x.org"), &id, "hunter2", &account("Clara"), &trust);
         let text = format!("{settings:?}");

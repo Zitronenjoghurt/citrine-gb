@@ -1,7 +1,7 @@
 mod common;
 
 use citrine_gb::nds::geometry::frame::{Frame, Polygon, SUBPIXEL_BITS};
-use citrine_gb_nds_gpu::{Antialiasing, Textures, Upscale};
+use citrine_gb_nds_gpu::{Antialiasing, Mipmaps, Textures, Upscale};
 use common::{Gpu, Scene, scenes};
 
 fn fine_point(frame: &Frame, polygon: &Polygon, index: usize) -> [f32; 2] {
@@ -99,6 +99,7 @@ fn shows_no_rear_plane_inside(scene: Scene) {
                     scale,
                     antialiasing,
                     textures,
+                    mipmaps: Mipmaps::Off,
                 };
                 let (inside, holes, first) = rear_pixels_inside(&mut gpu, &scene, upscale);
                 assert!(

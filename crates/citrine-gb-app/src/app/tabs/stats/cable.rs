@@ -1,5 +1,4 @@
-use super::{fact_row, heading, play_time, sessions};
-use crate::app::tabs::linked::LINK_ICON;
+use super::{fact_row, play_time, sessions};
 use crate::icons;
 use crate::stats::{CablePartner, CableSum, CableTotals, cable_sum};
 use egui::{RichText, Ui, vec2};
@@ -15,7 +14,7 @@ pub(super) fn sum_text(sum: CableSum) -> String {
 pub(super) fn kind(partner: &CablePartner) -> (&'static str, &'static str) {
     match partner {
         CablePartner::Friend(_) => (icons::USER, "Friend, online cable"),
-        CablePartner::Game(_) => (icons::GAME_CONTROLLER, "Second game, local cable"),
+        CablePartner::Game(_) => (icons::CARTRIDGE, "Second game, local cable"),
         CablePartner::Event(_) => (icons::HANDSHAKE, "Event partner, local cable"),
     }
 }
@@ -29,12 +28,14 @@ pub(super) fn name(totals: &CableTotals) -> &str {
     }
 }
 
-pub(super) fn section(ui: &mut Ui, cable: &[CableTotals]) {
+pub(super) fn cable_ms(cable: &[CableTotals]) -> u64 {
+    cable.iter().map(|totals| totals.ms).sum()
+}
+
+pub(super) fn rows(ui: &mut Ui, cable: &[CableTotals]) {
     if !has_cable(cable) {
         return;
     }
-    ui.add_space(12.0);
-    heading(ui, LINK_ICON, "Link cable");
     for (label, online) in [("Local cable", false), ("Online cable", true)] {
         let sum = cable_sum(cable, online);
         if sum.ms > 0 {

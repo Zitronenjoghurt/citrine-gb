@@ -5,8 +5,10 @@ use crate::app::widgets::field::{code_field, row_field};
 use crate::app::widgets::problem::problem_line;
 use crate::app::widgets::qr::Qr;
 use crate::app::widgets::section::{phone_label, section};
+use crate::app::widgets::security_code::{self, SecurityCode};
 use crate::icons;
 use crate::second_screens::{JoinState, Suggestion, SurfaceRow};
+use citrine_gb_surface::host::MAX_CODE_TRIES;
 use citrine_gb_surface::mode::{Mode, Preset};
 use citrine_gb_surface::pairing::Code;
 use citrine_gb_surface::proto::SurfaceKind;
@@ -70,6 +72,9 @@ fn host_part(ui: &mut Ui, pane: &mut PaneState, facts: &Facts) {
                 }
             }
             None => {
+                if facts.code_spent {
+                    problem_line(ui, &code_spent_line());
+                }
                 if ui.button(format!("{} Add a device", icons::PLUS)).clicked() {
                     pane.actions.push(PaneAction::AddDevice);
                 }
@@ -115,6 +120,10 @@ fn phone_host_part(ui: &mut Ui, pane: &mut PaneState, facts: &Facts) {
                 }
             }
         });
+    }
+    if facts.code_spent && facts.code.is_none() {
+        ui.add_space(6.0);
+        problem_line(ui, &code_spent_line());
     }
     if let Some((code, left)) = facts.code {
         if listed {
@@ -229,6 +238,10 @@ fn open_row(
     });
 }
 
+fn code_spent_line() -> String {
+    format!("The code stopped after {MAX_CODE_TRIES} wrong tries")
+}
+
 fn code_card(ui: &mut Ui, pane: &mut PaneState, code: Code, left: f64, link: Option<&str>) {
     ui.horizontal(|ui| {
         if let Some(link) = link {
@@ -328,7 +341,7 @@ fn suggestion_icon(suggestion: &Suggestion) -> &'static str {
     if suggestion.own {
         icons::USER_CIRCLE
     } else {
-        icons::WIFI_HIGH
+        icons::BROADCAST
     }
 }
 
@@ -383,6 +396,16 @@ fn phone_suggestions(ui: &mut Ui, pane: &mut PaneState, facts: &Facts) {
     }
 }
 
+fn join_code_hint(host: &str) -> String {
+    format!(
+        "If {host} shows other digits, someone else may be connecting. Choose Not now on {host}."
+    )
+}
+
+fn join_compare(host: &str) -> String {
+    format!("Check that {host} shows the same digits")
+}
+
 fn asking_line(facts: &Facts) -> String {
     match &facts.join_host {
         Some(host) => format!("Waiting for {host} to allow this device"),
@@ -414,6 +437,22 @@ fn join_part(ui: &mut Ui, pane: &mut PaneState, facts: &Facts) {
                         ui.add_space(8.0);
                     }
                     ui.label(RichText::new(asking_line(facts)).weak());
+                    if let Some(code) = facts.join_code {
+                        ui.add_space(6.0);
+                        let named = facts.join_host.as_deref();
+                        let host = named.unwrap_or("the other device");
+                        let compare = named.map_or_else(
+                            || "Check that the other device shows the same digits".to_owned(),
+                            join_compare,
+                        );
+                        SecurityCode {
+                            title: security_code::TITLE,
+                            hint: &join_code_hint(host),
+                            lines: &code.lines(),
+                            compare: Some(&compare),
+                        }
+                        .show_last(ui);
+                    }
                 }
                 Some(JoinState::Failed(why)) => {
                     if touch {
@@ -432,14 +471,17 @@ fn code_form(ui: &mut Ui, pane: &mut PaneState, facts: &Facts) {
     ui.horizontal(|ui| {
         let entered = code_field(ui, &mut pane.code_text, "Code", CODE_WIDTH, false);
         let code = Code::parse(&pane.code_text);
-        let join = ui
-            .add_enabled(code.is_some() && !busy, egui::Button::new("Join"))
-            .clicked();
-        if let Some(code) = code.filter(|_| (join || entered) && !busy) {
-            pane.actions.push(PaneAction::Join(code));
+        if busy {
+            if ui.button("Cancel").clicked() {
+                pane.actions.push(PaneAction::CancelJoin);
+            }
+            return;
         }
-        if busy && ui.button("Cancel").clicked() {
-            pane.actions.push(PaneAction::CancelJoin);
+        let join = ui
+            .add_enabled(code.is_some(), egui::Button::new("Join"))
+            .clicked();
+        if let Some(code) = code.filter(|_| join || entered) {
+            pane.actions.push(PaneAction::Join(code));
         }
     });
 }
@@ -455,20 +497,60 @@ fn phone_code_form(ui: &mut Ui, pane: &mut PaneState, facts: &Facts) {
     let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     let code = Code::parse(&pane.code_text);
     ui.add_space(10.0);
-    let label = if busy { "Connecting" } else { "Join" };
-    let join = ui
-        .add_enabled_ui(code.is_some() && !busy, |ui| {
-            kit::wide_button(ui, label, true)
-        })
-        .inner
-        .clicked();
-    if let Some(code) = code.filter(|_| (join || entered) && !busy) {
-        pane.actions.push(PaneAction::Join(code));
-    }
     if busy {
-        ui.add_space(8.0);
         if kit::wide_button(ui, "Cancel", false).clicked() {
             pane.actions.push(PaneAction::CancelJoin);
         }
+        return;
+    }
+    let join = ui
+        .add_enabled_ui(code.is_some(), |ui| kit::wide_button(ui, "Join", true))
+        .inner
+        .clicked();
+    if let Some(code) = code.filter(|_| join || entered) {
+        pane.actions.push(PaneAction::Join(code));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::text_rect;
+    use citrine_gb_net::{CheckCode, CheckNonce};
+
+    fn join_frame(ctx: &egui::Context, facts: &Facts) -> egui::FullOutput {
+        let mut pane = PaneState::default();
+        ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| join_part(ui, &mut pane, facts));
+        })
+    }
+
+    #[test]
+    fn the_waiting_device_shows_its_security_code() {
+        let code = CheckCode::new(&[1; 32], &CheckNonce::from_bytes([2; 32]));
+        let facts = Facts {
+            join: Some(JoinState::Asking),
+            join_host: Some("Mac".into()),
+            join_code: Some(code),
+            ..Facts::default()
+        };
+        let ctx = egui::Context::default();
+        let shown = join_frame(&ctx, &facts);
+        assert!(text_rect(&shown, "Waiting for Mac to allow this device").is_some());
+        assert!(text_rect(&shown, security_code::TITLE).is_some());
+        assert!(text_rect(&shown, &code.to_string()).is_some());
+        assert!(text_rect(&shown, "Check that Mac shows the same digits").is_some());
+        assert!(
+            text_rect(&shown, "Cancel").is_some(),
+            "the join button became Cancel"
+        );
+        assert!(text_rect(&shown, "Join").is_none());
+        assert!(text_rect(&shown, "Connecting").is_none());
+        let joined = Facts {
+            join: Some(JoinState::Joined),
+            ..facts
+        };
+        let shown = join_frame(&ctx, &joined);
+        assert!(text_rect(&shown, &code.to_string()).is_none());
     }
 }

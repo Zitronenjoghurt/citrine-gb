@@ -77,6 +77,10 @@ fn suite_bytes() -> Vec<u8> {
     (0..64 * 1024).map(|i| (i * 7 % 251) as u8).collect()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the core crate has no storage folders, so its tests use the system temp folder"
+)]
 fn empty_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("archives-fetch-{}-{name}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();

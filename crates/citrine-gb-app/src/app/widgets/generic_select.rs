@@ -1,4 +1,4 @@
-use crate::app::widgets::reset_slider::{RESET_GAP, reset_button, reset_width};
+use crate::app::widgets::reset_slider::{RESET_GAP, reset_button, reset_room};
 use egui::{Ui, Widget};
 use std::fmt::Display;
 
@@ -75,8 +75,8 @@ where
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = RESET_GAP;
             let mut width = ui.available_width();
-            if self.default_value.is_some() {
-                width -= reset_width(ui) + RESET_GAP;
+            if self.default_value.is_some() || super::settings::form::keeps_reset_column(ui) {
+                width -= reset_room(ui);
             }
 
             let combo = match self.label {
@@ -114,9 +114,43 @@ where
                     .size()
                     .x
             });
-            super::settings::form::need(ui, current + ui.available_width() - room);
+            let chrome = ui.available_width() - room;
+            if self.middle_ellipsis {
+                super::settings::form::shrinking_select_need(ui, current + chrome);
+                if let Some(default_value) = self.default_value {
+                    let floor = ctx.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                default_value.to_string(),
+                                font.clone(),
+                                egui::Color32::WHITE,
+                            )
+                            .size()
+                            .x
+                    });
+                    super::settings::form::select_need(ui, floor + chrome);
+                }
+            } else {
+                let floor = if super::settings::form::selects_shrink(ui) {
+                    current.min((super::settings::form::SELECT_MIN - (width - room)).max(0.0))
+                } else {
+                    current
+                };
+                super::settings::form::cut_select_need(ui, current + chrome, floor + chrome);
+            }
             let full = self.value.to_string();
-            let selected = shown(*self.value);
+            let selected = if self.middle_ellipsis {
+                shown(*self.value)
+            } else {
+                shorten_end(&full, room, |text| {
+                    ctx.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                            .size()
+                            .x
+                    })
+                })
+            };
             let shortened = selected != full || current > room;
             let mut response = ui
                 .allocate_ui(egui::vec2(width, height), |ui| {
@@ -157,21 +191,52 @@ where
     }
 }
 
+const FIT_SLACK: f32 = 0.5;
+
+pub(crate) fn shorten_end(text: &str, max: f32, measure: impl Fn(&str) -> f32) -> String {
+    let max = max + FIT_SLACK;
+    if text.is_empty() || measure(text) <= max {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    (1..chars.len())
+        .rev()
+        .map(|keep| {
+            let head: String = chars[..keep].iter().collect();
+            format!("{}\u{2026}", head.trim_end())
+        })
+        .find(|short| measure(short) <= max)
+        .unwrap_or_else(|| format!("{}\u{2026}", chars[0]))
+}
+
 fn shorten_middle(text: &str, max: f32, measure: impl Fn(&str) -> f32) -> String {
     if measure(text) <= max {
         return text.to_owned();
     }
     let chars: Vec<char> = text.chars().collect();
-    let cut = |keep: usize| {
-        let head: String = chars[..keep.div_ceil(2)].iter().collect();
-        let tail: String = chars[chars.len() - keep / 2..].iter().collect();
+    let join = |head: &[char], tail: &[char]| {
+        let head: String = head.iter().collect();
+        let tail: String = tail.iter().collect();
         format!("{}…{}", head.trim_end(), tail.trim_start())
     };
-    (1..chars.len())
+    let extension = chars
+        .iter()
+        .rposition(|&c| c == '.')
+        .filter(|&dot| dot > 1)
+        .map_or(0, |dot| chars.len() - dot);
+    let stem = chars.len() - extension;
+    let finder_end = if extension > 0 { stem } else { 0 };
+    let finder = (2..finder_end).rev().map(|keep| {
+        let tail = (keep / 4).max(1);
+        join(&chars[..keep - tail], &chars[stem - tail..])
+    });
+    let plain = (1..chars.len())
         .rev()
-        .map(cut)
+        .map(|keep| join(&chars[..keep.div_ceil(2)], &chars[chars.len() - keep / 2..]));
+    finder
+        .chain(plain)
         .find(|short| measure(short) <= max)
-        .unwrap_or_else(|| cut(1))
+        .unwrap_or_else(|| join(&chars[..1], &[]))
 }
 
 #[cfg(test)]
@@ -195,7 +260,38 @@ mod tests {
     }
 
     #[test]
+    fn a_shortened_name_keeps_a_letter_before_its_extension() {
+        assert_eq!(
+            shorten_middle("dmg_boot.bin", 110.0, measure),
+            "dmg_b…t.bin"
+        );
+    }
+
+    #[test]
+    fn a_name_without_an_extension_splits_in_the_middle() {
+        assert_eq!(shorten_middle("my_own_boot_rom", 70.0, measure), "my_…rom");
+    }
+
+    #[test]
     fn no_room_still_shows_the_first_letter() {
         assert_eq!(shorten_middle("gba_bios.bin", 5.0, measure), "g…");
+    }
+
+    #[test]
+    fn a_value_that_fits_to_a_rounding_stays_whole() {
+        let width = measure("Automatic");
+        assert_eq!(shorten_end("Automatic", width - 0.01, measure), "Automatic");
+    }
+
+    #[test]
+    fn a_value_that_fits_stays_whole() {
+        assert_eq!(shorten_end("Live camera", 110.0, measure), "Live camera");
+    }
+
+    #[test]
+    fn a_cut_value_ends_on_a_letter_before_the_ellipsis() {
+        assert_eq!(shorten_end("Live camera", 70.0, measure), "Live c…");
+        assert_eq!(shorten_end("Live camera", 60.0, measure), "Live…");
+        assert_eq!(shorten_end("Live camera", 40.0, measure), "Liv…");
     }
 }

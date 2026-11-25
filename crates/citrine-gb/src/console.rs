@@ -198,6 +198,10 @@ pub trait Console {
     fn keys(&self) -> Keys;
     fn set_keys(&mut self, keys: Keys);
     fn set_touch(&mut self, _touch: Option<Touch>) {}
+    fn set_mic(&mut self, _samples: &[i16]) {}
+    fn mic_in_use(&self) -> bool {
+        false
+    }
     fn soft_reset(&mut self);
     fn audio_channels(&self) -> &'static [&'static str];
     fn set_channel_enabled(&mut self, index: usize, enabled: bool);

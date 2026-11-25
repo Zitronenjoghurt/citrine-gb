@@ -1,3 +1,4 @@
+use crate::storage::kinds::Folder;
 use std::path::{Path, PathBuf};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,23 +20,112 @@ fn key_of(path: &Path) -> Option<&str> {
     path.file_stem().and_then(|stem| stem.to_str())
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+pub struct CopySizes {
+    folders: crate::storage::Folders,
+    folder: Folder,
+    sizes: std::collections::BTreeMap<String, u64>,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl CopySizes {
+    const FILE: &str = "sizes.txt";
+
+    pub fn load(folders: crate::storage::Folders, folder: Folder) -> Self {
+        let text = folders
+            .read(folder, Self::FILE)
+            .and_then(|data| String::from_utf8(data).ok())
+            .unwrap_or_default();
+        let sizes = text
+            .lines()
+            .filter_map(|line| {
+                let (key, bytes) = line.split_once(' ')?;
+                Some((key.to_owned(), bytes.parse().ok()?))
+            })
+            .collect();
+        Self {
+            folders,
+            folder,
+            sizes,
+        }
+    }
+
+    pub fn has(&self, key: &str) -> bool {
+        self.sizes.contains_key(key)
+    }
+
+    pub fn record(&mut self, key: &str, bytes: u64) {
+        if self.sizes.insert(key.to_owned(), bytes) != Some(bytes) {
+            self.save();
+        }
+    }
+
+    pub fn forget(&mut self, key: &str) {
+        if self.sizes.remove(key).is_some() {
+            self.save();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.sizes.clear();
+        let _ = self.folders.delete(self.folder, Self::FILE);
+    }
+
+    pub fn missing<'a>(&self, keys: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| !self.has(key))
+            .cloned()
+            .collect()
+    }
+
+    pub fn total<'a>(&self, keys: impl IntoIterator<Item = &'a String>) -> Option<u64> {
+        keys.into_iter()
+            .map(|key| self.sizes.get(key).copied())
+            .sum()
+    }
+
+    fn save(&self) {
+        let text: String = self
+            .sizes
+            .iter()
+            .map(|(key, bytes)| format!("{key} {bytes}\n"))
+            .collect();
+        if let Err(err) = self.folders.write(self.folder, Self::FILE, text.as_bytes()) {
+            log::warn!("couldn't keep the game copy sizes: {err}");
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
 
+    #[derive(Clone)]
     pub struct RomCopies {
         dir: PathBuf,
     }
 
     impl Default for RomCopies {
         fn default() -> Self {
-            Self::at(crate::storage::data_dir().join("roms"))
+            Self::at(crate::storage::folder(Folder::RomCopies))
         }
     }
 
     impl RomCopies {
         pub fn at(dir: PathBuf) -> Self {
             Self { dir }
+        }
+
+        pub fn archive() -> Self {
+            Self::at(crate::storage::folder(Folder::GameArchive))
+        }
+
+        pub fn path_for(&self, key: &str, name: &str) -> PathBuf {
+            self.dir.join(copy_name(key, name))
+        }
+
+        pub fn holds(&self, path: &Path) -> Option<bool> {
+            Some(path.parent() == Some(self.dir.as_path()) && path.is_file())
         }
 
         pub fn keep(&self, key: &str, name: &str, data: &[u8]) -> std::io::Result<PathBuf> {
@@ -52,6 +142,20 @@ mod native {
 
         pub fn is_gone(&self, path: &Path) -> bool {
             !crate::utils::zip_games::on_disk(path)
+        }
+
+        pub fn count(&self) -> usize {
+            std::fs::read_dir(&self.dir).map_or(0, |entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        let path = entry.path();
+                        path.is_file()
+                            && key_of(&path).is_some()
+                            && path.extension().is_some_and(|ext| ext != "tmp")
+                    })
+                    .count()
+            })
         }
 
         pub fn drop_copies<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) {
@@ -80,44 +184,93 @@ mod web {
     use web_sys::IdbTransactionMode;
     use web_sys::wasm_bindgen::{JsCast, JsValue};
 
-    const DB_NAME: &str = "citrine-roms";
     const DB_VERSION: u32 = 1;
     const ROMS: &str = "roms";
 
     pub struct RomCopies {
         keys: Rc<RefCell<Option<HashSet<String>>>>,
+        db: &'static str,
+        base: &'static str,
+        sizes: Rc<RefCell<CopySizes>>,
     }
 
     impl Default for RomCopies {
         fn default() -> Self {
-            let keys = Rc::new(RefCell::new(None));
-            let loading = keys.clone();
-            citrine_gb_threads::spawn_local(async move {
-                match all_keys().await {
-                    Ok(found) => *loading.borrow_mut() = Some(found),
-                    Err(err) => log::warn!("couldn't list the kept ROMs: {err:?}"),
-                }
-            });
-            Self { keys }
+            Self::in_db("citrine-roms", "", Folder::RomCopies)
         }
     }
 
     impl RomCopies {
+        pub fn archive() -> Self {
+            Self::in_db("citrine-archive", "archive", Folder::GameArchive)
+        }
+
+        fn in_db(db: &'static str, base: &'static str, folder: Folder) -> Self {
+            let keys = Rc::new(RefCell::new(None));
+            let sizes = Rc::new(RefCell::new(CopySizes::load(
+                crate::storage::Folders::default(),
+                folder,
+            )));
+            let loading = keys.clone();
+            let sizing = sizes.clone();
+            citrine_gb_threads::spawn_local(async move {
+                let found = match all_keys(db).await {
+                    Ok(found) => found,
+                    Err(err) => {
+                        log::warn!("couldn't list the kept ROMs: {err:?}");
+                        return;
+                    }
+                };
+                let missing = sizing.borrow().missing(&found);
+                *loading.borrow_mut() = Some(found);
+                for key in missing {
+                    match get(db, &key).await {
+                        Ok(Some(data)) => sizing.borrow_mut().record(&key, data.len() as u64),
+                        Ok(None) => {
+                            if let Some(keys) = loading.borrow_mut().as_mut() {
+                                keys.remove(&key);
+                            }
+                        }
+                        Err(err) => log::warn!("couldn't read the size of a kept ROM: {err:?}"),
+                    }
+                }
+            });
+            Self {
+                keys,
+                db,
+                base,
+                sizes,
+            }
+        }
+
+        pub fn path_for(&self, key: &str, name: &str) -> PathBuf {
+            Path::new(self.base).join(copy_name(key, name))
+        }
+
+        pub fn holds(&self, path: &Path) -> Option<bool> {
+            let key = key_of(path)?;
+            self.keys.borrow().as_ref().map(|keys| keys.contains(key))
+        }
+
         pub fn keep(&self, key: &str, name: &str, data: &[u8]) -> std::io::Result<PathBuf> {
-            let path = PathBuf::from(copy_name(key, name));
+            let path = self.path_for(key, name);
             let known = self
                 .keys
                 .borrow()
                 .as_ref()
                 .is_some_and(|keys| keys.contains(key));
+            if !known || !self.sizes.borrow().has(key) {
+                self.sizes.borrow_mut().record(key, data.len() as u64);
+            }
             if !known {
                 if let Some(keys) = self.keys.borrow_mut().as_mut() {
                     keys.insert(key.to_owned());
                 }
                 let key = key.to_owned();
                 let bytes = js_sys::Uint8Array::from(data);
+                let db = self.db;
                 citrine_gb_threads::spawn_local(async move {
-                    if let Err(err) = put(&key, bytes.into()).await {
+                    if let Err(err) = put(db, &key, bytes.into()).await {
                         log::warn!("couldn't keep a ROM copy: {err:?}");
                     }
                 });
@@ -143,8 +296,10 @@ mod web {
                 if let Some(keys) = self.keys.borrow_mut().as_mut() {
                     keys.remove(&key);
                 }
+                self.sizes.borrow_mut().forget(&key);
+                let db = self.db;
                 citrine_gb_threads::spawn_local(async move {
-                    let _ = remove(&key).await;
+                    let _ = remove(db, &key).await;
                 });
             }
         }
@@ -153,12 +308,19 @@ mod web {
             self.keys.borrow().as_ref().map_or(0, |keys| keys.len())
         }
 
+        pub fn bytes(&self) -> Option<u64> {
+            let keys = self.keys.borrow();
+            self.sizes.borrow().total(keys.as_ref()?)
+        }
+
         pub fn clear(&self) {
             if let Some(keys) = self.keys.borrow_mut().as_mut() {
                 keys.clear();
             }
+            self.sizes.borrow_mut().clear();
+            let db = self.db;
             citrine_gb_threads::spawn_local(async move {
-                let _ = clear().await;
+                let _ = clear(db).await;
             });
         }
 
@@ -167,8 +329,9 @@ mod web {
                 return;
             };
             let path = path.to_path_buf();
+            let db = self.db;
             citrine_gb_threads::spawn_local(async move {
-                match get(&key).await {
+                match get(db, &key).await {
                     Ok(Some(data)) => {
                         let seen = crate::rom_ids::Seen::kept(&path, data.len());
                         let _ = tx.send(PickedFile { name, data, seen });
@@ -180,12 +343,12 @@ mod web {
         }
     }
 
-    async fn open() -> Result<web_sys::IdbDatabase, JsValue> {
-        crate::utils::idb::open(DB_NAME, DB_VERSION, &[ROMS]).await
+    async fn open(db: &str) -> Result<web_sys::IdbDatabase, JsValue> {
+        crate::utils::idb::open(db, DB_VERSION, &[ROMS]).await
     }
 
-    async fn all_keys() -> Result<HashSet<String>, JsValue> {
-        let db = open().await?;
+    async fn all_keys(db: &str) -> Result<HashSet<String>, JsValue> {
+        let db = open(db).await?;
         let tx = db.transaction_with_str(ROMS)?;
         let keys = wait(&tx.object_store(ROMS)?.get_all_keys()?).await?;
         Ok(js_sys::Array::from(&keys)
@@ -194,29 +357,29 @@ mod web {
             .collect())
     }
 
-    async fn put(key: &str, bytes: JsValue) -> Result<(), JsValue> {
-        let db = open().await?;
+    async fn put(db: &str, key: &str, bytes: JsValue) -> Result<(), JsValue> {
+        let db = open(db).await?;
         let tx = db.transaction_with_str_and_mode(ROMS, IdbTransactionMode::Readwrite)?;
         tx.object_store(ROMS)?.put_with_key(&bytes, &key.into())?;
         finished(&tx).await
     }
 
-    async fn remove(key: &str) -> Result<(), JsValue> {
-        let db = open().await?;
+    async fn remove(db: &str, key: &str) -> Result<(), JsValue> {
+        let db = open(db).await?;
         let tx = db.transaction_with_str_and_mode(ROMS, IdbTransactionMode::Readwrite)?;
         tx.object_store(ROMS)?.delete(&key.into())?;
         finished(&tx).await
     }
 
-    async fn clear() -> Result<(), JsValue> {
-        let db = open().await?;
+    async fn clear(db: &str) -> Result<(), JsValue> {
+        let db = open(db).await?;
         let tx = db.transaction_with_str_and_mode(ROMS, IdbTransactionMode::Readwrite)?;
         tx.object_store(ROMS)?.clear()?;
         finished(&tx).await
     }
 
-    async fn get(key: &str) -> Result<Option<std::sync::Arc<[u8]>>, JsValue> {
-        let db = open().await?;
+    async fn get(db: &str, key: &str) -> Result<Option<std::sync::Arc<[u8]>>, JsValue> {
+        let db = open(db).await?;
         let tx = db.transaction_with_str(ROMS)?;
         let value = wait(&tx.object_store(ROMS)?.get(&key.into())?).await?;
         Ok(value
@@ -237,5 +400,45 @@ mod tests {
         assert_eq!(copy_name("KEY", "Game.gb"), "KEY.gb");
         assert_eq!(copy_name("KEY", "Game.nds"), "KEY.nds");
         assert_eq!(copy_name("KEY", "Game"), "KEY.gb");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod size_tests {
+    use super::CopySizes;
+    use crate::storage::Folders;
+    use crate::storage::kinds::Folder;
+
+    fn folders(name: &str) -> Folders {
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-copy-sizes-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Folders::at(root)
+    }
+
+    #[test]
+    fn copies_count_once_every_size_is_known_and_the_sizes_are_kept() {
+        let folders = folders("kept");
+        let keys = ["AAA".to_owned(), "BBB".to_owned()];
+        let mut sizes = CopySizes::load(folders.clone(), Folder::RomCopies);
+        sizes.record("AAA", 1 << 20);
+        assert_eq!(sizes.total(&keys), None, "BBB has no size yet");
+        assert_eq!(sizes.missing(&keys), ["BBB"]);
+        sizes.record("BBB", 512);
+        assert_eq!(sizes.total(&keys), Some((1 << 20) + 512));
+
+        let mut again = CopySizes::load(folders.clone(), Folder::RomCopies);
+        assert_eq!(again.total(&keys), Some((1 << 20) + 512));
+        assert!(again.missing(&keys).is_empty());
+        again.forget("AAA");
+        assert_eq!(
+            CopySizes::load(folders.clone(), Folder::RomCopies).total(&keys[1..]),
+            Some(512)
+        );
+        again.clear();
+        assert_eq!(
+            CopySizes::load(folders, Folder::RomCopies).missing(&keys),
+            keys
+        );
     }
 }

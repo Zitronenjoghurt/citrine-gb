@@ -1,3 +1,4 @@
+use crate::archive::{ArchiveGame, ArchiveId, ArchiveKey};
 use crate::crypto::{AuthKey, DeviceKey, PublicKey, Sealed};
 use crate::id::OnlineId;
 use crate::invite::InviteCode;
@@ -6,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 11;
 pub const OLDEST_PROTOCOL_VERSION: u16 = 2;
 pub const SAVE_PARTS_PROTOCOL: u16 = 4;
 pub const ROOMS_PROTOCOL: u16 = 4;
@@ -14,11 +15,16 @@ pub const GAME_BUCKET_PROTOCOL: u16 = 5;
 pub const PUSH_PROTOCOL: u16 = 6;
 pub const GTS_PROTOCOL: u16 = 7;
 pub const DS_NET_PROTOCOL: u16 = 8;
+pub const DIRECT_PROTOCOL: u16 = 10;
 pub const MAX_DATAGRAM_BYTES: usize = 2048;
 pub const MAX_NET_READ_BYTES: usize = 16 * 1024;
 pub const NET_WINDOW_BYTES: usize = 64 * 1024;
 pub const GTS_PAGE: usize = 20;
 pub const MAX_GTS_TARGET_CHARS: usize = 4096;
+pub const MAX_DS_HOST_KEYS: usize = 32;
+pub const MAX_DS_HOST_TEXT: usize = 64;
+pub const MAX_DS_HOSTS_LISTED: usize = 64;
+pub const MAX_DS_MESSAGE_BYTES: usize = 256;
 pub const MAX_PUSH_TOKEN_BYTES: usize = 4096;
 pub const ROOM_MEMBERS: usize = 16;
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
@@ -302,8 +308,14 @@ impl From<std::net::SocketAddrV4> for NetAddr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DsHost {
+    pub addr: NetAddr,
+    pub keys: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GtsReply {
-    Body(Vec<u8>),
+    Body(#[serde(with = "serde_bytes")] Vec<u8>),
     Status(u16),
 }
 
@@ -400,6 +412,7 @@ pub enum ClientMsg {
     },
     UploadChunk {
         tag: Tag,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     Download(FileId),
@@ -433,7 +446,9 @@ pub enum ClientMsg {
         game: GameKey,
         slot: String,
         base: u64,
+        #[serde(with = "serde_bytes")]
         label: Vec<u8>,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     GetSave {
@@ -446,7 +461,7 @@ pub enum ClientMsg {
         slot: String,
         base: u64,
     },
-    Screen(Vec<u8>),
+    Screen(#[serde(with = "serde_bytes")] Vec<u8>),
     TwoFactorStart,
     TwoFactorConfirm(OneTimeCode),
     TwoFactorOff(OneTimeCode),
@@ -499,6 +514,7 @@ pub enum ClientMsg {
     },
     SavePart {
         tag: Tag,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     SetPush {
@@ -542,6 +558,34 @@ pub enum ClientMsg {
         stream: u32,
         total: u64,
     },
+    DsProfile {
+        call: u64,
+        profile: u32,
+    },
+    DsHost {
+        game: String,
+        port: u16,
+        keys: Vec<(String, String)>,
+    },
+    DsUnhost,
+    DsList {
+        call: u64,
+        game: String,
+    },
+    DsMessage {
+        to: NetAddr,
+        data: Vec<u8>,
+    },
+    DsNatneg {
+        cookie: u32,
+        index: u8,
+        port: u16,
+    },
+    ArchiveGet {
+        id: ArchiveId,
+        from_part: u32,
+    },
+    ArchiveCancel(ArchiveId),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -608,6 +652,7 @@ pub enum ServerMsg {
     },
     FileChunk {
         file: FileId,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     DownloadFailed {
@@ -660,6 +705,7 @@ pub enum ServerMsg {
     },
     Save {
         info: SaveInfo,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     SaveMissing {
@@ -730,6 +776,7 @@ pub enum ServerMsg {
     SavePart {
         game: GameKey,
         slot: String,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     Gts {
@@ -773,6 +820,43 @@ pub enum ServerMsg {
     NetWritten {
         stream: u32,
         total: u64,
+    },
+    Stun {
+        port: u16,
+    },
+    DsProfile {
+        call: u64,
+        ours: bool,
+    },
+    DsList {
+        call: u64,
+        hosts: Vec<DsHost>,
+    },
+    DsMessage {
+        from: [u8; 4],
+        port: u16,
+        data: Vec<u8>,
+    },
+    DsNatneg {
+        cookie: u32,
+        peer: NetAddr,
+    },
+    Archive(Vec<ArchiveGame>),
+    ArchiveStart {
+        id: ArchiveId,
+        key: ArchiveKey,
+        prefix: [u8; 16],
+        parts: u32,
+    },
+    ArchivePart {
+        id: ArchiveId,
+        index: u32,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    ArchiveFailed {
+        id: ArchiveId,
+        error: ErrorCode,
     },
 }
 
@@ -911,11 +995,28 @@ mod tests {
             ClientMsg::NetClose { .. } => "NetClose",
             ClientMsg::NetLease { .. } => "NetLease",
             ClientMsg::NetTaken { .. } => "NetTaken",
+            ClientMsg::DsProfile { .. } => "DsProfile",
+            ClientMsg::DsHost { .. } => "DsHost",
+            ClientMsg::DsUnhost => "DsUnhost",
+            ClientMsg::DsList { .. } => "DsList",
+            ClientMsg::DsMessage { .. } => "DsMessage",
+            ClientMsg::DsNatneg { .. } => "DsNatneg",
+            ClientMsg::ArchiveGet { .. } => "ArchiveGet",
+            ClientMsg::ArchiveCancel(_) => "ArchiveCancel",
         }
     }
 
     fn server_name(msg: &ServerMsg) -> &'static str {
         match msg {
+            ServerMsg::Stun { .. } => "Stun",
+            ServerMsg::DsProfile { .. } => "DsProfile",
+            ServerMsg::DsList { .. } => "DsList",
+            ServerMsg::DsMessage { .. } => "DsMessage",
+            ServerMsg::DsNatneg { .. } => "DsNatneg",
+            ServerMsg::Archive(_) => "Archive",
+            ServerMsg::ArchiveStart { .. } => "ArchiveStart",
+            ServerMsg::ArchivePart { .. } => "ArchivePart",
+            ServerMsg::ArchiveFailed { .. } => "ArchiveFailed",
             ServerMsg::Info(_) => "Info",
             ServerMsg::Welcome(_) => "Welcome",
             ServerMsg::Account(_) => "Account",
@@ -1193,6 +1294,37 @@ mod tests {
                 stream: 3,
                 total: 5,
             },
+            ClientMsg::DsProfile {
+                call: 4,
+                profile: 0x1234_5678,
+            },
+            ClientMsg::DsHost {
+                game: "mariokartds".into(),
+                port: 56400,
+                keys: vec![("dwc_pid".into(), "603819417".into())],
+            },
+            ClientMsg::DsUnhost,
+            ClientMsg::DsList {
+                call: 5,
+                game: "mariokartds".into(),
+            },
+            ClientMsg::DsMessage {
+                to: NetAddr {
+                    ip: [10, 77, 1, 2],
+                    port: 56400,
+                },
+                data: vec![0xFD, 0xFC, 1, 2],
+            },
+            ClientMsg::DsNatneg {
+                cookie: 0x0102_0304,
+                index: 1,
+                port: 56400,
+            },
+            ClientMsg::ArchiveGet {
+                id: ArchiveId([3; 16]),
+                from_part: 7,
+            },
+            ClientMsg::ArchiveCancel(ArchiveId([3; 16])),
         ]
     }
 
@@ -1480,6 +1612,58 @@ mod tests {
                 stream: 3,
                 total: 7,
             },
+            ServerMsg::Stun { port: 3478 },
+            ServerMsg::DsProfile {
+                call: 4,
+                ours: false,
+            },
+            ServerMsg::DsList {
+                call: 5,
+                hosts: vec![DsHost {
+                    addr: NetAddr {
+                        ip: [10, 77, 1, 2],
+                        port: 56400,
+                    },
+                    keys: vec![("numplayers".into(), "1".into())],
+                }],
+            },
+            ServerMsg::DsMessage {
+                from: [10, 77, 1, 3],
+                port: 56400,
+                data: vec![0xFD, 0xFC, 1, 2],
+            },
+            ServerMsg::DsNatneg {
+                cookie: 0x0102_0304,
+                peer: NetAddr {
+                    ip: [10, 77, 1, 3],
+                    port: 50000,
+                },
+            },
+            ServerMsg::Archive(vec![ArchiveGame {
+                id: ArchiveId([3; 16]),
+                name: "Pokemon Platinum".into(),
+                console: crate::ArchiveConsole::Ds,
+                size: 128 << 20,
+                download: 25 << 20,
+                sha256: [1; 32],
+                sha1: [2; 20],
+                crc32: 0xDEAD_BEEF,
+            }]),
+            ServerMsg::ArchiveStart {
+                id: ArchiveId([3; 16]),
+                key: ArchiveKey([4; 32]),
+                prefix: [5; 16],
+                parts: 100,
+            },
+            ServerMsg::ArchivePart {
+                id: ArchiveId([3; 16]),
+                index: 99,
+                data: vec![6; 40],
+            },
+            ServerMsg::ArchiveFailed {
+                id: ArchiveId([3; 16]),
+                error: ErrorCode::UnknownFile,
+            },
         ]
     }
 
@@ -1512,7 +1696,7 @@ mod tests {
     fn every_client_message_round_trips() {
         let all = all_client();
         let names: BTreeSet<_> = all.iter().map(client_name).collect();
-        assert_eq!(names.len(), 56);
+        assert_eq!(names.len(), 64);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -1524,7 +1708,7 @@ mod tests {
     fn every_server_message_round_trips() {
         let all = all_server();
         let names: BTreeSet<_> = all.iter().map(server_name).collect();
-        assert_eq!(names.len(), 66);
+        assert_eq!(names.len(), 75);
         assert_eq!(names.len(), all.len());
         for msg in all {
             let bytes = msg.encode().unwrap();
@@ -1628,7 +1812,7 @@ mod tests {
     fn room_messages_take_new_tags_after_the_old_ones() {
         let all = all_client();
         let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
-        assert_eq!(tags, (0..56).collect::<Vec<u8>>());
+        assert_eq!(tags, (0..64).collect::<Vec<u8>>());
         assert_eq!(client_name(&all[10]), "Chat");
         assert_eq!(client_name(&all[45]), "SetPush");
         assert_eq!(client_name(&all[46]), "Refuse");
@@ -1640,9 +1824,17 @@ mod tests {
         assert_eq!(client_name(&all[53]), "NetClose");
         assert_eq!(client_name(&all[54]), "NetLease");
         assert_eq!(client_name(&all[55]), "NetTaken");
+        assert_eq!(client_name(&all[56]), "DsProfile");
+        assert_eq!(client_name(&all[57]), "DsHost");
+        assert_eq!(client_name(&all[58]), "DsUnhost");
+        assert_eq!(client_name(&all[59]), "DsList");
+        assert_eq!(client_name(&all[60]), "DsMessage");
+        assert_eq!(client_name(&all[61]), "DsNatneg");
+        assert_eq!(client_name(&all[62]), "ArchiveGet");
+        assert_eq!(client_name(&all[63]), "ArchiveCancel");
         let all = all_server();
         let tags: Vec<u8> = all.iter().map(|m| m.encode().unwrap()[0]).collect();
-        assert_eq!(tags, (0..66).collect::<Vec<u8>>());
+        assert_eq!(tags, (0..75).collect::<Vec<u8>>());
         assert_eq!(server_name(&all[42]), "SavesChanged");
         assert_eq!(server_name(&all[43]), "Typing");
         assert_eq!(server_name(&all[54]), "Gts");
@@ -1651,6 +1843,13 @@ mod tests {
         assert_eq!(server_name(&all[63]), "NetClosed");
         assert_eq!(server_name(&all[64]), "NetLeased");
         assert_eq!(server_name(&all[65]), "NetWritten");
+        assert_eq!(server_name(&all[66]), "Stun");
+        assert_eq!(server_name(&all[67]), "DsProfile");
+        assert_eq!(server_name(&all[68]), "DsList");
+        assert_eq!(server_name(&all[69]), "DsMessage");
+        assert_eq!(server_name(&all[70]), "DsNatneg");
+        assert_eq!(server_name(&all[71]), "Archive");
+        assert_eq!(server_name(&all[74]), "ArchiveFailed");
     }
 
     #[test]
@@ -1662,16 +1861,12 @@ mod tests {
     }
 
     #[test]
-    fn this_build_speaks_protocol_two_to_eight() {
+    fn this_build_speaks_protocol_two_to_eleven() {
         assert!(!speaks_protocol(1));
-        assert!(speaks_protocol(2));
-        assert!(speaks_protocol(3));
-        assert!(speaks_protocol(4));
-        assert!(speaks_protocol(5));
-        assert!(speaks_protocol(6));
-        assert!(speaks_protocol(7));
-        assert!(speaks_protocol(8));
-        assert!(!speaks_protocol(9));
+        for version in 2..=11 {
+            assert!(speaks_protocol(version), "protocol {version}");
+        }
+        assert!(!speaks_protocol(12));
     }
 
     #[test]
@@ -1776,5 +1971,309 @@ mod tests {
         assert!(!text.contains("hunter2"));
         assert!(!text.contains("481220"));
         assert!(!text.contains("238"));
+    }
+
+    mod old {
+        use super::*;
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Info {
+            pub game: GameKey,
+            pub slot: String,
+            pub version: u64,
+            pub size: u64,
+            pub updated: u64,
+            pub label: Vec<u8>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct PutSave {
+            pub tag: Tag,
+            pub game: GameKey,
+            pub slot: String,
+            pub base: u64,
+            pub label: Vec<u8>,
+            pub data: Vec<u8>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct ClientPart {
+            pub tag: Tag,
+            pub data: Vec<u8>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Save {
+            pub info: Info,
+            pub data: Vec<u8>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct ServerPart {
+            pub game: GameKey,
+            pub slot: String,
+            pub data: Vec<u8>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct UploadChunk {
+            pub tag: Tag,
+            pub data: Vec<u8>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct FileChunk {
+            pub file: FileId,
+            pub data: Vec<u8>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub enum GtsReply {
+            Body(Vec<u8>),
+            Status(u16),
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Gts {
+            pub call: u64,
+            pub reply: GtsReply,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Sealed {
+            pub nonce: [u8; crate::NONCE_BYTES],
+            pub ciphertext: Vec<u8>,
+        }
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 7 + 3) as u8).collect()
+    }
+
+    fn old_frame(variant: u8, body: &impl Serialize) -> Vec<u8> {
+        let mut bytes = vec![variant];
+        bytes.extend(postcard::to_allocvec(body).unwrap());
+        bytes
+    }
+
+    #[test]
+    fn save_bytes_keep_their_exact_wire_bytes() {
+        let part = ClientMsg::SavePart {
+            tag: 0x102,
+            data: vec![0xAB, 0xCD, 0xEF],
+        };
+        assert_eq!(
+            part.encode().unwrap(),
+            [44, 0x82, 0x02, 3, 0xAB, 0xCD, 0xEF]
+        );
+        let part = ServerMsg::SavePart {
+            game: GameKey([9; 32]),
+            slot: "a".into(),
+            data: pattern(300),
+        };
+        let mut want = vec![53];
+        want.extend([9; 32]);
+        want.extend([1, b'a', 0xAC, 0x02]);
+        want.extend(pattern(300));
+        assert_eq!(part.encode().unwrap(), want);
+    }
+
+    #[test]
+    fn save_messages_match_and_read_the_old_vec_encoding() {
+        let info = SaveInfo {
+            game: GameKey([4; 32]),
+            slot: "slot-1".into(),
+            version: 300,
+            size: 1 << 20,
+            updated: 1_700_000_000,
+            label: pattern(200),
+        };
+        let old_info = || old::Info {
+            game: info.game,
+            slot: info.slot.clone(),
+            version: info.version,
+            size: info.size,
+            updated: info.updated,
+            label: info.label.clone(),
+        };
+        let data = pattern(crate::SAVE_PART_BYTES);
+        let client = [
+            (
+                ClientMsg::PutSave {
+                    tag: 7,
+                    game: info.game,
+                    slot: info.slot.clone(),
+                    base: 3,
+                    label: pattern(150),
+                    data: data.clone(),
+                },
+                old_frame(
+                    25,
+                    &old::PutSave {
+                        tag: 7,
+                        game: info.game,
+                        slot: info.slot.clone(),
+                        base: 3,
+                        label: pattern(150),
+                        data: data.clone(),
+                    },
+                ),
+            ),
+            (
+                ClientMsg::SavePart {
+                    tag: Tag::MAX,
+                    data: data.clone(),
+                },
+                old_frame(
+                    44,
+                    &old::ClientPart {
+                        tag: Tag::MAX,
+                        data: data.clone(),
+                    },
+                ),
+            ),
+        ];
+        for (msg, old) in client {
+            assert_eq!(msg.encode().unwrap(), old);
+            assert_eq!(ClientMsg::decode(&old), Ok(msg));
+        }
+        let server = [
+            (
+                ServerMsg::Save {
+                    info: info.clone(),
+                    data: data.clone(),
+                },
+                old_frame(
+                    31,
+                    &old::Save {
+                        info: old_info(),
+                        data: data.clone(),
+                    },
+                ),
+            ),
+            (
+                ServerMsg::SavePart {
+                    game: info.game,
+                    slot: info.slot.clone(),
+                    data: data.clone(),
+                },
+                old_frame(
+                    53,
+                    &old::ServerPart {
+                        game: info.game,
+                        slot: info.slot.clone(),
+                        data: data.clone(),
+                    },
+                ),
+            ),
+            (
+                ServerMsg::Saves(vec![info.clone(), info.clone()]),
+                old_frame(28, &vec![old_info(), old_info()]),
+            ),
+        ];
+        for (msg, old) in server {
+            assert_eq!(msg.encode().unwrap(), old);
+            assert_eq!(ServerMsg::decode(&old), Ok(msg));
+        }
+    }
+
+    #[test]
+    fn file_screen_gts_and_sealed_bytes_match_the_old_vec_encoding() {
+        assert_eq!(
+            ClientMsg::UploadChunk {
+                tag: 0x102,
+                data: vec![0xAB, 0xCD, 0xEF],
+            }
+            .encode()
+            .unwrap(),
+            [13, 0x82, 0x02, 3, 0xAB, 0xCD, 0xEF]
+        );
+        assert_eq!(
+            ClientMsg::Screen(vec![1, 2]).encode().unwrap(),
+            [28, 2, 1, 2]
+        );
+        let data = pattern(CHUNK_BYTES);
+        let screen = pattern(MAX_SCREEN_BYTES);
+        let client = [
+            (
+                ClientMsg::UploadChunk {
+                    tag: Tag::MAX,
+                    data: data.clone(),
+                },
+                old_frame(
+                    13,
+                    &old::UploadChunk {
+                        tag: Tag::MAX,
+                        data: data.clone(),
+                    },
+                ),
+            ),
+            (ClientMsg::Screen(screen.clone()), old_frame(28, &screen)),
+        ];
+        for (msg, old) in client {
+            assert_eq!(msg.encode().unwrap(), old);
+            assert_eq!(ClientMsg::decode(&old), Ok(msg));
+        }
+        let file = FileId([5; 16]);
+        let server = [
+            (
+                ServerMsg::FileChunk {
+                    file,
+                    data: data.clone(),
+                },
+                old_frame(
+                    14,
+                    &old::FileChunk {
+                        file,
+                        data: data.clone(),
+                    },
+                ),
+            ),
+            (
+                ServerMsg::Gts {
+                    call: 300,
+                    reply: GtsReply::Body(pattern(400)),
+                },
+                old_frame(
+                    54,
+                    &old::Gts {
+                        call: 300,
+                        reply: old::GtsReply::Body(pattern(400)),
+                    },
+                ),
+            ),
+            (
+                ServerMsg::Gts {
+                    call: 1,
+                    reply: GtsReply::Status(404),
+                },
+                old_frame(
+                    54,
+                    &old::Gts {
+                        call: 1,
+                        reply: old::GtsReply::Status(404),
+                    },
+                ),
+            ),
+        ];
+        for (msg, old) in server {
+            assert_eq!(msg.encode().unwrap(), old);
+            assert_eq!(ServerMsg::decode(&old), Ok(msg));
+        }
+        let sealed = Sealed {
+            nonce: [3; crate::NONCE_BYTES],
+            ciphertext: pattern(300),
+        };
+        let old_sealed = postcard::to_allocvec(&old::Sealed {
+            nonce: sealed.nonce,
+            ciphertext: sealed.ciphertext.clone(),
+        })
+        .unwrap();
+        let mut want = vec![3; crate::NONCE_BYTES];
+        want.extend([0xAC, 0x02]);
+        want.extend(pattern(300));
+        assert_eq!(old_sealed, want);
+        assert_eq!(postcard::to_allocvec(&sealed).unwrap(), want);
+        assert_eq!(postcard::from_bytes::<Sealed>(&want), Ok(sealed));
     }
 }

@@ -12,7 +12,6 @@ enum Kind {
 const SYNCED: &[(&str, Kind)] = &[
     ("ui_theme", Kind::Whole),
     ("console", Kind::Whole),
-    ("game_consoles", Kind::Map),
     ("game_names", Kind::Map),
     ("cheats", Kind::Map),
     ("gimmicks.clock_offsets", Kind::Map),
@@ -21,11 +20,13 @@ const SYNCED: &[(&str, Kind)] = &[
     ("custom_palette", Kind::Whole),
     ("gbc_palette", Kind::Whole),
     ("palettes.entries", Kind::Named),
-    ("game_palettes", Kind::Map),
+    ("per_game", Kind::Map),
     ("color_correction", Kind::Whole),
+    ("gba_color_correction", Kind::Whole),
     ("scaling", Kind::Whole),
     ("same_size_pixels", Kind::Whole),
     ("ds_screens", Kind::Whole),
+    ("layout_picks", Kind::Whole),
     ("matrix", Kind::Whole),
     ("ghosting", Kind::Whole),
     ("matrix_edge_darkness", Kind::Whole),
@@ -34,10 +35,40 @@ const SYNCED: &[(&str, Kind)] = &[
     ("bindings.keyboard", Kind::Whole),
     ("bindings.shoulders.keyboard", Kind::Whole),
     ("bindings.ds.keyboard", Kind::Whole),
-    ("hotkeys", Kind::Whole),
+    ("bindings.combos.keyboard", Kind::Whole),
+    ("bindings.tilt", Kind::Whole),
+    ("hotkeys.bindings", Kind::Whole),
+    ("hotkeys.key_combos", Kind::Whole),
+    ("hotkeys.offered", Kind::Whole),
+    ("hotkeys.screens.bindings", Kind::Whole),
+    ("hotkeys.screens.key_combos", Kind::Whole),
+    ("hotkeys.screens.offered", Kind::Whole),
+    ("hotkeys.debugger.bindings", Kind::Whole),
+    ("hotkeys.debugger.key_combos", Kind::Whole),
+    ("hotkeys.debugger.offered", Kind::Whole),
+    ("hotkeys.rewind.bindings", Kind::Whole),
+    ("hotkeys.rewind.key_combos", Kind::Whole),
+    ("hotkeys.rewind.offered", Kind::Whole),
+    ("hotkeys.fast_forward.bindings", Kind::Whole),
+    ("hotkeys.fast_forward.key_combos", Kind::Whole),
+    ("hotkeys.fast_forward.offered", Kind::Whole),
+    ("hotkeys.hud.bindings", Kind::Whole),
+    ("hotkeys.hud.key_combos", Kind::Whole),
+    ("hotkeys.hud.offered", Kind::Whole),
+    ("hotkeys.window.bindings", Kind::Whole),
+    ("hotkeys.window.key_combos", Kind::Whole),
+    ("hotkeys.window.offered", Kind::Whole),
+    ("hotkeys.talk.bindings", Kind::Whole),
+    ("hotkeys.talk.key_combos", Kind::Whole),
+    ("hotkeys.talk.offered", Kind::Whole),
+    ("hotkeys.clip.bindings", Kind::Whole),
+    ("hotkeys.clip.key_combos", Kind::Whole),
+    ("hotkeys.clip.offered", Kind::Whole),
     ("online.show_playing", Kind::Whole),
     ("online.input_delay", Kind::Whole),
+    ("online.direct", Kind::Whole),
     ("online.typing_indicators", Kind::Whole),
+    ("online.typing_text", Kind::Whole),
     ("online.notify_friend_requests", Kind::Whole),
     ("online.notify_invites", Kind::Whole),
     ("online.notify_chats", Kind::Whole),
@@ -50,9 +81,14 @@ const SYNCED: &[(&str, Kind)] = &[
     ("autosave_keep", Kind::Whole),
     ("rewind", Kind::Whole),
     ("fast_forward_speed", Kind::Whole),
+    ("fast_forward_key", Kind::Whole),
+    ("quick_load", Kind::Whole),
     ("screenshot_scale", Kind::Whole),
+    ("clip_length", Kind::Whole),
     ("recording_scale", Kind::Whole),
+    ("render_video", Kind::Whole),
     ("randomized_ram", Kind::Whole),
+    ("library_depth", Kind::Whole),
     ("dev_mode", Kind::Whole),
     ("track_pc", Kind::Whole),
     ("stats_range", Kind::Whole),
@@ -67,9 +103,11 @@ const SYNCED: &[(&str, Kind)] = &[
 
 #[cfg_attr(not(test), allow(dead_code))]
 const LOCAL: &[&str] = &[
+    "per_game_local",
     "ui_scale",
     "ds_3d",
     "ds_jit",
+    "gba_jit",
     "match_screen",
     "ui_scale_per_ratio",
     "bindings.shoulders.triggers",
@@ -78,16 +116,48 @@ const LOCAL: &[&str] = &[
     "muted",
     "audio_queue_ms",
     "audio_device",
+    "microphone",
+    "push_to_talk",
+    "talk_button",
     "slow_sound",
+    "fast_forward_sound",
+    "capture_folder",
+    "record_frame_times",
+    "fullscreen",
+    "background_pause",
+    "hide_pointer",
     "channels",
     "gba_channels",
+    "hotkeys.pads",
+    "hotkeys.screens.pads",
+    "hotkeys.debugger.pads",
+    "hotkeys.rewind.pads",
+    "hotkeys.fast_forward.pads",
+    "hotkeys.hud.pads",
+    "hotkeys.pad_combos",
+    "hotkeys.screens.pad_combos",
+    "hotkeys.debugger.pad_combos",
+    "hotkeys.rewind.pad_combos",
+    "hotkeys.fast_forward.pad_combos",
+    "hotkeys.hud.pad_combos",
+    "hotkeys.window.pads",
+    "hotkeys.window.pad_combos",
+    "hotkeys.talk.pads",
+    "hotkeys.talk.pad_combos",
+    "hotkeys.clip.pads",
+    "hotkeys.clip.pad_combos",
     "bindings.gamepad",
     "bindings.shoulders.gamepad",
     "bindings.ds.gamepad",
+    "bindings.combos.gamepad",
     "bindings.ds.adopted",
     "bindings.stick_as_dpad",
     "bindings.stick_deadzone",
     "touch",
+    "layouts",
+    "saved_layouts",
+    "layouts_adopted",
+    "clip_length_adopted",
     "gimmicks.rumble",
     "gimmicks.light_source",
     "gimmicks.light",
@@ -98,9 +168,13 @@ const LOCAL: &[&str] = &[
     "online.relays",
     "online.cloud_saves",
     "online.sync_settings",
+    "online.keep_saves",
+    "online.network_saves",
+    "online.network_allowed",
     "online.friend_volume",
     "online.friend_muted",
     "online.notify_asked",
+    "online.device_name",
     "local_link.controls",
     "current_tab",
     "check_updates",
@@ -130,6 +204,16 @@ fn lookup_mut<'a>(root: &'a mut Value, path: &str) -> Option<&'a mut Value> {
 
 fn prefix(path: &str) -> String {
     format!("{path}/")
+}
+
+pub fn syncs(path: &str) -> bool {
+    SYNCED.iter().any(|(synced, kind)| {
+        *kind == Kind::Whole
+            && (path == *synced
+                || path
+                    .strip_prefix(synced)
+                    .is_some_and(|rest| rest.starts_with('.')))
+    })
 }
 
 pub fn is_synced_key(key: &str) -> bool {
@@ -213,12 +297,19 @@ pub fn adopt(settings: &mut Settings, values: &Values) -> bool {
     if root == before {
         return false;
     }
+    if let Some(adopted) = root.get_mut("layouts_adopted") {
+        *adopted = Value::Bool(true);
+    }
     let Ok(mut next) = serde_json::from_value::<Settings>(root) else {
         log::warn!("synced settings could not be read");
         return false;
     };
     next.scale_drag = settings.scale_drag;
     next.sanitize();
+    if serde_json::to_value(&next).is_ok_and(|after| after == before) {
+        return false;
+    }
+    next.resume_game(&mut *settings);
     *settings = next;
     true
 }
@@ -232,45 +323,70 @@ pub fn note(settings: &mut Settings, now: u64) -> bool {
 }
 
 #[cfg(test)]
+fn walk(
+    value: &Value,
+    path: &str,
+    descend: &dyn Fn(&str, &Value) -> bool,
+    found: &mut Vec<String>,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (key, child) in object {
+        let path = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        if descend(&path, child) {
+            walk(child, &path, descend, found);
+        } else {
+            found.push(path);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn setting_paths() -> Vec<String> {
+    let root = serde_json::to_value(Settings::default()).unwrap_or_default();
+    let mut found = Vec::new();
+    let descend = |path: &str, child: &Value| {
+        let split_by_key = SYNCED
+            .iter()
+            .any(|(p, kind)| *p == path && *kind != Kind::Whole);
+        !split_by_key && child.as_object().is_some_and(|object| !object.is_empty())
+    };
+    walk(&root, "", &descend, &mut found);
+    found
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ui_state::palette::{CustomPalette, PaletteChoice};
+    use crate::app::ui_state::palette::CustomPalette;
     use crate::app::ui_state::ui_theme::UiTheme;
     use crate::emulator::fast_forward::FastForwardSpeed;
     use citrine_gb::gb::ppu::types::theme::DmgTheme;
 
-    fn walk(value: &Value, path: &str, found: &mut Vec<String>) {
-        let Some(object) = value.as_object() else {
-            return;
-        };
-        for (key, child) in object {
-            let path = if path.is_empty() {
-                key.clone()
-            } else {
-                format!("{path}.{key}")
-            };
-            let synced = SYNCED.iter().any(|(p, _)| *p == path);
-            let local = LOCAL.contains(&path.as_str());
-            assert!(!(synced && local), "{path} is in both lists");
-            if synced || local {
-                continue;
-            }
-            let parent = SYNCED
-                .iter()
-                .any(|(p, _)| p.starts_with(&format!("{path}.")));
-            if parent && child.is_object() {
-                walk(child, &path, found);
-            } else {
-                found.push(path);
-            }
-        }
+    fn listed(path: &str) -> bool {
+        SYNCED.iter().any(|(p, _)| *p == path) || LOCAL.contains(&path)
     }
 
     #[test]
     fn every_setting_is_either_synced_or_kept_on_the_device() {
         let root = serde_json::to_value(Settings::default()).unwrap();
+        for (path, _) in SYNCED {
+            assert!(!LOCAL.contains(path), "{path} is in both lists");
+        }
+        let descend = |path: &str, child: &Value| {
+            let parent = SYNCED
+                .iter()
+                .any(|(p, _)| p.starts_with(&format!("{path}.")));
+            !listed(path) && parent && child.is_object()
+        };
         let mut unsorted = Vec::new();
-        walk(&root, "", &mut unsorted);
+        walk(&root, "", &descend, &mut unsorted);
+        unsorted.retain(|path| !listed(path));
         assert!(
             unsorted.is_empty(),
             "put these in SYNCED or LOCAL in synced.rs: {unsorted:?}"
@@ -292,6 +408,9 @@ mod tests {
             muted: true,
             audio_queue_ms: 77,
             audio_device: Some(format!("{MARK} speakers")),
+            microphone: crate::audio::mic::Microphone::Device(format!("{MARK} microphone")),
+            push_to_talk: true,
+            talk_button: false,
             channels: [true, false, true, false],
             quick_slot: 7,
             ..Default::default()
@@ -346,8 +465,7 @@ mod tests {
         };
         desk.palettes
             .upsert(CustomPalette::parse_code("Lemon", "FFF-CC0-880-220").unwrap());
-        desk.game_palettes
-            .insert("abc".into(), PaletteChoice::Builtin(DmgTheme::Pocket));
+        desk.set_own("abc", "dmg_theme", serde_json::json!(DmgTheme::Pocket));
         desk.matrix = true;
         let values = synced_values(&desk);
 
@@ -356,7 +474,7 @@ mod tests {
         assert!(adopt(&mut phone, &values));
         assert!(phone.matrix);
         assert!(phone.palettes.contains("Lemon"));
-        assert_eq!(phone.game_palettes.len(), 1);
+        assert_eq!(phone.own_values("abc").count(), 1);
         let after = serde_json::to_value(&phone).unwrap();
         for path in LOCAL.iter().filter(|p| **p != "synced") {
             assert_eq!(lookup(&before_local, path), lookup(&after, path), "{path}");
@@ -435,5 +553,73 @@ mod tests {
             Settings::default().online.push_kinds(),
             citrine_gb_net::PushKinds::ALL
         );
+    }
+
+    #[test]
+    fn controller_shortcuts_stay_on_the_device() {
+        use crate::app::ui_state::hotkeys::{Hotkey, HotkeyAction};
+        use crate::app::ui_state::keybinds::PadButton;
+        use strum::IntoEnumIterator;
+        type InGroup = fn(HotkeyAction) -> bool;
+        let groups: [(&str, InGroup); 8] = [
+            ("screens", HotkeyAction::is_ds),
+            ("debugger", HotkeyAction::is_debugger),
+            ("rewind", HotkeyAction::is_rewind),
+            ("fast_forward", HotkeyAction::is_fast_forward),
+            ("hud", HotkeyAction::is_hud),
+            ("window", HotkeyAction::is_window),
+            ("talk", HotkeyAction::is_talk),
+            ("clip", HotkeyAction::is_clip),
+        ];
+        let mut desk = Settings::default();
+        let mut pads = PadButton::iter().skip(1);
+        for (_, in_group) in groups {
+            let action = HotkeyAction::iter()
+                .find(|a| in_group(*a))
+                .expect("an action");
+            desk.hotkeys
+                .bind_pad(pads.next().expect("a pad button"), action);
+        }
+        let plain = HotkeyAction::iter()
+            .find(|a| groups.iter().all(|(_, in_group)| !in_group(*a)))
+            .expect("a plain action");
+        desk.hotkeys
+            .bind_pad(pads.next().expect("a pad button"), plain);
+        desk.hotkeys.bind(Hotkey::ctrl(egui::Key::J), plain);
+        let combo = crate::combo::Combo::new([
+            pads.next().expect("a pad button"),
+            pads.next().expect("a pad button"),
+        ])
+        .expect("a combo");
+        desk.hotkeys.bind_pads(combo, plain);
+        let stored = serde_json::to_value(&desk).unwrap();
+        let combos = lookup(&stored, "hotkeys.pad_combos").and_then(Value::as_array);
+        assert!(combos.is_some_and(|c| !c.is_empty()), "no pad combo stored");
+        for (group, _) in groups {
+            let path = format!("hotkeys.{group}.pads");
+            let bound = lookup(&stored, &path).and_then(Value::as_array);
+            assert!(bound.is_some_and(|b| !b.is_empty()), "{path} holds no pad");
+        }
+        let values = synced_values(&desk);
+        for key in values.keys().filter(|key| key.starts_with("hotkeys")) {
+            assert!(
+                !key.ends_with("pads") && !key.ends_with("pad_combos"),
+                "{key} left the device"
+            );
+        }
+        let first = PadButton::iter().next().expect("a pad button");
+        let mut phone = Settings::default();
+        phone.hotkeys.bind_pad(first, plain);
+        assert!(adopt(&mut phone, &values));
+        assert_eq!(
+            phone
+                .hotkeys
+                .action_for(egui::Key::J, egui::Modifiers::CTRL),
+            Some(plain)
+        );
+        let phone_pads: Vec<PadButton> = PadButton::iter()
+            .filter(|pad| phone.hotkeys.action_for_pad(*pad).is_some())
+            .collect();
+        assert_eq!(phone_pads, [first]);
     }
 }

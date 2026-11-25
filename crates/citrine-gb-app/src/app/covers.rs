@@ -5,12 +5,13 @@ use citrine_gb::console::Console;
 
 impl Citrine {
     pub(super) fn find_covers(&mut self) {
+        self.big.covers.follow_spawner(&self.files.spawner);
         if !self.ui.settings.covers {
             self.covers.forget_all();
             return;
         }
         let store = self.emulator.store.covers();
-        for key in self.covers.poll(&store, now_unix()) {
+        for key in self.covers.poll(&store, &self.files.spawner, now_unix()) {
             self.big.covers.forget(&key);
         }
     }

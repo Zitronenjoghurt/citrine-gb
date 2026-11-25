@@ -13,6 +13,7 @@ pub const VARS: &[&str] = &[
     "CITRINE_MAX_SAVES",
     "CITRINE_INBOX_MESSAGES",
     "CITRINE_INBOX_MB",
+    "CITRINE_CHAT_HISTORY_MB",
     "CITRINE_MAX_CONNECTIONS",
     "CITRINE_IP_CONNECTIONS",
     "CITRINE_IP_UNSIGNED",
@@ -49,6 +50,10 @@ pub const VARS: &[&str] = &[
     "CITRINE_DS_NET_PACKETS_PER_SECOND",
     "CITRINE_DS_NET_ACCOUNT_KB_PER_SECOND",
     "CITRINE_DS_NET_ACCOUNT_PACKETS_PER_SECOND",
+    "CITRINE_ARCHIVE_TOTAL_MB",
+    "CITRINE_ARCHIVE_FILE_MB",
+    "CITRINE_ARCHIVE_GAMES",
+    "CITRINE_ARCHIVE_DOWNLOAD_MB_PER_DAY",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +69,7 @@ pub struct Limits {
     pub max_saves: u64,
     pub inbox_messages: u64,
     pub inbox_bytes: u64,
+    pub chat_history_bytes: u64,
     pub max_connections: usize,
     pub ip_connections: usize,
     pub ip_unsigned: usize,
@@ -101,6 +107,10 @@ pub struct Limits {
     pub ds_net_account_bytes_per_second: u64,
     pub ds_net_account_packets_per_second: u64,
     pub invite_open: Duration,
+    pub archive_total_bytes: u64,
+    pub archive_file_bytes: u64,
+    pub archive_games: u64,
+    pub archive_download_bytes_per_day: u64,
 }
 
 const MB: u64 = 1 << 20;
@@ -120,6 +130,7 @@ impl Limits {
             max_saves: get("CITRINE_MAX_SAVES", 500)?,
             inbox_messages: get("CITRINE_INBOX_MESSAGES", 2000)?,
             inbox_bytes: get("CITRINE_INBOX_MB", 32)?.saturating_mul(MB),
+            chat_history_bytes: get("CITRINE_CHAT_HISTORY_MB", 64)?.saturating_mul(MB),
             max_connections: get("CITRINE_MAX_CONNECTIONS", 500)? as usize,
             ip_connections: get("CITRINE_IP_CONNECTIONS", 10)? as usize,
             ip_unsigned: get("CITRINE_IP_UNSIGNED", 3)? as usize,
@@ -183,6 +194,14 @@ impl Limits {
             )?
             .clamp(10, 100_000),
             invite_open: Duration::from_secs(get("CITRINE_INVITE_OPEN_SECS", 300)?.clamp(1, 3600)),
+            archive_total_bytes: get("CITRINE_ARCHIVE_TOTAL_MB", 20_480)?.saturating_mul(MB),
+            archive_file_bytes: get("CITRINE_ARCHIVE_FILE_MB", 512)?
+                .clamp(1, 4096)
+                .saturating_mul(MB),
+            archive_games: get("CITRINE_ARCHIVE_GAMES", 2000)?,
+            archive_download_bytes_per_day: get("CITRINE_ARCHIVE_DOWNLOAD_MB_PER_DAY", 2048)?
+                .max(1)
+                .saturating_mul(MB),
         })
     }
 }
@@ -219,6 +238,7 @@ mod tests {
         assert_eq!(l.max_saves, 500);
         assert_eq!(l.inbox_messages, 2000);
         assert_eq!(l.inbox_bytes, 32 << 20);
+        assert_eq!(l.chat_history_bytes, 64 << 20);
     }
 
     #[test]
@@ -231,6 +251,7 @@ mod tests {
             ("CITRINE_MAX_SAVES", "6"),
             ("CITRINE_INBOX_MESSAGES", "7"),
             ("CITRINE_INBOX_MB", "8"),
+            ("CITRINE_CHAT_HISTORY_MB", "9"),
         ]);
         assert_eq!(l.storage_total_bytes, 3 << 20);
         assert_eq!(l.disk_floor_bytes, 4 << 20);
@@ -239,6 +260,7 @@ mod tests {
         assert_eq!(l.max_saves, 6);
         assert_eq!(l.inbox_messages, 7);
         assert_eq!(l.inbox_bytes, 8 << 20);
+        assert_eq!(l.chat_history_bytes, 9 << 20);
     }
 
     #[test]
@@ -341,5 +363,24 @@ mod tests {
         assert_eq!(l.room_members, 4);
         assert_eq!(l.room_players, 2);
         assert_eq!(l.room_grace, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn archive_caps_default_and_follow_the_env() {
+        let l = limits(&[]);
+        assert_eq!(l.archive_total_bytes, 20 << 30);
+        assert_eq!(l.archive_file_bytes, 512 << 20);
+        assert_eq!(l.archive_games, 2000);
+        assert_eq!(l.archive_download_bytes_per_day, 2 << 30);
+        let l = limits(&[
+            ("CITRINE_ARCHIVE_TOTAL_MB", "5"),
+            ("CITRINE_ARCHIVE_FILE_MB", "0"),
+            ("CITRINE_ARCHIVE_GAMES", "3"),
+            ("CITRINE_ARCHIVE_DOWNLOAD_MB_PER_DAY", "7"),
+        ]);
+        assert_eq!(l.archive_total_bytes, 5 << 20);
+        assert_eq!(l.archive_file_bytes, 1 << 20);
+        assert_eq!(l.archive_games, 3);
+        assert_eq!(l.archive_download_bytes_per_day, 7 << 20);
     }
 }

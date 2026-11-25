@@ -26,6 +26,32 @@ pub struct Output {
     pub size: u64,
 }
 
+impl Output {
+    pub fn pack(
+        self,
+        replay: citrine_gb_replay::Replay,
+    ) -> Result<(PathBuf, Self), (String, Self)> {
+        let packed = self.path.with_extension("replay");
+        match write_packed(&self.path, &packed, replay) {
+            Ok(()) => Ok((packed, self)),
+            Err(err) => {
+                let _ = std::fs::remove_file(&packed);
+                Err((err, self))
+            }
+        }
+    }
+}
+
+fn write_packed(
+    mp4: &std::path::Path,
+    packed: &std::path::Path,
+    mut replay: citrine_gb_replay::Replay,
+) -> Result<(), String> {
+    replay.video = Some(std::fs::read(mp4).map_err(|err| err.to_string())?);
+    let bytes = replay.write().map_err(|err| err.to_string())?;
+    std::fs::write(packed, bytes).map_err(|err| err.to_string())
+}
+
 enum Message {
     Frame(Vec<u8>, u32),
     #[cfg(feature = "nds")]
@@ -215,7 +241,6 @@ impl Worker {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn pictures_waiting(&self) -> usize {
         self.pictures.load(Ordering::Relaxed)
     }

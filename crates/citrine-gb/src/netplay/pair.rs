@@ -408,11 +408,15 @@ fn next_round<C: LinkPort>(lanes: &mut [&mut Lane<'_, C>]) -> bool {
     let Some(start) = running.clone().map(|lane| *lane.clock).min() else {
         return false;
     };
-    let length = C::AIR_ROUND.unwrap_or(u64::MAX);
+    let end = round_end::<C>(start);
     for lane in lanes.iter_mut() {
-        lane.end = start.saturating_add(length);
+        lane.end = end;
     }
     true
+}
+
+fn round_end<C: LinkPort>(clock: u64) -> u64 {
+    C::AIR_ROUND.map_or(u64::MAX, |length| (clock / length + 1) * length)
 }
 
 fn next_window<C: LinkPort>(lanes: &mut [&mut Lane<'_, C>], window: u64) -> bool {
@@ -669,7 +673,10 @@ pub(crate) fn run_alone<C: Console + LinkPort>(
         if gb.link_waiting() {
             return false;
         }
-        *clock += gb.step_linked();
+        *clock += match C::AIR_ROUND {
+            Some(_) => gb.step_linked_within(round_end::<C>(*clock) - *clock),
+            None => gb.step_linked(),
+        };
         if !gb.take_link_messages().is_empty() {
             return false;
         }

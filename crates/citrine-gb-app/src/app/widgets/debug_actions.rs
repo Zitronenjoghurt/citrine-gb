@@ -23,7 +23,7 @@ impl Widget for DebugActions<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let mut response = None;
         if let Some(gb) = self.emulator.as_gb_mut() {
-            section(ui, icons::FILE_CODE, "Console state", |ui| {
+            section(ui, icons::BINARY, "Console state", |ui| {
                 let export = ui.button("Export as JSON");
                 if export.clicked()
                     && let Ok(json) = gb.dump_json(crate::storage::now_unix())

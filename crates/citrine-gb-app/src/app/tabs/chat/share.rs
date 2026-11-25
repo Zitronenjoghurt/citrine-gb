@@ -198,6 +198,17 @@ pub(super) fn share_item(item: &MediaItem, bytes: Vec<u8>) -> Option<NewShare> {
                 .map(chat_media::preview_of)
                 .unwrap_or_default(),
         ),
+        MediaKind::Replay if info.video => (
+            ShareKind::Recording,
+            citrine_gb_replay::Replay::video(&bytes).ok()??,
+            info.width,
+            info.height,
+            item.thumbnail
+                .as_ref()
+                .map(chat_media::preview_of)
+                .unwrap_or_default(),
+        ),
+        MediaKind::Replay => return None,
     };
     Some(NewShare {
         kind,
@@ -248,6 +259,9 @@ pub(crate) fn save_received(
         width: share.width,
         height: share.height,
         length_ms: share.length_ms,
+        frame_times: false,
+        video: false,
+        replay: None,
         frame,
     };
     let saved = match share.kind {
@@ -274,13 +288,14 @@ pub(super) fn replay_error(err: &ReplayError) -> String {
     match err {
         ReplayError::Unreadable => "This replay can't be read".to_owned(),
         ReplayError::OtherGame(game) => format!("Load {} to play it", game_name(game)),
+        ReplayError::Hardcore => "Replays are off in hardcore".to_owned(),
     }
 }
 
 pub(super) fn kind_word(item: &MediaItem) -> &'static str {
     match item.info.kind {
         MediaKind::Screenshot => "screenshot",
-        MediaKind::Recording => "recording",
+        MediaKind::Recording | MediaKind::Replay => "recording",
         MediaKind::Print => "print",
     }
 }
@@ -289,7 +304,7 @@ pub(super) fn share_icon(kind: ShareKind) -> &'static str {
     match kind {
         ShareKind::Screenshot => icons::CAMERA,
         ShareKind::Recording => icons::VIDEO_CAMERA,
-        ShareKind::Replay => icons::GAME_CONTROLLER,
+        ShareKind::Replay => icons::REPLAY,
     }
 }
 

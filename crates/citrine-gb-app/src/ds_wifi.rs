@@ -9,9 +9,9 @@ use citrine_gb::nds::wifi::Wifi;
 use citrine_gb::nds::wifi::air::{Station, WifiPeer};
 use citrine_gb_nds_net::access_point::{AccessPoint, SSID};
 use citrine_gb_nds_net::gateway::{Config, Gateway};
-use citrine_gb_nds_net::patch;
 use citrine_gb_nds_net::relay::{self, Relay};
 use citrine_gb_nds_net::services::Services;
+use citrine_gb_nds_net::{dwc, patch};
 use citrine_gb_net::ClientMsg;
 use citrine_gb_threads::Spawner;
 use std::net::Ipv4Addr;
@@ -22,6 +22,8 @@ pub use net::{NetPort, Refusal};
 const MAC_BYTES: usize = 6;
 const QUIET_EXCHANGE_US: u64 = 32;
 const MAX_CATCH_UP_US: u64 = 100_000;
+const USER_SCAN_FRAMES: u64 = 30;
+const BOOT_RESTART_FRAMES: u64 = 240;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -93,6 +95,11 @@ pub struct DsWifi {
     next_stream: u32,
     closing: Vec<u32>,
     patched_at: u64,
+    user_scanned_at: u64,
+    pub answered_user: Option<(u64, u64)>,
+    pub peer_console: bool,
+    restarted_for: Option<u64>,
+    restart: bool,
 }
 
 impl DsWifi {
@@ -100,6 +107,7 @@ impl DsWifi {
         let Machine::Nds(nds) = machine else {
             return;
         };
+        self.answer_saved_user(nds);
         if !self.online
             || network
                 .as_ref()
@@ -144,6 +152,15 @@ impl DsWifi {
                     services.note(format!("plain http in {spots} places"));
                 }
             }
+            if let Some(services) = network.access_point.gateway_mut().services_mut()
+                && let Some(userid) = services.profile_wanted()
+            {
+                let saved = dwc::saved_profile(nds.buses().main_ram(), userid);
+                if let Some(saved) = saved.filter(|&saved| saved != 0) {
+                    services.note(format!("the game holds gp profile {saved}"));
+                }
+                services.saved_profile(saved);
+            }
             for line in network.take_log() {
                 log::info!("ds wifi: {line}");
             }
@@ -154,7 +171,8 @@ impl DsWifi {
         }
         firmware.clear_dirty();
         let connections = firmware.connections();
-        if let Some(identity) = self.identity.as_mut()
+        if !self.peer_console
+            && let Some(identity) = self.identity.as_mut()
             && identity.connections.as_deref() != Some(connections)
         {
             identity.connections = Some(connections.to_vec());
@@ -164,6 +182,58 @@ impl DsWifi {
 }
 
 impl DsWifi {
+    fn answer_saved_user(&mut self, nds: &mut citrine_gb::nds::machine::Nds) {
+        let frames = nds.frames();
+        if frames < self.user_scanned_at {
+            self.user_scanned_at = 0;
+            self.answered_user = None;
+        }
+        if self.answered_user.is_some() || frames < self.user_scanned_at + USER_SCAN_FRAMES {
+            return;
+        }
+        self.user_scanned_at = frames;
+        let saved = dwc::saved_user(nds.buses().main_ram());
+        let firmware = &mut nds.buses_mut().spi_mut().devices_mut().firmware;
+        let console = firmware.wfc_user_id();
+        let Some(user) = self.answer(frames, saved, console) else {
+            return;
+        };
+        firmware.answer_wfc_user_id(user);
+        log::info!("ds wifi: the save holds wfc user {user}, the console held {console}");
+        if !self.peer_console
+            && let Some(identity) = self.identity.as_mut()
+        {
+            identity.connections = Some(firmware.connections().to_vec());
+            self.changed = true;
+        }
+    }
+
+    fn answer(&mut self, frames: u64, saved: Option<u64>, console: u64) -> Option<u64> {
+        let user = saved?;
+        self.answered_user = Some((user, console));
+        if console == user {
+            return None;
+        }
+        if self.online
+            && self.identity.is_some()
+            && frames <= BOOT_RESTART_FRAMES
+            && self.restarted_for != Some(user)
+        {
+            self.restarted_for = Some(user);
+            self.restart = true;
+        }
+        Some(user)
+    }
+
+    pub fn take_restart(&mut self) -> bool {
+        std::mem::take(&mut self.restart)
+    }
+
+    #[cfg(test)]
+    pub fn restarted(&self) -> bool {
+        self.restarted_for.is_some()
+    }
+
     pub fn pump(&mut self, online: &mut crate::online::Online) {
         for stream in self.closing.drain(..) {
             online.send(ClientMsg::NetClose { stream });
@@ -260,6 +330,69 @@ impl WifiPeer for Network {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SAVED: u64 = 7_208_171_066_066;
+
+    fn installed() -> DsWifi {
+        DsWifi {
+            identity: Some(Identity::random()),
+            online: true,
+            ..DsWifi::default()
+        }
+    }
+
+    #[test]
+    fn a_moved_save_restarts_once_during_the_boot_screens() {
+        let mut wifi = installed();
+        assert_eq!(wifi.answer(120, Some(SAVED), 0), Some(SAVED));
+        assert!(wifi.take_restart());
+        assert!(!wifi.take_restart());
+        assert_eq!(wifi.answer(120, Some(SAVED), SAVED), None);
+        assert!(!wifi.take_restart());
+        assert_eq!(wifi.answer(120, Some(SAVED), 0), Some(SAVED));
+        assert!(!wifi.take_restart());
+    }
+
+    #[test]
+    fn a_second_boot_of_the_same_save_never_restarts() {
+        let mut wifi = installed();
+        assert_eq!(wifi.answer(120, Some(SAVED), SAVED), None);
+        assert!(!wifi.take_restart());
+        assert_eq!(wifi.answered_user, Some((SAVED, SAVED)));
+    }
+
+    #[test]
+    fn a_save_without_a_wfc_id_never_restarts() {
+        let mut wifi = installed();
+        assert_eq!(wifi.answer(120, None, SAVED), None);
+        assert!(!wifi.take_restart());
+        assert_eq!(wifi.answered_user, None);
+    }
+
+    #[test]
+    fn a_late_answer_waits_for_the_next_boot() {
+        let mut wifi = installed();
+        assert_eq!(
+            wifi.answer(BOOT_RESTART_FRAMES + 1, Some(SAVED), 0),
+            Some(SAVED)
+        );
+        assert!(!wifi.take_restart());
+    }
+
+    #[test]
+    fn with_ds_online_off_the_id_waits_for_the_next_boot() {
+        let mut wifi = installed();
+        wifi.online = false;
+        assert_eq!(wifi.answer(120, Some(SAVED), 0), Some(SAVED));
+        assert!(!wifi.take_restart());
+    }
+
+    #[test]
+    fn no_install_identity_means_no_restart() {
+        let mut wifi = DsWifi::default();
+        assert_eq!(wifi.answer(120, Some(SAVED), 0), Some(SAVED));
+        assert!(!wifi.take_restart());
+    }
 
     #[test]
     fn two_installs_get_different_macs_with_nintendos_prefix() {

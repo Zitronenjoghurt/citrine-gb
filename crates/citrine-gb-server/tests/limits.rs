@@ -17,6 +17,7 @@ fn config(dir: &Path, vars: &[(&str, &str)]) -> Config {
     let mut map: HashMap<String, String> = HashMap::from([
         ("CITRINE_BIND".into(), "127.0.0.1".into()),
         ("CITRINE_PORT".into(), "0".into()),
+        ("CITRINE_STUN_PORT".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_MB".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_PERCENT".into(), "0".into()),
         (
@@ -632,6 +633,43 @@ async fn the_inbox_also_caps_bytes() {
     s.stop().await;
 }
 
+#[tokio::test]
+async fn one_account_cant_store_more_chat_history_than_its_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let vars = [LOOSE_RATES, &[("CITRINE_CHAT_HISTORY_MB", "1")]].concat();
+    let s = server(dir.path(), &vars).await;
+    let (mut a, a_acc, _) = Client::sign_up(s.addr, "Ana").await;
+    let (mut b, b_acc, _) = Client::sign_up(s.addr, "Ben").await;
+    let (mut c, c_acc, _) = Client::sign_up(s.addr, "Cy").await;
+    befriend(&mut a, &a_acc, &mut b, &b_acc).await;
+    befriend(&mut c, &c_acc, &mut b, &b_acc).await;
+    drop(b);
+    for tag in 0..17 {
+        a.send(ClientMsg::Chat {
+            tag,
+            to: b_acc.online_id,
+            sealed: sealed(1, 60_000),
+        })
+        .await;
+        assert_eq!(chat_answer(&mut a, tag).await, Ok(()));
+    }
+    a.send(ClientMsg::Chat {
+        tag: 17,
+        to: b_acc.online_id,
+        sealed: sealed(1, 60_000),
+    })
+    .await;
+    assert_eq!(chat_answer(&mut a, 17).await, Err(ErrorCode::QuotaFull));
+    c.send(ClientMsg::Chat {
+        tag: 0,
+        to: b_acc.online_id,
+        sealed: sealed(2, 60_000),
+    })
+    .await;
+    assert_eq!(chat_answer(&mut c, 0).await, Ok(()));
+    s.stop().await;
+}
+
 async fn try_connect(addr: SocketAddr, forwarded: Option<&str>) -> Result<Client, u16> {
     let mut request = format!("ws://{addr}/relay").into_client_request().unwrap();
     if let Some(ip) = forwarded {
@@ -1138,16 +1176,16 @@ fn screen(width: u32, height: u32) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn a_screen_must_have_the_game_boy_shape() {
+async fn a_screen_of_any_console_fits_but_no_bigger() {
     let dir = tempfile::tempdir().unwrap();
     let s = server(dir.path(), &[]).await;
     let (mut a, _, _) = Client::sign_up(s.addr, "Ana").await;
-    a.send(ClientMsg::Screen(screen(1000, 1000))).await;
+    a.send(ClientMsg::Screen(screen(1025, 1025))).await;
     assert_eq!(
         a.recv().await,
         ServerMsg::ScreenRefused(ErrorCode::BadMessage)
     );
-    a.send(ClientMsg::Screen(screen(480, 432))).await;
+    a.send(ClientMsg::Screen(screen(384, 384))).await;
     assert!(matches!(a.recv().await, ServerMsg::ScreenStored { .. }));
     s.stop().await;
 }
@@ -1287,5 +1325,29 @@ async fn one_account_has_a_cap_on_open_requests() {
     a.send(ClientMsg::AddFriend(targets[2].online_id)).await;
     assert_eq!(a.recv().await, ServerMsg::Error(ErrorCode::RateLimited));
     assert_eq!(friends_on_sign_in(s.addr, &a_id).await.len(), 2);
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn pings_alone_do_not_keep_a_connection_that_never_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), &[]).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/relay", s.addr))
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(50), async {
+        loop {
+            if ws.send(Message::Ping(vec![1].into())).await.is_err() {
+                return;
+            }
+            if let Ok(Some(Ok(Message::Close(_))) | Some(Err(_)) | None) =
+                tokio::time::timeout(Duration::from_secs(5), ws.next()).await
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok());
     s.stop().await;
 }

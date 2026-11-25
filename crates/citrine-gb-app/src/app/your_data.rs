@@ -1,7 +1,7 @@
 use super::Citrine;
 use super::tabs::Tab;
 use super::ui_state::UiState;
-use super::ui_state::settings::SettingsTab;
+use super::ui_state::settings_tree::SettingsTab;
 use super::widgets::confirm::{self, Answer, Ask};
 use super::widgets::settings::your_data::{
     self as your_data_ui, Exporting, PendingImport, Request,
@@ -17,15 +17,22 @@ const COUNT_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 const FILTER: &str = "Citrine data";
 
 impl Citrine {
-    fn data_parts(&mut self) -> Parts<'_> {
+    pub(super) fn data_parts(&mut self) -> Parts<'_> {
         Parts {
             saves: &self.emulator.store,
             media: &mut self.media,
+            rom_copies: &self.files.rom_copies,
             online: &mut self.online,
             settings: &mut self.ui.settings,
             stats: &mut self.stats,
             #[cfg(not(target_arch = "wasm32"))]
             recent: &mut self.ui.recent,
+            boot_roms: your_data::boot_roms::BootRoms {
+                store: &self.settings_store,
+                gb: &mut self.emulator.firmware.gb_boot_rom,
+                gbc: &mut self.emulator.firmware.gbc_boot_rom,
+                names: &mut self.emulator.boot_rom_names,
+            },
             #[cfg(feature = "gba")]
             gba_bios: your_data::gba_bios::GbaBios {
                 store: &self.settings_store,
@@ -48,14 +55,8 @@ impl Citrine {
         }
     }
 
-    fn your_data_open(&self) -> bool {
-        (self.ui.settings.current_tab == SettingsTab::YourData
-            && self.dock.find_tab(&Tab::Settings).is_some())
-            || self.mobile.nav.settings_page() == Some(SettingsTab::YourData)
-    }
-
     pub(super) fn count_your_data(&mut self) {
-        if !self.your_data_open() {
+        if !self.settings_page_open(SettingsTab::Storage) {
             self.ui.your_data.counted_at = None;
             return;
         }
@@ -68,7 +69,8 @@ impl Citrine {
         {
             return;
         }
-        self.ui.your_data.rows = self.data_parts().tallies();
+        let usage = self.storage_usage();
+        self.ui.your_data.rows = self.data_parts().tallies(&usage);
         self.ui.your_data.counted_at = Some(now);
     }
 
@@ -80,8 +82,10 @@ impl Citrine {
     pub(super) fn handle_your_data(&mut self, ctx: &Context) {
         let request = self.ui.your_data.request.take();
         let loading = your_data_ui::loading(&self.ui.your_data);
+        let empty = your_data_ui::nothing_stored(&self.ui.your_data);
         match request {
             Some(Request::Export | Request::Import) if loading => {}
+            Some(Request::Export | Request::Delete) if empty => {}
             Some(Request::Export) => self.start_data_export(),
             Some(Request::Import) => {
                 FileLoader::new()
@@ -229,11 +233,13 @@ impl Citrine {
             "your_data_import",
             Ask {
                 message: &message,
+                list: &[],
                 notes: &notes,
                 action: "Import",
                 action_enabled: true,
                 extra: None,
                 load: None,
+                code: None,
             },
         );
         match answer {
@@ -273,11 +279,8 @@ impl Citrine {
         if !self.ui.your_data.deleting {
             return;
         }
-        #[cfg(target_arch = "wasm32")]
-        let games = self.files.rom_copies.count();
-        #[cfg(not(target_arch = "wasm32"))]
-        let games = 0;
-        let notes = delete_notes(&self.ui.your_data.rows, games);
+        let (list, notes) = delete_ask(&self.ui.your_data.rows);
+        let stored = stores_anything(&self.ui.your_data.rows);
         let exporting = self.ui.your_data.exporting;
         let extra = match exporting {
             Exporting::Idle | Exporting::Busy => "Export first",
@@ -289,13 +292,15 @@ impl Citrine {
             "your_data_delete",
             Ask {
                 message: "Delete everything on this device?",
+                list: &list,
                 notes: &notes,
                 action: "Delete everything",
-                action_enabled: exporting != Exporting::Busy,
-                extra: Some((extra, exporting == Exporting::Idle)),
+                action_enabled: stored && exporting != Exporting::Busy,
+                extra: Some((extra, stored && exporting == Exporting::Idle)),
                 load: load
                     .as_ref()
                     .map(|(label, progress)| (label.as_str(), *progress)),
+                code: None,
             },
         );
         match answer {
@@ -317,7 +322,6 @@ impl Citrine {
         self.emulator.writes.settle();
         let deleted = self.data_parts().delete_all();
         let result = deleted.and(self.clear_cache());
-        self.files.rom_copies.clear();
         self.ui.recent.clear();
         self.online.cloud_forget_local();
         self.first_launch();
@@ -420,35 +424,45 @@ fn import_notes(plan: &[(Kind, Change)]) -> Vec<String> {
     notes
 }
 
-fn delete_notes(rows: &[(Kind, Tally)], games: usize) -> Vec<String> {
-    let made = |(kind, tally): &&(Kind, Tally)| tally.count > 0 && kind.name != "Settings";
-    let mut goes: Vec<String> = rows
+fn stores_anything(rows: &[(Kind, Tally)]) -> bool {
+    rows.iter().any(|(_, tally)| tally.count > 0)
+}
+
+pub const CLOUD_STAYS: &str = "Your online account and its cloud saves stay.";
+
+fn delete_ask(rows: &[(Kind, Tally)]) -> (Vec<String>, Vec<String>) {
+    let settings = |kind: &Kind| kind.name == "Settings";
+    let mut list: Vec<String> = rows
         .iter()
-        .filter(made)
+        .filter(|(kind, tally)| tally.count > 0 && !settings(kind) && kind.system_file.is_none())
         .map(|(kind, tally)| kind.noun(tally.count))
         .collect();
-    match games {
-        0 => {}
-        1 => goes.push("1 game".to_owned()),
-        n => goes.push(format!("{n} games")),
-    }
-    let changed = rows
+    let system_files: usize = rows
         .iter()
-        .find(|(kind, tally)| kind.name == "Settings" && tally.count > 0)
-        .map(|(kind, tally)| format!("resets {} to default", kind.noun(tally.count)));
-    let first = match (goes.is_empty(), changed) {
-        (true, None) => "Nothing you made is stored here yet.".to_owned(),
-        (true, Some(changed)) => format!("This {changed}."),
-        (false, None) => format!("This deletes {}.", listed(&goes)),
-        (false, Some(changed)) => {
-            let comma = if goes.len() > 1 { "," } else { "" };
-            format!("This deletes {}{comma} and {changed}.", listed(&goes))
-        }
-    };
-    vec![
-        first,
-        "Your online account and your copies in the cloud stay.".to_owned(),
-    ]
+        .filter(|(kind, _)| kind.system_file.is_some())
+        .map(|(_, tally)| tally.count)
+        .sum();
+    if system_files > 0 {
+        list.push(Kind::of(crate::storage::kinds::Kind::SystemFiles).noun(system_files));
+    }
+    list.extend(
+        rows.iter()
+            .find(|(kind, tally)| settings(kind) && tally.count > 0)
+            .map(|(kind, tally)| format!("{}, back to default", kind.noun(tally.count))),
+    );
+    if list.is_empty() {
+        list.push("Nothing you made is stored here yet.".to_owned());
+    }
+    let mut notes = Vec::new();
+    let copies = Kind::of(crate::storage::kinds::Kind::GameCopies).name;
+    if rows
+        .iter()
+        .any(|(kind, tally)| kind.name == copies && tally.count > 0)
+    {
+        notes.push(crate::storage::kinds::EXPORT_LEAVES_COPIES.to_owned());
+    }
+    notes.push(CLOUD_STAYS.to_owned());
+    (list, notes)
 }
 
 #[cfg(test)]
@@ -456,20 +470,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delete_everything_is_off_while_nothing_is_stored() {
+        assert!(!stores_anything(&[]));
+        assert_eq!(delete_ask(&[]).0, ["Nothing you made is stored here yet."]);
+        let saves = Kind::of(crate::storage::kinds::Kind::Saves);
+        let empty = Tally { count: 0 };
+        assert!(!stores_anything(&[(saves, empty)]));
+        let one = Tally { count: 1 };
+        assert!(stores_anything(&[(saves, one)]));
+    }
+
+    #[test]
     fn the_import_confirm_says_what_it_adds_and_replaces() {
-        let kind = |name, units, nouns| Kind {
+        let kind = |name, nouns| Kind {
             name,
-            icon: "",
-            units,
             nouns,
+            store: crate::storage::kinds::Kind::Saves,
+            system_file: None,
         };
-        let saves = kind("Saves", ("save", "saves"), ("save", "saves"));
-        let chats = kind(
-            "Chats",
-            ("message", "messages"),
-            ("chat message", "chat messages"),
-        );
-        let settings = kind("Settings", ("changed", "changed"), ("setting", "settings"));
+        let saves = kind("Saves", ("save", "saves"));
+        let chats = kind("Chats", ("chat message", "chat messages"));
+        let settings = kind("Settings", ("setting", "settings"));
         let notes = import_notes(&[
             (
                 saves,
@@ -508,37 +529,69 @@ mod tests {
     fn the_delete_confirm_counts_what_goes_and_says_what_stays() {
         let kind = |name, nouns| Kind {
             name,
-            icon: "",
-            units: ("", ""),
             nouns,
+            store: crate::storage::kinds::Kind::Saves,
+            system_file: None,
         };
-        let tally = |count| Tally { count, bytes: 0 };
+        let tally = |count| Tally { count };
         let rows = [
             (kind("Saves", ("save", "saves")), tally(4)),
             (kind("Media", ("file", "files")), tally(0)),
             (kind("Settings", ("setting", "settings")), tally(2)),
             (kind("Game names", ("game name", "game names")), tally(1)),
         ];
+        let (list, notes) = delete_ask(&rows);
         assert_eq!(
-            delete_notes(&rows, 0),
-            [
-                "This deletes 4 saves and 1 game name, and resets 2 settings to default.",
-                "Your online account and your copies in the cloud stay.",
-            ]
+            list,
+            ["4 saves", "1 game name", "2 settings, back to default"]
         );
+        assert_eq!(notes, [CLOUD_STAYS]);
         assert_eq!(
-            delete_notes(&rows[..3], 0)[0],
-            "This deletes 4 saves and resets 2 settings to default."
+            delete_ask(&rows[1..2]).0,
+            ["Nothing you made is stored here yet."]
         );
+        let copies = [
+            rows[0],
+            (Kind::of(crate::storage::kinds::Kind::GameCopies), tally(2)),
+        ];
+        let (list, notes) = delete_ask(&copies);
+        assert_eq!(list, ["4 saves", "2 game copies"]);
         assert_eq!(
-            delete_notes(&rows[1..2], 0)[0],
-            "Nothing you made is stored here yet."
+            notes,
+            [crate::storage::kinds::EXPORT_LEAVES_COPIES, CLOUD_STAYS]
         );
-        assert_eq!(
-            delete_notes(&rows[..1], 2)[0],
-            "This deletes 4 saves and 2 games."
+        let wifi = [(Kind::of(crate::storage::kinds::Kind::DsWifi), tally(2))];
+        assert_eq!(delete_ask(&wifi).0, ["2 DS wifi connections"]);
+    }
+
+    #[test]
+    fn an_empty_app_offers_no_export_and_no_delete() {
+        let _dirs = crate::storage::TestDirs::new("empty-delete");
+        let mut app = crate::app::tests::test_app();
+        let ctx = egui::Context::default();
+        let usage = app.storage_usage();
+        let mut rows = app.data_parts().tallies(&usage);
+        for (_, tally) in &mut rows {
+            *tally = Tally::default();
+        }
+        app.ui.your_data.rows = rows;
+        assert!(
+            !your_data_ui::nothing_stored(&app.ui.your_data),
+            "nothing is known before the count"
         );
-        assert_eq!(delete_notes(&rows[1..2], 1)[0], "This deletes 1 game.");
+        app.ui.your_data.counted_at = Some(web_time::Instant::now());
+        assert!(your_data_ui::nothing_stored(&app.ui.your_data));
+        for request in [Request::Delete, Request::Export] {
+            app.ui.your_data.request = Some(request);
+            let _ = ctx.run(egui::RawInput::default(), |ctx| app.handle_your_data(ctx));
+            assert!(!app.ui.your_data.deleting, "{request:?}");
+            assert_eq!(app.ui.your_data.exporting, Exporting::Idle, "{request:?}");
+        }
+        app.ui.your_data.rows[0].1 = Tally { count: 1 };
+        assert!(!your_data_ui::nothing_stored(&app.ui.your_data));
+        app.ui.your_data.request = Some(Request::Delete);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.handle_your_data(ctx));
+        assert!(app.ui.your_data.deleting);
     }
 
     #[cfg(feature = "nds")]
@@ -560,17 +613,22 @@ mod tests {
             };
             app.handle_load_ds_file(file, picked);
         }
-        let rows = app.data_parts().tallies();
+        let usage = app.storage_usage();
+        let rows = app.data_parts().tallies(&usage);
+        let (list, _) = delete_ask(&rows);
         assert!(
-            delete_notes(&rows, 0)[0].contains("1 DS ARM9 BIOS, 1 DS ARM7 BIOS and 1 DS firmware"),
-            "{:?}",
-            delete_notes(&rows, 0)
+            list.contains(&"3 BIOS and boot ROM files".to_owned()),
+            "{list:?}"
         );
 
         app.delete_everything();
         for file in <DsFile as strum::IntoEnumIterator>::iter() {
             assert_eq!(app.emulator.ds_file_name(file), None, "{file:?}");
-            assert_eq!(app.settings_store.ds_file(file), None, "{file:?}");
+            assert_eq!(
+                app.settings_store.kept_file(file.store_keys()),
+                None,
+                "{file:?}"
+            );
         }
     }
 
@@ -608,10 +666,10 @@ mod tests {
     #[test]
     fn every_folder_the_app_writes_is_your_data_or_cache_and_delete_everything_empties_both() {
         use crate::media::{Frame, MediaKind, NewMedia};
-        use crate::storage::{CODECS, EXPORT, REPORTS, UPDATES, cache_dir};
+        use crate::storage::kinds::{Folder, Kind};
         const GAME: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let dirs = crate::storage::TestDirs::new("sweep");
-        let mut app = Citrine::default();
+        let mut app = crate::app::tests::test_app();
         app.online.persist_chats();
         app.stats = crate::stats::Stats::open(crate::stats::StatsStore::default());
 
@@ -641,6 +699,9 @@ mod tests {
             width: 160,
             height: 144,
             length_ms: None,
+            frame_times: false,
+            video: false,
+            replay: None,
             frame,
         };
         app.media.add_screenshot(shot, &png).unwrap();
@@ -678,14 +739,59 @@ mod tests {
             app.settings_store.store_ds_wifi(&identity).unwrap();
             app.emulator.ds_wifi.identity = Some(identity);
         }
-        for folder in [CODECS, EXPORT, UPDATES, REPORTS] {
-            let dir = cache_dir().join(folder);
+        for folder in [
+            Folder::Codecs,
+            Folder::Export,
+            Folder::Updates,
+            Folder::Reports,
+        ] {
+            let dir = crate::storage::folder(folder);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("file"), b"cache").unwrap();
         }
+        crate::game_facts::InfoStore::on(crate::storage::Folders::default())
+            .put_found(GAME, &crate::game_facts::Found::default())
+            .unwrap();
+        store
+            .put_species_names(1, &["Bulbasaur".to_owned()])
+            .unwrap();
+        let cache = crate::storage::Folders::default();
+        cache.write(Folder::Badges, "1.png", b"badge").unwrap();
+        cache.write(Folder::AchievementLists, "gb", b"[]").unwrap();
+        let threads = citrine_gb_threads::Threads::new(citrine_gb_threads::Mode::Inline);
+        let rom = crate::storage::scratch_dir().join(format!("sweep-{}.gb", std::process::id()));
+        std::fs::write(&rom, b"rom").unwrap();
+        let stamp = crate::rom_ids::Stamp::new(
+            3,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+        )
+        .unwrap();
+        crate::rom_ids::RomIds::default().learn(
+            &crate::rom_ids::Seen::at(&rom, stamp),
+            citrine_gb::rom::id::RomId::with_game_sha1(b"rom"),
+            &threads.spawner(),
+        );
+        threads.run_side_jobs();
+        let _ = std::fs::remove_file(&rom);
+        #[cfg(feature = "nds")]
+        {
+            let jit = crate::storage::folder(Folder::Jit);
+            std::fs::create_dir_all(&jit).unwrap();
+            std::fs::write(jit.join("game.jit"), b"code").unwrap();
+            std::fs::write(
+                crate::storage::root_file(crate::storage::kinds::RootFile::JitKey),
+                [7; 32],
+            )
+            .unwrap();
+        }
 
+        let usage = crate::storage::kinds::usage();
+        assert_eq!(usage.get(&Kind::OtherData), None, "{usage:?}");
+        assert_eq!(usage.get(&Kind::OtherCache), None, "{usage:?}");
         let data = [
             "chats",
+            #[cfg(feature = "nds")]
+            "jit.key",
             "media",
             "roms",
             "saves",
@@ -698,21 +804,30 @@ mod tests {
         assert_eq!(
             folders(&dirs.cache),
             [
+                "achievements",
+                "badges",
                 "codecs",
                 "covers",
                 "export",
+                "game-pages",
+                #[cfg(feature = "nds")]
+                "jit",
                 "media-temp",
                 "reports",
-                "updates"
+                "rom-ids",
+                "species-names",
+                "updates",
             ]
         );
-        app.ui.your_data.rows = app.data_parts().tallies();
+        let usage = app.storage_usage();
+        app.ui.your_data.rows = app.data_parts().tallies(&usage);
+        let (list, notes) = delete_ask(&app.ui.your_data.rows);
         assert!(
-            delete_notes(&app.ui.your_data.rows, 0)[0]
-                .starts_with("This deletes 2 saves, 1 media file"),
-            "{:?}",
-            delete_notes(&app.ui.your_data.rows, 0)
+            list.starts_with(&["2 saves".to_owned(), "1 screenshot".to_owned()]),
+            "{list:?}"
         );
+        assert!(list.contains(&"1 game copy".to_owned()), "{list:?}");
+        assert_eq!(notes[0], crate::storage::kinds::EXPORT_LEAVES_COPIES);
 
         app.delete_everything();
         let mut kept = vec![
@@ -721,6 +836,8 @@ mod tests {
         ];
         #[cfg(ds_wifi)]
         kept.push("settings/nds-wifi.bin".to_owned());
+        #[cfg(feature = "nds")]
+        kept.push("jit.key".to_owned());
         kept.sort();
         assert_eq!(files_in(&dirs.data), kept);
         assert_eq!(files_in(&dirs.cache), Vec::<String>::new());
@@ -732,6 +849,61 @@ mod tests {
                 .as_ref()
                 .map(|identity| identity.connections.is_some()),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn delete_everything_counts_the_kinds_the_your_data_section_lists() {
+        const GAME: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut app = crate::app::tests::test_app();
+        let store = app.emulator.store.clone();
+        store.put_file(GAME, "battery.sav", b"save").unwrap();
+        store.put_file(GAME, "slot0.state", b"a state").unwrap();
+        app.files.rom_copies.keep(GAME, "tobu.gb", b"rom").unwrap();
+        let mystery = crate::storage::data_dir().join("mystery.bin");
+        std::fs::write(&mystery, b"left over").unwrap();
+        let listed = |app: &mut Citrine| {
+            app.ui.storage.usage = app.storage_usage();
+            let storage: Vec<(&str, u64)> = app
+                .ui
+                .storage
+                .rows(crate::storage::kinds::Section::Data)
+                .map(|kind| (kind.name(), app.ui.storage.bytes(kind)))
+                .collect();
+            let usage = app.storage_usage();
+            let mut counted: Vec<&str> = Vec::new();
+            let mut files = 0;
+            for (kind, _) in app.data_parts().tallies(&usage) {
+                if kind.system_file.is_some() {
+                    files += 1;
+                    if files == 1 {
+                        counted.push(crate::storage::kinds::Kind::SystemFiles.name());
+                    }
+                } else {
+                    counted.push(kind.name);
+                }
+            }
+            assert!(files >= 2, "each system file is counted on its own");
+            (storage, counted)
+        };
+        let (storage, counted) = listed(&mut app);
+        let names: Vec<&str> = storage.iter().map(|(name, _)| *name).collect();
+        assert_eq!(counted, names);
+        for name in ["Saves", "Save states", "Game copies", "Other data files"] {
+            assert!(
+                storage
+                    .iter()
+                    .any(|(row, bytes)| *row == name && *bytes > 0),
+                "{name}: {storage:?}"
+            );
+        }
+        std::fs::remove_file(&mystery).unwrap();
+        let (storage, counted) = listed(&mut app);
+        let names: Vec<&str> = storage.iter().map(|(name, _)| *name).collect();
+        assert_eq!(counted, names);
+        assert!(
+            storage.iter().all(|(row, _)| *row != "Other data files"),
+            "{storage:?}"
         );
     }
 }

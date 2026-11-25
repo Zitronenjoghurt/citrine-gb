@@ -249,14 +249,39 @@ impl Asm {
         }
     }
 
+    pub fn alu_store_wide(&mut self, op: Alu, mem: Mem, source: R) {
+        self.rm(&[(op as u8) << 3 | 1], true, source, mem, false);
+    }
+
     pub fn alu_mem_imm(&mut self, op: Alu, mem: Mem, imm: i32) {
+        self.mem_imm(false, op, mem, imm);
+    }
+
+    pub fn alu_mem_imm_wide(&mut self, op: Alu, mem: Mem, imm: i32) {
+        self.mem_imm(true, op, mem, imm);
+    }
+
+    fn mem_imm(&mut self, wide: bool, op: Alu, mem: Mem, imm: i32) {
         if fits8(imm) {
-            self.rm(&[0x83], false, op as u8, mem, false);
+            self.rm(&[0x83], wide, op as u8, mem, false);
             self.byte(imm as u8);
         } else {
-            self.rm(&[0x81], false, op as u8, mem, false);
+            self.rm(&[0x81], wide, op as u8, mem, false);
             self.word(imm as u32);
         }
+    }
+
+    pub fn test_mem8(&mut self, mem: Mem, imm: u8) {
+        self.rm(&[0xF6], false, 0, mem, false);
+        self.byte(imm);
+    }
+
+    pub fn alu_load8(&mut self, op: Alu, dest: R, mem: Mem) {
+        self.rm(&[(op as u8) << 3 | 2], false, dest, mem, true);
+    }
+
+    pub fn alu_store8(&mut self, op: Alu, mem: Mem, source: R) {
+        self.rm(&[(op as u8) << 3], false, source, mem, true);
     }
 
     pub fn test(&mut self, a: R, b: R) {
@@ -304,6 +329,11 @@ impl Asm {
     pub fn store_imm(&mut self, mem: Mem, imm: u32) {
         self.rm(&[0xC7], false, 0, mem, false);
         self.word(imm);
+    }
+
+    pub fn store_imm_wide(&mut self, mem: Mem, imm: i32) {
+        self.rm(&[0xC7], true, 0, mem, false);
+        self.word(imm as u32);
     }
 
     pub fn store8_imm(&mut self, mem: Mem, imm: u8) {
@@ -489,16 +519,8 @@ impl Asm {
         self.branch(&[0xEB], &[0xE9], label);
     }
 
-    pub fn jmp_mem(&mut self, mem: Mem) {
-        self.rm(&[0xFF], false, 4, mem, false);
-    }
-
     pub fn jmp_reg(&mut self, rm: R) {
         self.rr(&[0xFF], false, 4, rm, false);
-    }
-
-    pub fn call_mem(&mut self, mem: Mem) {
-        self.rm(&[0xFF], false, 2, mem, false);
     }
 
     pub fn call_reg(&mut self, rm: R) {
@@ -529,16 +551,6 @@ impl Asm {
 
     pub fn cmc(&mut self) {
         self.byte(0xF5);
-    }
-
-    pub fn copy16(&mut self, load: bool, xmm: R, mem: Mem) {
-        self.rm(
-            &[0x0F, if load { 0x10 } else { 0x11 }],
-            false,
-            xmm,
-            mem,
-            false,
-        );
     }
 }
 
@@ -626,7 +638,104 @@ mod tests {
             bytes(|a| a.lea(false, RAX, indexed(RBX, R9, 4, -3))),
             [0x42, 0x8D, 0x44, 0x8B, 0xFD]
         );
-        assert_eq!(bytes(|a| a.call_mem(at(RSP, 16))), [0xFF, 0x54, 0x24, 0x10]);
+    }
+
+    #[test]
+    fn wide_memory_immediates_and_byte_tests_match_the_manual() {
+        assert_eq!(
+            bytes(|a| a.alu_mem_imm_wide(Alu::Add, at(R11, 0x1234), 1)),
+            [0x49, 0x83, 0x83, 0x34, 0x12, 0x00, 0x00, 0x01]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_mem_imm_wide(Alu::Add, at(R11, 0x10), 1)),
+            [0x49, 0x83, 0x43, 0x10, 0x01]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_mem_imm_wide(Alu::Sub, at(RSP, 8), 0x100)),
+            [0x48, 0x81, 0x6C, 0x24, 0x08, 0x00, 0x01, 0x00, 0x00]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_mem_imm_wide(Alu::Cmp, at(R12, 0), -1)),
+            [0x49, 0x83, 0x3C, 0x24, 0xFF]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_mem_imm(Alu::Add, at(R11, 0x10), 1)),
+            [0x41, 0x83, 0x43, 0x10, 0x01]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_store_wide(Alu::Add, at(R11, 0x1234), RCX)),
+            [0x49, 0x01, 0x8B, 0x34, 0x12, 0x00, 0x00]
+        );
+        assert_eq!(
+            bytes(|a| a.store(true, at(R11, 0x10), RDX)),
+            [0x49, 0x89, 0x53, 0x10]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_store_wide(Alu::Add, at(RDI, 0x1234), R8)),
+            [0x4C, 0x01, 0x87, 0x34, 0x12, 0x00, 0x00]
+        );
+        assert_eq!(
+            bytes(|a| a.store_imm_wide(at(RSI, 0x40), 0x101)),
+            [0x48, 0xC7, 0x46, 0x40, 0x01, 0x01, 0x00, 0x00]
+        );
+        assert_eq!(
+            bytes(|a| a.store_imm_wide(at(R11, 0x1234), 0)),
+            [
+                0x49, 0xC7, 0x83, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            ]
+        );
+        assert_eq!(
+            bytes(|a| a.store_imm_wide(at(RDI, 8), -1)),
+            [0x48, 0xC7, 0x47, 0x08, 0xFF, 0xFF, 0xFF, 0xFF]
+        );
+        assert_eq!(
+            bytes(|a| a.load8(false, R8, at(RAX, 9))),
+            [0x44, 0x0F, 0xB6, 0x40, 0x09]
+        );
+        assert_eq!(
+            bytes(|a| a.extend8(false, RAX, RSI)),
+            [0x40, 0x0F, 0xB6, 0xC6]
+        );
+        assert_eq!(
+            bytes(|a| a.test_mem8(at(RSI, 0x40), 0xFF)),
+            [0xF6, 0x46, 0x40, 0xFF]
+        );
+        assert_eq!(
+            bytes(|a| a.test_mem8(at(R11, 0x40), 0x80)),
+            [0x41, 0xF6, 0x43, 0x40, 0x80]
+        );
+        assert_eq!(
+            bytes(|a| a.test_mem8(at(R11, 0x1234), 0x04)),
+            [0x41, 0xF6, 0x83, 0x34, 0x12, 0x00, 0x00, 0x04]
+        );
+        assert_eq!(
+            bytes(|a| a.test_mem8(at(RSP, 0x200), 4)),
+            [0xF6, 0x84, 0x24, 0x00, 0x02, 0x00, 0x00, 0x04]
+        );
+        assert_eq!(
+            bytes(|a| a.test_mem8(at(R13, 0), 1)),
+            [0x41, 0xF6, 0x45, 0x00, 0x01]
+        );
+    }
+
+    #[test]
+    fn byte_memory_alu_matches_the_manual() {
+        assert_eq!(
+            bytes(|a| a.alu_load8(Alu::Or, RCX, at(R11, 0x10))),
+            [0x41, 0x0A, 0x4B, 0x10]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_load8(Alu::Or, RSI, at(RDI, 8))),
+            [0x40, 0x0A, 0x77, 0x08]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_store8(Alu::Or, at(R11, 0x1234), RCX)),
+            [0x41, 0x08, 0x8B, 0x34, 0x12, 0x00, 0x00]
+        );
+        assert_eq!(
+            bytes(|a| a.alu_store8(Alu::And, at(RAX, 0), R8)),
+            [0x44, 0x20, 0x00]
+        );
     }
 
     #[test]

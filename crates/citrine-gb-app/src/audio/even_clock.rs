@@ -14,6 +14,8 @@ const PERIOD_RESET: f64 = 0.1;
 const PERIOD_FOLLOW: f64 = 1.0 / 256.0;
 const DRIFT_GAIN: f64 = 0.05;
 const MAX_DRIFT_SECS: f64 = 0.05;
+const REFRESH_BAND: f64 = 0.75;
+const PHASE_FOLLOW: f64 = 1.0 / 64.0;
 const COUNT_SECONDS: usize = 10;
 const MATCH_ENTER: f64 = 0.005;
 const MATCH_LEAVE: f64 = 0.006;
@@ -21,6 +23,10 @@ const FIT_DECAY: f64 = 1.0 - 1.0 / 2048.0;
 const FIT_LEAD: f64 = 16.0;
 const FIT_READY: f64 = 48.0;
 const FIT_RESET: f64 = 0.1;
+const FIT_LOST: f64 = 0.25;
+const FIT_SURE: f64 = 256.0;
+const FIT_SURE_SHARE: f64 = 0.75;
+const FIT_FASTER_UPDATES: u32 = 64;
 const DUE_SLACK: f64 = 0.05;
 
 #[derive(Debug, Default, Clone)]
@@ -29,7 +35,10 @@ pub struct RefreshSnap {
     sorted: Vec<f64>,
     period: Option<f64>,
     drift: f64,
+    phase: f64,
     last: Option<f64>,
+    screen: Option<f64>,
+    on_screen: bool,
 }
 
 impl RefreshSnap {
@@ -43,19 +52,29 @@ impl RefreshSnap {
 
         let Some(median) = self.settled_median() else {
             self.period = None;
+            self.on_screen = false;
             return self.release(dt);
         };
-        let period = match self.period {
-            Some(period) if (median - period).abs() <= period * PERIOD_RESET => period,
+        let screen = self
+            .screen
+            .filter(|&screen| median >= screen * (1.0 - PERIOD_RESET));
+        self.on_screen = screen.is_some();
+        let period = match (screen, self.period) {
+            (Some(screen), _) => {
+                self.period = Some(screen);
+                return self.on_refreshes(dt, screen);
+            }
+            (None, Some(period)) if (median - period).abs() <= period * PERIOD_RESET => {
+                if near(pair, period) {
+                    period + (pair - period) * PERIOD_FOLLOW
+                } else {
+                    period
+                }
+            }
             _ => {
                 self.period = Some(self.mean_near(median));
                 return self.release(dt);
             }
-        };
-        let period = if near(pair, period) {
-            period + (pair - period) * PERIOD_FOLLOW
-        } else {
-            period
         };
         self.period = Some(period);
 
@@ -69,6 +88,30 @@ impl RefreshSnap {
 
     pub fn period(&self) -> Option<f64> {
         self.period.filter(|&period| period <= MAX_PERIOD_SECS)
+    }
+
+    pub fn set_screen_hz(&mut self, hz: Option<f64>) {
+        self.screen = hz.filter(|&hz| hz > 0.0).map(|hz| 1.0 / hz);
+    }
+
+    fn screen_period(&self) -> Option<f64> {
+        self.on_screen.then(|| self.period()).flatten()
+    }
+
+    fn on_refreshes(&mut self, dt: f64, period: f64) -> f64 {
+        let ahead = self.drift + dt - self.phase;
+        let refreshes = if (ahead - period).abs() < period * REFRESH_BAND {
+            1.0
+        } else {
+            (ahead / period).round().max(0.0)
+        };
+        let snapped = refreshes * period;
+        self.drift += dt - snapped;
+        self.phase += (self.drift - self.phase) * PHASE_FOLLOW;
+        if self.phase.abs() > period {
+            self.phase -= (self.phase / period).round() * period;
+        }
+        snapped
     }
 
     fn release(&mut self, dt: f64) -> f64 {
@@ -216,6 +259,9 @@ pub struct EvenClock {
     clock: FrameClock,
     count: PaceCount,
     fit: PeriodFit,
+    trusted: Option<f64>,
+    fit_from_trusted: bool,
+    faster_for: u32,
     matching: bool,
     matched: Option<f64>,
 }
@@ -227,6 +273,10 @@ impl EvenClock {
 
     pub fn set_matching(&mut self, matching: bool) {
         self.matching = matching;
+    }
+
+    pub fn set_screen_hz(&mut self, hz: Option<f64>) {
+        self.snap.set_screen_hz(hz);
     }
 
     pub fn matching(&self) -> bool {
@@ -249,15 +299,16 @@ impl EvenClock {
     pub fn advance(&mut self, dt: f64, timing: Timing) -> usize {
         let even = self.snap.snap(dt);
         let period = self.snap.period();
-        if let (Some(period), Some(fitted)) = (period, self.fit.period())
-            && (period - fitted).abs() > period * FIT_RESET
-        {
-            self.fit = PeriodFit::default();
-        }
-        if let Some(guess) = self.fit.period().or(period) {
+        self.follow_fit(period);
+        let start = if self.fit_from_trusted {
+            self.trusted
+        } else {
+            period
+        };
+        if let Some(guess) = self.fit.period().or(start) {
             self.fit.push(dt, guess);
         }
-        let fitted = self.fit.period();
+        let fitted = self.snap.screen_period().or_else(|| self.fit.period());
         let matched = self
             .matching
             .then(|| matched_frame(timing.frame_secs(), fitted, self.matched.is_some()))
@@ -272,6 +323,29 @@ impl EvenClock {
         let due = self.clock.advance_by(even, frame_secs);
         self.count.record(due, even, frame_secs, period);
         due
+    }
+
+    fn follow_fit(&mut self, period: Option<f64>) {
+        let faster = matches!(
+            (period, self.fit.period()),
+            (Some(period), Some(fitted)) if period < fitted * (1.0 - FIT_RESET)
+        );
+        self.faster_for = if faster { self.faster_for + 1 } else { 0 };
+        if self.faster_for >= FIT_FASTER_UPDATES {
+            self.faster_for = 0;
+            self.trusted = None;
+            self.fit = PeriodFit::default();
+        } else if self.fit.lost() {
+            if self.fit_from_trusted {
+                self.trusted = None;
+            }
+            self.fit = PeriodFit::default();
+        } else if self.fit.sure() {
+            self.trusted = self.fit.period();
+        }
+        if self.fit.is_empty() {
+            self.fit_from_trusted = self.trusted.is_some();
+        }
     }
 
     pub fn advance_over(&mut self, dt: f64, refreshes: u64, timing: Timing) -> usize {
@@ -305,6 +379,11 @@ impl EvenClock {
     pub fn refresh(&self) -> Option<Duration> {
         self.snap.period().map(Duration::from_secs_f64)
     }
+
+    #[cfg(test)]
+    pub fn seed_refresh(&mut self, period: f64) {
+        self.snap.period = Some(period);
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -316,6 +395,8 @@ struct PeriodFit {
     co_spread: f64,
     index: f64,
     secs: f64,
+    miss_spread: f64,
+    miss_weight: f64,
 }
 
 impl PeriodFit {
@@ -329,6 +410,11 @@ impl PeriodFit {
         };
         if self.weight > 0.0 && index <= self.index {
             return;
+        }
+        if let Some(slope) = self.period() {
+            let miss = self.secs - (self.mean_secs + slope * (index - self.mean_index));
+            self.miss_spread = self.miss_spread * FIT_DECAY + miss * miss;
+            self.miss_weight = self.miss_weight * FIT_DECAY + 1.0;
         }
         self.index = index;
         self.weight = self.weight * FIT_DECAY + 1.0;
@@ -349,6 +435,26 @@ impl PeriodFit {
 
     fn period(&self) -> Option<f64> {
         self.slope(FIT_READY)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.weight == 0.0
+    }
+
+    fn miss(&self) -> Option<f64> {
+        (self.miss_weight >= FIT_READY).then(|| (self.miss_spread / self.miss_weight).sqrt())
+    }
+
+    fn lost(&self) -> bool {
+        matches!((self.period(), self.miss()), (Some(period), Some(miss)) if miss > period * FIT_LOST)
+    }
+
+    fn sure(&self) -> bool {
+        self.weight >= FIT_SURE
+            && matches!(
+                (self.period(), self.miss()),
+                (Some(period), Some(miss)) if miss <= period * FIT_LOST * FIT_SURE_SHARE
+            )
     }
 }
 
@@ -757,6 +863,62 @@ mod tests {
             let (_, clock) = matched_run(&dts, GB);
             assert_eq!(clock.pace(GB), 1.0, "{hz} Hz");
         }
+    }
+
+    fn late_updates(seed: u64, hz: f64, secs: f64) -> Vec<f64> {
+        let mut stamps = Stamps::new(seed);
+        let mut last = 0.0;
+        (1..(hz * secs) as usize)
+            .map(|i| {
+                let late = if stamps.uniform() < 0.3 { 0.003 } else { 0.0 };
+                let now = i as f64 / hz + stamps.gauss(0.0005) + late;
+                let dt = now - last;
+                last = now;
+                dt
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_screen_rate_from_the_system_keeps_late_updates_matched() {
+        let gba = citrine_gb::console::ConsoleKind::Gba.timing();
+        let hz = 180.0;
+        for seed in 1..6 {
+            let mut clock = EvenClock::default();
+            clock.set_matching(true);
+            clock.set_screen_hz(Some(hz));
+            let dues: Vec<(usize, bool)> = late_updates(seed * 7919, hz, 60.0)
+                .into_iter()
+                .map(|dt| (clock.advance(dt, gba), clock.matched().is_some()))
+                .collect();
+            let settled = &dues[(hz * 2.0) as usize..];
+            assert!(settled.iter().all(|&(_, matched)| matched), "seed {seed}");
+            let shown: Vec<usize> = settled
+                .iter()
+                .enumerate()
+                .filter(|&(_, &(due, _))| due > 0)
+                .map(|(at, _)| at)
+                .collect();
+            let uneven = shown
+                .windows(2)
+                .filter(|pair| pair[1] - pair[0] != 3)
+                .count();
+            assert!(uneven <= 12, "seed {seed}: {uneven} uneven frames");
+        }
+    }
+
+    #[test]
+    fn a_screen_rate_the_updates_disagree_with_is_left_out() {
+        let dts = Stamps::new(11).vsyncs(&[(120.0, 10.0)], 0.001);
+        let mut clock = EvenClock::default();
+        clock.set_matching(true);
+        clock.set_screen_hz(Some(60.0));
+        for dt in dts {
+            clock.advance(dt, GB);
+        }
+        let period = clock.refresh_period().expect("settled");
+        assert!((period * 120.0 - 1.0).abs() < 0.01, "period {period}");
+        assert!(clock.matched().is_some());
     }
 
     #[test]

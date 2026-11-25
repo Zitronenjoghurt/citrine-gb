@@ -272,6 +272,10 @@ impl Geometry {
         self.fifo.write_packed(value);
     }
 
+    pub fn write_packed_until_full(&mut self, words: &[u32]) -> usize {
+        self.fifo.write_packed_until_full(words)
+    }
+
     pub fn busy(&self) -> u32 {
         self.busy
     }

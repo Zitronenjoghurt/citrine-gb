@@ -74,8 +74,8 @@ owns. A banned account's friend requests go and its files stop downloading. "Ban
 bans every account that joined in the last hour, day or week, for a flood of sign-ups. For an
 account that is online, the page shows its address, and "Block address for 24 h" disconnects
 everyone on it and refuses new connections from it for a day; IPv6 addresses block by their /64.
-Addresses and blocks are kept in memory only, never in the database or the log, and a restart
-clears them.
+Addresses and blocks are kept in memory only, never in the database, and a restart clears them.
+The log records an address only for a failed admin sign-in or a wrong admin two-factor code.
 
 "Delete empty accounts" in Settings, off by default, deletes once an hour every account nobody
 signed in to for 30 days that has no friends, files or cloud saves. Banned accounts stay.
@@ -113,6 +113,25 @@ The log prints the key's fingerprint at start, and the dashboard shows it. With
 its first connect too. Restoring the database keeps
 the key; a fresh database makes a new one, and every app asks its user to accept it.
 
+## Direct connections
+
+With the relay on, the server also answers STUN on UDP port `CITRINE_STUN_PORT` (3478, 0 turns
+it off). Players who both turn on "Direct connection" ask it for their internet address and play
+straight to each other; their game data then skips the relay. When no direct path works, the
+game stays on the relay. Open the UDP port in the firewall, and publish it when the server runs
+in Docker (the compose file does).
+
+## Game Archive
+
+The Game Archive holds games that the admin shares with chosen accounts. It is off until
+`CITRINE_ARCHIVE_KEY_FILE` names a key file; the relay makes the file on its first start if it
+is missing. The games in `archive/` are compressed with zstd and encrypted with keys made from
+it. Keep the file outside `CITRINE_DATA_DIR`, so a copy of the data folder alone can't read
+them, and back it up on its own: without it the games are lost. The relay itself can decrypt them. The admin panel's Game Archive page lists the
+games and the accounts with access, and adds games. It names each game from the same No-Intro
+lists the app uses and fetches its box art from libretro-thumbnails on raw.githubusercontent.com,
+the only address it asks. Set `CITRINE_ARCHIVE_COVERS=false` to add games without covers.
+
 ## Limits
 
 The relay caps what one account, one connection or one address can use, so a single person
@@ -148,6 +167,10 @@ relay open to anyone; each one has a variable to change it, listed with its defa
 | `CITRINE_FRIEND_REQUESTS_PER_HOUR` | 20 | New friend requests per hour from one account. Asking the same person again doesn't count |
 | `CITRINE_FRIEND_REQUEST_BURST` | 10 | New friend requests one account may send at once |
 | `CITRINE_DOWNLOAD_MB_PER_DAY` | 1024 | MB of files one account may download per day |
+| `CITRINE_ARCHIVE_TOTAL_MB` | 20480 | Size of all Game Archive games together as stored, on top of `CITRINE_STORAGE_TOTAL_MB` |
+| `CITRINE_ARCHIVE_FILE_MB` | 512 | Size of one game added to the Game Archive |
+| `CITRINE_ARCHIVE_GAMES` | 2000 | Games in the Game Archive |
+| `CITRINE_ARCHIVE_DOWNLOAD_MB_PER_DAY` | 2048 | MB of Game Archive games one account may download per day. One account downloads one game at a time |
 | `CITRINE_SESSION_KB_PER_SECOND` | 256 | KB per second each player may send in a play session |
 | `CITRINE_SESSION_BURST_MB` | 12 | MB a player may send at once in a play session, enough for a saved state |
 | `CITRINE_GAME_KB_PER_SECOND` | 1024 | KB per second each player may send of a shared game |
@@ -235,6 +258,16 @@ Messaging while it is closed or in the background. Set `CITRINE_FCM_KEY_FILE` to
 it the server takes the phones' tokens and sends nothing; it says so once at start. Nothing is pushed while one of
 the account's devices is in use, and a chat updates one notification per friend.
 
+`docker logs <container> 2>&1 | grep -i push` shows what happened. At start: `push notifications go through Firebase
+project <id>`, where the id must be the project in the app's `google-services.json`. Each phone that registers logs
+the kinds it takes; "with every kind off" means its Android notifications are off. Each push logs one line:
+
+- `went to 1 of 1 phones`: Firebase took it; if the phone shows nothing, look on the phone.
+- `no phone registered for notifications`: the account's phone never sent its token. Open the app on the phone while signed in.
+- `with notifications for messages off`: the phone has that switch or its Android notifications off.
+- `Firebase refused it: 403 Forbidden, SENDER_ID_MISMATCH`: the key is from another Firebase project than the app.
+- `PERMISSION_DENIED`: the key's service account may not send, or the Firebase Cloud Messaging API is off in its project.
+
 ## Changing the database
 
 The schema is the numbered files in `migrations/`. At start the server applies the ones the
@@ -255,3 +288,5 @@ cargo sqlx prepare -- --all-targets
 ```
 
 The admin panel uses icons from [Lucide](https://lucide.dev), under the ISC licence in `src/admin/LICENSE-lucide.txt`.
+
+The server is part of Citrine and is licensed under GPL-3.0-or-later, like the rest of the repository. The image carries `LICENSE` and `NOTICE.md` in `/citrine`.

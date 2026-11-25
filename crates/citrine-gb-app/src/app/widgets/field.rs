@@ -1,9 +1,43 @@
-use egui::{Align, Key, TextBuffer, TextEdit, Ui, vec2};
+use egui::text_edit::TextEditOutput;
+use egui::{Align, Key, Margin, TextBuffer, TextEdit, Ui, vec2};
+
+const ROW_FIELD_MARGIN: Margin = Margin::symmetric(4, 2);
 
 pub fn row_field<'t>(ui: &Ui, text: &'t mut dyn TextBuffer) -> TextEdit<'t> {
     TextEdit::singleline(text)
         .min_size(vec2(0.0, ui.spacing().interact_size.y))
         .vertical_align(Align::Center)
+        .margin(ROW_FIELD_MARGIN)
+}
+
+pub fn row_field_width(ui: &Ui) -> f32 {
+    (super::settings::form::field_width(ui) - ROW_FIELD_MARGIN.sum().x).max(0.0)
+}
+
+pub fn framed(ui: &mut Ui, edit: TextEdit<'_>) -> TextEditOutput {
+    let back = ui.painter().add(egui::Shape::Noop);
+    let output = edit.frame(false).show(ui);
+    let response = &output.response;
+    let look = ui.style().interact(response);
+    let stroke = if response.has_focus() {
+        egui::Stroke::new(
+            ui.visuals().selection.stroke.width,
+            crate::app::ui_state::ui_theme::focus_ring(ui.visuals()),
+        )
+    } else {
+        look.bg_stroke
+    };
+    ui.painter().set(
+        back,
+        egui::epaint::RectShape::new(
+            response.rect.expand(look.expansion),
+            look.corner_radius,
+            ui.visuals().text_edit_bg_color(),
+            stroke,
+            egui::StrokeKind::Inside,
+        ),
+    );
+    output
 }
 
 pub fn code_field(ui: &mut Ui, code: &mut String, hint: &str, width: f32, focus: bool) -> bool {

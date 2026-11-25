@@ -1,5 +1,8 @@
 pub mod even_clock;
+#[cfg(test)]
+mod even_clock_replay;
 pub mod follow;
+pub mod mic;
 pub mod mix;
 pub mod pacer;
 pub mod preview;
@@ -10,6 +13,8 @@ pub mod shared;
 pub mod stretch;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
+
+pub const SAME_AS_SYSTEM: &str = "Same as system";
 
 use pacer::AudioFeed;
 use queue::{QueueConfig, QueueStats, latency_frames};

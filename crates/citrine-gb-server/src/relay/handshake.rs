@@ -12,8 +12,9 @@ pub(super) async fn handshake(
     sink: &mut SplitSink<WebSocket, Message>,
     stream: &mut SplitStream<WebSocket>,
 ) -> Option<Channel> {
+    let deadline = tokio::time::Instant::now() + SIGN_IN_TIMEOUT;
     let first = loop {
-        match tokio::time::timeout(SIGN_IN_TIMEOUT, stream.next()).await {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
             Ok(Some(Ok(Message::Binary(bytes)))) => break bytes,
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
             _ => return None,

@@ -1,8 +1,16 @@
+use super::super::QuickFetch;
 use super::super::helpers::{IDLES_SHIFT, RUN_DONE_SHIFT, RUN_LAST_SHIFT, THUMB};
 use super::super::scan::Op;
 use super::{Builder, DATA_OVERLAP, Fetch, Merge};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{InstBuilder, InstructionData, Opcode, Value, types};
+use cranelift_codegen::ir::{Block, InstBuilder, InstructionData, Opcode, Value, types};
+
+struct FlatRun {
+    quick: QuickFetch,
+    count: u32,
+    last: u32,
+    latch: u32,
+}
 
 impl Builder<'_, '_> {
     pub(super) fn load_next_fetch(&mut self) {
@@ -33,7 +41,7 @@ impl Builder<'_, '_> {
             Merge::Alone => self.timed_fetch(index, None),
             Merge::First { end } => {
                 let access = self.fetch_access();
-                self.fetch_run(index, end, access);
+                self.fetch_run_inline(index, end, access);
                 self.merged = true;
                 self.i32(0)
             }
@@ -55,15 +63,115 @@ impl Builder<'_, '_> {
         }
     }
 
+    fn fetch_run_inline(&mut self, index: usize, end: usize, access: Value) {
+        let Some(flat) = self.iwram_run(index, end) else {
+            self.fetch_run(index, end, access);
+            return;
+        };
+        let slow = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.set_cold_block(slow);
+        let total = self.b.use_var(self.vars.total);
+        self.flat_run(&flat, total, slow);
+        let total_after = self.b.ins().iadd_imm_u(total, i64::from(flat.count));
+        self.b.def_var(self.vars.total, total_after);
+        let last = self.i32(1);
+        self.b.def_var(self.vars.last, last);
+        let stop = self.i32((end + 2) as u32);
+        self.b.def_var(self.vars.stop, stop);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(slow);
+        let ran = self.call_fetch_run(index, end, access, total);
+        self.ran(index, total, ran);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+    }
+
     pub(super) fn fetch_run(&mut self, index: usize, end: usize, access: Value) {
+        let total = self.b.use_var(self.vars.total);
+        let ran = self.call_fetch_run(index, end, access, total);
+        self.ran(index, total, ran);
+    }
+
+    fn call_fetch_run(&mut self, index: usize, end: usize, access: Value, total: Value) -> Value {
         let addr = self.i32(self.pc_read(index));
         let count = self.i32((end - index + 1) as u32);
-        let total = self.b.use_var(self.vars.total);
-        let ran = self.call(
+        self.call(
             self.sigs.fetch_run,
             self.helpers.fetch_run,
             &[self.bus, addr, access, count, total, self.budget],
-        );
+        )
+    }
+
+    fn iwram_run(&self, index: usize, end: usize) -> Option<FlatRun> {
+        let quick = self.quick?;
+        let (first, last) = (self.pc_read(index), self.pc_read(end));
+        let words = [
+            *self.plan.words.get(end + 1)?,
+            *self.plan.words.get(end + 2)?,
+        ];
+        let latch = quick.iwram_latch(first, last, self.plan.thumb, words)?;
+        Some(FlatRun {
+            quick,
+            count: (end - index + 1) as u32,
+            last,
+            latch,
+        })
+    }
+
+    fn flat_run(&mut self, flat: &FlatRun, total: Value, slow: Block) {
+        let quick = flat.quick;
+        let (i32t, i64t) = (types::I32, types::I64);
+        let flags = Self::flags();
+        let bus = self.bus;
+        let fast = self.b.create_block();
+        let count = i64::from(flat.count);
+        let now = self.b.ins().load(i32t, flags, bus, quick.now);
+        let dma = self.b.ins().load(i32t, flags, bus, quick.dma_check);
+        let wide_now = self.b.ins().uextend(i64t, now);
+        let wide_dma = self.b.ins().uextend(i64t, dma);
+        let reach = self.b.ins().iadd_imm_u(wide_now, count);
+        let mut ok = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, reach, wide_dma);
+        let wide_total = self.b.ins().uextend(i64t, total);
+        let wide_budget = self.b.ins().uextend(i64t, self.budget);
+        let spent = self.b.ins().iadd_imm_u(wide_total, count);
+        let room = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, spent, wide_budget);
+        ok = self.b.ins().band(ok, room);
+        let enabled = self.prefetch_enabled(&quick);
+        ok = self.b.ins().band(ok, enabled);
+        self.b.ins().brif(ok, fast, &[], slow, &[]);
+        self.b.switch_to_block(fast);
+        let clock = self.b.ins().load(i64t, flags, bus, quick.clock);
+        let clock = self.b.ins().iadd_imm_u(clock, count);
+        self.b.ins().store(flags, clock, bus, quick.clock);
+        let zero = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().store(flags, zero, bus, quick.branched);
+        let now = self.b.ins().iadd_imm_u(now, count);
+        self.b.ins().store(flags, now, bus, quick.sample);
+        self.b.ins().store(flags, now, bus, quick.now);
+        let latch = self.i32(flat.latch);
+        self.b.ins().store(flags, latch, bus, quick.open_iwram);
+        self.b.ins().store(flags, latch, bus, quick.open_last);
+        let at = self.i32(flat.last);
+        self.b.ins().store(flags, at, bus, quick.open_addr);
+    }
+
+    fn prefetch_enabled(&mut self, quick: &QuickFetch) -> Value {
+        let bits = self
+            .b
+            .ins()
+            .uload16(types::I32, Self::flags(), self.bus, quick.wait_bits);
+        let bit = self.b.ins().band_imm_u(bits, i64::from(quick.prefetch_bit));
+        self.b.ins().icmp_imm_u(IntCC::NotEqual, bit, 0)
+    }
+
+    fn ran(&mut self, index: usize, total: Value, ran: Value) {
         let sum = self.b.ins().ireduce(types::I32, ran);
         let done = self.b.ins().ushr_imm_u(ran, i64::from(RUN_DONE_SHIFT));
         let done = self.b.ins().ireduce(types::I32, done);
@@ -78,6 +186,75 @@ impl Builder<'_, '_> {
     }
 
     fn timed_fetch(&mut self, index: usize, idles: Option<Value>) -> Value {
+        if idles.is_none()
+            && let Some(cycles) = self.iwram_fetch(index)
+        {
+            return cycles;
+        }
+        self.helper_fetch(index, idles)
+    }
+
+    fn iwram_fetch(&mut self, index: usize) -> Option<Value> {
+        let quick = self.quick?;
+        let addr = self.pc_read(index);
+        if addr >> 24 != quick.iwram_page {
+            return None;
+        }
+        let word = *self.plan.words.get(index + 2)?;
+        let (i32t, i64t) = (types::I32, types::I64);
+        let flags = Self::flags();
+        let bus = self.bus;
+        let fast = self.b.create_block();
+        let slow = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(done, i32t);
+        self.b.set_cold_block(slow);
+
+        let now = self.b.ins().load(i32t, flags, bus, quick.now);
+        let dma = self.b.ins().load(i32t, flags, bus, quick.dma_check);
+        let early = self.b.ins().icmp(IntCC::UnsignedLessThan, now, dma);
+        let enabled = self.prefetch_enabled(&quick);
+        let ok = self.b.ins().band(early, enabled);
+        self.b.ins().brif(ok, fast, &[], slow, &[]);
+
+        self.b.switch_to_block(fast);
+        let sample = self.b.ins().iadd_imm_u(now, 1);
+        self.b.ins().store(flags, sample, bus, quick.sample);
+        self.b.ins().store(flags, sample, bus, quick.now);
+        let zero = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().store(flags, zero, bus, quick.branched);
+        let clock = self.b.ins().load(i64t, flags, bus, quick.clock);
+        let clock = self.b.ins().iadd_imm_u(clock, 1);
+        self.b.ins().store(flags, clock, bus, quick.clock);
+        let at = self.i32(addr);
+        self.b.ins().store(flags, at, bus, quick.open_addr);
+        let latch = if self.plan.thumb {
+            let shift = 8 * (addr & 2);
+            let latch = self.b.ins().load(i32t, flags, bus, quick.open_iwram);
+            let kept = self
+                .b
+                .ins()
+                .band_imm_u(latch, i64::from(!(0xFFFF_u32 << shift)));
+            self.b
+                .ins()
+                .bor_imm_u(kept, i64::from((word & 0xFFFF) << shift))
+        } else {
+            self.i32(word)
+        };
+        self.b.ins().store(flags, latch, bus, quick.open_iwram);
+        self.b.ins().store(flags, latch, bus, quick.open_last);
+        let one = self.i32(1);
+        self.b.ins().jump(done, &[one.into()]);
+
+        self.b.switch_to_block(slow);
+        let called = self.helper_fetch(index, None);
+        self.b.ins().jump(done, &[called.into()]);
+
+        self.b.switch_to_block(done);
+        Some(self.b.block_params(done)[0])
+    }
+
+    fn helper_fetch(&mut self, index: usize, idles: Option<Value>) -> Value {
         let addr = self.i32(self.pc_read(index));
         let access = self.fetch_access();
         let packed = match idles {

@@ -157,6 +157,7 @@ impl Citrine {
                 self.ui.playing.opened_invite = Some(OpenedInvite::new(from, session, now));
                 self.events.open_tab(Tab::GameBoy);
             }
+            Opened::Walker => self.events.open_tab(Tab::Walker),
         }
     }
 }
@@ -164,6 +165,11 @@ impl Citrine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_step_notification_opens_the_walker() {
+        assert_eq!(Opened::parse("walker", "", ""), Some(Opened::Walker));
+    }
 
     #[test]
     fn a_tapped_invite_joins_once_it_arrives() {

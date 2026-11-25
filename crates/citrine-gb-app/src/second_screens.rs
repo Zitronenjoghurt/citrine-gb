@@ -1,8 +1,13 @@
+#[cfg(not(target_arch = "wasm32"))]
+mod doorway;
 mod relay;
 mod suggest;
 
 use citrine_gb::console::{Touch, VideoSpec};
+use citrine_gb_net::CheckCode;
 use citrine_gb_surface::host::{Host, ScreenFrame};
+#[cfg(not(target_arch = "wasm32"))]
+use citrine_gb_surface::link::Link;
 use citrine_gb_surface::mode::{Mode, View};
 use citrine_gb_surface::pairing::Code;
 use citrine_gb_surface::proto::{Bye, GameCard, SurfaceKind};
@@ -16,6 +21,8 @@ pub use citrine_gb_surface::host::Asker;
 pub use citrine_gb_surface::host::{Presence, SurfaceRow};
 pub use citrine_gb_surface::proto::{Action, SurfaceId};
 #[cfg(not(target_arch = "wasm32"))]
+pub use doorway::PeerArrival;
+#[cfg(not(target_arch = "wasm32"))]
 pub use suggest::Reach;
 pub use suggest::{Account, DeviceKeys, OwnDevice, Suggestion};
 
@@ -28,6 +35,10 @@ const LAN_CHECK_SECS: f64 = 2.0;
 const RETRY_SECS: f64 = 2.0;
 const ACCOUNT_RETRY_SECS: f64 = 30.0;
 const CARD_EVERY_SECS: f64 = 0.5;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PEERS_WAITING: usize = 8;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PEERS_PER_ADDRESS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay {
@@ -49,6 +60,7 @@ struct Looking {
     sweep: Option<citrine_gb_surface::pairing::Sweep>,
     since: f64,
     probed_at: f64,
+    answered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +68,17 @@ enum Knock {
     Code(Code),
     Own(DeviceKeys),
     Asked,
+}
+
+impl Knock {
+    fn surface(self) -> citrine_gb_surface::remote::Knock {
+        use citrine_gb_surface::remote::Knock as Surface;
+        match self {
+            Self::Code(code) => Surface::Code(code),
+            Self::Own(keys) => Surface::Own(keys.proof),
+            Self::Asked => Surface::Asked,
+        }
+    }
 }
 
 pub struct Joining {
@@ -107,6 +130,13 @@ impl Joining {
 
     pub fn custom(&self) -> &[View] {
         &self.custom
+    }
+
+    pub fn check_code(&self) -> Option<CheckCode> {
+        self.remote
+            .as_ref()
+            .filter(|remote| remote.phase() == Phase::Asking)
+            .and_then(Remote::check_code)
     }
 
     pub fn state(&self) -> JoinState {
@@ -177,6 +207,12 @@ pub struct SecondScreens {
     pub(crate) advertise: bool,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) nearby_targets: Option<Vec<std::net::SocketAddr>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    doorway: doorway::Doorway,
+    #[cfg(not(target_arch = "wasm32"))]
+    peers: Vec<PeerArrival>,
+    #[cfg(not(target_arch = "wasm32"))]
+    services: Vec<String>,
     account: Option<Account>,
     account_door: Option<Door>,
     account_door_at: f64,
@@ -214,6 +250,12 @@ impl Default for SecondScreens {
             advertise: !cfg!(test),
             #[cfg(not(target_arch = "wasm32"))]
             nearby_targets: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            doorway: doorway::Doorway::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            peers: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            services: Vec::new(),
             account: None,
             account_door: None,
             account_door_at: 0.0,
@@ -305,6 +347,10 @@ impl SecondScreens {
         self.host.code()
     }
 
+    pub fn code_spent(&self) -> bool {
+        self.host.code_spent()
+    }
+
     pub fn lan_blocked(&self) -> bool {
         self.lan_blocked
     }
@@ -346,6 +392,53 @@ impl SecondScreens {
     #[cfg(target_arch = "wasm32")]
     fn open_lan(&mut self) {}
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn offer(&mut self, service: &str, on: bool) {
+        let offered = self.services.iter().any(|s| s == service);
+        if on && !offered {
+            self.services.push(service.to_owned());
+        } else if !on && offered {
+            self.services.retain(|s| s != service);
+            self.peers.retain(|p| p.hello.service != service);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn take_peers(&mut self, service: &str) -> Vec<PeerArrival> {
+        let (taken, kept) = std::mem::take(&mut self.peers)
+            .into_iter()
+            .partition(|p| p.hello.service == service);
+        self.peers = kept;
+        taken
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn instance(&self) -> Option<u64> {
+        self.lan.as_ref().map(|lan| lan.instance())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sort_arrivals(&mut self, now: f64) {
+        for sorted in self.doorway.sort(now) {
+            match sorted {
+                doorway::Sorted::Screen(link) => self.host.accept(link),
+                doorway::Sorted::Peer(peer) => {
+                    let address = peer.link.address();
+                    let same = self
+                        .peers
+                        .iter()
+                        .filter(|p| address.is_some() && p.link.address() == address)
+                        .count();
+                    if self.services.contains(&peer.hello.service) && same < MAX_PEERS_PER_ADDRESS {
+                        self.peers.push(peer);
+                    }
+                }
+            }
+        }
+        let over = self.peers.len().saturating_sub(MAX_PEERS_WAITING);
+        self.peers.drain(..over);
+    }
+
     #[cfg(all(test, feature = "nds", not(target_arch = "wasm32")))]
     pub fn lan_discovery_port(&self) -> Option<u16> {
         self.lan.as_ref().and_then(|lan| lan.discovery_port())
@@ -359,7 +452,8 @@ impl SecondScreens {
     pub fn open_window(&mut self, name: &str, kind: SurfaceKind) -> Remote {
         let (near, far) = citrine_gb_surface::link::in_app();
         self.host.accept_trusted(Box::new(near));
-        let mut remote = Remote::join(Box::new(far), name, kind, None, None);
+        let knock = citrine_gb_surface::remote::Knock::Asked;
+        let mut remote = Remote::join(Box::new(far), name, kind, knock);
         let now = self.now();
         self.host.step(now);
         remote.step(now);
@@ -390,13 +484,13 @@ impl SecondScreens {
             let spawner = self.spawner.as_ref();
             let (discovery, sweep) = match &self.discovery_targets {
                 Some(targets) => (
-                    Discovery::toward(code, targets),
+                    Discovery::toward(targets),
                     spawner
                         .zip(self.sweep_targets.clone())
                         .map(|(spawner, targets)| Sweep::toward(targets, spawner)),
                 ),
                 None => (
-                    Discovery::start(code),
+                    Discovery::start(),
                     spawner.and_then(|spawner| Sweep::start(DISCOVERY_PORT, spawner)),
                 ),
             };
@@ -405,6 +499,7 @@ impl SecondScreens {
                 sweep,
                 since: now,
                 probed_at: now,
+                answered: false,
             });
         }
         #[cfg(target_arch = "wasm32")]
@@ -438,15 +533,8 @@ impl SecondScreens {
         match &mut joining.remote {
             Some(remote) => remote.resume_over(link),
             None => {
-                let code = match joining.knock {
-                    Knock::Code(code) => Some(code),
-                    Knock::Own(_) | Knock::Asked => None,
-                };
-                let mut remote = Remote::join(link, name, SurfaceKind::Device, code, None);
-                if let Knock::Own(keys) = joining.knock {
-                    remote.prove_with(keys.proof);
-                }
-                joining.remote = Some(remote);
+                let knock = joining.knock.surface();
+                joining.remote = Some(Remote::join(link, name, SurfaceKind::Device, knock));
             }
         }
     }
@@ -473,37 +561,38 @@ impl SecondScreens {
             looking.discovery.probe();
             looking.probed_at = now;
         }
-        let answered = looking.discovery.poll();
         let trying = joining
             .remote
             .as_ref()
             .is_some_and(|r| matches!(r.phase(), Phase::Joining | Phase::Asking | Phase::Joined));
-        let swept = if trying {
-            None
-        } else {
-            looking.sweep.as_mut().and_then(|sweep| sweep.poll())
-        };
-        let waited = now - looking.since > LOOK_SECS;
         let joined = joining
             .remote
             .as_ref()
             .is_some_and(|r| r.phase() == Phase::Joined);
         if joined {
             joining.looking = None;
-        } else if let Some(addr) = answered.filter(|_| !trying) {
-            joining.looking = None;
+            return;
+        }
+        if trying {
+            return;
+        }
+        if let Some(addr) = looking.discovery.poll() {
+            looking.answered = true;
             joining.remote = None;
             if !Self::dial_lan(joining, addr, &self.name) {
+                joining.looking = None;
                 self.dial_relay(joining);
             }
-        } else if let Some(tcp) = swept {
+        } else if looking.answered {
+            joining.looking = None;
+        } else if let Some(tcp) = looking.sweep.as_mut().and_then(|sweep| sweep.poll()) {
             let Some(addr) = tcp.peer() else {
                 return;
             };
             joining.remote = None;
             joining.way = Some(Way::Lan(addr));
             Self::link(joining, Box::new(tcp), &self.name);
-        } else if waited && !trying {
+        } else if now - looking.since > LOOK_SECS {
             joining.looking = None;
             joining.remote = None;
             self.dial_relay(joining);
@@ -536,16 +625,19 @@ impl SecondScreens {
             if self.host.game().is_some() {
                 services.push(citrine_gb_surface::pairing::SCREEN_SERVICE.to_owned());
             }
+            services.extend(self.services.iter().cloned());
             lan.set_presence(Some(citrine_gb_surface::pairing::Presence {
                 name: self.name.clone(),
                 tag_key: self.account.as_ref().map(|a| a.keys.tag),
                 services,
             }));
             while let Some(tcp) = lan.accept() {
-                self.host.accept(Box::new(tcp));
+                self.doorway.arrive(tcp, now);
             }
-            lan.answer(self.host.code().map(|(code, _)| code));
+            lan.answer(self.host.code().is_some());
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.sort_arrivals(now);
         #[cfg(target_os = "macos")]
         self.check_lan(now);
         let mut reopen = None;
@@ -744,6 +836,132 @@ fn crop(rgba: &[u8], width: usize, x: usize, y: usize, w: usize, h: usize) -> Ve
         }
     }
     out
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod doorway_tests {
+    use super::*;
+    use citrine_gb_surface::link::{Link, Poll, Tcp};
+    use citrine_gb_surface::proto::{HostMsg, Wire};
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    const HELLO_0_12: [u8; 13] = [0, 2, 7, b'P', b'i', b'x', b'e', b'l', b' ', b'8', 2, 0, 0];
+
+    fn listening() -> SecondScreens {
+        let mut screens = SecondScreens {
+            discovery_port: 0,
+            advertise: true,
+            ..SecondScreens::default()
+        };
+        screens.step();
+        screens
+    }
+
+    fn dial(screens: &SecondScreens) -> Tcp {
+        let port = screens.lan.as_ref().expect("the lan is open").port();
+        Tcp::dial(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_secs(2),
+        )
+        .unwrap()
+    }
+
+    fn step_until(
+        screens: &mut SecondScreens,
+        mut done: impl FnMut(&mut SecondScreens) -> bool,
+    ) -> bool {
+        for _ in 0..400 {
+            screens.step();
+            if done(screens) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn a_screen_hello_from_0_12_reaches_the_host_and_hears_needs_update() {
+        let mut screens = listening();
+        screens.offer("walker", true);
+        let mut phone = dial(&screens);
+        phone.send(HELLO_0_12.to_vec());
+        let mut reply = None;
+        assert!(step_until(&mut screens, |_| {
+            if let Poll::Message(bytes) = phone.poll() {
+                reply = HostMsg::decode(&bytes);
+            }
+            reply.is_some()
+        }));
+        assert_eq!(reply, Some(HostMsg::Bye(Bye::NeedsUpdate)));
+        assert_eq!(screens.take_outdated(), vec!["Pixel 8".to_owned()]);
+        assert!(screens.take_peers("walker").is_empty());
+    }
+
+    #[test]
+    fn a_0_12_host_tells_this_phone_to_update() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut phone = SecondScreens::default();
+        phone.join_suggestion(&Suggestion {
+            name: "Old Mac".into(),
+            own: false,
+            reach: Reach::Lan(listener.local_addr().unwrap()),
+            keys: None,
+        });
+        let mut old_host = Tcp::new(listener.accept().unwrap().0).unwrap();
+        let mut hello = None;
+        assert!(step_until(&mut phone, |_| {
+            if let Poll::Message(bytes) = old_host.poll() {
+                hello = citrine_gb_surface::proto::Hello::front(&bytes);
+            }
+            hello.is_some()
+        }));
+        assert_eq!(
+            hello.map(|(version, _)| version),
+            Some(citrine_gb_surface::proto::SURFACE_VERSION)
+        );
+        old_host.send(HostMsg::Bye(Bye::NeedsUpdate).encode());
+        assert!(step_until(&mut phone, |phone| {
+            phone.joining().map(|j| j.state())
+                == Some(JoinState::Failed("Update Citrine on both devices"))
+        }));
+    }
+
+    #[test]
+    fn a_walker_hello_never_reaches_the_host() {
+        let mut screens = listening();
+        screens.offer("walker", true);
+        let mut phone = dial(&screens);
+        let (_, first) =
+            citrine_gb_net::PeerDial::start("walker", &citrine_gb_net::PeerSecret::random(), None)
+                .unwrap();
+        phone.send(first.clone());
+        let mut peers = Vec::new();
+        assert!(step_until(&mut screens, |screens| {
+            peers.extend(screens.take_peers("walker"));
+            !peers.is_empty()
+        }));
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].first, first);
+        assert_eq!(peers[0].hello.service, "walker");
+        for _ in 0..20 {
+            screens.step();
+        }
+        assert_eq!(phone.poll(), Poll::Idle);
+    }
+
+    #[test]
+    fn a_service_this_device_does_not_offer_is_dropped() {
+        let mut screens = listening();
+        let mut phone = dial(&screens);
+        let (_, first) =
+            citrine_gb_net::PeerDial::start("walker", &citrine_gb_net::PeerSecret::random(), None)
+                .unwrap();
+        phone.send(first);
+        assert!(step_until(&mut screens, |_| phone.poll() == Poll::Closed));
+        assert!(screens.take_peers("walker").is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -210,6 +210,7 @@ fn open(url: &str, max_frame_bytes: usize) -> Result<(Socket, TcpStream), String
     let wake = tcp.try_clone().map_err(|err| failed(&err))?;
     let config = WebSocketConfig {
         max_frame_size: Some(max_frame_bytes),
+        max_message_size: Some(max_frame_bytes),
         ..Default::default()
     };
     let (socket, _) = tungstenite::client_tls_with_config(request, tcp, Some(config), None)

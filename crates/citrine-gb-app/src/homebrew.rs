@@ -1,6 +1,9 @@
+use crate::app::ui_state::settings::kind_icon;
 use crate::icons;
+use citrine_gb::console::ConsoleKind;
 
 pub mod loader;
+pub mod names;
 #[cfg(test)]
 mod storage;
 
@@ -18,10 +21,10 @@ impl ShelfConsole {
 
     pub fn icon(&self) -> &'static str {
         match self {
-            ShelfConsole::GameBoy => icons::DEVICE_MOBILE,
-            ShelfConsole::GameBoyAdvance => icons::GAME_CONTROLLER,
+            ShelfConsole::GameBoy => kind_icon(ConsoleKind::Gb),
+            ShelfConsole::GameBoyAdvance => kind_icon(ConsoleKind::Gba),
             #[cfg(feature = "nds")]
-            ShelfConsole::NintendoDs => icons::SQUARE_SPLIT_VERTICAL,
+            ShelfConsole::NintendoDs => kind_icon(ConsoleKind::Nds),
         }
     }
 }
@@ -41,7 +44,7 @@ impl LinkKind {
     pub fn icon(&self) -> &'static str {
         match self {
             LinkKind::Official => icons::BUILDING_OFFICE,
-            LinkKind::Itch => icons::GAME_CONTROLLER,
+            LinkKind::Itch => icons::ITCH_IO,
             LinkKind::Github => icons::GITHUB_LOGO,
         }
     }

@@ -71,7 +71,6 @@ impl<'a> TagChip<'a> {
         };
         let text = match self.look {
             Look::Add => format!("{} {}", icons::PLUS, self.label),
-            Look::Choice if self.picked => format!("{} {}", icons::CHECK, self.label),
             Look::Own | Look::Genre | Look::Choice => self.label.to_owned(),
         };
         let galley = ui.painter().layout_no_wrap(text, font.clone(), ink);

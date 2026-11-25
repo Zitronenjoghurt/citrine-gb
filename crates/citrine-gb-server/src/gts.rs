@@ -18,6 +18,7 @@ const TOKEN_CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno
 const TOKEN_LENGTH: usize = 32;
 const TOKEN_LIFE: Duration = Duration::from_secs(600);
 const MAX_TOKENS: usize = 4096;
+const TOKENS_PER_ACCOUNT: usize = 16;
 const PROFILE_BYTES: usize = 100;
 const FINISH_BYTES: usize = 8;
 const GEN5_UPLOAD_BYTES: usize = 432;
@@ -48,6 +49,17 @@ pub struct Gts {
     tokens: Mutex<HashMap<String, Token>>,
     pending: Mutex<HashMap<i64, (Instant, Pending)>>,
     notices: Mutex<Vec<(i64, ServerMsg)>>,
+}
+
+fn drop_oldest(tokens: &mut HashMap<String, Token>, pick: impl Fn(&Token) -> bool) {
+    let oldest = tokens
+        .iter()
+        .filter(|(_, token)| pick(token))
+        .min_by_key(|(_, token)| token.issued)
+        .map(|(hash, _)| hash.clone());
+    if let Some(hash) = oldest {
+        tokens.remove(&hash);
+    }
 }
 
 struct Call<'a> {
@@ -232,17 +244,21 @@ impl Gts {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         tokens.retain(|_, token| token.issued.elapsed() < TOKEN_LIFE);
-        if tokens.len() < MAX_TOKENS {
-            tokens.insert(
-                crypt::hash(generation, &token),
-                Token {
-                    pid,
-                    account,
-                    generation,
-                    issued: Instant::now(),
-                },
-            );
+        let held = tokens.values().filter(|t| t.account == account).count();
+        if held >= TOKENS_PER_ACCOUNT {
+            drop_oldest(&mut tokens, |t| t.account == account);
+        } else if tokens.len() >= MAX_TOKENS {
+            drop_oldest(&mut tokens, |_| true);
         }
+        tokens.insert(
+            crypt::hash(generation, &token),
+            Token {
+                pid,
+                account,
+                generation,
+                issued: Instant::now(),
+            },
+        );
         token
     }
 
@@ -516,6 +532,17 @@ mod tests {
 
     const A: i32 = 1_000_001;
     const B: i32 = 2_000_002;
+
+    #[test]
+    fn one_account_asking_for_tokens_leaves_room_for_everyone_else() {
+        let gts = Gts::default();
+        for _ in 0..2 * MAX_TOKENS {
+            gts.issue(A, 1, Generation::Four);
+        }
+        let mine = gts.issue(B, 2, Generation::Four);
+        let hash = crypt::hash(Generation::Four, &mine);
+        assert!(gts.redeem(&hash, B, 2, Generation::Four));
+    }
 
     struct Setup {
         gts: Gts,

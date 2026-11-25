@@ -1,21 +1,20 @@
+use crate::app::report::{Hand, Outgoing};
 use crate::app::ui_state::settings::Settings;
 use crate::emulator::Emulator;
 use crate::frame_log::{FrameLog, PowerSample, Recorded, RowFacts, RunContext};
 use crate::game_report::{FEATURES, console_name, game_code, shareable_settings};
+use crate::media::{MediaId, MediaStore};
 use crate::storage::now_unix;
+use crate::utils::file_channels::FileChannels;
 use citrine_gb::console::Console;
-use citrine_gb::persistence::state::StateBody;
+use citrine_gb_replay::Perf;
 use serde::Serialize;
 use std::io::Write;
 use std::time::Duration;
 use web_time::Instant;
-use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipWriter};
 
 pub const FRAMES: &str = "frames.csv";
 pub const INFO: &str = "info.json";
-pub const STATE_START: &str = "state-start.snap";
-pub const STATE_END: &str = "state-end.snap";
 const CHECK_EVERY: Duration = Duration::from_secs(1);
 
 const NOTES: [&str; 9] = [
@@ -26,8 +25,8 @@ const NOTES: [&str; 9] = [
     "ui_shapes counts the shapes the UI painted in that update",
     "in a play session, delay_frames is the input delay, ping_ms the median round trip, ahead_frames how far this side runs ahead of the friend, watching whether the friend's screen is shown; ran_frames, waited_frames, skipped_frames and repaid_frames count since the last row the frames the session ran, waited on the friend's input, skipped to let the friend catch up, and ran extra to make up a wait",
     "gpu_calibration_ms is the GPU time of one fixed compute dispatch (32 x 64 threads, 1024 xorshift steps each), sent once a second after a present while a game runs; it lands in the row of the update that read it back",
-    "refresh_hz is estimated from the app's own update times; the OS refresh rate is not read",
-    "the .snap files are save states in the app's slot format, taken when the recording started and stopped",
+    "refresh_hz is the refresh rate the OS reports for the monitor the window is on, and refresh_from names the call it came from (windows_display_config, windows_display_settings, mac_display_mode, mac_screen_maximum), or estimate when the OS gave none and refresh_hz is the app's own estimate; estimated_hz is always that estimate, from the app's update times; paced_to_monitor is true when presents came faster than the monitor refreshes (vsync following another monitor) and the app timed its updates to the monitor's rate instead",
+    "tape_frame is the recording's frame after that update, counted from its start; it steps back after a rewind and stays blank in a video-only recording",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,10 +121,10 @@ struct Gpu {
     driver_info: String,
 }
 
-struct Begun {
+pub struct Begun {
     unix: u64,
-    state: Option<StateBody>,
     gpu: Option<Gpu>,
+    game: Option<Game>,
 }
 
 #[derive(Default)]
@@ -169,8 +168,8 @@ impl RecordWatch {
         if self.begun.is_none() {
             self.begun = Some(Begun {
                 unix: now_unix(),
-                state: state_of(emulator),
                 gpu: gpu_of(frame),
+                game: Game::of(emulator),
             });
         }
         let now = Seen::of(ctx, emulator);
@@ -209,36 +208,163 @@ impl RecordWatch {
             ui_shapes: Some(shapes(ctx)),
             gpu_calibration,
             events,
+            tape_frame: emulator.tape_frame(),
         });
+    }
+
+    pub fn take_begun(&mut self) -> Option<Begun> {
+        self.begun.take()
     }
 
     pub fn finish(
         &mut self,
         recorded: Recorded,
+        begun: Option<Begun>,
         ctx: &egui::Context,
         emulator: &mut Emulator,
         settings: &Settings,
-    ) -> Pack {
-        let begun = self.begun.take();
+    ) -> Perf {
+        self.begun = None;
         self.seen = None;
         self.settings = None;
         self.checked = None;
         let info = RunInfo::gather(&recorded, begun.as_ref(), ctx, emulator, settings);
-        let (start, gpu) = begun.map_or((None, None), |begun| (begun.state, begun.gpu));
-        Pack {
-            csv: recorded.csv,
-            info: RunInfo { gpu, ..info },
-            start,
-            end: state_of(emulator),
+        let gpu = begun.and_then(|begun| begun.gpu);
+        let info = RunInfo { gpu, ..info };
+        Perf {
+            frames: recorded.csv.into_bytes(),
+            info: serde_json::to_vec_pretty(&info).unwrap_or_default(),
+            gpu: None,
         }
     }
 }
 
-fn state_of(emulator: &mut Emulator) -> Option<StateBody> {
-    if !emulator.has_game() {
-        return None;
+pub fn cropped_perf(perf: &Perf, from: u64, to: u64) -> Option<Perf> {
+    let csv = std::str::from_utf8(&perf.frames).ok()?;
+    let cropped = crate::frame_log::tape_times::crop(csv, from, to)?;
+    let info = serde_json::from_slice::<serde_json::Value>(&perf.info)
+        .ok()
+        .map(|mut info| {
+            if let Some(span) = info
+                .get_mut("recording")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if let Some(started) = span.get("started_unix").and_then(serde_json::Value::as_u64)
+                {
+                    let shifted = started + cropped.began_s.max(0.0).round() as u64;
+                    span.insert("started_unix".into(), shifted.into());
+                }
+                span.insert("length_s".into(), cropped.length_s.into());
+                span.insert("rows".into(), cropped.rows.into());
+            }
+            if let Some(samples) = info
+                .get_mut("power")
+                .and_then(|power| power.get_mut("samples"))
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                let span = cropped.began_s..=cropped.began_s + cropped.length_s;
+                samples.retain_mut(|sample| {
+                    let Some(time) = sample.get("time_s").and_then(serde_json::Value::as_f64)
+                    else {
+                        return false;
+                    };
+                    let inside = span.contains(&time);
+                    if inside && let Some(sample) = sample.as_object_mut() {
+                        let shifted = ((time - cropped.began_s) * 1000.0).round() / 1000.0;
+                        sample.insert("time_s".into(), shifted.into());
+                    }
+                    inside
+                });
+            }
+            serde_json::to_vec_pretty(&info).unwrap_or_default()
+        })
+        .unwrap_or_else(|| perf.info.clone());
+    Some(Perf {
+        frames: cropped.csv.into_bytes(),
+        info,
+        gpu: None,
+    })
+}
+
+pub fn frame_times_zip(replay: &[u8]) -> Result<Vec<u8>, String> {
+    let replay = citrine_gb_replay::Replay::read(replay).map_err(|err| err.to_string())?;
+    let perf = replay
+        .perf
+        .ok_or_else(|| "the recording has no performance data".to_string())?;
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in [(FRAMES, &perf.frames), (INFO, &perf.info)] {
+        zip.start_file(name, options)
+            .map_err(|err| err.to_string())?;
+        zip.write_all(bytes).map_err(|err| err.to_string())?;
     }
-    emulator.core_mut().machine.state_body(now_unix()).ok()
+    zip.finish()
+        .map(|cursor| cursor.into_inner())
+        .map_err(|err| err.to_string())
+}
+
+pub fn frame_times_name(id: &MediaId) -> String {
+    let stem = std::path::Path::new(id.file_name())
+        .file_stem()
+        .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+    format!("{stem} performance.zip")
+}
+
+pub fn export_frame_times(store: &MediaStore, id: &MediaId, files: &FileChannels) {
+    let hand = Hand::of(files, "performance data");
+    let spawner = files.spawner.clone();
+    let file_name = frame_times_name(id);
+    store.read_bytes(id, move |bytes| {
+        spawner.run("frame times", move || {
+            let zipped = bytes
+                .ok_or_else(|| "the file is missing".to_string())
+                .and_then(|bytes| frame_times_zip(&bytes));
+            match zipped {
+                Ok(zipped) => hand.over(Outgoing {
+                    file_name,
+                    bytes: zipped,
+                    filter: "Performance data",
+                    extension: "zip",
+                    mime: "application/zip",
+                }),
+                Err(err) => hand.failed(err),
+            }
+        });
+    });
+}
+
+pub fn video_name(id: &MediaId) -> String {
+    let stem = std::path::Path::new(id.file_name())
+        .file_stem()
+        .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+    format!("{stem}.mp4")
+}
+
+pub fn export_video(store: &MediaStore, id: &MediaId, files: &FileChannels) {
+    let hand = Hand::of(files, "video");
+    let spawner = files.spawner.clone();
+    let file_name = video_name(id);
+    store.read_bytes(id, move |bytes| {
+        spawner.run("video", move || {
+            let video = bytes
+                .ok_or_else(|| "the file is missing".to_string())
+                .and_then(|bytes| {
+                    citrine_gb_replay::Replay::video(&bytes).map_err(|err| err.to_string())
+                })
+                .and_then(|video| video.ok_or_else(|| "the recording has no video".to_string()));
+            match video {
+                Ok(video) => hand.over(Outgoing {
+                    file_name,
+                    bytes: video,
+                    filter: "MP4 video",
+                    extension: "mp4",
+                    mime: "video/mp4",
+                }),
+                Err(err) => hand.failed(err),
+            }
+        });
+    });
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -302,9 +428,27 @@ struct System {
 #[derive(Debug, Clone, Serialize)]
 struct Display {
     refresh_hz: Option<f64>,
+    refresh_from: &'static str,
+    estimated_hz: Option<f64>,
+    paced_to_monitor: bool,
     window: Window,
     present_mode: Option<String>,
     max_frame_latency: Option<u32>,
+}
+
+impl Game {
+    fn of(emulator: &mut Emulator) -> Option<Self> {
+        emulator.has_game().then(|| {
+            let machine = &emulator.core_mut().machine;
+            let kind = machine.kind();
+            Self {
+                console: console_name(kind),
+                title: machine.title(),
+                code: game_code(kind, &machine.rom_bytes()),
+                crc32: format!("{:08x}", machine.rom_id().crc32),
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -361,7 +505,6 @@ pub struct RunInfo {
     settings: Option<serde_json::Value>,
     recording: Span,
     power: Power,
-    states: Vec<&'static str>,
     notes: [&'static str; 9],
 }
 
@@ -384,21 +527,17 @@ impl RunInfo {
         };
         #[cfg(target_arch = "wasm32")]
         let (present_mode, max_frame_latency) = (None, None);
-        let refresh_hz = emulator
+        let estimated_hz = emulator
             .frame_budget()
             .refresh
             .filter(|period| !period.is_zero())
             .map(|period| (10.0 / period.as_secs_f64()).round() / 10.0);
-        let game = emulator.has_game().then(|| {
-            let machine = &emulator.core_mut().machine;
-            let kind = machine.kind();
-            Game {
-                console: console_name(kind),
-                title: machine.title(),
-                code: game_code(kind, &machine.rom_bytes()),
-                crc32: format!("{:08x}", machine.rom_id().crc32),
-            }
-        });
+        let shown = emulator.display();
+        let (refresh_hz, refresh_from) = refresh(shown, estimated_hz);
+        let game = match begun {
+            Some(begun) => begun.game.clone(),
+            None => Game::of(emulator),
+        };
         let on_mac = crate::platform::power().is_some();
         Self {
             app: App {
@@ -423,6 +562,9 @@ impl RunInfo {
             gpu: None,
             display: Display {
                 refresh_hz,
+                refresh_from,
+                estimated_hz,
+                paced_to_monitor: shown.paced,
                 window: Window::of(ctx),
                 present_mode,
                 max_frame_latency,
@@ -447,43 +589,21 @@ impl RunInfo {
                     .then_some("only macOS reports the thermal state and Low Power Mode"),
                 samples: recorded.power.clone(),
             },
-            states: Vec::new(),
             notes: NOTES,
         }
     }
 }
 
-pub struct Pack {
-    csv: String,
-    info: RunInfo,
-    start: Option<StateBody>,
-    end: Option<StateBody>,
-}
-
-impl Pack {
-    pub fn zip(mut self) -> std::io::Result<Vec<u8>> {
-        let states: Vec<(&'static str, Vec<u8>)> =
-            [(STATE_START, &self.start), (STATE_END, &self.end)]
-                .into_iter()
-                .filter_map(|(name, state)| {
-                    let state = state.as_ref()?;
-                    let packed = state.pack(state.quality(true)).ok()?;
-                    Some((name, packed))
-                })
-                .collect();
-        self.info.states = states.iter().map(|(name, _)| *name).collect();
-        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-        let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file(FRAMES, deflated)?;
-        zip.write_all(self.csv.as_bytes())?;
-        zip.start_file(INFO, deflated)?;
-        zip.write_all(&serde_json::to_vec_pretty(&self.info).map_err(std::io::Error::other)?)?;
-        for (name, bytes) in states {
-            zip.start_file(name, stored)?;
-            zip.write_all(&bytes)?;
-        }
-        Ok(zip.finish()?.into_inner())
+fn refresh(
+    shown: crate::emulator::Display,
+    estimated_hz: Option<f64>,
+) -> (Option<f64>, &'static str) {
+    match shown.monitor {
+        Some(monitor) => (
+            Some((monitor.hz * 1000.0).round() / 1000.0),
+            monitor.source.name(),
+        ),
+        None => (estimated_hz, "estimate"),
     }
 }
 
@@ -493,22 +613,32 @@ mod calibration;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::monitor::{MonitorRate, RateSource};
     use crate::app::tests::{load_game, phone_app};
     use crate::frame_log::COLUMNS;
-    use std::io::{Cursor, Read};
-    use zip::ZipArchive;
 
-    fn read(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> String {
-        let mut text = String::new();
-        zip.by_name(name)
-            .unwrap()
-            .read_to_string(&mut text)
-            .unwrap();
-        text
+    #[test]
+    fn the_refresh_rate_comes_from_the_monitor_or_else_the_estimate() {
+        let mac = crate::emulator::Display {
+            monitor: Some(MonitorRate {
+                hz: 120.0,
+                source: RateSource::MacDisplayMode,
+            }),
+            paced: false,
+        };
+        assert_eq!(refresh(mac, Some(119.9)), (Some(120.0), "mac_display_mode"));
+        assert_eq!(
+            refresh(crate::emulator::Display::default(), Some(59.9)),
+            (Some(59.9), "estimate")
+        );
+        assert_eq!(
+            refresh(crate::emulator::Display::default(), None),
+            (None, "estimate")
+        );
     }
 
     #[test]
-    fn a_recording_zip_holds_the_frames_the_run_info_and_both_states() {
+    fn the_frame_times_track_holds_the_frames_and_the_run_info() {
         let mut app = phone_app("record-zip");
         load_game(
             &mut app,
@@ -546,19 +676,18 @@ mod tests {
             });
         }
         let recorded = log.stop_recording().unwrap();
-        let bytes = watch
-            .finish(recorded, &ctx, &mut app.emulator, &app.ui.settings)
-            .zip()
-            .unwrap();
-        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
-        let mut names: Vec<String> = zip
-            .file_names()
-            .map(|name| name.unwrap().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(names, [FRAMES, INFO, STATE_END, STATE_START]);
+        app.emulator.set_display(crate::emulator::Display {
+            monitor: Some(MonitorRate {
+                hz: 59.951_02,
+                source: RateSource::WindowsDisplayConfig,
+            }),
+            paced: true,
+        });
+        let begun = watch.take_begun();
+        let perf = watch.finish(recorded, begun, &ctx, &mut app.emulator, &app.ui.settings);
+        assert_eq!(perf.gpu, None);
 
-        let csv = read(&mut zip, FRAMES);
+        let csv = String::from_utf8(perf.frames).unwrap();
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines[0], COLUMNS.join(","));
         assert_eq!(lines.len(), 3);
@@ -572,7 +701,9 @@ mod tests {
             if was_running { "pause" } else { "resume" }
         );
 
-        let info: serde_json::Value = serde_json::from_str(&read(&mut zip, INFO)).unwrap();
+        assert_eq!(column(lines[2], "tape_frame"), "", "nothing on the tape");
+
+        let info: serde_json::Value = serde_json::from_slice(&perf.info).unwrap();
         for path in [
             "/app/version",
             "/app/commit",
@@ -590,11 +721,12 @@ mod tests {
             assert!(info.pointer(path).is_some(), "{path} missing");
         }
         assert_eq!(info["game"]["console"], "gbc");
+        assert_eq!(info["display"]["refresh_hz"], 59.951);
+        assert_eq!(info["display"]["refresh_from"], "windows_display_config");
+        assert_eq!(info["display"]["paced_to_monitor"], true);
+        assert!(info.pointer("/display/estimated_hz").is_some());
         assert_eq!(info["recording"]["rows"], 2);
-        assert_eq!(
-            info.pointer("/states").unwrap(),
-            &serde_json::json!([STATE_START, STATE_END])
-        );
+        assert!(info.pointer("/states").is_none());
         if cfg!(target_os = "macos") {
             assert!(
                 !info

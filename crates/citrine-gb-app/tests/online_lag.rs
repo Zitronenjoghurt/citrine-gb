@@ -40,6 +40,7 @@ impl Relay {
             ("CITRINE_BIND", "127.0.0.1".into()),
             ("CITRINE_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_MB", "0".into()),
+            ("CITRINE_STUN_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
             (
                 "CITRINE_DATA_DIR",
@@ -278,16 +279,20 @@ struct Device {
     online: Online,
     store: SaveStore,
     clock: Rc<RefCell<Clock>>,
-    _threads: Threads,
-    _dir: tempfile::TempDir,
+    threads: Threads,
+    dir: tempfile::TempDir,
 }
 
 impl Device {
     fn new(settings: &OnlineSettings) -> Self {
+        Self::with_mode(settings, Mode::Threads)
+    }
+
+    fn with_mode(settings: &OnlineSettings, mode: Mode) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = SaveStore::in_dir(dir.path().to_path_buf());
         let clock = Rc::new(RefCell::new(Clock::default()));
-        let threads = Threads::new(Mode::Threads);
+        let threads = Threads::new(mode);
         let mut online = Online::new(timed(&clock));
         online.cloud_attach(store.clone());
         online.cloud_spawner(threads.spawner());
@@ -296,8 +301,8 @@ impl Device {
             online,
             store,
             clock,
-            _threads: threads,
-            _dir: dir,
+            threads,
+            dir,
         }
     }
 
@@ -306,6 +311,7 @@ impl Device {
         let started = Instant::now();
         self.online.update(Instant::now());
         let spent = started.elapsed();
+        self.threads.run_side_jobs();
         let clock = *self.clock.borrow();
         frames.count += 1;
         frames.worst = frames.worst.max(spent);
@@ -351,6 +357,11 @@ impl Device {
         self.run_until("signing in", Duration::from_secs(60), |d| {
             d.online.is_connected()
         })
+    }
+
+    fn leave(&mut self) {
+        self.online.leave();
+        self.online.update(Instant::now());
     }
 
     fn synced(&self, saves: &[LocalSave]) -> bool {
@@ -522,6 +533,125 @@ fn a_relay_that_answers_two_seconds_late_holds_no_frame() {
     let line = sync.line("late upload");
     assert!(sync.missed.is_none(), "{line}");
     assert!(sync.worst < Duration::from_millis(50), "{line}");
+}
+
+fn uploaded(relay: &Relay, saves: &[(usize, Vec<u8>)]) -> (OnlineSettings, Device) {
+    let settings = account(relay);
+    let mut first = Device::new(&settings);
+    for (slot, data) in saves {
+        first
+            .store
+            .store_snapshot(ROM, *slot, data, &picture(), ConsoleKind::Gbc)
+            .unwrap();
+    }
+    first.sign_in(settings.joined_relay().unwrap());
+    first.online.cloud_game(Some((ROM.into(), TITLE.into())));
+    first.online.cloud_hold(ROM);
+    let slots: Vec<LocalSave> = saves
+        .iter()
+        .map(|(slot, _)| LocalSave::Snapshot(*slot))
+        .collect();
+    let up = first.run_until("the upload", Duration::from_secs(60), |d| d.synced(&slots));
+    assert!(up.missed.is_none(), "{}", up.line("upload"));
+    (settings, first)
+}
+
+fn second_device(settings: &OnlineSettings, mode: Mode) -> Device {
+    let mut second = Device::with_mode(settings, mode);
+    second.sign_in(settings.joined_relay().unwrap());
+    second.online.cloud_game(Some((ROM.into(), TITLE.into())));
+    second.online.cloud_hold(ROM);
+    second
+}
+
+fn files_named(root: &std::path::Path, stem: &str) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut folders = vec![root.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.file_stem().is_some_and(|s| s == stem) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_downloaded_save_lands_with_the_same_bytes() {
+    let relay = Relay::start();
+    let (settings, first) = uploaded(&relay, &[(0, noise(STATE, 1)), (1, noise(4096, 2))]);
+    let mut second = second_device(&settings, Mode::Threads);
+    let saves = [LocalSave::Snapshot(0), LocalSave::Snapshot(1)];
+    let down = second.run_until("the download", Duration::from_secs(60), |d| {
+        d.synced(&saves)
+    });
+    assert!(down.missed.is_none(), "{}", down.line("download"));
+    for save in &saves {
+        let sent = first.store.read_payload(ROM, save).unwrap();
+        assert_eq!(second.store.read_payload(ROM, save), Some(sent), "{save:?}");
+    }
+}
+
+#[test]
+fn a_download_that_cannot_be_written_shows_as_unreadable() {
+    let relay = Relay::start();
+    let (settings, mut first) = uploaded(&relay, &[(0, noise(4096, 1))]);
+    first.leave();
+    let mut second = second_device(&settings, Mode::Threads);
+    let slot = [LocalSave::Snapshot(0)];
+    let down = second.run_until("the download", Duration::from_secs(60), |d| d.synced(&slot));
+    assert!(down.missed.is_none(), "{}", down.line("download"));
+    second.leave();
+    let kept = second.store.read_payload(ROM, &slot[0]).unwrap();
+    first
+        .store
+        .store_snapshot(ROM, 0, &noise(4096, 3), &picture(), ConsoleKind::Gbc)
+        .unwrap();
+    first.sign_in(settings.joined_relay().unwrap());
+    let up = first.run_until("the new upload", Duration::from_secs(60), |d| {
+        d.synced(&slot)
+    });
+    assert!(up.missed.is_none(), "{}", up.line("new upload"));
+    first.leave();
+    for file in files_named(second.dir.path(), "slot0") {
+        std::fs::create_dir_all(file.with_extension("tmp")).unwrap();
+    }
+    second.sign_in(settings.joined_relay().unwrap());
+    let failed = second.run_until("the failed write", Duration::from_secs(60), |d| {
+        d.online.cloud_state(ROM, &slot[0]) == Some(SyncState::Unreadable)
+    });
+    assert!(failed.missed.is_none(), "{}", failed.line("failed write"));
+    assert_eq!(second.store.read_payload(ROM, &slot[0]), Some(kept));
+}
+
+#[test]
+fn the_frame_never_writes_a_downloaded_save() {
+    let relay = Relay::start();
+    let (settings, first) = uploaded(&relay, &[(0, noise(STATE, 1))]);
+    let mut second = second_device(&settings, Mode::Inline);
+    let slot = [LocalSave::Snapshot(0)];
+    let on_disk = |d: &Device| d.store.read_payload(ROM, &slot[0]);
+    let until = Instant::now() + Duration::from_secs(60);
+    let mut side_writes = 0;
+    while !second.synced(&slot) {
+        assert!(Instant::now() < until, "no download");
+        let before = on_disk(&second).is_some();
+        second.online.update(Instant::now());
+        assert_eq!(
+            on_disk(&second).is_some(),
+            before,
+            "the frame wrote the save"
+        );
+        second.threads.run_side_jobs();
+        side_writes += usize::from(!before && on_disk(&second).is_some());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(side_writes, 1);
+    assert_eq!(on_disk(&second), first.store.read_payload(ROM, &slot[0]));
 }
 
 fn sparse(len: usize, seed: u64) -> Vec<u8> {

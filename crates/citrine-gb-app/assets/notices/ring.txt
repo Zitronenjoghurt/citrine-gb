@@ -1,0 +1,8 @@
+Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2014-2024 The BoringSSL Authors
+Copyright (c) 2014-2019, Google Inc.
+Copyright (c) 2014-2015, Intel Corporation. All Rights Reserved.
+Copyright (c) 2015-2020, CloudFlare Ltd.
+Copyright (c) 2022, ARM Inc.
+Copyright (c) 2002, Oracle and/or its affiliates. All rights reserved.
+Copyright 2015-2020 the fiat-crypto authors

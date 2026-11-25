@@ -1,33 +1,32 @@
 [package]
 name = "citrine-gb"
-description = "A cycle-accurate game boy emulator. (Work in progress)"
+description = "Cycle-accurate Game Boy and Game Boy Color emulator core, with Game Boy Advance and Nintendo DS cores behind features. (Work in progress)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-publish = false
-exclude = [".DS_Store"]
+exclude = [".DS_Store", "tests/", "examples/"]
 
 [features]
 default = []
-gba = []
-nds = ["gba"]
+gba = ["dep:blip_buf"]
+nds = ["gba", "dep:citrine-gb-threads"]
 serde = ["dep:serde", "bitflags/serde"]
 debug = ["png", "rom-id", "serde", "serde_json"]
-persistence = ["serde", "rmp-serde", "dep:xxhash-rust"]
+persistence = ["serde", "rmp-serde", "dep:xxhash-rust", "dep:citrine-gb-threads"]
 recording = ["serde", "serde_json"]
-rom-id = ["dep:crc32fast", "dep:sha1", "dep:sha2"]
+rom-id = ["dep:crc32fast", "dep:sha1", "dep:sha2", "dep:citrine-gb-threads"]
 strum = ["dep:strum", "strum_macros"]
-jit = ["nds", "dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-native", "dep:libc", "dep:windows-sys"]
+jit = ["nds", "dep:sha2", "dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-native", "dep:libc", "dep:windows-sys"]
 jit-lockstep = ["jit"]
 
 [dependencies]
 bitflags = "2.11.0"
 base64 = { version = "0.22.1", optional = true }
-blip_buf = "0.1.6"
+blip_buf = { version = "0.1.6", optional = true }
 citrine-gb-blip = { workspace = true }
-citrine-gb-threads = { workspace = true }
+citrine-gb-threads = { workspace = true, optional = true }
 brotli = { version = "8.0.2", optional = true }
 crc32fast = { version = "1.5.0", optional = true }
 png = { version = "0.18.1", optional = true }

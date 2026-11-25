@@ -47,6 +47,7 @@ mod rollback;
 mod state;
 #[cfg(feature = "persistence")]
 pub use state::StateCopy;
+mod achievements;
 #[cfg(test)]
 pub(crate) mod test_rom;
 
@@ -89,6 +90,9 @@ impl JitCounts {
 const SLICE: u32 = 64;
 const PAINTERS: usize = 2;
 const EXTRA_RASTERS: usize = 2;
+const DESKTOP_LANES: usize = 2;
+const CAPPED_POOL: usize = 4;
+const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
 #[cfg(jit)]
 const ARM_BRANCH_TO_SELF: u32 = 0xEAFF_FFFE;
 #[cfg(jit)]
@@ -339,11 +343,9 @@ impl Nds {
             self.run_frame_with(port, peer);
             return;
         }
-        let painters = split.lanes().saturating_sub(1).min(PAINTERS);
-        let rasters = 1 + split
-            .lanes()
-            .saturating_sub(1 + painters)
-            .min(EXTRA_RASTERS);
+        let lanes = frame_lanes(split.lanes(), PHONE);
+        let painters = lanes.saturating_sub(1).min(PAINTERS);
+        let rasters = 1 + lanes.saturating_sub(1 + painters).min(EXTRA_RASTERS);
         let (rasters, ending) = self.buses.lend_3d(rasters);
         let (painters, lines_ending) = self.buses.lend_lines(painters);
         let mut sides: Vec<(&str, Side<'_>)> = Vec::new();
@@ -428,6 +430,18 @@ impl Nds {
     pub fn set_touch(&mut self, touch: Option<Touch>) {
         self.buses
             .set_pen(touch.map(|touch| (touch.x, touch.y.min(HEIGHT as u8 - 1))));
+    }
+
+    pub fn set_mic(&mut self, samples: &[i16]) {
+        self.buses.set_mic(samples);
+    }
+
+    pub fn mic_in_use(&self) -> bool {
+        self.buses.mic_in_use()
+    }
+
+    pub fn mic_amplifier(&self) -> Option<u8> {
+        self.buses.mic_amplifier()
     }
 
     pub fn set_clock(&mut self, unix: i64) {
@@ -1055,6 +1069,14 @@ impl Nds {
     }
 }
 
+fn frame_lanes(pool: usize, phone: bool) -> usize {
+    if phone || pool < CAPPED_POOL {
+        pool
+    } else {
+        DESKTOP_LANES
+    }
+}
+
 fn uniform(row: &[u32; WIDTH]) -> Option<u32> {
     let first = row[0];
     let ends = first == row[row.len() / 2] && first == row[row.len() - 1];
@@ -1403,6 +1425,19 @@ mod tests {
             late > 30 && blank > 30 && blank <= late,
             "{late} finished late, {blank} blank"
         );
+    }
+
+    #[test]
+    fn a_desktop_ds_frame_takes_two_lanes_of_a_big_pool_and_a_phone_its_whole_pool() {
+        assert_eq!(frame_lanes(7, false), 2);
+        assert_eq!(frame_lanes(4, false), 2);
+        assert_eq!(frame_lanes(3, false), 3);
+        assert_eq!(frame_lanes(2, false), 2);
+        assert_eq!(frame_lanes(1, false), 1);
+        assert_eq!(frame_lanes(3, true), 3);
+        assert_eq!(frame_lanes(7, true), 7);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        assert_eq!(frame_lanes(7, PHONE), 2);
     }
 
     #[cfg(feature = "persistence")]

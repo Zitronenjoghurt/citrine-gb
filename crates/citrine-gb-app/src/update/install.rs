@@ -136,7 +136,8 @@ pub fn replace_bundle(dmg: &[u8], bundle: &Path) -> anyhow::Result<()> {
     let dir = bundle
         .parent()
         .context("Citrine couldn't find its own folder.")?;
-    let work = std::env::temp_dir().join(format!("citrine-update-{}", std::process::id()));
+    let work = crate::storage::folder(crate::storage::kinds::Folder::Updates)
+        .join(format!("citrine-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     let image = work.join("update.dmg");
     let mount = work.join("mount");
@@ -216,7 +217,7 @@ pub fn relaunch() {
 
 #[cfg(target_os = "android")]
 fn apk_path() -> anyhow::Result<PathBuf> {
-    let dir = crate::storage::cache_dir().join(crate::storage::UPDATES);
+    let dir = crate::storage::folder(crate::storage::kinds::Folder::Updates);
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("citrine-update.apk"))
 }

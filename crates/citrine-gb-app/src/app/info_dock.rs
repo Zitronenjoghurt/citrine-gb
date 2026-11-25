@@ -87,7 +87,7 @@ impl Citrine {
 
     #[cfg(feature = "nds")]
     pub(super) fn follow_walker(&mut self, ctx: &egui::Context) {
-        let now_ms = (ctx.input(|i| i.time) * 1000.0) as u64;
+        let now_ms = crate::storage::now_unix_ms();
         let online = &self.ui.settings.online;
         let synced = online.cloud_saves && online.cloud_owner().is_some();
         self.emulator.sync_walker(&mut self.online, synced);
@@ -109,13 +109,14 @@ impl Citrine {
     fn follow_phone_steps(&mut self, showing: bool) {
         use crate::platform::android::steps;
         let on = self.ui.settings.walker.phone;
-        steps::follow(on, on && (showing || self.ui.settings.walker_asked));
         let pokewalker = &mut self.emulator.pokewalker;
+        let keep = on && pokewalker.walking_here();
+        steps::follow(on, on && (showing || self.ui.settings.walker_asked), keep);
         if on != pokewalker.has_step_source() {
             pokewalker.set_step_source(on.then(|| {
                 Box::new(crate::walker::PhoneSteps::new(
                     Box::new(steps::reading),
-                    crate::storage::Backend::settings(),
+                    crate::storage::Folders::default(),
                 )) as Box<dyn crate::walker::StepSource>
             }));
         }

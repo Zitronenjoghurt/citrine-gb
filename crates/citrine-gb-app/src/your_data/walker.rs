@@ -1,5 +1,4 @@
-use super::{Change, Files, Kind, Part, Tally};
-use crate::icons;
+use super::{Change, Files, Part, Store, Tally};
 use crate::walker::{MAIN, Pokewalker, decode, is_walker_file};
 use std::io;
 
@@ -28,20 +27,13 @@ impl WalkerPart<'_> {
 }
 
 impl Part for WalkerPart<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Pokéwalker",
-            icon: icons::PERSON_SIMPLE_WALK,
-            units: ("", ""),
-            nouns: ("Pokéwalker", "Pokéwalkers"),
-        }
+    fn kind(&self) -> Store {
+        Store::Pokewalker
     }
 
     fn tally(&mut self) -> Tally {
-        let files = self.0.files();
         Tally {
-            count: files.len(),
-            bytes: files.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
+            count: self.0.files().len(),
         }
     }
 

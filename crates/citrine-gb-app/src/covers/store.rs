@@ -1,24 +1,25 @@
 use super::names::{Names, System};
-use crate::storage::Backend;
+use crate::storage::Folders;
+use crate::storage::kinds::Folder;
 
-const ART: &str = "covers";
-const NAMES: &str = "cover-names";
+const ART: Folder = Folder::Covers;
+const NAMES: Folder = Folder::CoverNames;
 const MISS_MARK: u8 = 2;
-pub const NAMESPACES: [&str; 2] = [ART, NAMES];
+pub const FOLDERS: [Folder; 2] = [ART, NAMES];
 
 #[derive(Clone)]
 pub struct CoverStore {
-    backend: Backend,
+    backend: Folders,
 }
 
 impl CoverStore {
-    pub(crate) fn on(backend: Backend) -> Self {
+    pub(crate) fn on(backend: Folders) -> Self {
         Self { backend }
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn at(root: std::path::PathBuf) -> Self {
-        Self::on(Backend::at(root))
+        Self::on(Folders::at(root))
     }
 
     pub fn art(&self, rom_key: &str) -> Option<Vec<u8>> {
@@ -71,7 +72,7 @@ mod tests {
     #[test]
     fn a_miss_from_before_the_wider_match_is_tried_again() {
         let dir = tempfile::tempdir().unwrap();
-        Backend::at(dir.path().to_path_buf())
+        Folders::at(dir.path().to_path_buf())
             .write(ART, &format!("{KEY}.miss"), &NOW.to_le_bytes())
             .unwrap();
         let store = CoverStore::at(dir.path().to_path_buf());

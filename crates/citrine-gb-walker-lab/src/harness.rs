@@ -1,8 +1,7 @@
 use crate::h8::Fault;
-use crate::ir::{
-    CMD_ADVERTISE, CMD_ASSERT_MASTER, CMD_IDENTITY_REQ, CMD_SLAVE_ACK, Packet, WIRE_XOR,
-};
+use crate::ir::{CMD_ADVERTISE, CMD_ASSERT_MASTER, CMD_IDENTITY_REQ, CMD_SLAVE_ACK, Packet};
 use crate::walker::{CLOCK_HZ, Walker};
+use citrine_gb_walker::packet::WIRE_XOR;
 
 pub const MASTER_SESSION: u32 = 0x4C41_4221;
 const QUIET: u64 = 1500;

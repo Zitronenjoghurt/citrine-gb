@@ -4,10 +4,10 @@ use super::wait::Width;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpenBus {
-    addr: u32,
-    last: u32,
-    bios: u32,
-    iwram: u32,
+    pub(crate) addr: u32,
+    pub(crate) last: u32,
+    pub(crate) bios: u32,
+    pub(crate) iwram: u32,
 }
 
 impl OpenBus {

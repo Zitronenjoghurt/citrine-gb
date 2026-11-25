@@ -5,6 +5,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use citrine_gb_nds_net::gateway::{Config, Gateway};
+use citrine_gb_nds_net::list_cipher::ListCipher;
+use citrine_gb_nds_net::server_list::Host;
 use citrine_gb_nds_net::services::{self, GtsLink, Services};
 use citrine_gb_threads::Threads;
 use common::Client;
@@ -16,6 +18,9 @@ use smoltcp::wire::{DnsQueryType, IpAddress, IpEndpoint};
 struct Relay {
     calls: Sender<(u64, String)>,
     answers: Receiver<(u64, Option<Vec<u8>>)>,
+    claims: Sender<(u64, u32)>,
+    claimed: Receiver<(u64, Option<bool>)>,
+    lists: Vec<u64>,
 }
 
 impl GtsLink for Relay {
@@ -26,6 +31,38 @@ impl GtsLink for Relay {
     fn answer(&mut self) -> Option<(u64, Option<Vec<u8>>)> {
         self.answers.try_recv().ok()
     }
+
+    fn claim(&mut self, id: u64, profile: u32) {
+        self.claims.send((id, profile)).ok();
+    }
+
+    fn claimed(&mut self) -> Option<(u64, Option<bool>)> {
+        self.claimed.try_recv().ok()
+    }
+
+    fn host(&mut self, _: &str, _: u16, _: &[(String, String)]) {}
+
+    fn unhost(&mut self) {}
+
+    fn list(&mut self, id: u64, _: &str) {
+        self.lists.push(id);
+    }
+
+    fn listed(&mut self) -> Option<(u64, Option<Vec<Host>>)> {
+        self.lists.pop().map(|id| (id, Some(Vec::new())))
+    }
+
+    fn message(&mut self, _: std::net::SocketAddrV4, _: &[u8]) {}
+
+    fn messages(&mut self) -> Option<(std::net::Ipv4Addr, u16, Vec<u8>)> {
+        None
+    }
+
+    fn natneg(&mut self, _: u32, _: u8, _: u16) {}
+
+    fn natnegged(&mut self) -> Option<(u32, std::net::SocketAddrV4)> {
+        None
+    }
 }
 
 struct Setup {
@@ -33,6 +70,8 @@ struct Setup {
     client: Client,
     calls: Receiver<(u64, String)>,
     answers: Sender<(u64, Option<Vec<u8>>)>,
+    claims: Receiver<(u64, u32)>,
+    claimed: Sender<(u64, Option<bool>)>,
     _threads: Threads,
 }
 
@@ -40,17 +79,30 @@ fn setup() -> Setup {
     let threads = Threads::default();
     let (calls, called) = mpsc::channel();
     let (answer, answers) = mpsc::channel();
+    let (claims, claim_rx) = mpsc::channel();
+    let (claimed_tx, claimed) = mpsc::channel();
     let config = Config::default();
     let gateway = Gateway::new(config, threads.spawner())
         .with_resolver(std::sync::Arc::new(|_: &str| {
             panic!("no lookup leaves the gateway")
         }))
-        .with_services(Services::new(77, Box::new(Relay { calls, answers })));
+        .with_services(Services::new(
+            77,
+            Box::new(Relay {
+                calls,
+                answers,
+                claims,
+                claimed,
+                lists: Vec::new(),
+            }),
+        ));
     Setup {
         gateway,
         client: Client::new(config.address),
         calls: called,
         answers: answer,
+        claims: claim_rx,
+        claimed: claimed_tx,
         _threads: threads,
     }
 }
@@ -168,6 +220,89 @@ fn every_wfc_name_the_stand_ins_answer_resolves_to_them_and_others_to_nothing() 
 }
 
 #[test]
+fn mario_kart_reaches_the_server_browser_with_its_list_request() {
+    let mut setup = setup();
+    assert_eq!(
+        resolve(&mut setup, "mariokartds.ms17.gs.nintendowifi.net"),
+        vec![IpAddress::Ipv4(services::ADDRESS)]
+    );
+    let mut request = vec![0, 1, 3, 0, 0, 0, 0];
+    request.extend_from_slice(b"mariokartds\0mariokartds\0Abc12345\0\\dwc_pid\0");
+    request.extend_from_slice(&[0, 0, 0, 0]);
+    let mut framed = u16::try_from(request.len() + 2)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    framed.extend_from_slice(&request);
+    let browser = connect(&mut setup, services::SB_PORT, 4100);
+    let reply = talk(&mut setup, browser, &framed, |heard| heard.len() >= 42);
+    let random = usize::from(reply[0] ^ 0xEC);
+    let key_len = usize::from(reply[random + 1] ^ 0xEA);
+    let key = &reply[random + 2..random + 2 + key_len];
+    let mut list = reply[random + 2 + key_len..].to_vec();
+    ListCipher::for_list(b"yeJ3x8", *b"Abc12345", key).decrypt(&mut list);
+    assert_eq!(list[4..6], 6500u16.to_be_bytes());
+    assert_eq!(list[6..], *b"\x01\0dwc_pid\0\0\0\xFF\xFF\xFF\xFF");
+    let log = setup.gateway.services_mut().unwrap().take_log();
+    assert!(
+        log.contains(&"sb list mariokartds filter  fields \\dwc_pid".to_owned()),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_browser_message_to_our_own_host_comes_back_to_its_query_port() {
+    let mut setup = setup();
+    let mut udp = udp::Socket::new(
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 512]),
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 512]),
+    );
+    udp.bind(56400).unwrap();
+    let udp = setup.client.sockets.add(udp);
+    let mut beat = vec![3, 9, 8, 7, 6];
+    beat.extend_from_slice(b"gamename\0mariokartds\0dwc_pid\x00603819417\0\0");
+    let qr = IpEndpoint::new(IpAddress::Ipv4(services::ADDRESS), services::QR_PORT);
+    setup
+        .client
+        .sockets
+        .get_mut::<udp::Socket>(udp)
+        .send_slice(&beat, qr)
+        .unwrap();
+    let mut heard = Vec::new();
+    for _ in 0..200 {
+        setup.client.step(&mut setup.gateway);
+        while let Ok((data, _)) = setup.client.sockets.get_mut::<udp::Socket>(udp).recv() {
+            heard.push(data.to_vec());
+        }
+        if !heard.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(heard.len(), 1);
+    assert_eq!(heard[0][..3], [0xFE, 0xFD, 1]);
+
+    let mut request = vec![0, 0, 2, 10, 77, 0, 2];
+    request.extend_from_slice(&56400u16.to_be_bytes());
+    request.extend_from_slice(b"hello");
+    let length = u16::try_from(request.len()).unwrap().to_be_bytes();
+    request[..2].copy_from_slice(&length);
+    let browser = connect(&mut setup, services::SB_PORT, 4101);
+    talk(&mut setup, browser, &request, |_| true);
+    let mut message = None;
+    for _ in 0..200 {
+        setup.client.step(&mut setup.gateway);
+        if let Ok((data, meta)) = setup.client.sockets.get_mut::<udp::Socket>(udp).recv() {
+            message = Some((data.to_vec(), meta.endpoint));
+            break;
+        }
+    }
+    let (data, from) = message.expect("the message reaches the query port");
+    assert_eq!(from, qr);
+    assert_eq!(data[..7], [0xFE, 0xFD, 6, 9, 8, 7, 6]);
+    assert_eq!(data[11..], *b"hello");
+}
+
+#[test]
 fn a_ds_logs_in_through_nas_and_gamespy_and_reaches_the_gts_over_the_link() {
     let mut setup = setup();
     let conntest = connect(&mut setup, services::HTTP_PORT, 4000);
@@ -202,7 +337,7 @@ fn a_ds_logs_in_through_nas_and_gamespy_and_reaches_the_gts_over_the_link() {
     let gpcm = connect(&mut setup, services::GPCM_PORT, 4002);
     let greeting = talk(&mut setup, gpcm, b"", |heard| heard.ends_with(b"\\final\\"));
     assert!(greeting.starts_with(b"\\lc\\1\\challenge\\"));
-    let answer = talk(
+    let early = talk(
         &mut setup,
         gpcm,
         format!(
@@ -210,10 +345,21 @@ fn a_ds_logs_in_through_nas_and_gamespy_and_reaches_the_gts_over_the_link() {
             "x".repeat(32)
         )
         .as_bytes(),
-        |heard| heard.ends_with(b"\\final\\"),
+        |_| false,
     );
-    let answer = String::from_utf8(answer).unwrap();
+    assert!(early.is_empty());
     let pid = services::profile_id(77, "CPUDjdnc");
+    let stand_ins = setup.gateway.services_mut().unwrap();
+    assert_eq!(stand_ins.profile_wanted(), Some(2_000_000_000_001));
+    stand_ins.saved_profile(None);
+    let (call, claimed) = setup
+        .claims
+        .try_recv()
+        .expect("the login claims its profile");
+    assert_eq!(claimed, pid);
+    setup.claimed.send((call, Some(true))).unwrap();
+    let answer = talk(&mut setup, gpcm, b"", |heard| heard.ends_with(b"\\final\\"));
+    let answer = String::from_utf8(answer).unwrap();
     assert!(answer.starts_with("\\lc\\2\\sesskey\\"));
     assert!(answer.contains(&format!("\\profileid\\{pid}\\")));
 

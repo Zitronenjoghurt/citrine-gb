@@ -314,6 +314,13 @@ impl Ppu {
         self.line
     }
 
+    pub(crate) fn clamp_loaded(&mut self) {
+        self.line_dot_counter %= LINE_DOTS;
+        self.hblank_dot %= LINE_DOTS;
+        self.line %= 154;
+        self.frame_dots = self.frame_dots.min(2 * FRAME_DOTS);
+    }
+
     #[inline(always)]
     pub fn cycle(&mut self, ic: &mut impl ICInterface, oam_dma: bool, double_speed: bool) -> bool {
         let dots = if double_speed { 2 } else { 4 };
@@ -2152,6 +2159,50 @@ mod tests {
         assert_eq!(div_to_ppu_phase(GbModel::Dmg, TOBU), 1);
         assert_eq!(div_to_ppu_phase(GbModel::Cgb, TOBU), 1);
         assert_eq!(div_to_ppu_phase(GbModel::Cgb, PETRIS), 1);
+    }
+
+    #[test]
+    fn a_loaded_dot_or_line_past_the_frame_wraps_into_it() {
+        let mut gb = GameBoy::new_empty(GbModel::Dmg);
+        gb.load_rom(&Rom::new(TOBU)).unwrap();
+        gb.ppu.line_dot_counter = u16::MAX;
+        gb.ppu.hblank_dot = u16::MAX;
+        gb.ppu.line = u8::MAX;
+        gb.ppu.frame_dots = u32::MAX;
+        gb.ppu.clamp_loaded();
+        assert!(gb.ppu.line_dot_counter < LINE_DOTS && gb.ppu.line < 154);
+        for _ in 0..100_000 {
+            gb.step();
+        }
+    }
+
+    #[test]
+    fn a_real_dot_and_line_are_unchanged_by_the_load_clamp() {
+        let mut gb = GameBoy::new_empty(GbModel::Cgb);
+        gb.load_rom(&Rom::new(PETRIS)).unwrap();
+        for steps in [12_345, 23_456, 34_567] {
+            for _ in 0..steps {
+                gb.step();
+            }
+            let ppu = &gb.ppu;
+            let before = (
+                ppu.line_dot_counter,
+                ppu.hblank_dot,
+                ppu.line,
+                ppu.frame_dots,
+            );
+            gb.ppu.clamp_loaded();
+            let ppu = &gb.ppu;
+            assert_eq!(
+                (
+                    ppu.line_dot_counter,
+                    ppu.hblank_dot,
+                    ppu.line,
+                    ppu.frame_dots
+                ),
+                before
+            );
+        }
     }
 
     fn boot(model: GbModel, rom: &[u8], per_dot: bool) -> GameBoy {

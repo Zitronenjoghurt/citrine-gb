@@ -5,11 +5,13 @@ use crate::app::widgets::cloud_mark::cloud_status;
 use crate::app::widgets::scroll;
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::snapshots::{
-    FailedStep, NameEdit, PendingLoad, SnapshotNews, editable_name, failed_message, name_editor,
-    named, quick_slot_message, relative_time, snapshot_message, stamp_row_with,
+    AutosaveEntry, FailedStep, NameEdit, PendingLoad, SnapshotNews, content_end, failed_message,
+    name_editor, named, quick_slot_message, snapshot_message, stamp_row_with,
 };
+use crate::emulator::SaveStatus;
 use crate::icons;
 use crate::online::cloud::LocalSave;
+use crate::storage::list_stamp;
 use citrine_gb::console::ConsoleKind;
 use citrine_gb::error::GbError;
 
@@ -38,17 +40,19 @@ fn stamp_row(
     console: Option<ConsoleKind>,
     rom_key: &str,
     save: &LocalSave,
-) {
+) -> crate::app::widgets::snapshots::StampRow {
     let state = viewer.online.cloud_state(rom_key, save);
     let conflict = viewer
         .online
         .cloud_conflict(rom_key, save)
         .map(|c| c.slot.clone());
-    if stamp_row_with(ui, stamp, console, state, conflict.is_some())
+    let row = stamp_row_with(ui, stamp, console, state, conflict.is_some());
+    if row.chosen
         && let Some(slot) = conflict
     {
         viewer.online.cloud_ask_again(rom_key, &slot);
     }
+    row
 }
 
 fn cloud_mark_for(viewer: &TabViewer, ui: &mut egui::Ui, rom_key: &str, save: &LocalSave) {
@@ -86,7 +90,7 @@ fn forget_in_cloud(viewer: &mut TabViewer, rom_key: &str, save: &LocalSave) {
     viewer.online.cloud_forget(rom_key, save, cloud_too);
 }
 
-fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
+fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str, times: &[u64]) {
     let others: Vec<(String, String, Option<u64>)> = viewer
         .ui
         .snapshots
@@ -98,15 +102,16 @@ fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
         })
         .collect();
     if !others.is_empty() {
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("Other battery saves").strong());
+        ui.separator();
+        ui.add_space(8.0);
+        ui.heading("Other battery saves");
     }
     for (token, name, saved_at) in others {
         let save = LocalSave::OtherBattery(token.clone());
-        ui.horizontal(|ui| {
+        let row = ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.add(egui::Label::new(egui::RichText::new(&name).strong()).truncate());
-                let stamp = saved_at.map(relative_time).unwrap_or_default();
+                let stamp = saved_at.map(|at| list_stamp(at, times)).unwrap_or_default();
                 stamp_row(viewer, ui, stamp, None, rom_key, &save);
                 ui.horizontal(|ui| {
                     if ui.button("Use this").clicked() {
@@ -124,6 +129,7 @@ fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
                 });
             });
         });
+        keep_asked_in_view(viewer, ui, &save, row.response.rect);
     }
 
     if let Some(question) = viewer.ui.snapshots.use_battery_question() {
@@ -171,8 +177,13 @@ fn other_batteries(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
     }
 }
 
-fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
-    let status = viewer.emulator.save_status();
+fn battery_section(
+    viewer: &mut TabViewer,
+    ui: &mut egui::Ui,
+    rom_key: &str,
+    status: SaveStatus,
+    times: &[u64],
+) {
     ui.heading("Battery save");
 
     if !status.battery_backed {
@@ -181,6 +192,7 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
         return;
     }
 
+    let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
     let mut renamed = None;
     Form::show(ui, "battery_save", |form| {
         form.row("Name", |ui| {
@@ -212,21 +224,27 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
             }
         });
 
-        form.text_row("Status", |ui| {
+        let status_row = |ui: &mut egui::Ui| {
             match (status.stored, status.saved_at) {
-                (true, Some(at)) => ui.label(format!("Saved {}", relative_time(at))),
+                (true, Some(at)) => ui.label(format!("Saved {}", list_stamp(at, times))),
                 (true, None) => ui.label("Saved"),
                 (false, _) => ui.label("Nothing saved yet"),
             };
             if status.stored {
                 cloud_mark_for(viewer, ui, rom_key, &LocalSave::Battery);
             }
-        });
-
-        form.text_row("Stored in", |ui| {
-            ui.add(egui::Label::new(&status.location).truncate());
-        });
+        };
+        form.text_row("Status", status_row);
+        if !touch {
+            form.text_row("Stored in", |ui| {
+                ui.add(egui::Label::new(&status.location).truncate());
+            });
+        }
     });
+    if touch {
+        let text = egui::style::Spacing::default().interact_size.y;
+        ui.add_space((crate::app::mobile::touch_square(ui) - text).max(0.0) / 2.0);
+    }
 
     if let Some(name) = renamed {
         let trimmed = name.trim().to_string();
@@ -234,7 +252,7 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
             Ok(()) if trimmed.is_empty() => {
                 viewer.events.notify("The save is back to its default name")
             }
-            Ok(()) => viewer.events.notify(format!("Renamed to '{trimmed}'")),
+            Ok(()) => viewer.events.notify(format!("Renamed to {trimmed}")),
             Err(err) => viewer.events.notify_error(failed_message(
                 FailedStep::Rename,
                 &named(&status.name, "the battery save"),
@@ -342,7 +360,7 @@ fn battery_section(viewer: &mut TabViewer, ui: &mut egui::Ui, rom_key: &str) {
         }
     }
 
-    other_batteries(viewer, ui, rom_key);
+    other_batteries(viewer, ui, rom_key, times);
 
     ui.separator();
 }
@@ -434,7 +452,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
         ui.small("No ROM loaded");
         return;
     }
-    let Some(rom_key) = viewer.emulator.rom_key().map(str::to_owned) else {
+    let Some(saves_key) = viewer.emulator.saves_key() else {
         ui.small("No ROM loaded");
         return;
     };
@@ -442,9 +460,17 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     viewer
         .ui
         .snapshots
-        .sync(ui.ctx(), &viewer.emulator.store, &rom_key);
+        .sync(ui.ctx(), &viewer.emulator.store, &saves_key);
 
-    battery_section(viewer, ui, &rom_key);
+    let status = viewer.emulator.save_status();
+    let times: Vec<u64> = viewer
+        .ui
+        .snapshots
+        .page_times()
+        .into_iter()
+        .chain(status.saved_at.filter(|_| status.stored))
+        .collect();
+    battery_section(viewer, ui, &saves_key, status, &times);
     ui.add_space(8.0);
     ui.heading("Snapshots");
     if viewer.ui.snapshots.is_empty() {
@@ -452,6 +478,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     }
 
     let quick_slot = viewer.ui.settings.quick_slot;
+    let hardcore = viewer.emulator.hardcore();
     let quick_keys = viewer.ui.settings.hotkeys.quick_keys();
     let mut action = None;
     let mut auto_action = None;
@@ -494,71 +521,88 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
             })
             .collect();
 
-        let listed = !slots.is_empty();
         for (index, (slot, saved_at, name, texture, console)) in slots.into_iter().enumerate() {
+            let above = content_end(ui);
             if index > 0 {
                 ui.separator();
             }
             let mut begin_rename = false;
-            ui.horizontal(|ui| {
+            let mut name_rect = egui::Rect::NOTHING;
+            let mut row = None;
+            let card = ui.horizontal(|ui| {
                 thumb_image(ui, texture, console);
 
                 ui.vertical(|ui| {
                     match viewer.ui.snapshots.rename_buffer(slot) {
-                        Some(buffer) => match name_editor(ui, buffer, &name) {
-                            NameEdit::Cancel => viewer.ui.snapshots.cancel_rename(),
-                            NameEdit::Commit => {
-                                if let Some((slot, text)) = viewer.ui.snapshots.take_rename() {
-                                    action = Some(SlotAction::Rename(slot, text));
+                        Some(buffer) => {
+                            let edit = ui.scope(|ui| name_editor(ui, buffer, &name));
+                            name_rect = edit.response.rect;
+                            match edit.inner {
+                                NameEdit::Cancel => viewer.ui.snapshots.cancel_rename(),
+                                NameEdit::Commit => {
+                                    if let Some((slot, text)) = viewer.ui.snapshots.take_rename() {
+                                        action = Some(SlotAction::Rename(slot, text));
+                                    }
                                 }
+                                NameEdit::Editing => {}
                             }
-                            NameEdit::Editing => {}
-                        },
+                        }
+                        None if touch => {
+                            name_rect = ui
+                                .add(
+                                    egui::Label::new(egui::RichText::new(&name).strong())
+                                        .truncate(),
+                                )
+                                .rect;
+                        }
                         None => {
                             ui.allocate_ui_with_layout(
                                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    let mut rename = touch
-                                        && crate::app::mobile::compact_button(
-                                            ui,
-                                            icons::PENCIL_SIMPLE,
-                                        )
-                                        .clicked();
-                                    if !touch && slot == quick_slot {
+                                    if slot == quick_slot {
                                         ui.colored_label(ui.visuals().warn_fg_color, icons::STAR);
                                     }
                                     ui.with_layout(
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
-                                            ui.add_space(4.0);
-                                            rename |= editable_name(ui, &name).clicked();
+                                            name_rect = ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(&name).strong(),
+                                                    )
+                                                    .truncate(),
+                                                )
+                                                .rect;
                                         },
                                     );
-                                    if rename {
-                                        begin_rename = true;
-                                    }
                                 },
                             );
                         }
                     }
 
                     let save = LocalSave::Snapshot(slot);
-                    stamp_row(
+                    row = Some(stamp_row(
                         viewer,
                         ui,
-                        relative_time(saved_at),
+                        list_stamp(saved_at, &times),
                         console,
-                        &rom_key,
+                        &saves_key,
                         &save,
-                    );
+                    ));
 
                     ui.horizontal(|ui| {
-                        if ui.button("Load").clicked() {
+                        if crate::app::hardcore::load_button(ui, hardcore).clicked() {
                             action = Some(SlotAction::Load(slot));
                         }
                         if ui.button("Overwrite").clicked() {
                             action = Some(SlotAction::Save(slot));
+                        }
+                        if crate::app::mobile::compact_button(ui, icons::PENCIL_SIMPLE)
+                            .on_hover_text("Rename")
+                            .clicked()
+                        {
+                            begin_rename = true;
                         }
                         let side = crate::app::mobile::touch_square(ui);
                         let more = more_button(side);
@@ -578,13 +622,6 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
                                 {
                                     action = Some(SlotAction::MakeQuick(slot));
                                 }
-                                if !touch
-                                    && ui
-                                        .button(format!("{} Rename", icons::PENCIL_SIMPLE))
-                                        .clicked()
-                                {
-                                    begin_rename = true;
-                                }
                                 if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
                                     viewer.ui.snapshots.ask_delete(slot, name.clone());
                                 }
@@ -594,6 +631,10 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
                     });
                 });
             });
+            if let Some(row) = row {
+                row.show_tip(ui, card.response.rect, name_rect, above);
+            }
+            keep_asked_in_view(viewer, ui, &LocalSave::Snapshot(slot), card.response.rect);
             if begin_rename {
                 let current = if name == crate::storage::default_slot_name(slot) {
                     String::new()
@@ -603,12 +644,16 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
                 viewer.ui.snapshots.begin_rename(slot, current);
             }
         }
-        if listed {
-            ui.add_space(LIST_END);
-        }
     });
 
-    autosave_section(viewer, ui, &rom_key, &mut auto_action);
+    autosave_section(
+        viewer,
+        ui,
+        &saves_key,
+        &times,
+        &mut auto_action,
+        &mut action,
+    );
 
     if let Some((slot, question)) = viewer.ui.snapshots.delete_question() {
         let save = LocalSave::Snapshot(slot);
@@ -617,11 +662,11 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
             ui.ctx(),
             "snapshot_delete",
             &question,
-            &rom_key,
+            &saves_key,
             &save,
         );
         if let Some(slot) = viewer.ui.snapshots.answer_delete(choice) {
-            forget_in_cloud(viewer, &rom_key, &save);
+            forget_in_cloud(viewer, &saves_key, &save);
             action = Some(SlotAction::Delete(slot));
         }
     }
@@ -633,18 +678,22 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
             ui.ctx(),
             "autosave_delete",
             &question,
-            &rom_key,
+            &saves_key,
             &save,
         );
         if let Some((id, label)) = viewer.ui.snapshots.answer_delete_autosave(choice) {
-            forget_in_cloud(viewer, &rom_key, &save);
+            forget_in_cloud(viewer, &saves_key, &save);
             auto_action = Some(AutoAction::Delete(id, label));
         }
     }
 
     if let Some(question) = viewer.ui.snapshots.load_autosave_question() {
-        let choice =
-            crate::app::widgets::confirm::confirm(ui.ctx(), "autosave_load", &question, "Load");
+        let choice = crate::app::widgets::confirm::confirm_losing_progress(
+            ui.ctx(),
+            "autosave_load",
+            &question,
+            "Load",
+        );
         match viewer.ui.snapshots.answer_load_autosave(choice) {
             Some((true, load)) => auto_action = Some(AutoAction::Load(load.id, load.label)),
             Some((false, load)) => viewer.emulator.running = load.was_running,
@@ -653,11 +702,11 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     }
 
     if let Some(action) = action {
-        apply(viewer, &rom_key, action, ui.ctx());
+        apply(viewer, &saves_key, action, ui.ctx());
     }
 
     if let Some(action) = auto_action {
-        apply_auto(viewer, &rom_key, action, ui.ctx());
+        apply_auto(viewer, &saves_key, action, ui.ctx());
     }
 }
 
@@ -667,79 +716,68 @@ enum AutoAction {
     Delete(usize, String),
 }
 
-type AutosaveRow = (usize, u64, egui::TextureId, Option<ConsoleKind>);
+struct AutosaveRow {
+    slot: usize,
+    saved_at: u64,
+    title: String,
+    texture: egui::TextureId,
+    console: Option<ConsoleKind>,
+    filed: bool,
+}
 
 fn autosave_section(
     viewer: &mut TabViewer,
     ui: &mut egui::Ui,
     rom_key: &str,
+    times: &[u64],
     action: &mut Option<AutoAction>,
+    slot_action: &mut Option<SlotAction>,
 ) {
     ui.separator();
     ui.add_space(8.0);
     ui.heading("Autosaves");
 
-    let rows: Vec<AutosaveRow> = viewer
-        .ui
-        .snapshots
-        .autosaves()
-        .iter()
-        .take(viewer.ui.snapshots.shown_autosaves())
-        .map(|view| (view.slot, view.saved_at, view.texture.id(), view.console))
+    let snapshots = &viewer.ui.snapshots;
+    let rows: Vec<AutosaveRow> = snapshots
+        .autosave_list()
+        .into_iter()
+        .map(|entry| {
+            let (view, filed) = match entry {
+                AutosaveEntry::Mine(index) => (&snapshots.autosaves()[index], false),
+                AutosaveEntry::Filed(index) => (&snapshots.filed_autosaves()[index], true),
+            };
+            AutosaveRow {
+                slot: view.slot,
+                saved_at: view.saved_at,
+                title: if filed {
+                    view.display_name()
+                } else {
+                    "Autosave".to_owned()
+                },
+                texture: view.texture.id(),
+                console: view.console,
+                filed,
+            }
+        })
         .collect();
-
     if rows.is_empty() {
         ui.weak("No autosaves yet.");
     }
 
-    autosave_rows(viewer, ui, rom_key, rows, action);
-}
-
-fn autosave_stamp_format(saved_at: u64, times: &[u64]) -> &'static str {
-    let minute = saved_at / 60;
-    if times.iter().filter(|at| **at / 60 == minute).count() > 1 {
-        "%b %-d, %H:%M:%S"
-    } else {
-        "%b %-d, %H:%M"
-    }
-}
-
-fn autosave_rows(
-    viewer: &mut TabViewer,
-    ui: &mut egui::Ui,
-    rom_key: &str,
-    rows: Vec<AutosaveRow>,
-    action: &mut Option<AutoAction>,
-) {
-    let times: Vec<u64> = rows.iter().map(|row| row.1).collect();
-    for (index, (id, saved_at, texture, console)) in rows.into_iter().enumerate() {
+    for (index, row) in rows.into_iter().enumerate() {
+        let above = content_end(ui);
         if index > 0 {
             ui.separator();
         }
-        let label = relative_time(saved_at);
-        ui.horizontal(|ui| {
-            thumb_image(ui, texture, console);
-            ui.vertical(|ui| {
-                ui.add(egui::Label::new(egui::RichText::new(&label).strong()).truncate());
-                let save = LocalSave::Autosave(id);
-                stamp_row(
-                    viewer,
-                    ui,
-                    crate::media::local_stamp(saved_at, autosave_stamp_format(saved_at, &times)),
-                    console,
-                    rom_key,
-                    &save,
-                );
-                ui.horizontal(|ui| {
-                    if ui.button("Load").clicked() {
-                        *action = Some(AutoAction::AskLoad(id, label.clone()));
-                    }
-                    if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
-                        viewer.ui.snapshots.ask_delete_autosave(id, label.clone());
-                    }
-                });
-            });
-        });
+        autosave_row(
+            viewer,
+            ui,
+            rom_key,
+            (row, above),
+            times,
+            action,
+            slot_action,
+        );
     }
 
     if let Some(fold) = viewer.ui.snapshots.fold_label() {
@@ -749,6 +787,87 @@ fn autosave_rows(
         }
     }
     ui.add_space(LIST_END);
+}
+
+fn autosave_row(
+    viewer: &mut TabViewer,
+    ui: &mut egui::Ui,
+    rom_key: &str,
+    (row, above): (AutosaveRow, f32),
+    times: &[u64],
+    action: &mut Option<AutoAction>,
+    slot_action: &mut Option<SlotAction>,
+) {
+    let save = if row.filed {
+        LocalSave::Snapshot(row.slot)
+    } else {
+        LocalSave::Autosave(row.slot)
+    };
+    let mut name_rect = egui::Rect::NOTHING;
+    let mut stamp = None;
+    let shown = ui.horizontal(|ui| {
+        thumb_image(ui, row.texture, row.console);
+        ui.vertical(|ui| {
+            name_rect = ui
+                .add(egui::Label::new(egui::RichText::new(&row.title).strong()).truncate())
+                .rect;
+            stamp = Some(stamp_row(
+                viewer,
+                ui,
+                list_stamp(row.saved_at, times),
+                row.console,
+                rom_key,
+                &save,
+            ));
+            ui.horizontal(|ui| {
+                let hardcore = viewer.emulator.hardcore();
+                let load = crate::app::hardcore::load_button(ui, hardcore).clicked();
+                let delete = ui.button(format!("{} Delete", icons::TRASH)).clicked();
+                if row.filed {
+                    if load {
+                        *slot_action = Some(SlotAction::Load(row.slot));
+                    }
+                    if delete {
+                        let spoken =
+                            format!("{} from {}", row.title, list_stamp(row.saved_at, times));
+                        viewer.ui.snapshots.ask_delete(row.slot, spoken);
+                    }
+                } else {
+                    let label = list_stamp(row.saved_at, times);
+                    if load {
+                        *action = Some(AutoAction::AskLoad(row.slot, label.clone()));
+                    }
+                    if delete {
+                        viewer.ui.snapshots.ask_delete_autosave(row.slot, label);
+                    }
+                }
+            });
+        });
+    });
+    if let Some(stamp) = stamp {
+        stamp.show_tip(ui, shown.response.rect, name_rect, above);
+    }
+    keep_asked_in_view(viewer, ui, &save, shown.response.rect);
+}
+
+fn keep_asked_in_view(viewer: &TabViewer, ui: &egui::Ui, save: &LocalSave, row: egui::Rect) {
+    let snapshots = &viewer.ui.snapshots;
+    let asked = match save {
+        LocalSave::Snapshot(slot) => snapshots
+            .delete_question()
+            .is_some_and(|(asked, _)| asked == *slot),
+        LocalSave::Autosave(id) => snapshots
+            .delete_autosave_question()
+            .is_some_and(|(asked, _)| asked == *id),
+        LocalSave::OtherBattery(token) => snapshots
+            .delete_battery_question()
+            .is_some_and(|(asked, _)| asked == *token),
+        LocalSave::Battery => false,
+    };
+    if asked {
+        crate::app::mobile::sheet::keep_above(ui, row);
+        crate::app::widgets::confirm::keep_lit(ui, row);
+    }
 }
 
 fn apply_auto(viewer: &mut TabViewer, rom_key: &str, action: AutoAction, ctx: &egui::Context) {
@@ -822,7 +941,7 @@ fn apply(viewer: &mut TabViewer, rom_key: &str, action: SlotAction, ctx: &egui::
     }
 
     let failed = |viewer: &TabViewer, step, slot, err: GbError| {
-        failed_message(step, &format!("'{}'", name(viewer, slot)), &err)
+        failed_message(step, &name(viewer, slot), &err)
     };
     let result = match action {
         SlotAction::New => {
@@ -856,7 +975,7 @@ fn apply(viewer: &mut TabViewer, rom_key: &str, action: SlotAction, ctx: &egui::
                 .emulator
                 .delete_snapshot(slot)
                 .map(|_| snapshot_message(SnapshotNews::Deleted, &deleted))
-                .map_err(|err| failed_message(FailedStep::Delete, &format!("'{deleted}'"), &err))
+                .map_err(|err| failed_message(FailedStep::Delete, &deleted, &err))
         }
         SlotAction::Rename(slot, name) => {
             let trimmed = name.trim().to_string();
@@ -889,12 +1008,20 @@ mod tests {
     use egui::Key;
 
     #[test]
-    fn autosaves_in_the_same_minute_show_seconds() {
+    fn a_list_shows_seconds_on_every_row_or_on_none() {
         let minute = 1_793_648_340;
-        let times = [minute + 50, minute + 5, minute - 300];
-        assert_eq!(autosave_stamp_format(times[0], &times), "%b %-d, %H:%M:%S");
-        assert_eq!(autosave_stamp_format(times[1], &times), "%b %-d, %H:%M:%S");
-        assert_eq!(autosave_stamp_format(times[2], &times), "%b %-d, %H:%M");
+        let shared = [minute + 50, minute + 5, minute - 300];
+        for at in shared {
+            assert_eq!(list_stamp(at, &shared).matches(':').count(), 2, "{at}");
+        }
+        let apart = [minute + 50, minute - 300, minute - 900];
+        for at in apart {
+            assert_eq!(list_stamp(at, &apart).matches(':').count(), 1, "{at}");
+        }
+        assert_eq!(
+            list_stamp(minute, &shared),
+            crate::media::local_stamp(minute, "%b %-d, %H:%M:%S")
+        );
     }
 
     #[test]
@@ -908,9 +1035,9 @@ mod tests {
     #[test]
     fn the_hint_names_the_keys_the_player_bound() {
         let mut hotkeys = Hotkeys::default();
-        hotkeys.unbind(Hotkey::plain(Key::F8));
-        hotkeys.unbind(Hotkey::shift(Key::F8));
-        hotkeys.unbind(Hotkey::plain(Key::F9));
+        hotkeys.unbind(&Hotkey::plain(Key::F8));
+        hotkeys.unbind(&Hotkey::shift(Key::F8));
+        hotkeys.unbind(&Hotkey::plain(Key::F9));
         hotkeys.bind(Hotkey::plain(Key::Q), HotkeyAction::QuickSave);
         hotkeys.bind(Hotkey::shift(Key::Q), HotkeyAction::QuickSaveNewSlot);
         hotkeys.bind(Hotkey::plain(Key::L), HotkeyAction::QuickLoad);
@@ -935,9 +1062,9 @@ mod tests {
     #[test]
     fn unbound_quick_keys_leave_no_key_names() {
         let mut hotkeys = Hotkeys::default();
-        hotkeys.unbind(Hotkey::plain(Key::F8));
-        hotkeys.unbind(Hotkey::shift(Key::F8));
-        hotkeys.unbind(Hotkey::plain(Key::F9));
+        hotkeys.unbind(&Hotkey::plain(Key::F8));
+        hotkeys.unbind(&Hotkey::shift(Key::F8));
+        hotkeys.unbind(&Hotkey::plain(Key::F9));
 
         assert_eq!(quick_keys_hint(false, &hotkeys), None);
         assert_eq!(hotkeys.quick_keys(), None);

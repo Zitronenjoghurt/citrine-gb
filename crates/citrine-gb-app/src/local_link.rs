@@ -1,4 +1,5 @@
-use crate::app::ui_state::keybinds::{GbButton, KeyBindings, key_label};
+use crate::app::ui_state::keybinds::{GameButton, GbButton, KeyBindings, key_label};
+use crate::combo::{Bound, Combo};
 use crate::held::{Change, HeldButtons, InputSource};
 use crate::storage::{SaveStore, Write, Writes, now_unix};
 use citrine_gb::console::{Console, ConsoleKind, Keys};
@@ -196,15 +197,6 @@ impl LinkSettings {
             }
         }
         parts.join(", ")
-    }
-
-    fn half_for(&self, key: egui::Key) -> Option<(Half, GbButton)> {
-        Half::BOTH.into_iter().find_map(|half| {
-            self.keys(half)
-                .iter()
-                .find(|(bound, _)| *bound == key)
-                .map(|(_, button)| (half, *button))
-        })
     }
 
     pub fn game_of_side(&self, side: usize) -> Game {
@@ -418,21 +410,40 @@ impl LocalLink {
         }
     }
 
-    pub fn key(&self, key: egui::Key, bindings: &KeyBindings) -> Option<(Game, GbButton)> {
+    pub fn key_table(&self, bindings: &KeyBindings) -> Vec<Bound<egui::Key, (Game, GameButton)>> {
         if self.settings.controls == Controls::SplitKeyboard {
-            let (half, button) = self.settings.half_for(key)?;
-            let side = match half {
-                Half::Left => 0,
-                Half::Right => 1,
-            };
-            return Some((self.settings.game_of_side(side), button));
+            return Half::BOTH
+                .into_iter()
+                .enumerate()
+                .flat_map(|(side, half)| {
+                    let game = self.settings.game_of_side(side);
+                    self.settings.keys(half).iter().map(move |(key, button)| {
+                        Bound::any_mods(Combo::single(*key), (game, GameButton::Button(*button)))
+                    })
+                })
+                .collect();
         }
-        let button = bindings.button_for_key(key)?;
         let game = match self.settings.controls {
             Controls::KeyboardAndController => self.settings.game_of_side(0),
             _ => self.control,
         };
-        Some((game, button))
+        bindings
+            .key_table(false)
+            .into_iter()
+            .filter(|bound| matches!(bound.target, GameButton::Button(_)))
+            .map(|bound| bound.map(|button| (game, button)))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn key(&self, key: egui::Key, bindings: &KeyBindings) -> Option<(Game, GbButton)> {
+        self.key_table(bindings)
+            .into_iter()
+            .find(|bound| bound.combo == Combo::single(key))
+            .and_then(|bound| match bound.target {
+                (game, GameButton::Button(button)) => Some((game, button)),
+                _ => None,
+            })
     }
 
     pub fn game_for(&mut self, source: Source) -> Game {
@@ -624,8 +635,8 @@ mod tests {
     }
 
     fn emulator(name: &str) -> Emulator {
-        let root =
-            std::env::temp_dir().join(format!("citrine-link-test-{}-{name}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-link-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut emulator = Emulator::default();
         emulator.store = SaveStore::at(root);
@@ -794,8 +805,8 @@ mod tests {
     }
 
     fn link_with(controls: Controls, swapped: bool) -> LocalLink {
-        let root =
-            std::env::temp_dir().join(format!("citrine-link-routing-{}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-link-routing-{}", std::process::id()));
         let store = SaveStore::at(root);
         let mut link = LocalLink::start(
             &silver(),

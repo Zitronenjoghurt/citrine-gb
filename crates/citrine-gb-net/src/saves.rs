@@ -34,6 +34,7 @@ pub struct SaveInfo {
     pub version: u64,
     pub size: u64,
     pub updated: u64,
+    #[serde(with = "serde_bytes")]
     pub label: Vec<u8>,
 }
 
@@ -48,7 +49,27 @@ pub struct SaveLabel {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavePayload {
+    #[serde(with = "payload_files")]
     pub files: Vec<(String, Vec<u8>)>,
+}
+
+mod payload_files {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_bytes::{ByteBuf, Bytes};
+
+    pub fn serialize<S: Serializer>(files: &[(String, Vec<u8>)], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(files.iter().map(|(role, data)| (role, Bytes::new(data))))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<(String, Vec<u8>)>, D::Error> {
+        let files = Vec::<(String, ByteBuf)>::deserialize(d)?;
+        Ok(files
+            .into_iter()
+            .map(|(role, data)| (role, data.into_vec()))
+            .collect())
+    }
 }
 
 impl SavePayload {
@@ -169,6 +190,42 @@ mod tests {
                 ("meta".into(), 1_700_000_000u64.to_le_bytes().to_vec()),
             ],
         }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldPayload {
+        files: Vec<(String, Vec<u8>)>,
+    }
+
+    #[test]
+    fn a_payload_keeps_its_exact_bytes_and_reads_the_old_encoding() {
+        let small = SavePayload {
+            files: vec![("sav".into(), vec![1, 2, 3])],
+        };
+        assert_eq!(
+            postcard::to_allocvec(&small).unwrap(),
+            [1, 3, b's', b'a', b'v', 3, 1, 2, 3]
+        );
+        let big: Vec<u8> = (0..SAVE_PART_BYTES + 5).map(|i| (i * 13) as u8).collect();
+        let old = OldPayload {
+            files: vec![("sav".into(), big.clone()), ("rtc".into(), vec![0; 200])],
+        };
+        let new = SavePayload {
+            files: old.files.clone(),
+        };
+        let old_bytes = postcard::to_allocvec(&old).unwrap();
+        assert_eq!(postcard::to_allocvec(&new).unwrap(), old_bytes);
+        assert_eq!(
+            postcard::from_bytes::<SavePayload>(&old_bytes),
+            Ok(new.clone())
+        );
+        assert_eq!(
+            postcard::from_bytes::<OldPayload>(&postcard::to_allocvec(&new).unwrap())
+                .unwrap()
+                .files,
+            new.files
+        );
+        assert_eq!(new.hash(), <[u8; 32]>::from(Sha256::digest(&old_bytes)));
     }
 
     #[test]

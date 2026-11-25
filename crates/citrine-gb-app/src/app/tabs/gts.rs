@@ -844,7 +844,8 @@ mod tests {
 
     #[test]
     fn with_no_rom_the_names_come_from_the_cache() {
-        let root = std::env::temp_dir().join(format!("citrine-gts-names-{}", std::process::id()));
+        let root =
+            crate::storage::scratch_dir().join(format!("citrine-gts-names-{}", std::process::id()));
         let cache = root.with_file_name(format!("citrine-gts-names-{}-cache", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&cache);

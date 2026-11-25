@@ -1,6 +1,7 @@
 use super::clock::Clock;
 use super::menu::{menu_id, message_menu};
 use super::palette::{card_width, palette_card};
+use super::reply::{self, QuoteView};
 use super::share::share_card;
 use super::{
     Action, BIG_EMOJI, BIG_EMOJI_GAP, BIG_EMOJI_MAX, BUBBLE_MARGIN, BUBBLE_SHARE, ChatUi,
@@ -24,6 +25,7 @@ pub(super) fn entry_ui(
     online: &Online,
     friend: OnlineId,
     entry: &ChatEntry,
+    quote: Option<&QuoteView>,
     clock: &Clock,
     rom: Option<&str>,
     names: &GameNames,
@@ -33,6 +35,7 @@ pub(super) fn entry_ui(
     if entry.is_deleted() {
         return deleted_ui(ui, online, entry, clock, actions);
     }
+    let start = paint_index(ui);
     let room = ui.available_width();
     let max = (room * BUBBLE_SHARE).max(120.0).min(room);
     let layout = if entry.mine {
@@ -46,18 +49,23 @@ pub(super) fn entry_ui(
         let big = match &entry.body {
             Body::Text(text) => emoji::only_emoji(&emoji::pieces(text))
                 .filter(|n| *n <= BIG_EMOJI_MAX)
-                .map(|count| BigRow::fit(count, max, stamp_width(ui, entry, clock))),
+                .map(|count| BigRow::fit(count, max, chip_width(ui, entry, clock))),
             _ => None,
         };
         let margin = if big.is_some() {
-            egui::Margin::symmetric(0, BUBBLE_MARGIN.top)
+            egui::Margin {
+                bottom: BUBBLE_MARGIN.bottom,
+                ..egui::Margin::ZERO
+            }
         } else {
             BUBBLE_MARGIN
         };
         let fit_id = ui.id().with(("bubble_fit", entry.id));
         let wraps = match &entry.body {
             Body::Text(text) => {
-                let needed = text_width(ui, text, big.as_ref(), entry, clock) + margin.sum().x;
+                let quoted = quote.map_or(0.0, |quote| reply::quote_width(ui, quote));
+                let needed =
+                    text_width(ui, text, big.as_ref(), entry, clock).max(quoted) + margin.sum().x;
                 let fitted = ui
                     .data(|d| d.get_temp::<(f32, f32)>(fit_id))
                     .filter(|(at, _)| (at - max).abs() < 0.5)
@@ -84,14 +92,17 @@ pub(super) fn entry_ui(
             .corner_radius(10.0)
             .inner_margin(margin)
             .show(ui, |ui| {
-                if entry.mine && big.is_none() {
-                    let ink = crate::app::ui_state::ui_theme::ink_on(fill);
-                    let visuals = ui.visuals_mut();
-                    visuals.widgets.active.fg_stroke.color = ink;
-                    visuals.widgets.noninteractive.fg_stroke.color = ink;
-                }
-                let content =
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| match &entry.body {
+                let ink = if entry.mine && big.is_none() {
+                    own_ink(ui, fill)
+                } else {
+                    ui.visuals().text_color()
+                };
+                let mine = entry.mine && big.is_none();
+                let content = ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    if let Some(quote) = quote {
+                        reply::quote_block(ui, quote, mine, ink, actions);
+                    }
+                    match &entry.body {
                         Body::Text(text) => text_body(ui, text, big.as_ref(), entry, clock),
                         Body::Share(share) => {
                             own_tip = share_card(
@@ -102,8 +113,12 @@ pub(super) fn entry_ui(
                         Body::Palette(json) => {
                             palette_card(ui, entry, clock, json, palettes, actions);
                         }
-                        Body::Receipt(_) | Body::Edit(_) | Body::Delete(_) => {}
-                    });
+                        Body::Receipt(_)
+                        | Body::Edit(_)
+                        | Body::Delete(_)
+                        | Body::TypingText(_) => {}
+                    }
+                });
                 if wraps {
                     let width = content.response.rect.width();
                     let known = ui.data(|d| d.get_temp::<(f32, f32)>(fit_id));
@@ -122,6 +137,9 @@ pub(super) fn entry_ui(
         shown.response.rect
     });
     let bubble = bubble.inner;
+    if state.touch && super::menu::can_reply(online, friend, entry) {
+        swipe(ui, state, entry.id, start, bubble, actions);
+    }
     message_menu(ui, state, online, friend, entry, bubble, palettes, actions);
     if entry.mine
         && let Some(text) = receipt_text(entry.delivery, clock)
@@ -194,6 +212,34 @@ pub(super) fn entry_ui(
     bubble
 }
 
+fn swipe(
+    ui: &mut Ui,
+    state: &mut ChatUi,
+    id: u64,
+    start: usize,
+    bubble: Rect,
+    actions: &mut Vec<Action>,
+) {
+    let (shift, down) = ui.input(|i| (reply::swipe_of(i, bubble), i.pointer.primary_down()));
+    if let Some(shift) = shift {
+        state.swipe = Some((id, shift));
+        reply::swipe_shift(ui, start, shift);
+        reply::swipe_mark(ui, bubble, shift);
+        ui.ctx().request_repaint();
+        return;
+    }
+    let Some((swiped, shift)) = state.swipe else {
+        return;
+    };
+    if swiped != id {
+        return;
+    }
+    state.swipe = None;
+    if !down && shift >= reply::SWIPE_REPLY {
+        actions.push(Action::Reply(id));
+    }
+}
+
 fn deleted_ui(
     ui: &mut Ui,
     online: &Online,
@@ -218,18 +264,27 @@ fn deleted_ui(
                     ui.spacing_mut().interact_size.y = 0.0;
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = TEXT_STAMP_GAP;
-                        ui.scope(|ui| {
-                            ui.set_max_width(text_max.max(0.0));
-                            ui.add(
-                                Label::new(
-                                    RichText::new(format!("{} Deleted", icons::PROHIBIT))
-                                        .italics()
-                                        .color(ui.visuals().weak_text_color()),
-                                )
-                                .truncate(),
-                            );
-                        });
-                        stamp_label(ui, entry, clock, false);
+                        ui.set_min_height(ui.text_style_height(&egui::TextStyle::Body));
+                        let deleted = |ui: &mut Ui| {
+                            ui.scope(|ui| {
+                                ui.set_max_width(text_max.max(0.0));
+                                ui.add(
+                                    Label::new(
+                                        RichText::new(format!("{} Deleted", icons::PROHIBIT))
+                                            .italics()
+                                            .color(ui.visuals().weak_text_color()),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        };
+                        if entry.mine {
+                            stamp_label(ui, entry, clock, false);
+                            deleted(ui);
+                        } else {
+                            deleted(ui);
+                            stamp_label(ui, entry, clock, false);
+                        }
                     });
                 })
                 .response
@@ -332,14 +387,14 @@ pub(super) fn text_body(
                 ui.allocate_ui_with_layout(
                     vec2(ui.available_width(), big.size),
                     Layout::bottom_up(Align::Max),
-                    |ui| stamp_label(ui, entry, clock, false),
+                    |ui| stamp_chip(ui, entry, clock),
                 );
             }
         });
         if !big.beside {
             let align = if entry.mine { Align::Max } else { Align::Min };
             ui.with_layout(Layout::top_down(align), |ui| {
-                stamp_label(ui, entry, clock, false);
+                stamp_chip(ui, entry, clock);
             });
         }
         return;
@@ -424,6 +479,32 @@ pub(super) fn measure(ui: &Ui, text: RichText) -> f32 {
         .x
 }
 
+fn own_ink(ui: &mut Ui, fill: Color32) -> Color32 {
+    let ink = crate::app::ui_state::ui_theme::ink_on(fill);
+    let visuals = ui.visuals_mut();
+    visuals.widgets.active.fg_stroke.color = ink;
+    visuals.widgets.noninteractive.fg_stroke.color = ink;
+    ink
+}
+
+fn stamp_chip(ui: &mut Ui, entry: &ChatEntry, clock: &Clock) {
+    let fill = bubble_fill(ui.visuals(), entry.mine);
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(CHIP_RADIUS)
+        .inner_margin(CHIP_MARGIN)
+        .show(ui, |ui| {
+            if entry.mine {
+                own_ink(ui, fill);
+            }
+            stamp_label(ui, entry, clock, true);
+        });
+}
+
+fn chip_width(ui: &Ui, entry: &ChatEntry, clock: &Clock) -> f32 {
+    stamp_width(ui, entry, clock) + CHIP_MARGIN.sum().x
+}
+
 pub(super) fn stamp_width(ui: &Ui, entry: &ChatEntry, clock: &Clock) -> f32 {
     measure(ui, RichText::new(stamp_text(entry, clock)).small())
 }
@@ -482,7 +563,10 @@ fn entry_mark(entry: &ChatEntry) -> Option<&'static str> {
     if entry.change.untold() {
         return Some(icons::CLOCK);
     }
-    stamp_mark(entry.delivery)
+    match entry.delivery {
+        Delivery::Sent | Delivery::Delivered(_) | Delivery::Read(_) if entry.is_deleted() => None,
+        delivery => stamp_mark(delivery),
+    }
 }
 
 pub(super) fn stamp_mark(delivery: Delivery) -> Option<&'static str> {
@@ -504,6 +588,8 @@ pub(super) fn stamp_text(entry: &ChatEntry, clock: &Clock) -> String {
 }
 
 const EDITED: &str = "edited ";
+const CHIP_MARGIN: egui::Margin = egui::Margin::symmetric(6, 1);
+const CHIP_RADIUS: f32 = 8.0;
 
 pub(super) fn stamp_label(ui: &mut Ui, entry: &ChatEntry, clock: &Clock, in_bubble: bool) {
     let font = egui::TextStyle::Small.resolve(ui.style());
@@ -535,8 +621,8 @@ pub(super) fn stamp_label(ui: &mut Ui, entry: &ChatEntry, clock: &Clock, in_bubb
     }
 }
 
-pub(super) fn read_color(visuals: &egui::Visuals) -> Color32 {
-    visuals.selection.stroke.color
+fn read_color(visuals: &egui::Visuals) -> Color32 {
+    crate::app::ui_state::ui_theme::ink_on(bubble_fill(visuals, true))
 }
 
 pub(super) fn receipt_text(delivery: Delivery, clock: &Clock) -> Option<String> {
@@ -714,6 +800,7 @@ mod tests {
             body: Body::Text("See you at 3".into()),
             delivery: Delivery::Sent,
             change: Change::Kept,
+            reply: None,
         };
         let ctx = egui::Context::default();
         ctx.set_visuals(egui::Visuals::dark());
@@ -743,6 +830,7 @@ mod tests {
                 body: Body::Text("See you at 3".into()),
                 delivery,
                 change: Change::Kept,
+                reply: None,
             };
             let ctx = egui::Context::default();
             ctx.set_visuals(visuals.clone());
@@ -768,6 +856,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn read_ticks_are_one_colour_and_sit_on_my_bubble_colour_in_every_theme() {
+        use crate::app::ui_state::ui_theme::UiTheme;
+        use strum::IntoEnumIterator;
+        let ticks = |ctx: egui::Context, text: &str, delivery| {
+            let entry = ChatEntry {
+                id: 1,
+                mine: true,
+                at: 1_793_448_000,
+                body: Body::Text(text.into()),
+                delivery,
+                change: Change::Kept,
+                reply: None,
+            };
+            let shapes = shapes_in(ctx, &entry, &GameNames::default(), 412.0);
+            let (rect, color) = shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text().contains(icons::CHECKS) => text
+                        .galley
+                        .job
+                        .sections
+                        .last()
+                        .map(|s| (text.visual_bounding_rect(), s.format.color)),
+                    _ => None,
+                })
+                .expect("the ticks");
+            let under = shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(r) if r.rect.contains_rect(rect) => Some(r.fill),
+                    _ => None,
+                })
+                .next_back()
+                .expect("a surface under the ticks");
+            (color, under)
+        };
+        for theme in UiTheme::iter().filter(|theme| *theme != UiTheme::System) {
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let visuals = ctx.style().visuals.clone();
+            let bubble = bubble_fill(&visuals, true);
+            let read = Delivery::Read(1_793_448_060);
+            let delivered = Delivery::Delivered(1_793_448_060);
+            let in_bubble = ticks(ctx.clone(), "See you at 3", read);
+            for text in ["😋", "😋😂"] {
+                let (color, under) = ticks(ctx.clone(), text, read);
+                assert_eq!(
+                    under, bubble,
+                    "{theme:?} {text}: ticks off my bubble colour"
+                );
+                assert_eq!(color, in_bubble.0, "{theme:?} {text}: two read colours");
+                let shown = blend(color, under);
+                assert!(
+                    contrast(shown, under) >= 3.0,
+                    "{theme:?} {text}: read ticks {color:?} on {under:?}"
+                );
+                let (faded, _) = ticks(ctx.clone(), text, delivered);
+                assert!(
+                    apart(shown, blend(faded, under)) >= 80.0,
+                    "{theme:?} {text}: read {color:?} looks like delivered {faded:?}"
+                );
+            }
+        }
+    }
+
     fn blend(top: Color32, under: Color32) -> Color32 {
         let a = top.a() as f32 / 255.0;
         let mix = |t: u8, u: u8| (t as f32 + u as f32 * (1.0 - a)).round().min(255.0) as u8;
@@ -776,6 +930,11 @@ mod tests {
             mix(top.g(), under.g()),
             mix(top.b(), under.b()),
         )
+    }
+
+    fn apart(a: Color32, b: Color32) -> f32 {
+        let d = |x: u8, y: u8| (x as f32 - y as f32).powi(2);
+        (d(a.r(), b.r()) + d(a.g(), b.g()) + d(a.b(), b.b())).sqrt()
     }
 
     fn contrast(a: Color32, b: Color32) -> f32 {

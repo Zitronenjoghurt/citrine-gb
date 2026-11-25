@@ -271,11 +271,12 @@ fn split(
 fn slot(pass: Pass) -> usize {
     match pass {
         Pass::Reference => 0,
-        Pass::Upscaled => 1,
-        Pass::Centers => 2,
+        Pass::Opaque => 1,
+        Pass::Tail => 2,
         Pass::Edges => 3,
         Pass::Finish => 4,
         Pass::Present => 5,
+        Pass::Mipmaps => 6,
     }
 }
 
@@ -290,11 +291,11 @@ mod tests {
     #[test]
     fn pass_stamps_split_the_frame_between_its_passes() {
         let words = [100, 1000, 300, 600, 700, 750, 0, 0];
-        let passes = [Pass::Reference, Pass::Centers, Pass::Edges, Pass::Present];
+        let passes = [Pass::Reference, Pass::Tail, Pass::Edges, Pass::Present];
         let split = split(&words, &passes, nanos);
         assert_eq!(
             split.map(|time| time.as_nanos()),
-            [200, 0, 300, 100, 0, 50, 250]
+            [200, 0, 300, 100, 0, 50, 0, 250]
         );
         assert_eq!(split.iter().sum::<Duration>(), nanos(100, 1000));
     }
@@ -315,20 +316,23 @@ mod tests {
     #[test]
     fn pass_stamps_out_of_order_never_split_more_than_the_frame() {
         let words = [100, 1000, 600, 300, 1100, 900, 0, 0];
-        let passes = [Pass::Reference, Pass::Centers, Pass::Edges, Pass::Present];
+        let passes = [Pass::Reference, Pass::Tail, Pass::Edges, Pass::Present];
         let split = split(&words, &passes, nanos);
-        assert_eq!(split.map(|time| time.as_nanos()), [500, 0, 0, 400, 0, 0, 0]);
+        assert_eq!(
+            split.map(|time| time.as_nanos()),
+            [500, 0, 0, 400, 0, 0, 0, 0]
+        );
         assert_eq!(split.iter().sum::<Duration>(), nanos(100, 1000));
     }
 
     #[test]
     fn a_pass_that_ends_before_the_frame_starts_splits_from_the_start() {
         let words = [100, 1000, 50, 400, 800, 0, 0, 0];
-        let passes = [Pass::Reference, Pass::Upscaled, Pass::Present];
+        let passes = [Pass::Reference, Pass::Opaque, Pass::Present];
         let split = split(&words, &passes, nanos);
         assert_eq!(
             split.map(|time| time.as_nanos()),
-            [0, 300, 0, 0, 0, 400, 200]
+            [0, 300, 0, 0, 0, 400, 0, 200]
         );
         assert_eq!(split.iter().sum::<Duration>(), nanos(100, 1000));
     }
@@ -336,7 +340,7 @@ mod tests {
     #[test]
     fn a_missing_pass_stamp_splits_nothing() {
         let words = [100, 1000, 300, 0, 700, 750, 0, 0];
-        let passes = [Pass::Reference, Pass::Centers, Pass::Edges, Pass::Present];
+        let passes = [Pass::Reference, Pass::Tail, Pass::Edges, Pass::Present];
         assert_eq!(split(&words, &passes, nanos), [Duration::ZERO; GPU_PASSES]);
     }
 }

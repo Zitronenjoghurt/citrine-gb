@@ -1,6 +1,7 @@
 use super::Room;
 use crate::play::engine::{GROUP_UNITS, Rollback, Setup};
 use crate::play::links::{self, LinkGroup};
+use crate::play::messages::{HELD_MESSAGES, keep};
 use crate::play::seen::Shown;
 use crate::play::{
     Engine, GUEST_POWER_ON, PlaySession, Returned, Role, SETUP_PINGS, SETUP_WAIT, Stage, kind_of,
@@ -210,6 +211,7 @@ impl Room {
             return;
         };
         let friend = self.pairs.first().map(|p| p.friend);
+        let peer_touched = engine.local_from_peer() || self.pairs.iter().any(|p| p.from_peer);
         if let (Some(console), Some(friend)) = ((*engine).into_console(true), friend)
             && self.returned.is_none()
         {
@@ -220,6 +222,7 @@ impl Room {
                 friend,
                 history: None,
                 downloaded: false,
+                peer_touched,
             });
             for pair in &mut self.pairs {
                 if let Some(mine) = &mut pair.round.mine {
@@ -271,15 +274,9 @@ impl Room {
         };
         let Some(g) = self.group.as_mut().filter(|g| g.round == round) else {
             if let Some(g) = &mut self.group {
-                g.pending.push((from, msg));
-                if g.pending.len() > KEPT_PENDING {
-                    g.pending.remove(0);
-                }
+                keep(&mut g.pending, from, msg, KEPT_PENDING);
             } else {
-                self.early.push((from, msg));
-                if self.early.len() > KEPT_PENDING {
-                    self.early.remove(0);
-                }
+                keep(&mut self.early, from, msg, KEPT_PENDING);
             }
             return None;
         };
@@ -298,7 +295,7 @@ impl Room {
                     Some(r) => r.receive_from(unit, msg),
                     None => {
                         if let Some(g) = &mut self.group {
-                            g.pending.push((from, msg));
+                            keep(&mut g.pending, from, msg, HELD_MESSAGES);
                         }
                     }
                 }
@@ -493,14 +490,15 @@ impl Room {
             .iter()
             .filter(|p| members.contains(&p.friend))
             .find_map(|p| match &p.round.my_origin {
-                Some(Origin::Resume(state)) if p.round.set_up => Some(state.clone()),
+                Some(Origin::Resume(state)) if p.round.set_up => Some((state.clone(), p.from_peer)),
                 _ => None,
             });
-        let Some(state) = origin else {
+        let Some((state, from_peer)) = origin else {
             return;
         };
         for pair in &mut self.pairs {
             if members.contains(&pair.friend) && pair.wants_state {
+                pair.from_peer |= from_peer;
                 pair.give_state(state.clone(), None);
             }
         }
@@ -547,7 +545,7 @@ impl Room {
         let trips: Vec<Option<u32>> = pairs.iter().map(|p| p.round_trip_ms()).collect();
         let input_delay = view.input_delay;
         let sample_rate = view.sample_rate;
-        let local = members.iter().position(|w| *w == me)?;
+        let player = *Player::ALL.get(members.iter().position(|w| *w == me)?)?;
         let start = match self.group.as_ref()?.start.clone() {
             Some(start) => start,
             None if authority => {
@@ -592,7 +590,7 @@ impl Room {
         g.start = Some(start.clone());
         g.building = Some(threads.background("group engine build", move || {
             Rollback::group(
-                Player::ALL[local],
+                player,
                 start,
                 games,
                 users,

@@ -41,6 +41,8 @@ pub struct SyncDoc {
     started: bool,
     #[serde(skip, default = "unsent")]
     unsent: bool,
+    #[serde(skip)]
+    edits: u64,
 }
 
 impl SyncDoc {
@@ -67,7 +69,7 @@ impl SyncDoc {
                     },
                 );
             }
-            self.unsent = true;
+            self.mark(true);
             return true;
         }
         let mut stamp = None;
@@ -105,7 +107,7 @@ impl SyncDoc {
             );
             changed = true;
         }
-        self.unsent |= changed;
+        self.mark(changed);
         changed
     }
 
@@ -118,7 +120,7 @@ impl SyncDoc {
                 changed = true;
             }
         }
-        self.unsent |= changed;
+        self.mark(changed);
         changed
     }
 
@@ -149,7 +151,15 @@ impl SyncDoc {
             clock: 0,
             started: true,
             unsent: false,
+            edits: 0,
         })
+    }
+
+    fn mark(&mut self, changed: bool) {
+        if changed {
+            self.unsent = true;
+            self.edits += 1;
+        }
     }
 
     fn tick(&mut self, now: u64) -> u64 {
@@ -159,22 +169,38 @@ impl SyncDoc {
 }
 
 impl Online {
-    pub fn sync_settings(&mut self, doc: &mut SyncDoc, on: bool) -> bool {
-        if !on {
+    pub fn sync_settings(&mut self, doc: &mut SyncDoc, cloud: bool, network: bool) -> bool {
+        if !cloud {
             self.account_stop(SLOT);
             doc.unsent = true;
-            return false;
+        }
+        if !network {
+            self.network_settings_put(None);
+        }
+        let mut copies = Vec::new();
+        if cloud {
+            copies.extend(
+                self.account_take(SLOT)
+                    .into_iter()
+                    .map(|copy| (copy.device, copy.data)),
+            );
+        }
+        if network {
+            copies.extend(self.network_settings_take());
         }
         let mut changed = false;
-        for copy in self.account_take(SLOT) {
-            match SyncDoc::from_bytes(&copy.data) {
+        for (device, data) in copies {
+            match SyncDoc::from_bytes(&data) {
                 Some(theirs) => changed |= doc.merge(&theirs),
-                None => log::warn!("the settings from {} could not be read", copy.device),
+                None => log::warn!("the settings from {device} could not be read"),
             }
         }
-        if doc.unsent {
+        if cloud && doc.unsent {
             doc.unsent = false;
             self.account_put(SLOT, doc.to_bytes());
+        }
+        if network && self.network_settings_edits() != Some(doc.edits) {
+            self.network_settings_put(Some((doc.edits, doc.to_bytes())));
         }
         changed
     }

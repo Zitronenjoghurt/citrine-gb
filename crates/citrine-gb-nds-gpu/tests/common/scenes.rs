@@ -771,10 +771,21 @@ fn wide_textured_quad(gx: &mut Gx, half: [f32; 2], s: [f32; 2], t: [f32; 2]) {
 }
 
 pub fn cut_out() -> Scene {
+    cut_out_with(rgb(31, 31, 31), TEXTURES | BLENDING)
+}
+
+pub fn edge_marked_cut_out(blending: bool) -> Scene {
+    let display = TEXTURES | EDGE_MARKING | if blending { BLENDING } else { 0 };
+    let mut scene = cut_out_with(rgb(31, 31, 0), display);
+    scene.registers.write(EDGE_COLOR, 0, !0);
+    scene
+}
+
+fn cut_out_with(color: u16, display: u32) -> Scene {
     let mut memory = Memory::default();
     for t in 0..8u32 {
         for s in 0..8u32 {
-            let texel = if s < 4 { rgb(31, 31, 31) | 0x8000 } else { 0 };
+            let texel = if s < 4 { color | 0x8000 } else { 0 };
             memory.set_texture_u16((t * 8 + s) * 2, texel);
         }
     }
@@ -787,12 +798,7 @@ pub fn cut_out() -> Scene {
     Scene {
         name: "cut-out",
         frame: gx.finish(false, false),
-        registers: registers(
-            TEXTURES | BLENDING,
-            u32::from(rgb(31, 31, 31)),
-            FAR_DEPTH,
-            0,
-        ),
+        registers: registers(display, u32::from(rgb(31, 31, 31)), FAR_DEPTH, 0),
         memory,
     }
 }
@@ -843,4 +849,45 @@ pub fn bands(tilt: f32) -> Scene {
         gx.end();
     }
     mesh_scene("bands", gx)
+}
+
+pub const FLOOR_DIRECT: u32 = DIRECT;
+pub const FLOOR_FOUR_COLORS: u32 = FOUR_COLORS;
+pub const FLOOR_PALETTE_256: u32 = PALETTE_256;
+pub const FLOOR_SIZE_8: u32 = SIZE_8;
+const FLOOR_HALF: f32 = 7.5;
+const FLOOR_DEPTH: f32 = 7.5;
+const FLOOR_TEXELS_PER_UNIT: f32 = 16.0;
+
+pub fn floor(name: &'static str, memory: Memory, textures: &[(u32, u32)]) -> Scene {
+    let mut gx = Gx::default();
+    gx.perspective(0.5, 20.0);
+    gx.translate(0.0, -0.4, -1.0);
+    gx.attributes(BOTH | MODULATE | SOLID | id(1));
+    let width = FLOOR_HALF * 2.0 / textures.len() as f32;
+    for (index, &(param, palette)) in textures.iter().enumerate() {
+        gx.texture(param, palette);
+        let left = -FLOOR_HALF + index as f32 * width;
+        let right = left + width;
+        let s = |x: f32| (x + FLOOR_HALF) * FLOOR_TEXELS_PER_UNIT;
+        let far = FLOOR_DEPTH * FLOOR_TEXELS_PER_UNIT * 2.0;
+        gx.begin(QUADS);
+        gx.color(rgb(31, 31, 31));
+        for ([x, z], [cs, ct]) in [
+            ([left, 0.0], [s(left), 0.0]),
+            ([left, -FLOOR_DEPTH], [s(left), far]),
+            ([right, -FLOOR_DEPTH], [s(right), far]),
+            ([right, 0.0], [s(right), 0.0]),
+        ] {
+            gx.texcoord(cs, ct);
+            gx.vertex(x, 0.0, z);
+        }
+        gx.end();
+    }
+    Scene {
+        name,
+        frame: gx.finish(false, false),
+        registers: registers(TEXTURES | BLENDING, 0, FAR_DEPTH, 0),
+        memory,
+    }
 }

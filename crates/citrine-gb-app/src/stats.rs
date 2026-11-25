@@ -162,6 +162,94 @@ impl Overview {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PeriodGame {
+    pub rom: String,
+    pub name: String,
+    pub play_ms: u64,
+    pub sessions: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Period {
+    pub play_ms: u64,
+    pub sessions: u64,
+    pub snapshots: u64,
+    pub loads: u64,
+    pub link_ms: u64,
+    pub together_ms: u64,
+    pub chat_messages: u64,
+    pub cable: Vec<CableTotals>,
+    pub games: Vec<PeriodGame>,
+}
+
+impl Book {
+    pub fn period(&self, first: Date, last: Date, rom: Option<&str>) -> Period {
+        let (first, last) = (day_key(first), day_key(last));
+        let within = |key: &String| *key >= first && *key <= last;
+        let mut period = Period::default();
+        let mut games: BTreeMap<&str, (PeriodGame, u64)> = BTreeMap::new();
+        for record in self.devices.values() {
+            if rom.is_none() {
+                for (_, app) in record.days.iter().filter(|(key, _)| within(key)) {
+                    period.chat_messages += u64::from(app.chat_messages);
+                }
+            }
+            for (key, game) in &record.games {
+                if rom.is_some_and(|rom| rom != key) {
+                    continue;
+                }
+                let (totals, named_at) = games.entry(key).or_insert_with(|| {
+                    let game = PeriodGame {
+                        rom: key.clone(),
+                        ..Default::default()
+                    };
+                    (game, 0)
+                });
+                if !game.name.is_empty() && *named_at <= game.last_played {
+                    totals.name = game.name.clone();
+                    *named_at = game.last_played;
+                }
+                for (_, counts) in game.days.iter().filter(|(day, _)| within(day)) {
+                    totals.play_ms += counts.play_ms;
+                    totals.sessions += u64::from(counts.sessions);
+                    period.snapshots += u64::from(counts.snapshots);
+                    period.loads += u64::from(counts.loads);
+                    period.link_ms += counts.link_ms;
+                    period.together_ms += counts.together_ms;
+                    for (partner_key, cable) in &counts.cable {
+                        let Some(partner) = CablePartner::from_key(partner_key) else {
+                            continue;
+                        };
+                        let name = game.partners.get(partner_key).cloned().unwrap_or_default();
+                        add_cable(
+                            &mut period.cable,
+                            &CableTotals {
+                                partner,
+                                name,
+                                ms: cable.ms,
+                                sessions: u64::from(cable.sessions),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        sort_cable(&mut period.cable);
+        period.games = games
+            .into_values()
+            .map(|(game, _)| game)
+            .filter(|game| game.play_ms > 0)
+            .collect();
+        period
+            .games
+            .sort_by(|a, b| b.play_ms.cmp(&a.play_ms).then_with(|| a.name.cmp(&b.name)));
+        period.play_ms = period.games.iter().map(|game| game.play_ms).sum();
+        period.sessions = period.games.iter().map(|game| game.sessions).sum();
+        period
+    }
+}
+
 impl Book {
     pub fn overview(&self, today: Date) -> Overview {
         let today_key = day_key(today);
@@ -264,5 +352,84 @@ impl Book {
                 .then_with(|| a.name.cmp(&b.name))
         });
         overview
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recorder::Recorder;
+    use super::*;
+    use std::time::Duration;
+
+    const WEDNESDAY: &str = "2026-10-28";
+    const THURSDAY: &str = "2026-10-29";
+
+    fn day(key: &str) -> Date {
+        parse_day(key).unwrap()
+    }
+
+    fn played(stats: &mut Recorder, rom: &str, name: &str, minutes: u64, at: u64, key: &str) {
+        stats.launch(rom, name, at, key);
+        stats.play(
+            rom,
+            name,
+            Duration::from_secs(minutes * 60),
+            Activity::default(),
+            at,
+            key,
+        );
+    }
+
+    fn two_days() -> Book {
+        let mut stats = Recorder::new(Book::new());
+        played(&mut stats, "tetris", "Tetris", 30, 1_000, WEDNESDAY);
+        played(
+            &mut stats,
+            "zelda",
+            "Link's Awakening",
+            50,
+            5_000,
+            WEDNESDAY,
+        );
+        stats.snapshot("zelda", WEDNESDAY);
+        stats.chat_message(WEDNESDAY);
+        played(
+            &mut stats,
+            "zelda",
+            "Link's Awakening",
+            20,
+            90_000,
+            THURSDAY,
+        );
+        stats.book().clone()
+    }
+
+    #[test]
+    fn a_day_lists_what_was_played_that_day() {
+        let wednesday = two_days().period(day(WEDNESDAY), day(WEDNESDAY), None);
+        assert_eq!(wednesday.play_ms, 80 * 60_000);
+        assert_eq!(wednesday.sessions, 2);
+        assert_eq!(wednesday.snapshots, 1);
+        assert_eq!(wednesday.chat_messages, 1);
+        let games: Vec<(&str, u64)> = wednesday
+            .games
+            .iter()
+            .map(|game| (game.name.as_str(), game.play_ms / 60_000))
+            .collect();
+        assert_eq!(games, [("Link's Awakening", 50), ("Tetris", 30)]);
+    }
+
+    #[test]
+    fn a_period_adds_up_its_days_and_can_follow_one_game() {
+        let book = two_days();
+        let both = book.period(day(WEDNESDAY), day(THURSDAY), None);
+        assert_eq!(both.play_ms, 100 * 60_000);
+        assert_eq!(both.games[0].play_ms, 70 * 60_000);
+        let zelda = book.period(day(WEDNESDAY), day(THURSDAY), Some("zelda"));
+        assert_eq!(zelda.play_ms, 70 * 60_000);
+        assert_eq!(zelda.games.len(), 1);
+        assert_eq!(zelda.chat_messages, 0);
+        let quiet = book.period(day("2026-10-27"), day("2026-10-27"), None);
+        assert_eq!(quiet, Period::default());
     }
 }

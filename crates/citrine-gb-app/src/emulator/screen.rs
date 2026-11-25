@@ -1,9 +1,12 @@
-use super::layout::ScreenLayout;
+use super::layout::{ScreenLayout, ScreenSpots};
 use super::{Emulator, runner};
 use crate::app::ui_state::settings::ScalingMode;
 use citrine_gb::console::{Console, Touch};
+use citrine_gb_replay::Input;
 use egui::{Color32, ColorImage};
 use std::sync::Arc;
+
+const POINTER_REST_SECS: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Shown {
@@ -137,6 +140,7 @@ impl Emulator {
         let available = ui.available_size();
         let (layout, display_size) = self.fit(ui.ctx(), available, only);
 
+        let spots = self.take_spots().filter(|_| only.is_none());
         let tex = self.texture.as_ref()?;
         let leftover_x = (available.x - display_size.x).max(0.0);
         let leftover_y = (available.y - display_size.y).max(0.0);
@@ -148,17 +152,23 @@ impl Emulator {
         let shown = ui.horizontal(|ui| {
             ui.add_space((leftover_x / 2.0).floor());
             let (rect, _) = ui.allocate_exact_size(display_size, egui::Sense::hover());
+            let layout = match &spots {
+                Some(spots) => layout.spotted(rect, spots),
+                None => layout,
+            };
             layout.paint(ui, tex.id(), self.upscaled_screen(ui.ctx()), rect);
-            rect
+            (rect, layout)
         });
+        let (rect, layout) = shown.inner;
         if only.is_none_or(|index| index == 0) {
-            self.place_screens(layout, shown.inner);
+            self.place_screens(ui.ctx(), layout, rect);
         }
-        self.see_touch(layout.point(ui, shown.inner));
-        Some(shown.inner)
+        self.see_touch(layout.point(ui, rect));
+        Some(rect)
     }
 
-    fn place_screens(&mut self, layout: ScreenLayout, picture: egui::Rect) {
+    fn place_screens(&mut self, ctx: &egui::Context, layout: ScreenLayout, picture: egui::Rect) {
+        self.placed_pass = Some(ctx.cumulative_pass_nr());
         self.placed_screens.clear();
         self.placed_screens
             .extend(layout.place(picture).map(|placed| placed.rect));
@@ -170,6 +180,34 @@ impl Emulator {
 
     pub fn placed_screens(&self) -> &[egui::Rect] {
         &self.placed_screens
+    }
+
+    pub fn rest_pointer(&self, ctx: &egui::Context) {
+        let drawn = self.placed_pass == Some(ctx.cumulative_pass_nr());
+        let over = drawn
+            && ctx.pointer_hover_pos().is_some_and(|at| {
+                ctx.layer_id_at(at)
+                    .is_some_and(|layer| layer.order == egui::Order::Background)
+                    && self.placed_screens.iter().any(|rect| rect.contains(at))
+            });
+        let still = ctx.input(|i| i.pointer.time_since_last_movement());
+        if self.hide_pointer && self.is_running() && over && still >= POINTER_REST_SECS {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+    }
+
+    fn take_spots(&mut self) -> Option<ScreenSpots> {
+        let spots = self.screen_spots.take();
+        #[cfg(all(test, feature = "nds"))]
+        {
+            self.spotted_room = spots.map(|spots| spots.room);
+        }
+        spots
+    }
+
+    #[cfg(all(test, feature = "nds"))]
+    pub fn spotted_room(&self) -> Option<egui::Rect> {
+        self.spotted_room
     }
 
     pub fn placed_touch(&self) -> Option<egui::Rect> {
@@ -199,7 +237,7 @@ impl Emulator {
             return;
         }
         let core = self.seat.core_mut();
-        core.machine.set_touch(self.touch);
+        core.feed(Input::Touch(self.touch.map(|touch| (touch.x, touch.y))));
         core.flight.set_touch(self.touch);
     }
 
@@ -223,7 +261,11 @@ impl Emulator {
         let (layout, display_size) = self.fit(ui.ctx(), area.size(), None);
         let target = place(display_size);
         let layout = self.sampled(layout);
-        self.place_screens(layout, target);
+        let layout = match self.take_spots() {
+            Some(spots) => layout.spotted(target, &spots),
+            None => layout,
+        };
+        self.place_screens(ui.ctx(), layout, target);
         if let Some(tex) = &self.texture {
             layout.paint(ui, tex.id(), self.upscaled_screen(ui.ctx()), target);
         }
@@ -236,7 +278,7 @@ impl Emulator {
         self.shown_layout = Some(layout);
         let (_, size) = fit_screen(layout, rect.size(), ScalingMode::Fit);
         let target = egui::Rect::from_center_size(rect.center(), size);
-        self.place_screens(layout, target);
+        self.place_screens(ui.ctx(), layout, target);
         if self.texture.is_none() {
             self.update_texture(ui.ctx());
         }
@@ -281,13 +323,25 @@ impl Emulator {
     }
 
     pub fn screenshot_of(&self, source: &[u8], scale: usize) -> (usize, usize, Vec<u8>) {
+        self.screenshot_of_screen(source, scale, None)
+    }
+
+    pub fn screenshot_of_screen(
+        &self,
+        source: &[u8],
+        scale: usize,
+        only: Option<usize>,
+    ) -> (usize, usize, Vec<u8>) {
         let scale = scale.max(1);
         let video = self.video();
         let rgba = self.paint_frame(source, scale);
         if !self.two_screens() {
             return (video.width * scale, video.height * scale, rgba);
         }
-        let layout = self.shown_layout();
+        let layout = match only {
+            Some(index) => self.shown_layout().only(index),
+            None => self.shown_layout(),
+        };
         let mut arranged = Vec::new();
         layout.compose(&rgba, scale, &mut arranged);
         let (width, height) = layout.frame_size(scale);

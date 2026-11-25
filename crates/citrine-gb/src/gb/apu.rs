@@ -805,9 +805,9 @@ impl Apu {
             right += ch4_sample;
         };
 
-        left *= (self.nr50.volume_left + 1) as f32;
+        left *= ((self.nr50.volume_left & 0b111) + 1) as f32;
         left /= 64.0;
-        right *= (self.nr50.volume_right + 1) as f32;
+        right *= ((self.nr50.volume_right & 0b111) + 1) as f32;
         right /= 64.0;
 
         (left, right)
@@ -922,6 +922,25 @@ mod tests {
             gb.run_frame();
         }
         gb.apu.audio_buffer.iter().any(|s| s.abs() > 0.01)
+    }
+
+    #[test]
+    fn a_damaged_master_volume_plays_at_its_register_bits() {
+        let mut played = Vec::new();
+        for volume in [7, 255] {
+            let mut gb = GameBoy::new_empty(GbModel::Dmg);
+            gb.load_rom(&tone_rom()).expect("load");
+            for _ in 0..5 {
+                gb.run_frame();
+            }
+            gb.apu.nr50.volume_left = volume;
+            gb.apu.nr50.volume_right = volume;
+            gb.apu.audio_buffer.clear();
+            gb.run_frame();
+            played.push(gb.apu.audio_buffer.clone());
+        }
+        assert!(played[0].iter().any(|s| s.abs() > 0.01));
+        assert_eq!(played[0], played[1]);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use super::links::{CostMeter, DsCost};
 use super::pace;
 use super::rejoin::KEPT_FRAMES;
 use crate::utils::avg_timer::AvgTimer;
@@ -32,8 +33,15 @@ const REPAY_GAP: u32 = 3;
 const WATCH_BEHIND: u32 = 6;
 const WAIT_WINDOW: u32 = 300;
 const WAIT_LIMIT: usize = 5;
-const CALM_FRAMES: u32 = 1200;
+pub(super) const CALM_FRAMES: u32 = 1200;
+const QUICK_CALM_FRAMES: u32 = 60;
+const QUICK_GAP: u32 = 2;
 const EASE_SLACK: u32 = 2;
+const LONG_STALL: u32 = 3;
+const RISE_STALL: u32 = 2;
+const SPARE_FRAMES: u32 = 60;
+const SPELL_DROP: u32 = 2;
+const SPREAD_TICKS: u32 = 15;
 const PACE_STEP: u32 = 30;
 const PACE_SAMPLES: usize = 9;
 const SLOW_PACE: f64 = 0.98;
@@ -54,6 +62,9 @@ pub struct Ticks {
     pub cable: Option<bool>,
     pub saves: bool,
     pub round_trip_ms: u32,
+    pub spread_ms: u32,
+    pub aim: Option<u32>,
+    pub rise_aim: Option<u32>,
     pub now: Instant,
 }
 
@@ -195,6 +206,14 @@ impl Linked {
 
     fn sync(&self) -> Sync {
         each!(self, s => s.sync())
+    }
+
+    fn set_budget(&mut self, budget: u32) {
+        each!(self, s => s.set_budget(budget))
+    }
+
+    fn last_rollback(&self) -> u32 {
+        each!(self, s => s.last_rollback())
     }
 
     fn frame(&self) -> u32 {
@@ -342,6 +361,10 @@ impl Linked {
         each!(self, s => s.checkpoint_cable(frame))
     }
 
+    fn local_from_peer(&self) -> bool {
+        each!(self, s => s.local_from_peer())
+    }
+
     fn input(&self, player: Player, frame: u32) -> Option<Input> {
         each!(self, s => s.input(player, frame))
     }
@@ -418,7 +441,24 @@ pub struct Rollback {
     hidden: bool,
     delay: u32,
     least_delay: u32,
+    aim: u32,
+    rise_aim: Option<u32>,
+    quick: bool,
     delay_room: u32,
+    delay_cap: u32,
+    spell_from: Option<u32>,
+    spell_top: u32,
+    rose: Option<(u32, u32)>,
+    spread_ms: u32,
+    stall_run: u32,
+    stall_base: u32,
+    heard_frame: u32,
+    heard_tick: u32,
+    stall_quiet: bool,
+    echo: Option<(u32, u32)>,
+    held_delay: Option<u32>,
+    last_wait: u32,
+    least_spare: u32,
     calm_since: u32,
     least_slack: u32,
     ticks: u32,
@@ -442,6 +482,7 @@ pub struct Rollback {
     save: Option<SramDump>,
     ticked: Ticked,
     frame_timer: AvgTimer,
+    meter: Option<CostMeter>,
     #[cfg(test)]
     pub log: Log,
 }
@@ -459,6 +500,7 @@ impl Lendable for Rollback {
         self.since_repay = self.since_repay.saturating_add(due);
         if ran
             && self.owed > 0
+            && self.spell_from.is_none()
             && self.since_repay >= REPAY_GAP
             && self.ahead < AHEAD_LIMIT - REPAY_ROOM
             && self.session.remote_frame() > self.session.frame() + REPAY_SPARE
@@ -468,6 +510,9 @@ impl Lendable for Rollback {
             self.owed -= 1;
             self.since_repay = 0;
         }
+        self.spread_ms = plan.spread_ms;
+        self.aim_at(plan.aim);
+        self.rise_aim = plan.rise_aim;
         self.ease_delay();
     }
 }
@@ -795,7 +840,24 @@ impl Rollback {
             hidden: false,
             delay: start.delay as u32,
             least_delay: start.delay as u32,
+            aim: start.delay as u32,
+            rise_aim: None,
+            quick: false,
             delay_room: 0,
+            delay_cap: 0,
+            spell_from: None,
+            spell_top: 0,
+            rose: None,
+            spread_ms: 0,
+            stall_run: 0,
+            stall_base: 0,
+            heard_frame: 0,
+            heard_tick: 0,
+            stall_quiet: false,
+            echo: None,
+            held_delay: None,
+            last_wait: 0,
+            least_spare: u32::MAX,
             calm_since: 0,
             least_slack: u32::MAX,
             ticks: 0,
@@ -819,6 +881,7 @@ impl Rollback {
             save: None,
             ticked: Ticked::default(),
             frame_timer: AvgTimer::default(),
+            meter: None,
             #[cfg(test)]
             log: Log {
                 started,
@@ -973,12 +1036,34 @@ impl Rollback {
         self.session.sync()
     }
 
+    pub fn measure_cost(&mut self) {
+        self.meter = Some(CostMeter::default());
+    }
+
+    pub fn measured_cost(&self) -> Option<DsCost> {
+        self.meter.as_ref().and_then(CostMeter::cost)
+    }
+
+    fn note_cost(&mut self, spent: Duration) {
+        let Some(meter) = &mut self.meter else {
+            return;
+        };
+        meter.note(spent, self.session.last_rollback());
+        if let Some(cost) = meter.cost() {
+            self.session.set_budget(cost.budget());
+        }
+    }
+
     pub fn frame(&self) -> u32 {
         self.session.frame()
     }
 
     pub fn resyncs(&self) -> u32 {
         self.resyncs
+    }
+
+    pub fn local_from_peer(&self) -> bool {
+        self.session.local_from_peer()
     }
 
     #[cfg(test)]
@@ -995,6 +1080,29 @@ impl Rollback {
             cable: None,
         });
         Some(len)
+    }
+
+    #[cfg(test)]
+    pub fn send_resync_with(&mut self, edit: impl FnOnce(&mut GameBoy)) -> Option<()> {
+        use citrine_gb::console::Rollback as _;
+        let frame = self.session.latest_checkpoint()?;
+        let data = self.session.checkpoint(frame, Player::Two)?;
+        let mut gb = match &self.session {
+            Linked::Gb(s) => s.console(Player::Two).decode_state(&data).ok()?,
+            #[cfg(feature = "gba")]
+            _ => return None,
+        };
+        edit(&mut gb);
+        let data = gb.encode_state().ok()?;
+        self.session.resync(frame, Player::Two, &data, None).ok()?;
+        self.outgoing.push(PlayMsg::Resync {
+            round: self.round,
+            frame,
+            unit: 1,
+            data,
+            cable: None,
+        });
+        Some(())
     }
 
     pub fn cable_plugged(&self) -> bool {
@@ -1210,14 +1318,35 @@ impl Rollback {
             }
             self.filled += 1;
         }
+        if self.session.remote_frame() != self.heard_frame {
+            self.heard_frame = self.session.remote_frame();
+            self.heard_tick = self.ticks;
+        }
+        let slack = (self.session.remote_frame() + self.session.sync().budget())
+            .saturating_sub(self.session.frame());
+        self.least_spare = self.least_spare.min(slack);
         if self.ahead <= AHEAD_LIMIT && !self.partner_slow() {
-            let slack = (self.session.remote_frame() + self.session.sync().budget())
-                .saturating_sub(self.session.frame());
             self.least_slack = self.least_slack.min(slack);
         }
+        if let Some((_, until)) = self.echo
+            && self.ticks >= until
+        {
+            self.echo = None;
+            if let Some(delay) = self.held_delay.take() {
+                self.follow_lower(delay);
+            }
+        }
+        let started = self.meter.is_some().then(Instant::now);
         let ran = self.session.advance(split) == Advance::Ran;
+        if ran && let Some(started) = started {
+            self.note_cost(started.elapsed());
+        }
         if ran {
             self.stalled_since = None;
+            let run = std::mem::take(&mut self.stall_run);
+            if run >= LONG_STALL {
+                self.stalled_long(run);
+            }
             if self.session.frame().is_multiple_of(SAVE_EVERY)
                 && let Some(save) = self.session.local_save(false)
             {
@@ -1226,8 +1355,24 @@ impl Rollback {
         } else {
             self.stalled_since.get_or_insert(now);
             self.counts.waited += 1;
-            self.owed = (self.owed + 1).min(MAX_OWED);
-            if self.ahead <= AHEAD_LIMIT && !self.partner_slow() {
+            if self.spell_from.is_none() {
+                self.owed = (self.owed + 1).min(MAX_OWED);
+            }
+            if self.stall_run == 0 {
+                self.stall_base = self.delay;
+            }
+            self.stall_run += 1;
+            if self.stall_run == 1 {
+                self.stall_quiet = self.went_quiet();
+            }
+            if self.stall_run >= RISE_STALL || self.stall_quiet {
+                self.rise_in_stall();
+            }
+            self.last_wait = self.ticks;
+            self.least_spare = u32::MAX;
+            if self.aim >= self.delay + QUICK_GAP
+                || (self.ahead <= AHEAD_LIMIT && !self.partner_slow())
+            {
                 self.note_wait();
             }
         }
@@ -1273,7 +1418,16 @@ impl Rollback {
 
     fn note_wait(&mut self) {
         self.calm();
-        if self.delay_room == 0 || self.group.is_some() || self.ticks <= WAIT_WINDOW {
+        if !self.can_rise() || self.group.is_some() || self.ticks <= WAIT_WINDOW {
+            return;
+        }
+        if self.delay_cap > 0
+            && self
+                .rise_aim
+                .is_some_and(|aim| aim >= self.delay + QUICK_GAP)
+        {
+            self.waits.clear();
+            self.rise_to_aim();
             return;
         }
         let now = self.ticks;
@@ -1302,12 +1456,42 @@ impl Rollback {
         }
     }
 
-    fn step_up(&mut self) {
-        if self.delay_room == 0 {
+    fn rise_to_aim(&mut self) {
+        let aim = self.rise_aim.unwrap_or(self.aim);
+        if self.host {
+            self.jump_to(aim);
             return;
         }
-        self.delay_room -= 1;
+        #[cfg(all(test, feature = "nds"))]
+        {
+            self.log.asks += 1;
+        }
+        self.outgoing.push(PlayMsg::Delay {
+            round: self.round,
+            delay: aim.min(self.delay_cap) as u8,
+        });
+    }
+
+    fn can_rise(&self) -> bool {
+        self.delay_room > 0 || (self.spell_from.is_some() && self.delay < self.delay_cap)
+    }
+
+    fn step_up(&mut self) {
+        if !self.can_rise() {
+            return;
+        }
+        let from = self.rise_from().unwrap_or(self.delay);
+        self.rose = Some((from, self.ticks));
+        if self.delay_cap > 0 && self.delay + 1 >= from + SPELL_DROP {
+            self.start_spell(from);
+        }
         self.delay += 1;
+        self.owed = 0;
+        self.delay_room = match self.spell_from {
+            Some(_) => self.spell_room(self.delay),
+            None => self.delay_room - 1,
+        };
+        self.quick = false;
         self.calm();
         self.outgoing.push(PlayMsg::Delay {
             round: self.round,
@@ -1315,17 +1499,216 @@ impl Rollback {
         });
     }
 
+    fn stalled_long(&mut self, frames: u32) {
+        if !self.may_jump() {
+            return;
+        }
+        let to = (self.stall_base + frames)
+            .max(self.rise_aim.unwrap_or(0))
+            .min(self.delay_cap);
+        if self.host {
+            self.jump_to(to);
+        } else if to > self.delay {
+            #[cfg(all(test, feature = "nds"))]
+            {
+                self.log.asks += 1;
+            }
+            self.outgoing.push(PlayMsg::Delay {
+                round: self.round,
+                delay: to as u8,
+            });
+        }
+    }
+
+    fn went_quiet(&self) -> bool {
+        let frame_ms = pace::frame_ms(self.timing());
+        let quiet = self.ticks.saturating_sub(self.heard_tick + 1);
+        f64::from(quiet) * frame_ms > f64::from(self.spread_ms) + frame_ms
+    }
+
+    fn may_jump(&self) -> bool {
+        self.delay_cap > 0
+            && self.group.is_none()
+            && self.ticks > WAIT_WINDOW
+            && (!self.partner_slow() || self.aim >= self.stall_base + QUICK_GAP)
+    }
+
+    fn rise_in_stall(&mut self) {
+        if !self.may_jump() {
+            return;
+        }
+        let to = (self.stall_base + self.stall_run).min(self.delay_cap);
+        if to <= self.delay {
+            return;
+        }
+        if self.host {
+            self.jump_to(to);
+            return;
+        }
+        if !self.can_rise() {
+            return;
+        }
+        #[cfg(all(test, feature = "nds"))]
+        {
+            self.log.asks += 1;
+        }
+        let from = self
+            .echo
+            .map_or(self.stall_base, |(from, _)| from.min(self.stall_base));
+        self.echo = Some((from, self.ticks + SPARE_FRAMES));
+        self.follow_rise(to);
+        self.outgoing.push(PlayMsg::Delay {
+            round: self.round,
+            delay: to as u8,
+        });
+    }
+
+    fn follow_lower(&mut self, delay: u32) {
+        if delay < self.delay {
+            let spell = self.spell_from.is_some();
+            if self.spell_from.is_some_and(|from| delay <= from) {
+                self.spell_from = None;
+            }
+            self.delay_room = if spell {
+                self.spell_room(delay)
+            } else {
+                self.delay_room + (self.delay - delay)
+            };
+            self.delay = delay;
+        } else if delay == self.delay {
+            self.delay_room = 0;
+        }
+    }
+
+    fn follow_rise(&mut self, delay: u32) {
+        let from = self.rise_from().unwrap_or(self.delay);
+        self.rose = Some((from, self.ticks));
+        if self.delay_cap > 0
+            && (delay > self.delay + self.delay_room || delay >= from + SPELL_DROP)
+        {
+            self.start_spell(from);
+        }
+        self.delay_room = match self.spell_from {
+            Some(_) => self.spell_room(delay),
+            None => self.delay_room.saturating_sub(delay - self.delay),
+        };
+        self.delay = delay;
+        self.owed = 0;
+    }
+
+    fn jump_to(&mut self, to: u32) {
+        let to = to.min(self.delay_cap);
+        if to <= self.delay {
+            return;
+        }
+        self.start_spell(self.rise_from().unwrap_or(self.delay));
+        self.delay = to;
+        self.owed = 0;
+        self.delay_room = self.spell_room(to);
+        self.quick = false;
+        self.last_wait = self.ticks;
+        self.least_spare = u32::MAX;
+        self.calm();
+        self.outgoing.push(PlayMsg::Delay {
+            round: self.round,
+            delay: self.delay as u8,
+        });
+    }
+
+    fn start_spell(&mut self, from: u32) {
+        if self.spell_from.is_none() {
+            self.spell_from = Some(from.min(self.delay));
+            self.spell_top = self.delay + self.delay_room;
+        }
+    }
+
+    fn spell_room(&self, delay: u32) -> u32 {
+        match self.spell_from {
+            Some(from) if delay > from => self.delay_cap.saturating_sub(delay),
+            _ => self.spell_top.saturating_sub(delay),
+        }
+    }
+
+    fn spare_window(&self) -> u32 {
+        let spread = f64::from(self.spread_ms) / pace::frame_ms(self.timing());
+        SPARE_FRAMES + SPREAD_TICKS * spread.ceil() as u32
+    }
+
+    fn rise_from(&self) -> Option<u32> {
+        self.rose
+            .filter(|&(_, at)| self.ticks.saturating_sub(at) < WAIT_WINDOW)
+            .map(|(from, _)| from)
+    }
+
+    fn ease_spell(&mut self) -> bool {
+        let Some(from) = self.spell_from else {
+            return false;
+        };
+        if self.delay <= from {
+            self.spell_from = None;
+            return false;
+        }
+        if self.ticks.saturating_sub(self.last_wait) < self.spare_window() {
+            return false;
+        }
+        if self.least_spare == u32::MAX || self.least_spare < EASE_SLACK + SPELL_DROP {
+            self.last_wait = self.ticks;
+            self.least_spare = u32::MAX;
+            return false;
+        }
+        let mut to = self
+            .delay
+            .saturating_sub(self.least_spare - EASE_SLACK)
+            .max(from);
+        if to <= from + 1 {
+            to = from;
+        }
+        self.delay = to;
+        self.delay_room = self.spell_room(to);
+        self.last_wait = self.ticks;
+        self.least_spare = u32::MAX;
+        if to <= from {
+            self.spell_from = None;
+        }
+        self.calm();
+        self.outgoing.push(PlayMsg::Delay {
+            round: self.round,
+            delay: self.delay as u8,
+        });
+        true
+    }
+
     fn calm(&mut self) {
         self.calm_since = self.ticks;
         self.least_slack = u32::MAX;
     }
 
+    fn aim_at(&mut self, aim: Option<u32>) {
+        let aim = aim.unwrap_or(self.least_delay);
+        if aim != self.aim {
+            self.aim = aim;
+            self.quick = aim + QUICK_GAP <= self.delay;
+        }
+    }
+
+    fn floor(&self) -> u32 {
+        if self.aim + QUICK_GAP <= self.least_delay {
+            self.aim
+        } else {
+            self.least_delay
+        }
+    }
+
     fn ease_delay(&mut self) {
-        if !self.host
-            || self.group.is_some()
-            || self.delay <= self.least_delay
-            || self.ticks.saturating_sub(self.calm_since) < CALM_FRAMES
-        {
+        let calm = if self.quick && self.delay > self.aim && self.spell_from.is_none() {
+            QUICK_CALM_FRAMES
+        } else {
+            CALM_FRAMES
+        };
+        if !self.host || self.group.is_some() || self.ease_spell() {
+            return;
+        }
+        if self.delay <= self.floor() || self.ticks.saturating_sub(self.calm_since) < calm {
             return;
         }
         if self.least_slack < EASE_SLACK && !self.partner_slow() {
@@ -1333,7 +1716,10 @@ impl Rollback {
             return;
         }
         self.delay -= 1;
-        self.delay_room += 1;
+        self.delay_room = match self.spell_from {
+            Some(_) => self.spell_room(self.delay),
+            None => self.delay_room + 1,
+        };
         self.calm();
         self.outgoing.push(PlayMsg::Delay {
             round: self.round,
@@ -1343,6 +1729,10 @@ impl Rollback {
 
     pub fn set_delay_room(&mut self, room: u32) {
         self.delay_room = room;
+    }
+
+    pub fn set_delay_cap(&mut self, cap: u32) {
+        self.delay_cap = cap;
     }
 
     #[cfg(all(test, feature = "nds"))]
@@ -1627,7 +2017,9 @@ impl Rollback {
                     if delay > self.delay {
                         self.calm();
                     }
-                    if delay > self.delay && self.delay_room == 0 {
+                    if self.delay_cap > 0 && delay >= self.delay + LONG_STALL {
+                        self.jump_to(delay);
+                    } else if delay > self.delay && !self.can_rise() {
                         self.outgoing.push(PlayMsg::Delay {
                             round: self.round,
                             delay: self.delay as u8,
@@ -1636,13 +2028,19 @@ impl Rollback {
                         self.step_up();
                     }
                 } else if delay > self.delay {
-                    self.delay_room = self.delay_room.saturating_sub(delay - self.delay);
-                    self.delay = delay;
-                } else if delay < self.delay {
-                    self.delay_room += self.delay - delay;
-                    self.delay = delay;
+                    self.held_delay = None;
+                    self.follow_rise(delay);
+                } else if self
+                    .echo
+                    .is_some_and(|(from, until)| delay > from && self.ticks < until)
+                {
+                    self.held_delay = (delay < self.delay).then_some(delay);
+                    if delay == self.delay {
+                        self.delay_room = 0;
+                    }
                 } else {
-                    self.delay_room = 0;
+                    self.held_delay = None;
+                    self.follow_lower(delay);
                 }
             }
             _ => {}

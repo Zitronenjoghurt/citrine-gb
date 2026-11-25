@@ -30,7 +30,7 @@ pub fn stat_rows(overview: &crate::stats::Overview) -> Vec<(&'static str, &'stat
         stats::play_time(overview.week_ms),
     )];
     if let Some(game) = overview.most_played() {
-        rows.push((icons::GAME_CONTROLLER, "Most played", game.name.clone()));
+        rows.push((icons::CARTRIDGE, "Most played", game.name.clone()));
     }
     rows
 }
@@ -50,7 +50,7 @@ impl Citrine {
             );
         }
         kit::place(ui, "you_place", |ui| {
-            kit::place_title(ui, Place::You.label(), |_| {});
+            kit::place_heading(ui, Place::You.label());
             if account.is_some() {
                 self.you_face(ui);
             }
@@ -131,17 +131,18 @@ impl Citrine {
             {
                 open = Some(YouSheet::DisplayName);
             }
-            let (id_value, id_icon) = if copied {
-                ("Copied".to_owned(), icons::CHECK)
+            let id_icon = if copied {
+                icons::CHECK_FAT
             } else {
-                (account.online_id.clone(), icons::COPY)
+                icons::COPY
             };
             if list
                 .row(
                     Row::new("Online ID")
-                        .icon(icons::GLOBE)
-                        .value(id_value)
-                        .trailing(id_icon),
+                        .icon(icons::GLOBE_SIMPLE)
+                        .value(account.online_id.clone())
+                        .trailing(id_icon)
+                        .trailing_accent(copied),
                 )
                 .clicked()
             {
@@ -267,7 +268,8 @@ impl Citrine {
                 .closed
             }
             YouSheet::Devices => {
-                sheet::show(ctx, id, "", |ui| online::devices_body(ui, client, form)).closed
+                let s = &mut self.ui.settings;
+                sheet::show(ctx, id, "", |ui| online::devices_body(ui, s, client, form)).closed
             }
             YouSheet::Accounts => {
                 let s = &mut self.ui.settings;
@@ -336,11 +338,7 @@ mod tests {
             stat_rows(&overview),
             [
                 (icons::CHART_BAR, "This week", "6 h 20 min".to_owned()),
-                (
-                    icons::GAME_CONTROLLER,
-                    "Most played",
-                    "Pokémon Silver".to_owned()
-                )
+                (icons::CARTRIDGE, "Most played", "Pokémon Silver".to_owned())
             ]
         );
     }

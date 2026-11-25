@@ -24,7 +24,9 @@ import android.view.inputmethod.InputMethodManager
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.androidgamesdk.GameActivity
@@ -57,6 +59,7 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = nativeBack()
         })
+        followKeyboard(window.decorView)
         val input = getSystemService(InputManager::class.java)
         input.registerInputDeviceListener(this, null)
         InputDevice.getDeviceIds().forEach(::onInputDeviceAdded)
@@ -113,6 +116,32 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
         if (!isChangingConfigurations) Process.killProcess(Process.myPid())
     }
 
+    private fun followKeyboard(view: View) {
+        val ime = WindowInsetsCompat.Type.ime()
+        val callback = object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+            override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+                if (animation.typeMask and ime == 0) return
+                val now = ViewCompat.getRootWindowInsets(view)?.getInsets(ime)?.bottom ?: return
+                nativeKeyboardStep(now)
+            }
+
+            override fun onProgress(
+                insets: WindowInsetsCompat,
+                running: MutableList<WindowInsetsAnimationCompat>,
+            ): WindowInsetsCompat {
+                if (running.any { it.typeMask and ime != 0 }) {
+                    nativeKeyboardStep(insets.getInsets(ime).bottom)
+                }
+                return insets
+            }
+
+            override fun onEnd(animation: WindowInsetsAnimationCompat) {
+                if (animation.typeMask and ime != 0) nativeKeyboardStep(-1)
+            }
+        }
+        ViewCompat.setWindowInsetsAnimationCallback(view, callback)
+    }
+
     override fun onApplyWindowInsets(v: View, insets: WindowInsetsCompat): WindowInsetsCompat {
         val safe = insets.getInsets(
             WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
@@ -143,6 +172,9 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
         super.onRequestPermissionsResult(code, permissions, results)
         if (code == CameraFeed.PERMISSION_REQUEST) {
             camera.permissionAnswered(results.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+        }
+        if (code == MICROPHONE_REQUEST) {
+            nativeMicrophone(results.firstOrNull() == PackageManager.PERMISSION_GRANTED)
         }
         if (code == StepCounter.PERMISSION_REQUEST) {
             stepCounter.permissionAnswered(results.firstOrNull() == PackageManager.PERMISSION_GRANTED)
@@ -261,6 +293,14 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
         }
     }
 
+    fun askMicrophone() = runOnUiThread {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            nativeMicrophone(true)
+        } else {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), MICROPHONE_REQUEST)
+        }
+    }
+
     fun senses(motion: Boolean, light: Boolean, wantCamera: Boolean) = runOnUiThread {
         senses.follow(motion, light)
         camera.follow(wantCamera)
@@ -268,7 +308,14 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     fun rumble(strength: Float) = runOnUiThread { senses.rumble(strength) }
 
-    fun steps(on: Boolean, ask: Boolean) = runOnUiThread { stepCounter.follow(on, ask) }
+    fun steps(on: Boolean, ask: Boolean, keep: Boolean) = runOnUiThread {
+        stepCounter.follow(on, ask)
+        StepService.follow(this, keep)
+    }
+
+    fun deviceName(): String =
+        android.provider.Settings.Global.getString(contentResolver, android.provider.Settings.Global.DEVICE_NAME)
+            ?.takeIf { it.isNotBlank() } ?: Build.MODEL.orEmpty()
 
     fun openSecondDisplay() = runOnUiThread { second.open() }
 
@@ -337,7 +384,7 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     fun copyIntoTree(tree: String, dir: String) = documents.copyIntoTree(tree, File(dir))
 
-    fun listRoms(id: Int, tree: String) = documents.listRoms(id, tree)
+    fun listRoms(id: Int, tree: String, depth: Int) = documents.listRoms(id, tree, depth)
 
     fun readRom(id: Int, uri: String) = documents.readRom(id, uri)
 
@@ -350,6 +397,8 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
     external fun nativeRoms(id: Int, names: Array<String>, uris: Array<String>, readable: Boolean)
 
     private external fun nativeSafeArea(left: Int, top: Int, right: Int, bottom: Int, ime: Int)
+
+    private external fun nativeKeyboardStep(ime: Int)
 
     private external fun nativePause()
 
@@ -381,6 +430,8 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
 
     private external fun nativeCameraDenied()
 
+    private external fun nativeMicrophone(granted: Boolean)
+
     private external fun nativeSecondDisplay(name: String?)
 
     private external fun nativeSecondSurface(surface: Surface?, width: Int, height: Int, density: Float)
@@ -394,6 +445,7 @@ class MainActivity : GameActivity(), InputManager.InputDeviceListener {
     private external fun nativeOpen(kind: String, from: String, session: String)
 
     companion object {
+        private const val MICROPHONE_REQUEST = 7305
         private const val PUSH_PREFS = "push"
         private const val BLOCKED = "blocked"
 

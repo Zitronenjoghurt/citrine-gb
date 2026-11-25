@@ -1,15 +1,17 @@
 use crate::app::Citrine;
 use crate::app::big_screen::Backdrop;
-use crate::app::big_screen::scroll::Following;
 use crate::app::tabs::stats::Page;
 use crate::app::tabs::{Tab, TabViewer, linked, playing};
+use crate::app::ui_state::screen_layouts::LayoutView;
 use crate::app::widgets::avatar;
 use crate::app::widgets::touch_controls::TouchInput;
-use egui::{Context, CornerRadius, Frame, Margin, Rect, Ui, Vec2, pos2, vec2};
+use egui::{Context, Frame, Margin, Rect, Ui, pos2, vec2};
 use egui_dock::TabViewer as _;
 use nav::Place;
 
 pub(crate) mod achievements;
+#[cfg(test)]
+mod chat_feel_tests;
 pub(crate) mod cheats;
 pub(crate) mod frame;
 mod game;
@@ -21,18 +23,25 @@ pub(super) mod hud;
 pub mod kit;
 #[cfg(test)]
 mod kit_guard;
+#[cfg(all(test, feature = "nds"))]
+mod layout_edit_tests;
 mod library;
 mod more;
 pub mod nav;
+#[cfg(test)]
+mod page_toast_tests;
 mod room;
 mod screens;
 pub(super) mod settings_list;
 mod settings_pages;
 pub mod sheet;
 mod strip;
+mod this_game;
 #[cfg(feature = "nds")]
 pub(crate) mod walker;
 mod you;
+
+pub const OPEN_ROM: &str = "Open a ROM";
 
 pub const TOUCH_TARGET_PX: f32 = 44.0;
 
@@ -45,17 +54,18 @@ pub struct MobileState {
     pub nav: nav::Nav,
     pub phone: bool,
     touch: TouchInput,
-    hidden: hide::HiddenUi,
+    pub(crate) hidden: hide::HiddenUi,
+    pub(crate) held_buttons: Vec<crate::app::ui_state::screen_layouts::Item>,
     layer_was_open: bool,
     history: history::BrowserHistory,
     held_pause: bool,
     more: more::MoreState,
     games_search: games::GamesSearch,
+    pub(in crate::app) files_sheet: Option<games::FilesView>,
     sheet: Option<settings_pages::Sheet>,
     you_sheet: Option<you::YouSheet>,
     join_sheet: Option<crate::app::widgets::settings::online::JoinSheet>,
     media_filter: bool,
-    screens_sheet: bool,
     pub(super) hud_sheet: Option<hud::HudSheet>,
     homebrew_info: Option<usize>,
     pub(super) library: library::LibrarySheets,
@@ -86,10 +96,10 @@ impl MobileState {
             || self.you_sheet.is_some()
             || self.join_sheet.is_some()
             || self.media_filter
-            || self.screens_sheet
             || self.hud_sheet.is_some()
             || self.homebrew_info.is_some()
             || self.library.open()
+            || self.files_sheet.is_some()
     }
 
     pub fn listen_for_back(&self) {
@@ -127,7 +137,7 @@ pub fn compact<'a>(ui: &Ui, button: egui::Button<'a>) -> egui::Button<'a> {
 }
 
 pub fn bar_track(ui: &Ui) -> Option<egui::Color32> {
-    (touch_square(ui) > 0.0).then(|| kit::icon_tile_fill(ui.visuals()))
+    (touch_square(ui) > 0.0).then(|| kit::bar_track(ui.visuals()))
 }
 
 pub fn switch(ui: &Ui, rect: Rect, t: f32) -> bool {
@@ -157,7 +167,6 @@ pub(super) fn landscape(ctx: &Context) -> bool {
 
 const PLACE_MAX_WIDTH: f32 = 560.0;
 const HINT_HEIGHT: f32 = 40.0;
-const FRAME_CORNER: u8 = 16;
 
 impl Citrine {
     pub(super) fn render_mobile(&mut self, ctx: &Context) {
@@ -168,6 +177,18 @@ impl Citrine {
         }
         if !self.game_open() {
             self.mobile.nav.leave_game();
+            self.mobile.hidden.forget();
+        }
+        if !big {
+            let view = if landscape(ctx) {
+                LayoutView::Landscape
+            } else {
+                LayoutView::Portrait
+            };
+            let wanted = self.mobile.nav.on_game()
+                && self.plays_phone_default(view)
+                && !self.editing_layout();
+            self.mobile.hidden.follow_default(wanted);
         }
         let bare = if big {
             self.mobile.nav.on_game() && !self.mobile.nav.more_open()
@@ -181,27 +202,52 @@ impl Citrine {
         self.hold_game_off_screen();
         let landscape = big || landscape(ctx);
         let screen = ctx.content_rect();
-        let rail = if landscape && !bare {
+        let typing = self.chat_typing(ctx);
+        let rail = if landscape && !bare && !big {
             frame::rail_width(&ctx.style())
+        } else {
+            0.0
+        };
+        let tabs = if big && !bare {
+            crate::app::big_screen::TAB_BAR_HEIGHT
         } else {
             0.0
         };
         let bar = if landscape {
             0.0
+        } else if let Some(covered) = typing {
+            (frame::bar_height(&ctx.style()) - covered).max(0.0)
         } else {
             frame::bar_height(&ctx.style())
         };
         let hints = if big && !bare { HINT_HEIGHT } else { 0.0 };
-        sheet::set_area(
-            ctx,
-            Some(Rect::from_min_max(
-                pos2(screen.left() + rail, screen.top()),
-                pos2(screen.right(), screen.bottom() - bar - hints),
-            )),
+        crate::app::big_screen::set_hint_room(ctx, hints);
+        crate::app::big_screen::set_tab_bottom(ctx, screen.top() + tabs);
+        crate::app::big_screen::set_named_tab(ctx, None);
+        let page = Rect::from_min_max(
+            pos2(screen.left() + rail, screen.top() + tabs),
+            pos2(screen.right(), screen.bottom() - bar - hints),
         );
+        sheet::set_area(ctx, Some(page));
         let entries = self.frame_entries();
         let bar_fill = kit::card_fill(&ctx.style().visuals);
         let picked = if bare {
+            None
+        } else if big {
+            egui::TopBottomPanel::top("big_tabs")
+                .exact_height(tabs)
+                .show_separator_line(false)
+                .frame(Frame::NONE.fill(bar_fill))
+                .show(ctx, |ui| self.big_tab_bar(ui));
+            None
+        } else if typing.is_some() && !landscape {
+            if bar > 0.0 {
+                egui::TopBottomPanel::bottom("place_bar_room")
+                    .exact_height(bar)
+                    .show_separator_line(false)
+                    .frame(Frame::NONE.fill(kit::page_fill(&ctx.style().visuals)))
+                    .show(ctx, |_| {});
+            }
             None
         } else if landscape {
             egui::SidePanel::left("place_rail")
@@ -222,9 +268,8 @@ impl Citrine {
         if let Some(place) = picked {
             self.go_place(place);
         }
-        let mut corner = CornerRadius::ZERO;
         if hints > 0.0 {
-            let bar = egui::TopBottomPanel::bottom("big_hints")
+            egui::TopBottomPanel::bottom("big_hints")
                 .exact_height(hints)
                 .show_separator_line(false)
                 .frame(
@@ -232,16 +277,7 @@ impl Citrine {
                         .fill(bar_fill)
                         .inner_margin(Margin::symmetric(16, 0)),
                 )
-                .show(ctx, |ui| self.big_hints(ui))
-                .response
-                .rect;
-            corner.sw = FRAME_CORNER;
-            let behind = Rect::from_min_size(
-                bar.left_top() - vec2(0.0, f32::from(FRAME_CORNER)),
-                Vec2::splat(f32::from(FRAME_CORNER)),
-            );
-            ctx.layer_painter(egui::LayerId::background())
-                .rect_filled(behind, 0.0, bar_fill);
+                .show(ctx, |ui| self.big_hints(ui));
         }
         let keys = self.pad_keys_room(ctx) - hints;
         if keys > 0.0 {
@@ -261,16 +297,40 @@ impl Citrine {
         } else {
             kit::page_fill(visuals)
         };
-        egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(fill).corner_radius(corner))
+        let (need, room) = self.toasts.page_strip(ctx);
+        if room > 0.0 {
+            egui::TopBottomPanel::bottom("toast_room")
+                .exact_height(room)
+                .show_separator_line(false)
+                .frame(Frame::NONE.fill(fill))
+                .show(ctx, |ui| {
+                    self.toasts
+                        .place_strip(ui.max_rect(), need.unwrap_or(room), kit::SIDE);
+                });
+        }
+        let fade = hints > 0.0 && !on_game;
+        crate::app::big_screen::scroll::set_fade(ctx, fade, room);
+        let shown = egui::CentralPanel::default()
+            .frame(Frame::NONE.fill(fill))
             .show(ctx, |ui| {
-                self.toasts.place_page(ui.max_rect());
+                if room == 0.0 {
+                    self.toasts.place_page(ui.max_rect());
+                }
                 self.show_place(ui, landscape);
-            });
-        if !big {
+            })
+            .response
+            .rect;
+        if fade {
+            crate::app::big_screen::scroll::fade_top(ctx, shown, fill);
+            crate::app::big_screen::scroll::fade_bottom(ctx, shown, fill, room);
+        }
+        if big {
+            self.big_home_menu(ctx, page);
+        } else {
             self.more_sheet(ctx);
         }
-        self.screens_sheet(ctx);
+        self.phone_layout_sheet(ctx);
+        self.layout_turn_wait(self.mobile.nav.on_game());
         self.hud_sheet(ctx);
     }
 
@@ -326,14 +386,17 @@ impl Citrine {
 
     fn hold_game_off_screen(&mut self) {
         let loaded = self.emulator.has_game();
+        if self.editing_layout() && (!loaded || !self.mobile.nav.game_in_view()) {
+            self.cancel_layout_edit();
+        }
         if !loaded || self.play.session().is_some() {
             self.mobile.held_pause = false;
             return;
         }
         let in_view =
-            (self.mobile.nav.game_in_view() && !self.moving_screen()) || self.walker_needs_game();
-        if !in_view && self.emulator.running && !self.load_needs_game() {
-            self.emulator.running = false;
+            (self.mobile.nav.game_in_view() && !self.editing_layout()) || self.walker_needs_game();
+        if !in_view && self.emulator.running && !self.load_needs_game() && self.emulator.try_pause()
+        {
             self.mobile.held_pause = true;
         } else if in_view && self.mobile.held_pause {
             self.emulator.running = true;
@@ -436,6 +499,10 @@ impl Citrine {
             self.rom_folders_page(ui);
             return;
         }
+        if tab == Tab::ThisGame {
+            self.this_game_page(ui);
+            return;
+        }
         if tab == Tab::Stats {
             Frame::new()
                 .inner_margin(TAB_PLACE_MARGIN)
@@ -461,6 +528,11 @@ impl Citrine {
         if let Some(name) = self.stats_game() {
             return name.to_owned();
         }
+        if tab == Tab::Achievements
+            && let Some(title) = self.achievements.boards.open_title()
+        {
+            return title.to_owned();
+        }
         if self.game_info_details_shown() {
             return self.game_info.view.page.label().to_owned();
         }
@@ -479,6 +551,7 @@ impl Citrine {
                 .unwrap_or(Tab::DsFiles.title())
                 .to_owned(),
             (Tab::Info, _) => "About".to_owned(),
+            (Tab::ThisGame, _) => self.this_game_title(),
             (tab, _) => tab.label().to_owned(),
         }
     }
@@ -490,10 +563,14 @@ impl Citrine {
             self.ui.linked.listing = false;
         } else if self.about_doc_shown().is_some() {
             self.mobile.about_doc = None;
+            self.mobile.nav.back();
         } else if self.game_info_details_shown() {
             self.game_info.view.details = false;
         } else if self.stats_game().is_some() {
             self.ui.stats.page = Page::Overview;
+        } else if self.mobile.showing(Tab::Achievements) && self.achievements.boards.open.is_some()
+        {
+            self.achievements.boards.open = None;
         } else if !(self.mobile.showing(Tab::DsFiles) && self.ui.ds_files.folder_up()) {
             self.mobile.nav.back();
         }
@@ -519,6 +596,8 @@ impl Citrine {
             stats: &self.stats,
             threads: &self.threads,
             ui: &mut self.ui,
+            #[cfg(feature = "nds")]
+            mic_test: self.mic.test(),
         }
     }
 
@@ -527,13 +606,13 @@ impl Citrine {
         if tab.scrolls_itself() {
             viewer.ui(ui, &mut tab);
         } else {
-            egui::ScrollArea::vertical()
+            let scroll = egui::ScrollArea::vertical()
                 .id_salt(("page_scroll", tab))
-                .auto_shrink(false)
-                .show_following(ui, |ui| {
-                    ui.style_mut().interaction.selectable_labels = false;
-                    viewer.ui(ui, &mut tab);
-                });
+                .auto_shrink(false);
+            kit::clear_of_toasts(ui, scroll, |ui| {
+                ui.style_mut().interaction.selectable_labels = false;
+                viewer.ui(ui, &mut tab);
+            });
         }
     }
 
@@ -633,12 +712,18 @@ impl Citrine {
         let big = self.big_screen_on();
         let escape = touch && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         if escape && !self.mobile.layer_was_open {
-            if big && self.moving_screen() {
-                self.stop_moving_screen();
+            if big && self.editing_layout() {
+                self.cancel_layout_edit();
+            } else if big && self.mobile.nav.more_open() && self.ui.layout_sheet.is_some() {
+                self.close_layout_sheet_layer(false);
             } else if big && self.mobile.nav.on_game() && !self.mobile.nav.more_open() {
                 self.open_game_menu();
+            } else if self.editing_layout() {
+                self.cancel_layout_edit();
             } else if self.mobile.hidden.on() {
-                self.mobile.hidden.show();
+                self.mobile.hidden.keep_shown();
+            } else if self.in_game_scope() {
+                self.ui.settings.leave_scope();
             } else {
                 self.page_back();
             }
@@ -652,12 +737,13 @@ impl Citrine {
         let depth = if touch {
             self.mobile.nav.depth()
                 + usize::from(self.mobile.hidden.on())
+                + usize::from(self.editing_layout())
                 + usize::from(self.games_search_open())
                 + usize::from(self.chat_open())
                 + usize::from(self.events_open())
                 + usize::from(self.game_info_details_shown())
-                + usize::from(self.about_doc_shown().is_some())
                 + usize::from(self.stats_game().is_some())
+                + usize::from(self.in_game_scope())
                 + crate::app::viewer::depth(&self.ui.viewer)
         } else {
             0
@@ -675,6 +761,11 @@ impl Citrine {
 
     pub(super) fn browser_backs(&mut self) -> usize {
         self.mobile.history.take_backs()
+    }
+
+    fn in_game_scope(&self) -> bool {
+        self.scope_bar_shown()
+            && self.ui.settings.scope() == crate::app::ui_state::per_game::Scope::ThisGame
     }
 
     fn events_open(&self) -> bool {
@@ -696,6 +787,13 @@ impl Citrine {
             Page::Game { name, .. } if self.mobile.showing(Tab::Stats) => Some(name),
             _ => None,
         }
+    }
+
+    fn chat_typing(&self, ctx: &Context) -> Option<f32> {
+        let keyboard = crate::app::widgets::soft_keyboard::shown(ctx);
+        let chat = &self.ui.friends.chat;
+        (self.chat_open() && (keyboard > 0.0 || chat.panel_open()))
+            .then(|| keyboard + chat.emoji_room(ctx))
     }
 
     fn chat_open(&self) -> bool {
@@ -722,7 +820,7 @@ impl Citrine {
         use crate::utils::save_files::ROM_FILTER;
         self.try_start_audio();
         crate::utils::file_loader::FileLoader::new()
-            .title("Load ROM")
+            .title(OPEN_ROM)
             .add_filter(ROM_FILTER.0, ROM_FILTER.1)
             .dispatch(&self.files.spawner, self.files.rom_tx.clone());
     }

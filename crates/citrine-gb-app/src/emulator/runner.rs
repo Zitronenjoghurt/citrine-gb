@@ -1,9 +1,10 @@
 use super::fast_forward::Spending;
 use super::gimmicks::Catch;
 use super::rewind::{Rewind, RewindPlan};
+use super::tape_play::{SEEK_BUDGET, TapePlay};
 use crate::app::ui_state::keybinds::{DsButton, GbButton, Shoulder};
 use crate::audio::mix::{Mixer, SoundLevels};
-use crate::audio::pacer::AudioFeed;
+use crate::audio::pacer::{AudioFeed, FastForwardSound};
 use crate::audio::preview::Playing;
 use crate::game_report::flight::Flight;
 use crate::local_link::LocalLink;
@@ -16,6 +17,7 @@ use citrine_gb::error::GbResult;
 use citrine_gb::machine::Machine;
 use citrine_gb::persistence::battery_save::BatterySave;
 use citrine_gb::persistence::state::StateBody;
+use citrine_gb_replay::{Input, Replay};
 use citrine_gb_threads::Split;
 use strum::IntoEnumIterator;
 
@@ -31,6 +33,10 @@ pub(crate) struct Core {
     pub(crate) wifi: Option<crate::ds_wifi::Network>,
     pub(crate) audio: Vec<f32>,
     pub(crate) audio_feed: Option<AudioFeed>,
+    #[cfg(feature = "nds")]
+    pub(crate) mic: Option<crate::audio::mic::MicLine>,
+    #[cfg(feature = "nds")]
+    mic_heard: Vec<i16>,
     pub(crate) preview: Option<Playing>,
     pub(crate) mixer: Mixer,
     pub(crate) linked_audio: Vec<f32>,
@@ -41,9 +47,11 @@ pub(crate) struct Core {
     pub(crate) ran: Option<Ran>,
     pub(crate) taken: Option<Taken>,
     pub(crate) flight: Flight,
-    pub(crate) cheats: Vec<Cheat>,
+    cheats: Vec<Cheat>,
     pub(crate) rewind: Rewind,
+    pub(crate) cut_recording: Option<Replay>,
     pub(crate) clock_hold: ClockHold,
+    pub(crate) tape_play: Option<TapePlay>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) achievements: Option<citrine_gb_achievements::Client>,
 }
@@ -150,6 +158,10 @@ impl Core {
             wifi: None,
             audio: Vec::new(),
             audio_feed: None,
+            #[cfg(feature = "nds")]
+            mic: None,
+            #[cfg(feature = "nds")]
+            mic_heard: Vec::new(),
             preview: None,
             mixer: Mixer::default(),
             linked_audio: Vec::new(),
@@ -165,9 +177,11 @@ impl Core {
             flight: Flight::default(),
             cheats: Vec::new(),
             rewind: Rewind::default(),
+            cut_recording: None,
             #[cfg(not(target_arch = "wasm32"))]
             achievements: None,
             clock_hold: ClockHold::default(),
+            tape_play: None,
         }
     }
 
@@ -184,21 +198,43 @@ impl Core {
         };
         if ran.frames > 0 {
             self.paint(plan.effects, None);
-            self.drain_audio(plan.sound, plan.pace, plan.fast_forward || plan.rewind.back);
+            self.drain_audio(plan.sound, plan.pace, plan.fast_forward, plan.rewind.back);
         }
         ran
     }
 
-    fn run_plain_frame_beside_rewind(&mut self, split: &mut Split<'_>) {
-        if self.rewind.is_settled() {
-            self.run_plain_frame(split);
-            return;
+    fn run_tape(&mut self, plan: &Plan, hooks: &mut impl Hooks, split: &mut Split<'_>) -> Ran {
+        let Some(mut play) = self.tape_play.take() else {
+            return Ran::default();
+        };
+        let wanted = play.wanted();
+        let seeking = wanted > 0;
+        self.machine.set_muted(
+            seeking || (plan.fast_forward && plan.sound.fast == FastForwardSound::Silent),
+        );
+        let (frames, budget) = if seeking {
+            (wanted, Some(SEEK_BUDGET))
+        } else {
+            (plan.frames, plan.budget)
+        };
+        let mut ran = Ran::default();
+        let mut heard = self.audio.len();
+        let mut spending = Spending::start(frames, budget);
+        while !play.is_done() && spending.next() {
+            let frame_started = web_time::Instant::now();
+            self.machine
+                .defer_3d(plan.defer_3d && !play.keeps_next_frame());
+            self.frame_timer.start();
+            play.step(&mut self.machine, |machine| tape_frame(machine, split));
+            self.frame_timer.stop();
+            ran.frames += 1;
+            self.machine.take_audio(&mut self.audio);
+            hooks.captured(&self.machine, &self.audio[heard.min(self.audio.len())..]);
+            heard = self.audio.len();
+            spending.frame_took(frame_started.elapsed());
         }
-        let mut rewind = std::mem::take(&mut self.rewind);
-        split.beside_with(vec![("rewind", Box::new(|| rewind.settle()))], |split| {
-            self.run_plain_frame(split)
-        });
-        self.rewind = rewind;
+        self.tape_play = Some(play);
+        ran
     }
 
     pub(crate) fn run_plain_frame(&mut self, split: &mut Split<'_>) {
@@ -228,37 +264,42 @@ impl Core {
         hooks: &mut impl Hooks,
         split: &mut Split<'_>,
     ) -> Ran {
+        if self.tape_play.is_some() {
+            return self.run_tape(plan, hooks, split);
+        }
         if self.follow_rewind(plan.rewind) {
             return self.run_back(plan.frames);
         }
-        self.machine.set_muted(plan.fast_forward);
+        self.land_rewind();
+        self.machine
+            .set_muted(plan.fast_forward && plan.sound.fast == FastForwardSound::Silent);
         let mut ran = Ran::default();
         let mut heard = self.audio.len();
-        let mut spending = Spending::start(plan.budget);
-        for _ in 0..plan.frames {
-            if ran.frames > 0 && !spending.next_fits() {
-                break;
-            }
+        let mut spending = Spending::start(plan.frames, plan.budget);
+        while spending.next() {
             let frame_started = web_time::Instant::now();
             crate::profile::scope!("console frame");
             hooks.before_frame(&mut self.machine);
             self.flight
                 .before_frame(&mut self.machine, crate::storage::now_unix());
+            self.rewind.record(Input::Keys(self.machine.keys().bits()));
+            if !plan.fast_forward {
+                self.hold_clock(plan.pace);
+            }
             self.machine.apply_cheats(&self.cheats);
+            #[cfg(feature = "nds")]
+            self.feed_mic();
             let rewinds = plan.rewind.keep.is_some() && self.rewind.captures_next();
             self.machine
                 .defer_3d(plan.defer_3d && !rewinds && !self.flight.shoots_next());
             self.frame_timer.start();
-            if self.link.is_some() || self.partner.is_some() {
-                self.rewind.settle();
-            }
             match (self.link.as_mut(), self.partner.as_mut()) {
                 (Some(link), _) => link.run_frame(&mut self.machine, plan.held),
                 (None, Some(partner)) => match self.machine.as_gb_mut() {
                     Some(gb) => partner.run_frame(gb),
                     None => self.machine.run_frame(),
                 },
-                (None, None) => self.run_plain_frame_beside_rewind(split),
+                (None, None) => self.run_plain_frame(split),
             }
             self.frame_timer.stop();
             self.flight.after_frame(&mut self.machine);
@@ -270,11 +311,17 @@ impl Core {
             } else {
                 Keys::empty()
             };
-            apply(&mut self.machine, Keys::empty(), owed, hooks);
             ran.frames += 1;
             if plan.rewind.keep.is_some() {
-                self.rewind
-                    .after_frame(&mut self.machine, split.lanes() > 1);
+                #[cfg(not(target_arch = "wasm32"))]
+                let progress = || self.achievements.as_mut()?.progress();
+                #[cfg(target_arch = "wasm32")]
+                let progress = || None;
+                self.rewind.after_frame(&mut self.machine, progress);
+            }
+            if !owed.is_empty() {
+                apply(&mut self.machine, Keys::empty(), owed, hooks);
+                self.rewind.record(Input::Keys(self.machine.keys().bits()));
             }
             self.machine.take_audio(&mut self.audio);
             hooks.captured(&self.machine, &self.audio[heard.min(self.audio.len())..]);
@@ -285,15 +332,58 @@ impl Core {
                 break;
             }
         }
-        if !plan.fast_forward {
-            let frame_secs = self.machine.timing().frame_secs();
-            let machine = &mut self.machine;
-            self.clock_hold
-                .ran(ran.frames, frame_secs, plan.pace, |secs| {
-                    machine.hold_clock(secs)
-                });
-        }
         ran
+    }
+
+    fn hold_clock(&mut self, pace: f64) {
+        let frame_secs = self.machine.timing().frame_secs();
+        let machine = &mut self.machine;
+        let rewind = &mut self.rewind;
+        self.clock_hold.ran(1, frame_secs, pace, |secs| {
+            let held = machine.hold_clock(secs);
+            rewind.record(Input::HoldClock(secs));
+            held
+        });
+    }
+
+    #[cfg(feature = "nds")]
+    fn feed_mic(&mut self) {
+        if !matches!(self.machine, Machine::Nds(_)) {
+            return;
+        }
+        match &self.mic {
+            Some(line) => line.frame(self.machine.timing().frame_secs(), &mut self.mic_heard),
+            None => self.mic_heard.clear(),
+        }
+        self.rewind
+            .feed(&mut self.machine, Input::Mic(self.mic_heard.clone()));
+    }
+
+    #[cfg(threaded)]
+    pub(crate) fn run_rewind_gaps_on(&mut self, spawner: citrine_gb_threads::Spawner) {
+        self.rewind.run_gaps_on(spawner);
+    }
+
+    pub(crate) fn feed(&mut self, input: Input) {
+        if self.tape_play.is_some() {
+            return;
+        }
+        if matches!(
+            input,
+            Input::Reset | Input::SetClock(_) | Input::ShiftClock(..)
+        ) {
+            self.land_rewind();
+        }
+        self.rewind.feed(&mut self.machine, input);
+    }
+
+    pub(crate) fn set_cheats(&mut self, codes: Vec<String>) {
+        let kind = self.machine.kind();
+        self.cheats = codes
+            .iter()
+            .filter_map(|code| Cheat::parse(kind, code).ok())
+            .collect();
+        self.rewind.record(Input::Cheats(codes));
     }
 
     fn follow_rewind(&mut self, plan: RewindPlan) -> bool {
@@ -302,14 +392,15 @@ impl Core {
             return false;
         };
         let fps = 1.0 / self.machine.timing().frame_secs();
-        self.rewind.follow(self.machine.kind(), seconds, fps);
+        self.rewind
+            .follow(self.machine.kind(), seconds, plan.reach, fps);
         plan.back
     }
 
     fn run_back(&mut self, frames: usize) -> Ran {
         let mut ran = Ran::default();
         for _ in 0..frames {
-            if !self.rewind.step_back(&mut self.machine) {
+            if !self.rewind.step_back(&self.machine) {
                 break;
             }
             ran.frames += 1;
@@ -318,9 +409,86 @@ impl Core {
         ran
     }
 
-    pub(crate) fn put_machine(&mut self, machine: Machine) {
-        self.machine = machine;
+    pub(crate) fn land_rewind(&mut self) {
+        if !self.rewind.is_rewound() {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(progress) = self.rewind.landing_progress()
+                && let Some(client) = self.achievements.as_mut()
+            {
+                client.restore_progress(progress);
+            }
+            let achievements = &mut self.achievements;
+            self.rewind.land(&mut self.machine, |_, machine| {
+                super::achievements::after_frame(achievements, machine)
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.rewind.land(&mut self.machine, |_, _| {});
+    }
+
+    pub(crate) fn start_recording(&mut self, now: u64, plan: RewindPlan) -> bool {
+        self.follow_rewind(plan);
+        self.land_rewind();
+        #[cfg(not(target_arch = "wasm32"))]
+        let progress = self
+            .achievements
+            .as_mut()
+            .and_then(|client| client.progress());
+        #[cfg(target_arch = "wasm32")]
+        let progress = None;
+        match self
+            .rewind
+            .start_recording(&mut self.machine, now, progress)
+        {
+            Ok(started) => started,
+            Err(err) => {
+                log::error!("could not start a recording: {err:?}");
+                false
+            }
+        }
+    }
+
+    pub(crate) fn restart_recording(&mut self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let achievements = &mut self.achievements;
+        #[cfg(not(target_arch = "wasm32"))]
+        let restore = |progress: Option<&[u8]>| {
+            if let Some(client) = achievements.as_mut() {
+                client.restore_progress(progress);
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let restore = |_: Option<&[u8]>| {};
+        let restarted = match self.rewind.restart_recording(&mut self.machine, restore) {
+            Ok(restarted) => restarted,
+            Err(err) => {
+                log::error!("could not start the recording over: {err:?}");
+                self.rewind.clear();
+                false
+            }
+        };
+        self.drop_audio();
+        restarted
+    }
+
+    pub(crate) fn stop_recording(&mut self) -> Option<Replay> {
+        self.land_rewind();
+        self.rewind.stop_recording(&self.machine)
+    }
+
+    pub(crate) fn clear_rewind(&mut self) {
+        if let Some(replay) = self.stop_recording() {
+            self.cut_recording = Some(replay);
+        }
         self.rewind.clear();
+    }
+
+    pub(crate) fn put_machine(&mut self, machine: Machine) {
+        self.clear_rewind();
+        self.machine = machine;
         self.flight.restart();
         self.follow_feed_rate();
     }
@@ -336,8 +504,15 @@ impl Core {
         self.audio.clear();
     }
 
-    pub(crate) fn drain_audio(&mut self, sound: SoundLevels, pace: f64, fast_forward: bool) {
-        if fast_forward {
+    pub(crate) fn drain_audio(
+        &mut self,
+        sound: SoundLevels,
+        pace: f64,
+        fast_forward: bool,
+        rewinding: bool,
+    ) {
+        let sped_up = fast_forward && !rewinding && sound.fast == FastForwardSound::SpedUp;
+        if (fast_forward || rewinding) && !sped_up {
             self.drop_audio();
             if let Some(link) = &mut self.link {
                 link.clear_audio();
@@ -356,6 +531,12 @@ impl Core {
             self.friend_audio.clear();
         } else if let Some(link) = &mut self.link {
             link.mix(&mut samples);
+        }
+        if sped_up && let Some(feed) = &self.audio_feed {
+            squeeze(
+                &mut samples,
+                feed.target_frames().saturating_sub(feed.queued_frames()),
+            );
         }
         self.mixer.mix(sound, &mut samples, &mut self.friend_audio);
         if let Some(feed) = &mut self.audio_feed {
@@ -411,9 +592,14 @@ impl Core {
 
     pub(crate) fn paint(&mut self, effects: Effects, linked: Option<(&[u8], VideoSpec)>) {
         let Self {
-            machine, screen, ..
+            machine,
+            screen,
+            rewind,
+            ..
         } = self;
-        let (source, video) = linked.unwrap_or_else(|| (machine.frame(), machine.video()));
+        let (source, video) = linked
+            .or_else(|| rewind.picture())
+            .unwrap_or_else(|| (machine.frame(), machine.video()));
         screen.blend(source, effects);
         let mut painted = std::mem::take(&mut screen.painted);
         paint(
@@ -462,6 +648,26 @@ pub(crate) fn apply(machine: &mut Machine, pressed: Keys, released: Keys, hooks:
             hooks.record(total_cycles, joypad, false);
         }
     }
+}
+
+fn squeeze(samples: &mut Vec<f32>, room: usize) {
+    let frames = samples.len() / 2;
+    if frames <= room {
+        return;
+    }
+    for out in 0..room {
+        let start = out * frames / room;
+        let end = ((out + 1) * frames / room).max(start + 1);
+        let (mut left, mut right) = (0.0, 0.0);
+        for [l, r] in samples[start * 2..end * 2].as_chunks::<2>().0 {
+            left += l;
+            right += r;
+        }
+        let count = (end - start) as f32;
+        samples[out * 2] = left / count;
+        samples[out * 2 + 1] = right / count;
+    }
+    samples.truncate(room * 2);
 }
 
 pub(crate) fn backdrop(machine: &Machine) -> [u8; 3] {
@@ -537,15 +743,31 @@ fn replicate(source: &[u8], width: usize, scale: usize, out: &mut [u8]) {
     }
 }
 
+fn tape_frame(machine: &mut Machine, split: &mut Split<'_>) {
+    #[cfg(feature = "nds")]
+    if let Machine::Nds(nds) = machine {
+        nds.run_frame_on(
+            &mut citrine_gb::nds::ir::NoLink,
+            &mut citrine_gb::nds::wifi::air::NoPeer,
+            split,
+        );
+        return;
+    }
+    #[cfg(not(feature = "nds"))]
+    let _ = split;
+    machine.run_frame();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Core, Effects, Plan, Screen};
+    use super::{Core, Effects, NoHooks, Plan, Screen, apply};
     use crate::audio::mix::SoundLevels;
-    use crate::audio::pacer::SlowSound;
+    use crate::audio::pacer::{FastForwardSound, SlowSound};
     use crate::emulator::rewind::RewindPlan;
     use citrine_gb::console::{Console, ConsoleKind, Keys};
     use citrine_gb::machine::{Firmware, Machine};
     use citrine_gb::rom::Rom;
+    use citrine_gb_replay::{Diverged, Input, Player};
     use citrine_gb_threads::Split;
     use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -592,6 +814,16 @@ mod tests {
     }
 
     fn state_after(rom: &[u8], kind: ConsoleKind, frames: usize, fast_forward: bool) -> Played {
+        played(rom, kind, frames, fast_forward, FastForwardSound::Silent)
+    }
+
+    fn played(
+        rom: &[u8],
+        kind: ConsoleKind,
+        frames: usize,
+        fast_forward: bool,
+        fast: FastForwardSound,
+    ) -> Played {
         let machine = Machine::load(&Rom::new(rom), kind, &Firmware::default()).unwrap();
         let mut core = Core::new(machine);
         let plan = Plan {
@@ -603,6 +835,7 @@ mod tests {
                 mine: 1.0,
                 friend: 1.0,
                 slow: SlowSound::default(),
+                fast,
             },
             fast_forward,
             take: false,
@@ -662,6 +895,51 @@ mod tests {
         );
         assert!(heard.samples > 0, "{kind:?}: no sound at normal speed");
         assert_eq!(muted.samples, 0, "{kind:?}: sound while fast forwarding");
+    }
+
+    fn same_game_sped_up(rom: &[u8], kind: ConsoleKind, frames: usize) {
+        let silent = played(rom, kind, frames, true, FastForwardSound::Silent);
+        let sped_up = played(rom, kind, frames, true, FastForwardSound::SpedUp);
+        assert!(
+            silent.screens == sped_up.screens,
+            "{kind:?}: sound while fast forwarding changed the picture"
+        );
+        assert!(
+            silent.game == sped_up.game,
+            "{kind:?}: sound while fast forwarding changed the game"
+        );
+        assert!(
+            sped_up.samples > 0,
+            "{kind:?}: no sound while fast forwarding sped up"
+        );
+    }
+
+    #[test]
+    fn sped_up_fast_forward_sound_plays_the_game_boy_game_the_same() {
+        same_game_sped_up(
+            include_bytes!("../../homebrew/tobu.gb"),
+            ConsoleKind::Gb,
+            600,
+        );
+    }
+
+    #[cfg(feature = "gba")]
+    #[test]
+    fn sped_up_fast_forward_sound_plays_the_game_boy_advance_game_the_same() {
+        let rom = unpacked(include_bytes!("../../homebrew/gba/pentris.gba.br"));
+        same_game_sped_up(&rom, ConsoleKind::Gba, 600);
+    }
+
+    #[test]
+    fn sped_up_sound_squeezes_the_frames_into_the_room_left_in_order() {
+        let mut samples = vec![0.0, 0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0];
+        super::squeeze(&mut samples, 2);
+        assert_eq!(samples, [0.5, -0.5, 2.5, -2.5]);
+        let mut samples = vec![0.25, -0.25];
+        super::squeeze(&mut samples, 4);
+        assert_eq!(samples, [0.25, -0.25]);
+        super::squeeze(&mut samples, 0);
+        assert!(samples.is_empty());
     }
 
     #[test]
@@ -725,5 +1003,368 @@ mod tests {
             });
         }
         assert_eq!(held, 0.0);
+    }
+
+    fn rewinding(back: bool) -> Plan {
+        Plan {
+            frames: 1,
+            held: Keys::empty(),
+            owed: Keys::empty(),
+            effects: ghosting(false, 0.0),
+            sound: SoundLevels {
+                mine: 1.0,
+                friend: 1.0,
+                slow: SlowSound::default(),
+                fast: FastForwardSound::Silent,
+            },
+            fast_forward: false,
+            take: false,
+            rewind: RewindPlan {
+                keep: Some(10),
+                reach: 10,
+                back,
+            },
+            budget: None,
+            defer_3d: false,
+            pace: 1.0,
+        }
+    }
+
+    fn tobu() -> Core {
+        let rom = include_bytes!("../../homebrew/tobu.gb");
+        Core::new(Machine::load(&Rom::new(rom), ConsoleKind::Gb, &Firmware::default()).unwrap())
+    }
+
+    fn steps(core: &mut Core, back: bool, frames: usize) {
+        for _ in 0..frames {
+            core.step(&rewinding(back), &mut Split::inline());
+        }
+    }
+
+    #[test]
+    fn a_reset_while_rewound_resets_the_game_from_the_frame_shown() {
+        let mut rewound = tobu();
+        steps(&mut rewound, false, 60);
+        steps(&mut rewound, true, 30);
+        rewound.feed(Input::Reset);
+        assert!(!rewound.rewind.is_rewound());
+        steps(&mut rewound, false, 30);
+
+        let mut straight = tobu();
+        steps(&mut straight, false, 30);
+        straight.feed(Input::Reset);
+        steps(&mut straight, false, 30);
+        assert_eq!(rewound.machine.state_hash(), straight.machine.state_hash());
+    }
+
+    const NOW: u64 = 1_780_000_000;
+
+    #[test]
+    fn putting_in_another_game_keeps_the_running_recording() {
+        let mut core = tobu();
+        steps(&mut core, false, 30);
+        assert!(core.start_recording(NOW, rewinding(false).rewind));
+        steps(&mut core, false, 40);
+        core.put_machine(tobu().machine);
+        let replay = core.cut_recording.take().unwrap();
+        assert_eq!(replay.header.frames, 40);
+        assert_eq!(core.rewind.recording_frames(), None);
+    }
+
+    #[test]
+    fn starting_over_while_rewound_goes_back_to_the_mark() {
+        let mut core = tobu();
+        steps(&mut core, false, 30);
+        core.start_recording(NOW, rewinding(false).rewind);
+        let then = core.machine.state_hash();
+        steps(&mut core, false, 60);
+        steps(&mut core, true, 10);
+        assert!(core.rewind.is_rewound());
+        assert!(core.restart_recording());
+        assert!(!core.rewind.is_rewound());
+        assert_eq!(core.machine.state_hash(), then);
+        assert_eq!(core.rewind.recording_frames(), Some(0));
+    }
+
+    struct Recorded {
+        live: Vec<u64>,
+        played: Vec<u64>,
+        live_starts: Vec<u64>,
+        played_starts: Vec<u64>,
+        diverged: Option<Diverged>,
+    }
+
+    fn recorded_and_played(
+        rom: &[u8],
+        kind: ConsoleKind,
+        plan: &Plan,
+        before: impl Fn(&mut Core),
+    ) -> Recorded {
+        cut_and_played(rom, kind, plan, before, |core| {
+            let replay = core.stop_recording().expect("a replay");
+            assert_eq!(replay.header.frames, 150);
+            replay
+        })
+    }
+
+    fn cut_and_played(
+        rom: &[u8],
+        kind: ConsoleKind,
+        plan: &Plan,
+        before: impl Fn(&mut Core),
+        cut: impl FnOnce(&mut Core) -> citrine_gb_replay::Replay,
+    ) -> Recorded {
+        let rom = Rom::new(rom);
+        let mut core = Core::new(Machine::load(&rom, kind, &Firmware::default()).unwrap());
+        let mut live = Vec::new();
+        let mut live_starts = Vec::new();
+        for _ in 0..25 {
+            before(&mut core);
+            live_starts.push(core.machine.state_hash());
+            core.step(plan, &mut Split::inline());
+            live.push(core.machine.state_hash());
+        }
+        assert!(core.start_recording(NOW, plan.rewind));
+        for _ in 0..150 {
+            before(&mut core);
+            live_starts.push(core.machine.state_hash());
+            core.step(plan, &mut Split::inline());
+            live.push(core.machine.state_hash());
+        }
+        let replay = cut(&mut core);
+        assert!(!replay.checks.is_empty());
+        let mut machine = Machine::from_state(
+            &replay.start,
+            &rom,
+            replay.header.start_unix,
+            &Firmware::default(),
+        )
+        .unwrap();
+        let mut player = Player::new(&replay);
+        let mut played = Vec::new();
+        let mut played_starts = Vec::new();
+        let mut diverged = None;
+        while !player.is_done() {
+            let stepped = player.step_with(&mut machine, |machine| {
+                played_starts.push(machine.state_hash());
+                machine.run_frame();
+            });
+            if let Err(err) = stepped {
+                diverged.get_or_insert(err);
+            }
+            machine.take_audio(&mut Vec::new());
+            played.push(machine.state_hash());
+        }
+        assert!(played.len() <= live.len(), "{} frames", played.len());
+        live.drain(..live.len() - played.len());
+        live_starts.drain(..live_starts.len() - played_starts.len());
+        Recorded {
+            live,
+            played,
+            live_starts,
+            played_starts,
+            diverged,
+        }
+    }
+
+    fn plays_back_every_frame_at_the_screen_pace(rom: &[u8], kind: ConsoleKind) {
+        let plan = Plan {
+            pace: 60.0 * kind.timing().frame_secs(),
+            ..rewinding(false)
+        };
+        assert!(plan.pace > 1.0);
+        let recorded = recorded_and_played(rom, kind, &plan, |_| {});
+        let first = recorded
+            .live
+            .iter()
+            .zip(&recorded.played)
+            .position(|(live, played)| live != played);
+        assert_eq!(first, None, "the first frame that played back another way");
+        assert_eq!(recorded.diverged, None);
+    }
+
+    #[test]
+    fn a_game_boy_clock_held_to_the_screen_plays_back_every_frame() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0147] = 0x10;
+        rom[0x0149] = 0x02;
+        plays_back_every_frame_at_the_screen_pace(&rom, ConsoleKind::Gb);
+    }
+
+    #[cfg(feature = "gba")]
+    #[test]
+    fn a_gba_game_held_to_the_screen_plays_back_every_frame() {
+        let rom = unpacked(include_bytes!("../../homebrew/gba/pentris.gba.br"));
+        plays_back_every_frame_at_the_screen_pace(&rom, ConsoleKind::Gba);
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_clock_held_to_the_screen_plays_back_every_frame() {
+        let rom = unpacked(include_bytes!("../../homebrew/nds/pong_nds.nds.br"));
+        plays_back_every_frame_at_the_screen_pace(&rom, ConsoleKind::Nds);
+    }
+
+    fn a_clip_cut_while_a_key_is_held_plays_back_every_frame(rom: &[u8], kind: ConsoleKind) {
+        let recorded = cut_and_played(
+            rom,
+            kind,
+            &rewinding(false),
+            |_| {},
+            |core| {
+                core.machine.set_keys(Keys::A);
+                core.land_rewind();
+                let clip = core.rewind.clip(&core.machine, 2).expect("a clip");
+                let mut twin = crate::emulator::rewind::twin_of(&core.machine);
+                clip.cut(&mut twin, NOW).expect("a replay")
+            },
+        );
+        assert!(
+            recorded.played.len() >= 120,
+            "{} frames",
+            recorded.played.len()
+        );
+        assert_eq!(recorded.diverged, None);
+    }
+
+    #[test]
+    fn a_game_boy_clip_cut_while_a_key_is_held_plays_back_every_frame() {
+        a_clip_cut_while_a_key_is_held_plays_back_every_frame(
+            include_bytes!("../../homebrew/tobu.gb"),
+            ConsoleKind::Gb,
+        );
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_clip_cut_while_a_key_is_held_plays_back_every_frame() {
+        let rom = unpacked(include_bytes!("../../homebrew/nds/pong_nds.nds.br"));
+        a_clip_cut_while_a_key_is_held_plays_back_every_frame(&rom, ConsoleKind::Nds);
+    }
+
+    fn a_clip_with_taps_on_back_to_back_frames_plays_back_every_frame(
+        rom: &[u8],
+        kind: ConsoleKind,
+    ) {
+        let tapping = Plan {
+            owed: Keys::A,
+            ..rewinding(false)
+        };
+        let recorded = cut_and_played(
+            rom,
+            kind,
+            &tapping,
+            |core| apply(&mut core.machine, Keys::A, Keys::empty(), &mut NoHooks),
+            |core| {
+                let clip = core.rewind.clip(&core.machine, 2).expect("a clip");
+                let mut twin = crate::emulator::rewind::twin_of(&core.machine);
+                clip.cut(&mut twin, NOW).expect("a replay")
+            },
+        );
+        assert!(
+            recorded.played.len() >= 120,
+            "{} frames",
+            recorded.played.len()
+        );
+        let first = recorded
+            .live_starts
+            .iter()
+            .zip(&recorded.played_starts)
+            .position(|(live, played)| live != played);
+        assert_eq!(first, None, "the first frame that started another way");
+        assert_eq!(recorded.diverged, None);
+    }
+
+    #[test]
+    fn a_game_boy_clip_with_taps_on_back_to_back_frames_plays_back_every_frame() {
+        a_clip_with_taps_on_back_to_back_frames_plays_back_every_frame(
+            include_bytes!("../../homebrew/tobu.gb"),
+            ConsoleKind::Gb,
+        );
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_clip_with_taps_on_back_to_back_frames_plays_back_every_frame() {
+        let rom = unpacked(include_bytes!("../../homebrew/nds/pong_nds.nds.br"));
+        a_clip_with_taps_on_back_to_back_frames_plays_back_every_frame(&rom, ConsoleKind::Nds);
+    }
+
+    #[test]
+    fn a_game_boy_recording_with_taps_on_back_to_back_frames_plays_back_every_frame() {
+        let tapping = Plan {
+            owed: Keys::A,
+            ..rewinding(false)
+        };
+        let recorded = recorded_and_played(
+            include_bytes!("../../homebrew/tobu.gb"),
+            ConsoleKind::Gb,
+            &tapping,
+            |core| apply(&mut core.machine, Keys::A, Keys::empty(), &mut NoHooks),
+        );
+        let first = recorded
+            .live_starts
+            .iter()
+            .zip(&recorded.played_starts)
+            .position(|(live, played)| live != played);
+        assert_eq!(first, None, "the first frame that started another way");
+        assert_eq!(recorded.diverged, None);
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_tape_leaves_3d_to_the_gpu_except_on_frames_a_seek_key_keeps() {
+        use crate::emulator::tape_play::TapePlay;
+        use citrine_gb_replay::SeekPoints;
+        use std::sync::Arc;
+        let rom = Rom::new(include_bytes!(
+            "../../fixtures/nds/blocksds-lighting_cube.nds"
+        ));
+        let plan = rewinding(false);
+        let machine = Machine::load(&rom, ConsoleKind::Nds, &Firmware::default()).unwrap();
+        let mut core = Core::new(machine);
+        for _ in 0..25 {
+            core.step(&plan, &mut Split::inline());
+        }
+        assert!(core.start_recording(NOW, plan.rewind));
+        for _ in 0..150 {
+            core.step(&plan, &mut Split::inline());
+        }
+        let replay = core.stop_recording().expect("a replay");
+        let start = replay.header.start_unix;
+        let machine = Machine::from_state(&replay.start, &rom, start, &Firmware::default());
+        let mut core = Core::new(machine.unwrap());
+        if let Machine::Nds(nds) = &mut core.machine {
+            nds.record_composite(true);
+        }
+        let play = TapePlay::new(Arc::new(replay), SeekPoints::default());
+        core.tape_play = Some(play);
+        let gpu = Plan {
+            defer_3d: true,
+            ..rewinding(false)
+        };
+        let mut drawn = Vec::new();
+        for frame in 1..=130 {
+            core.step(&gpu, &mut Split::inline());
+            if !core.machine.finish_picture() {
+                drawn.push(frame);
+            }
+        }
+        assert_eq!(drawn, [60, 120]);
+    }
+
+    #[test]
+    fn taps_let_go_after_their_frame_play_back_to_the_last_check() {
+        let plan = Plan {
+            owed: Keys::A,
+            ..rewinding(false)
+        };
+        let recorded = recorded_and_played(
+            include_bytes!("../../homebrew/tobu.gb"),
+            ConsoleKind::Gb,
+            &plan,
+            |core| core.machine.set_keys(Keys::A),
+        );
+        assert_eq!(recorded.diverged, None);
     }
 }

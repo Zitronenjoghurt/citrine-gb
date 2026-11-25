@@ -11,7 +11,7 @@ const OTHER_BATTERY: &str = "battery-";
 const SNAPSHOT_SLOT: &str = "slot-";
 const AUTOSAVE_SLOT: &str = "auto-";
 const BATTERY_ROLES: &[&str] = &["sav", "meta", "name"];
-const STATE_ROLES: &[&str] = &["snap", "meta", "thumb", "name"];
+const STATE_ROLES: &[&str] = &["snap", "meta", "thumb", "name", "filed"];
 const AUTOSAVE_ROLES: &[&str] = &["snap", "meta", "thumb"];
 const CONSOLE_ROLE: &str = "console";
 const GAME_CONSOLE: &str = "game.console";
@@ -113,7 +113,7 @@ impl SaveStore {
         let mut cache = root.file_name().unwrap_or_default().to_os_string();
         cache.push("-cache");
         Self {
-            cache: super::Backend::at(root.with_file_name(cache)),
+            cache: super::Folders::at(root.with_file_name(cache)),
             backend: super::Backend::at(root),
             touched: Default::default(),
         }
@@ -415,8 +415,8 @@ mod tests {
     const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn new_store(name: &str) -> (SaveStore, std::path::PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("citrine-cloud-store-{}-{name}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-cloud-store-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         (SaveStore::in_dir(root.clone()), root)
     }

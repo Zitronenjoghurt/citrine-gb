@@ -32,8 +32,8 @@ impl Citrine {
         while let Ok(file) = self.files.second_rom_rx.try_recv() {
             self.take_rom(file, RomFor::Link);
         }
-        while let Ok(file) = self.files.boot_rom_rx.try_recv() {
-            self.handle_load_boot_rom(file);
+        while let Ok((file, picked)) = self.files.boot_rom_rx.try_recv() {
+            self.handle_load_boot_rom(file, picked);
         }
         #[cfg(feature = "gba")]
         while let Ok(file) = self.files.gba_bios_rx.try_recv() {
@@ -52,6 +52,11 @@ impl Citrine {
         #[cfg(not(target_arch = "wasm32"))]
         while let Ok(dir) = self.files.folder_rx.try_recv() {
             self.handle_export_e2e(&dir);
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        while let Ok(dir) = self.files.capture_folder_rx.try_recv() {
+            self.ui.settings.capture_folder = Some(dir.to_string_lossy().into_owned());
+            self.ui.settings.dirty = true;
         }
         while let Ok(outcome) = self.files.save_rx.try_recv() {
             match outcome {
@@ -151,6 +156,7 @@ impl Citrine {
     }
 
     pub(super) fn handle_load_rom(&mut self, file: PickedFile) {
+        self.close_replay_show();
         let rom = Rom::from(file.data.clone());
         let kind = self.opened_as(&rom, Some(&file.name));
         let rom = self.with_rom_ids(rom, kind, Some(&file));
@@ -208,7 +214,12 @@ impl Citrine {
         let picked = file.path.clone();
         #[cfg(target_arch = "wasm32")]
         let picked: Option<std::path::PathBuf> = None;
-        let path = match picked {
+        let archived = self
+            .ui
+            .library
+            .archive_path(&sha)
+            .map(std::path::PathBuf::from);
+        let path = match picked.or(archived) {
             Some(path) => path,
             None => match copies.keep(&sha, &file.name, &file.data) {
                 Ok(path) => path,
@@ -255,6 +266,9 @@ impl Citrine {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn load_recent(&mut self, path: std::path::PathBuf) {
+        if self.play_archive(&path.to_string_lossy()) {
+            return;
+        }
         if !path.is_file() && self.load_recent_zip(&path) {
             return;
         }
@@ -408,15 +422,6 @@ impl Citrine {
         Ok(file)
     }
 
-    pub(super) fn handle_load_boot_rom(&mut self, file: PickedFile) {
-        self.try_start_audio();
-        if let Some(gb) = self.emulator.as_gb_mut() {
-            gb.load_boot_rom(&file.data);
-        }
-        self.ui.settings.dirty = true;
-        self.toasts.success("Boot ROM loaded");
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn handle_export_e2e(&mut self, dir: &std::path::Path) {
         if self.ui.e2e.title.is_empty() {
@@ -438,6 +443,7 @@ impl Citrine {
     }
 
     pub(super) fn handle_load_rom_data(&mut self, data: Vec<u8>) {
+        self.close_replay_show();
         let rom = Rom::new(&data);
         let kind = self.opened_as(&rom, None);
         let rom = self.with_rom_ids(rom, kind, None);

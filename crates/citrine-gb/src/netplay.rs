@@ -197,6 +197,7 @@ pub struct Session<C: Rollback + LinkPort, const N: usize = 2> {
     ring: Box<[Snapshot<C, N>]>,
     rollback_from: Option<u32>,
     last_rollback: u32,
+    most_budget: u32,
     next_check: u32,
     check_lag: u32,
     outbox: VecDeque<Check<N>>,
@@ -211,6 +212,7 @@ pub struct Session<C: Rollback + LinkPort, const N: usize = 2> {
     present: [bool; N],
     pacer: Pacer,
     turnout: Option<Turnout>,
+    local_from_peer: bool,
 }
 
 impl<const N: usize> Session<GameBoy, N> {
@@ -350,6 +352,7 @@ impl<C: Rollback + LinkPort, const N: usize> Session<C, N> {
                 .collect(),
             rollback_from: None,
             last_rollback: 0,
+            most_budget: config.sync.budget(),
             next_check: start.div_ceil(interval) * interval,
             check_lag: 0,
             outbox: VecDeque::new(),
@@ -364,6 +367,7 @@ impl<C: Rollback + LinkPort, const N: usize> Session<C, N> {
             present,
             pacer: Pacer::default(),
             turnout: None,
+            local_from_peer: false,
             consoles: Box::new(consoles),
         };
         session.set_catch_up(false);
@@ -376,6 +380,10 @@ impl<C: Rollback + LinkPort, const N: usize> Session<C, N> {
 
     pub fn local(&self) -> Player {
         self.config.local
+    }
+
+    pub fn local_from_peer(&self) -> bool {
+        self.local_from_peer
     }
 
     pub fn sync(&self) -> Sync {
@@ -503,6 +511,10 @@ impl<C: Rollback + LinkPort, const N: usize> Session<C, N> {
 
     pub fn last_rollback(&self) -> u32 {
         self.last_rollback
+    }
+
+    pub fn set_budget(&mut self, budget: u32) {
+        self.config.sync.budget = budget.min(self.most_budget);
     }
 
     pub fn desync(&self) -> Option<Desync<N>> {
@@ -706,6 +718,9 @@ impl<C: Rollback + LinkPort, const N: usize> Session<C, N> {
         self.next_check = frame;
         self.local_checks.retain(|c| c.frame < frame);
         self.desync = None;
+        if player == self.config.local {
+            self.local_from_peer = true;
+        }
         let split = &mut Split::inline();
         self.replay(frame, split);
         self.emit_checks(self.frame, split);
@@ -1559,6 +1574,33 @@ mod tests {
     }
 
     #[test]
+    fn a_resync_of_the_local_player_marks_its_state_as_from_the_peer() {
+        let roms = roms(SNAKE, SNAKE);
+        let inputs = [vec![Input::default(); 60], vec![Input::default(); 60]];
+        let (mut session, _) = play_reference(session(&roms, Player::One, 1), &inputs);
+        assert!(!session.local_from_peer());
+        let at = session.latest_checkpoint().unwrap();
+        let state = session.checkpoint(at, Player::One).unwrap();
+        session.resync(at, Player::One, &state).unwrap();
+        assert!(session.local_from_peer());
+        let at = session.latest_checkpoint().unwrap();
+        let state = session.checkpoint(at, Player::Two).unwrap();
+        session.resync(at, Player::Two, &state).unwrap();
+        assert!(session.local_from_peer());
+    }
+
+    #[test]
+    fn a_resync_of_a_remote_player_leaves_the_local_state_its_own() {
+        let roms = roms(SNAKE, SNAKE);
+        let inputs = [vec![Input::default(); 60], vec![Input::default(); 60]];
+        let (mut session, _) = play_reference(session(&roms, Player::One, 1), &inputs);
+        let at = session.latest_checkpoint().unwrap();
+        let state = session.checkpoint(at, Player::Two).unwrap();
+        session.resync(at, Player::Two, &state).unwrap();
+        assert!(!session.local_from_peer());
+    }
+
+    #[test]
     fn a_cgb_game_stays_in_step_under_jitter() {
         let roms = roms(PETRIS, PETRIS);
         let mut inputs = [random_inputs(5, 360, 12), random_inputs(6, 360, 12)];
@@ -1770,6 +1812,38 @@ mod tests {
             reference.console(Player::Two),
             &format!("frame {frame}"),
         );
+    }
+
+    #[test]
+    fn a_lowered_budget_waits_for_the_friend_and_never_rises_past_the_start() {
+        let roms = roms(SNAKE, SNAKE);
+        let inputs = snake_inputs(120);
+        let config = SessionConfig {
+            sync: Sync::new(4, 0),
+            ..config(Player::One, 1)
+        };
+        let mut late = Session::new(config, setups(&roms)).unwrap();
+        late.set_budget(9);
+        assert_eq!(late.sync().budget(), 4);
+        for frame in 0..4u32 {
+            late.add_local_input(frame, inputs[0][frame as usize])
+                .unwrap();
+            assert_eq!(late.step(), Advance::Ran, "frame {frame}");
+        }
+        late.set_budget(1);
+        late.add_local_input(4, inputs[0][4]).unwrap();
+        assert_eq!(late.step(), Advance::AwaitingRemote);
+        for heard in 0..4u32 {
+            late.add_remote_input(heard, inputs[1][heard as usize]);
+        }
+        assert_eq!(late.step(), Advance::Ran);
+        assert_eq!(late.frame(), 5);
+        late.set_budget(0);
+        late.add_local_input(5, inputs[0][5]).unwrap();
+        assert_eq!(late.step(), Advance::AwaitingRemote);
+        late.add_remote_input(4, inputs[1][4]);
+        late.add_remote_input(5, inputs[1][5]);
+        assert_eq!(late.step(), Advance::Ran);
     }
 
     fn exchange_program(sc: u8, first: u8, step: u8, count: u16) -> Vec<u8> {
@@ -2734,7 +2808,7 @@ mod tests {
         assert_eq!(last.frame, 240);
         assert_eq!(
             last.hashes,
-            [13_872_898_839_403_894_110, 5_139_518_631_026_255_222]
+            [5_248_057_994_921_852_960, 5_139_518_631_026_255_222]
         );
     }
 
@@ -2866,6 +2940,98 @@ mod tests {
             session
         }
 
+        #[test]
+        #[ignore = "times a DS pair's frames with rollback; set CITRINE_DS_ROM, run in release"]
+        fn ds_rollback_frame_time() {
+            use std::time::{Duration, Instant};
+            let var = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from);
+            let Some(path) = var("CITRINE_DS_ROM") else {
+                return;
+            };
+            let rom = Rom::new(&std::fs::read(path).unwrap());
+            let state = var("CITRINE_DS_STATE").map(|path| std::fs::read(path).unwrap());
+            let num = |name: &str, or: u32| std::env::var(name).map_or(or, |v| v.parse().unwrap());
+            let budget = num("ROLLBACK_BUDGET", 2);
+            let late = num("REMOTE_LATE", budget);
+            let change = num("REMOTE_CHANGE", 7).max(1);
+            let frames = num("ROLLBACK_FRAMES", 1800);
+            let mode = match num("ROLLBACK_LANES", 2) {
+                1 => Mode::Inline,
+                _ => Mode::Threads,
+            };
+            let threads = Threads::new(mode);
+            let setups = std::array::from_fn(|unit| {
+                Some(NdsSetup {
+                    boot: NdsBoot::Card(ConsoleSetup {
+                        rom: &rom,
+                        kind: ConsoleKind::Nds,
+                        save: None,
+                        state: state.as_deref(),
+                    }),
+                    firmware: firmware(unit as u8),
+                })
+            });
+            let config = SessionConfig {
+                check_interval: NEVER,
+                sync: Sync::new(budget, 0),
+                ..SessionConfig::<2>::new(Player::One, 0x0D5_2026, START_TIME)
+            };
+            let mut session = Session::<Nds, 2>::new_nds(config, setups)
+                .unwrap()
+                .keeping_confirmed(num("KEPT_FRAMES", 20));
+            #[cfg(feature = "jit")]
+            for nds in session.consoles.iter_mut() {
+                nds.set_jit(true);
+            }
+            let remote = |frame: u32| pad(1, frame * 7 / change);
+            let mut times: Vec<Duration> = Vec::with_capacity(frames as usize);
+            let mut replayed = 0u64;
+            let mut deepest = 0;
+            let mut sent = 0;
+            let mut waits = 0;
+            let mut frame = 0;
+            session.add_local_input(0, pad(0, 0)).unwrap();
+            while frame < frames {
+                while sent + late <= frame {
+                    session.add_player_input(Player::Two, sent, remote(sent));
+                    sent += 1;
+                }
+                let t = Instant::now();
+                let ran = threads.split(|split| session.advance_on(split));
+                let spent = t.elapsed();
+                if ran != Advance::Ran {
+                    waits += 1;
+                    session.add_player_input(Player::Two, sent, remote(sent));
+                    sent += 1;
+                    continue;
+                }
+                times.push(spent);
+                replayed += u64::from(session.last_rollback());
+                deepest = deepest.max(session.last_rollback());
+                frame += 1;
+                session.add_local_input(frame, pad(0, frame)).unwrap();
+            }
+            let warm = times.len() / 10;
+            let mut kept: Vec<f64> = times[warm..]
+                .iter()
+                .map(|t| t.as_secs_f64() * 1e3)
+                .collect();
+            kept.sort_by(f64::total_cmp);
+            let at = |q: f64| kept[((kept.len() - 1) as f64 * q).round() as usize];
+            let mean = kept.iter().sum::<f64>() / kept.len() as f64;
+            let over = kept.iter().filter(|&&ms| ms > 12.7).count();
+            println!(
+                "DSRB budget {budget} late {late} change {change} lanes {}: frame mean {mean:.2} p50 {:.2} p90 {:.2} p99 {:.2} max {:.2} ms, over 12.7 ms {over} of {}, replayed {:.2} a frame, deepest {deepest}, waits {waits}",
+                threads.pool_size(),
+                at(0.5),
+                at(0.9),
+                at(0.99),
+                at(1.0),
+                kept.len(),
+                replayed as f64 / f64::from(frames),
+            );
+        }
+
         pub(super) fn ds_inputs(seed: u64, frames: usize) -> Vec<Input> {
             let mut rng = Rng(seed);
             let mut inputs = random_inputs(seed, frames, 30);
@@ -2959,6 +3125,47 @@ mod tests {
                 assert!(host.on_the_air() && waiting.on_the_air());
                 assert!(waiting.download().is_some());
                 assert_eq!(host.air_us(), waiting.air_us());
+            }
+        }
+
+        fn late_guest_session(rom: &Rom, local: Player) -> Session<Nds> {
+            let setups = [0, 1].map(|unit| {
+                Some(NdsSetup {
+                    boot: NdsBoot::Card(ConsoleSetup {
+                        rom,
+                        kind: ConsoleKind::Nds,
+                        save: None,
+                        state: None,
+                    }),
+                    firmware: firmware(unit),
+                })
+            });
+            let config = SessionConfig {
+                check_interval: 1,
+                sync: Sync::new(2, 0),
+                power_on: [0, 1],
+                ..SessionConfig::new(local, 0x0D5_2026, START_TIME)
+            };
+            let mut session = Session::new_nds(config, setups).unwrap();
+            session.watch_remote(true);
+            session
+        }
+
+        #[test]
+        fn a_guest_powered_on_late_replays_the_air_in_step() {
+            let rom = Rom::new(AIRTALK);
+            let frames = 60;
+            for seed in 0..2 {
+                let inputs = [ds_inputs(3 + seed, frames), ds_inputs(4 + seed, frames)];
+                let delay = Delay::Jitter(20.0 + seed as f64 * 15.0, seed as f64 * 8.0);
+                let online = play_online_ahead(
+                    |local| late_guest_session(&rom, local),
+                    &inputs,
+                    delay,
+                    1,
+                    |_, _| {},
+                );
+                assert_in_step(&online, frames);
             }
         }
 
@@ -4680,7 +4887,7 @@ mod tests {
                 assert_eq!(last.frame, 230);
                 assert_eq!(
                     last.hashes,
-                    [14_405_267_487_096_731_327, 1_181_902_853_036_324_256]
+                    [9_079_662_873_613_382_230, 16_208_275_486_166_875_730]
                 );
             }
         }
@@ -4839,7 +5046,7 @@ mod tests {
             let (checks, _) = play(LATE);
             let last = checks.iter().max_by_key(|check| check.frame).unwrap();
             assert_eq!(last.frame, 230);
-            assert_eq!(last.hashes, [8146627273359226289, 6833908170815622173]);
+            assert_eq!(last.hashes, [7076099957967274382, 11928561717309766812]);
         }
     }
 }

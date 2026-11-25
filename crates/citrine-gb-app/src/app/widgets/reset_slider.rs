@@ -1,6 +1,8 @@
 use crate::icons;
 use egui::emath::Numeric;
-use egui::{Response, TextStyle, TextWrapMode, Ui, Widget, WidgetText, vec2};
+use egui::{
+    Context, Id, Rect, Response, Sense, TextStyle, TextWrapMode, Ui, Vec2, Widget, WidgetText, vec2,
+};
 use std::fmt::Display;
 
 pub struct ResetSlider<'a, V: Numeric> {
@@ -46,6 +48,26 @@ impl<'a, V: Numeric> ResetSlider<'a, V> {
     }
 }
 
+pub fn percent_slider(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    default: f32,
+) -> Response {
+    let percent = |fraction: f32| (fraction * 100.0).round();
+    let mut shown = percent(*value);
+    let response = ResetSlider::new(&mut shown, percent(*range.start())..=percent(*range.end()))
+        .step_by(f64::from(percent(step)))
+        .suffix("%")
+        .default_value(percent(default))
+        .ui(ui);
+    if response.changed() {
+        *value = shown / 100.0;
+    }
+    response
+}
+
 impl<V: Numeric> Widget for ResetSlider<'_, V> {
     fn ui(self, ui: &mut Ui) -> Response {
         ui.horizontal(|ui| {
@@ -74,14 +96,12 @@ impl<V: Numeric> Widget for ResetSlider<'_, V> {
                 .size()
                 .x
                 + 2.0 * ui.spacing().button_padding.x;
+            let value_width = super::settings::form::value_box(ui, value_width);
 
-            let reset_width = reset_width(ui);
-            super::settings::form::need(
-                ui,
-                SLIDER_MIN + value_width + reset_width + 2.0 * RESET_GAP,
-            );
+            let reset = reset_room(ui);
+            super::settings::form::need(ui, SLIDER_MIN + value_width + RESET_GAP + reset);
             ui.spacing_mut().slider_width =
-                (ui.available_width() - value_width - reset_width - 2.0 * RESET_GAP)
+                (ui.available_width() - value_width - RESET_GAP - reset)
                     .max(ui.spacing().interact_size.y);
             ui.spacing_mut().interact_size.x = value_width;
 
@@ -112,22 +132,99 @@ impl<V: Numeric> Widget for ResetSlider<'_, V> {
 
 pub const RESET_GAP: f32 = 4.0;
 
-const SLIDER_MIN: f32 = 48.0;
+const SLIDER_MIN: f32 = 40.0;
+
+fn reset_icon(ui: &Ui) -> Vec2 {
+    WidgetText::from(icons::ARROW_COUNTER_CLOCKWISE)
+        .into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            f32::INFINITY,
+            TextStyle::Button,
+        )
+        .size()
+}
 
 pub fn reset_width(ui: &Ui) -> f32 {
-    let icon = WidgetText::from(icons::ARROW_COUNTER_CLOCKWISE).into_galley(
-        ui,
-        Some(TextWrapMode::Extend),
-        f32::INFINITY,
-        TextStyle::Button,
-    );
-    (icon.size().x + 2.0 * ui.spacing().button_padding.x).max(crate::app::mobile::touch_square(ui))
+    (reset_icon(ui).x + 2.0 * ui.spacing().button_padding.x)
+        .max(crate::app::mobile::touch_square(ui))
+}
+
+pub fn reset_height(ui: &Ui) -> f32 {
+    reset_icon(ui).y.max(crate::app::mobile::touch_square(ui))
+}
+
+fn hidden_key() -> Id {
+    Id::new("reset_hidden")
+}
+
+pub fn without_reset<R>(ctx: &Context, hide: bool, add: impl FnOnce() -> R) -> R {
+    let outer = ctx.data(|d| d.get_temp::<bool>(hidden_key()));
+    ctx.data_mut(|d| d.insert_temp(hidden_key(), hide));
+    let inner = add();
+    ctx.data_mut(|d| match outer {
+        Some(outer) => d.insert_temp(hidden_key(), outer),
+        None => d.remove::<bool>(hidden_key()),
+    });
+    inner
+}
+
+pub fn reset_shown(ui: &Ui) -> bool {
+    !ui.data(|d| d.get_temp::<bool>(hidden_key()))
+        .unwrap_or(false)
+}
+
+pub fn reset_room(ui: &Ui) -> f32 {
+    if reset_shown(ui) {
+        reset_width(ui) + RESET_GAP
+    } else {
+        0.0
+    }
 }
 
 pub fn reset_button(ui: &mut Ui, enabled: bool, default: impl Display) -> Response {
+    if !reset_shown(ui) {
+        return ui.interact(Rect::NOTHING, ui.id().with("no_reset"), Sense::hover());
+    }
     let width = reset_width(ui);
     let button = crate::app::mobile::compact(ui, egui::Button::new(icons::ARROW_COUNTER_CLOCKWISE))
         .min_size(vec2(width, 0.0));
     ui.add_enabled(enabled, button)
         .on_hover_text(format!("Reset to {default}"))
+}
+
+pub fn with_reset(
+    ui: &mut Ui,
+    changed: bool,
+    default: impl Display,
+    add: impl FnOnce(&mut Ui),
+) -> bool {
+    let spacing = ui.spacing().item_spacing;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = RESET_GAP;
+        let width = (ui.available_width() - reset_room(ui)).max(0.0);
+        let size = vec2(width, ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(
+            size,
+            egui::Layout::top_down_justified(egui::Align::Min),
+            |ui| {
+                ui.spacing_mut().item_spacing = spacing;
+                super::settings::form::reset_taken(ui, add);
+            },
+        );
+        if !reset_shown(ui) {
+            return false;
+        }
+        let row = vec2(
+            reset_width(ui),
+            ui.spacing().interact_size.y.max(reset_height(ui)),
+        );
+        ui.allocate_ui_with_layout(
+            row,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| reset_button(ui, changed, default).clicked(),
+        )
+        .inner
+    })
+    .inner
 }

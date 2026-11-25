@@ -10,9 +10,11 @@ publish = false
 argon2 = "0.6.0"
 axum = { version = "0.8.8", features = ["ws"] }
 base64 = "0.22.1"
+citrine-gb-gameinfo = { workspace = true, features = ["nds"] }
 citrine-gb-net = { workspace = true }
 citrine-gb-pkm = { workspace = true }
 citrine-gb-surface = { workspace = true }
+crc32fast = "1.5.0"
 dotenvy = "0.15.7"
 env_logger = "0.11.9"
 fs4 = "0.13.1"
@@ -32,6 +34,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 totp-rs = { version = "6.0.0", default-features = false, features = ["std", "otpauth"] }
 tower-http = { version = "0.6.8", features = ["fs"] }
+zstd = { version = "0.14.0", default-features = false }
 
 [dev-dependencies]
 rand = "0.8.5"

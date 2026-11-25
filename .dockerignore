@@ -3,18 +3,23 @@
 !Cargo.lock
 !CHANGELOG.md
 !FEATURES.md
+!LICENSE
+!NOTICE.md
 !Makefile
 !.cargo
 !crates/citrine-gb
 !crates/citrine-gb-achievements
 !crates/citrine-gb-app
 !crates/citrine-gb-blip
+!crates/citrine-gb-direct
 !crates/citrine-gb-gamedata
+!crates/citrine-gb-gameinfo
 !crates/citrine-gb-net
 !crates/citrine-gb-nds-files
 !crates/citrine-gb-nds-gpu
 !crates/citrine-gb-nds-net
 !crates/citrine-gb-nds-sound
+!crates/citrine-gb-replay
 !crates/citrine-gb-report
 !crates/citrine-gb-partner
 !crates/citrine-gb-pkm
@@ -25,6 +30,7 @@
 !crates/citrine-gb-walker
 !crates/citrine-gb-websocket
 !crates/rcheevos-sys
+!vendor/dimpl
 
 crates/citrine-gb-app/dist
 crates/citrine-gb-server/data

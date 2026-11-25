@@ -8,6 +8,7 @@ pub const HALF: usize = 128;
 const PIPE: usize = 4;
 const PIPE_REFILL: usize = 2;
 const COMMANDS_PER_WORD: u8 = 4;
+const MOST_PUSHED_PER_WORD: usize = COMMANDS_PER_WORD as usize;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -80,16 +81,51 @@ impl std::hash::Hash for Fifo {
 }
 
 impl Fifo {
+    pub fn write_packed_until_full(&mut self, words: &[u32]) -> usize {
+        let mut written = 0;
+        while written < words.len() {
+            let rest = &words[written..];
+            let safe = (CAPACITY - 1).saturating_sub(self.waiting()) / MOST_PUSHED_PER_WORD;
+            if safe == 0 {
+                self.write_packed(rest[0]);
+                written += 1;
+                if self.full() {
+                    break;
+                }
+                continue;
+            }
+            let chunk = &rest[..safe.min(rest.len())];
+            let mut values = chunk.iter();
+            while self.pipe == self.entries.len() && self.pipe < PIPE {
+                let Some(&value) = values.next() else {
+                    break;
+                };
+                self.write_packed(value);
+            }
+            for &value in values {
+                self.write_packed_as::<false>(value);
+            }
+            written += chunk.len();
+        }
+        written
+    }
+
+    #[inline]
     pub fn write_packed(&mut self, value: u32) {
+        self.write_packed_as::<true>(value);
+    }
+
+    #[inline(always)]
+    fn write_packed_as<const FILLS_PIPE: bool>(&mut self, value: u32) {
         if self.packed_left == 0 {
             if value == 0 {
-                self.push(Entry::default());
+                self.push_as::<FILLS_PIPE>(Entry::default());
                 return;
             }
             self.packed = value;
             self.packed_left = COMMANDS_PER_WORD;
         } else {
-            self.push(Entry {
+            self.push_as::<FILLS_PIPE>(Entry {
                 command: self.packed as u8,
                 param: value,
             });
@@ -99,7 +135,7 @@ impl Fifo {
             }
             self.next_packed();
         }
-        self.unpack();
+        self.unpack_as::<FILLS_PIPE>();
     }
 
     pub fn write_port(&mut self, command: u8, value: u32) {
@@ -150,13 +186,19 @@ impl Fifo {
     }
 
     fn push(&mut self, entry: Entry) {
-        if self.pipe == self.entries.len() && self.pipe < PIPE {
+        self.push_as::<true>(entry);
+    }
+
+    #[inline(always)]
+    fn push_as<const FILLS_PIPE: bool>(&mut self, entry: Entry) {
+        if FILLS_PIPE && self.pipe == self.entries.len() && self.pipe < PIPE {
             self.pipe += 1;
         }
         self.entries.push_back(entry);
     }
 
-    fn unpack(&mut self) {
+    #[inline(always)]
+    fn unpack_as<const FILLS_PIPE: bool>(&mut self) {
         while self.packed_left > 0 {
             let command = self.packed as u8;
             let params = command::parameters(command);
@@ -165,7 +207,7 @@ impl Fifo {
                 return;
             }
             if command != command::NOP {
-                self.push(Entry { command, param: 0 });
+                self.push_as::<FILLS_PIPE>(Entry { command, param: 0 });
             }
             self.next_packed();
         }
@@ -208,6 +250,41 @@ mod tests {
         std::iter::from_fn(|| fifo.pop())
             .map(|entry| (entry.command, entry.param))
             .collect()
+    }
+
+    #[test]
+    fn writing_until_full_matches_word_by_word_writes_that_stop_once_full() {
+        let mut words = Vec::new();
+        for index in 0..400u32 {
+            words.extend([0x1515_1515, 0x0000_2310, index, 1, 2, 0, 0x0015_0011, 7]);
+        }
+        for queued in [0, 3, 60, 200, 255] {
+            let mut whole = Fifo::default();
+            for _ in 0..queued {
+                whole.write_port(0x15, 0);
+            }
+            let mut single = whole.clone();
+            let mut rest = &words[..];
+            while !rest.is_empty() {
+                let written = whole.write_packed_until_full(rest);
+                let mut expected = 0;
+                for &word in rest {
+                    single.write_packed(word);
+                    expected += 1;
+                    if single.full() {
+                        break;
+                    }
+                }
+                assert_eq!(written, expected, "{queued} queued");
+                assert_eq!(whole, single, "{queued} queued");
+                let pops = if rest.len() % 3 == 0 { CAPACITY } else { 1 };
+                for _ in 0..pops {
+                    whole.pop();
+                    single.pop();
+                }
+                rest = &rest[written..];
+            }
+        }
     }
 
     #[test]

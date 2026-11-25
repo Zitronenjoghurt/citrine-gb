@@ -17,6 +17,7 @@ object CrashReport {
     private const val SEEN = "seen"
     private const val MAX_CHARS = 100_000
     private val FRAME = Regex("""^\s*\d+: .*""")
+    private val ADDRESS = Regex("""^0x[0-9a-f]+ - """)
 
     fun find(context: Context): String? {
         val parts = mutableListOf<String>()
@@ -61,7 +62,7 @@ object CrashReport {
         val frames = mutableListOf<String>()
         for ((index, line) in trace.withIndex()) {
             if (frames.size >= 12) break
-            val name = line.trim().substringAfter(": ", "")
+            val name = line.substringAfter(": ", "").trim().replace(ADDRESS, "")
             if (!FRAME.matches(line) || "citrine" !in name || name.contains("crash_hook") || name.contains("panic_hook")) continue
             frames += "  $name"
             trace.getOrNull(index + 1)?.trim()?.takeIf { it.startsWith("at ") }?.let { frames += "    $it" }

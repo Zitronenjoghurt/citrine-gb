@@ -31,6 +31,7 @@ impl Relay {
             ("CITRINE_BIND", "127.0.0.1".into()),
             ("CITRINE_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_MB", "0".into()),
+            ("CITRINE_STUN_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
             (
                 "CITRINE_DATA_DIR",

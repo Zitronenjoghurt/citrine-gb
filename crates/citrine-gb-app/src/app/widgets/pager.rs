@@ -129,13 +129,21 @@ impl Widget for Pager<'_> {
                 Cell::Gap => ("…".to_owned(), None, false),
             };
             let current = matches!(cell, Cell::Page(page) if *page == *self.page);
+            let id = ui.id().with(("pager_cell", index));
             let sense = if enabled && !current {
                 Sense::click()
+            } else if matches!(cell, Cell::Gap) {
+                Sense::hover()
+            } else if current || ui.memory(|memory| memory.has_focus(id)) {
+                Sense::focusable_noninteractive()
             } else {
                 Sense::hover()
             };
-            let id = ui.id().with(("pager_cell", index));
             let cell_response = ui.interact(rect, id, sense);
+            crate::app::big_screen::ring::mark(
+                &cell_response,
+                crate::app::big_screen::ring::Mark::Ring { rect, radius },
+            );
             let name = match cell {
                 Cell::Back => "Previous page".to_owned(),
                 Cell::Next => "Next page".to_owned(),

@@ -19,6 +19,7 @@ async fn server(dir: &Path, vars: &[(&str, &str)]) -> Running {
     let mut map: HashMap<String, String> = HashMap::from([
         ("CITRINE_BIND".into(), "127.0.0.1".into()),
         ("CITRINE_PORT".into(), "0".into()),
+        ("CITRINE_STUN_PORT".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_MB".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_PERCENT".into(), "0".into()),
         ("CITRINE_IP_CONNECTIONS".into(), "100000".into()),

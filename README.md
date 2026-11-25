@@ -85,3 +85,9 @@ ever passes, the ledger fails until the mark comes off.
 # Server
 
 [crates/citrine-gb-server/](crates/citrine-gb-server/README.md) hosts the web version of Citrine and the online relay for playing with friends, cloud saves, etc.
+
+# Licence
+
+Citrine is free software under the GNU General Public License, version 3 or any later version (GPL-3.0-or-later). The text is in [LICENSE](LICENSE). Versions up to 0.12.0 were released under the MIT License.
+
+[NOTICE.md](NOTICE.md) names the projects parts of the code follow. The app's Licences page (Settings, About) lists every library the app ships, with its licence.

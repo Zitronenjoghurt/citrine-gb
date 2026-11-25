@@ -1,4 +1,5 @@
-pub const WIRE_XOR: u8 = 0xAA;
+use citrine_gb_walker::packet::{WIRE_XOR, checksum};
+
 pub const HEADER: usize = 8;
 pub const MAX_PAYLOAD: usize = 128;
 
@@ -16,32 +17,6 @@ pub struct Packet {
     pub payload: Vec<u8>,
 }
 
-fn sum_into(mut sum: u32, bytes: &[u8]) -> u32 {
-    for (i, &b) in bytes.iter().enumerate() {
-        sum += if i % 2 == 0 {
-            (b as u32) << 8
-        } else {
-            b as u32
-        };
-    }
-    sum
-}
-
-fn fold(mut sum: u32) -> u16 {
-    while sum > 0xFFFF {
-        sum = (sum >> 16) + (sum & 0xFFFF);
-    }
-    sum as u16
-}
-
-pub fn checksum(header: &[u8; HEADER], payload: &[u8]) -> u16 {
-    let mut h = *header;
-    h[2] = 0;
-    h[3] = 0;
-    let seed = fold(sum_into(0x0002, &h)) as u32;
-    fold(sum_into(seed, payload))
-}
-
 impl Packet {
     pub fn new(cmd: u8, extra: u8, session: u32, payload: &[u8]) -> Self {
         Self {
@@ -53,15 +28,11 @@ impl Packet {
     }
 
     pub fn plain(&self) -> Vec<u8> {
-        let mut header = [0u8; HEADER];
-        header[0] = self.cmd;
-        header[1] = self.extra;
-        header[4..8].copy_from_slice(&self.session.to_be_bytes());
-        let sum = checksum(&header, &self.payload);
-        header[2] = sum as u8;
-        header[3] = (sum >> 8) as u8;
-        let mut out = header.to_vec();
+        let mut out = vec![self.cmd, self.extra, 0, 0];
+        out.extend_from_slice(&self.session.to_be_bytes());
         out.extend_from_slice(&self.payload);
+        let sum = checksum(&out);
+        out[2..4].copy_from_slice(&sum.to_le_bytes());
         out
     }
 
@@ -78,17 +49,18 @@ impl Packet {
         if plain.len() < HEADER || plain.len() > HEADER + MAX_PAYLOAD {
             return None;
         }
-        let header: [u8; HEADER] = plain[..HEADER].try_into().ok()?;
-        let payload = &plain[HEADER..];
-        let sum = u16::from_le_bytes([header[2], header[3]]);
-        if checksum(&header, payload) != sum {
+        let stored = u16::from_le_bytes([plain[2], plain[3]]);
+        let mut bytes = plain.to_vec();
+        bytes[2] = 0;
+        bytes[3] = 0;
+        if checksum(&bytes) != stored {
             return None;
         }
         Some(Self {
-            cmd: header[0],
-            extra: header[1],
-            session: u32::from_be_bytes(header[4..8].try_into().ok()?),
-            payload: payload.to_vec(),
+            cmd: plain[0],
+            extra: plain[1],
+            session: u32::from_be_bytes(plain[4..8].try_into().ok()?),
+            payload: plain[HEADER..].to_vec(),
         })
     }
 }
@@ -96,20 +68,6 @@ impl Packet {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn checksum_seeds_two_and_sums_even_bytes_high() {
-        let header = [0u8; HEADER];
-        assert_eq!(checksum(&header, &[]), 0x0002);
-        assert_eq!(
-            checksum(&header, &[0x01, 0x02, 0x03]),
-            0x0002 + 0x0102 + 0x0300
-        );
-        let mut h = [0xFFu8; HEADER];
-        h[2] = 0x12;
-        h[3] = 0x34;
-        assert_eq!(checksum(&h, &[]), fold(0x0002 + 0xFFFF * 3));
-    }
 
     #[test]
     fn wire_round_trip_with_xor() {

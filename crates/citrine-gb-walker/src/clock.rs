@@ -65,6 +65,14 @@ impl Walker {
         }
     }
 
+    pub fn ticked_at(&self) -> Option<u64> {
+        self.clock.last
+    }
+
+    pub fn resume_at(&mut self, now: u64) {
+        self.clock.last.get_or_insert(now);
+    }
+
     pub fn asleep(&self) -> bool {
         self.ram.awake_seconds == 0
     }
@@ -207,6 +215,21 @@ mod tests {
         assert_eq!(health.total_days(), 13);
         assert_eq!(health.hours(), 13 * 24);
         assert_eq!(walker.history(), vec![0; 7]);
+    }
+
+    #[test]
+    fn a_restored_walker_resumed_at_its_last_tick_catches_up_the_days_between() {
+        let walker = walker_at(0, 0);
+        let restore = || Walker::restore(walker.eeprom.clone(), walker.memory());
+        let mut resumed = restore();
+        resumed.resume_at(0);
+        resumed.steps(400);
+        resumed.tick(2 * DAY_MS);
+        assert_eq!(resumed.history()[..2], [0, 400]);
+        assert_eq!(resumed.ticked_at(), Some(2 * DAY_MS));
+        let mut fresh = restore();
+        fresh.tick(2 * DAY_MS);
+        assert_eq!(fresh.health().total_days(), 0);
     }
 
     #[test]

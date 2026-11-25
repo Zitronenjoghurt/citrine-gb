@@ -5,6 +5,7 @@ use super::links::Links;
 use super::shelf::Finder;
 use super::{Ending, GameFile, MyGame, PlaySession, Returned, Role, Stage};
 use crate::online::Online;
+use citrine_gb_direct::Direct;
 use citrine_gb_net::{
     Body, ClientMsg, Console, EndReason, Envelope, ErrorCode, GameCard, Member, MemberState,
     OnlineId, PlayMsg, PublicKey, ROOMS_PROTOCOL, Sealed, SessionId,
@@ -12,6 +13,8 @@ use citrine_gb_net::{
 use citrine_gb_threads::Threads;
 use std::time::Duration;
 use web_time::Instant;
+
+const MEMBERS_MAX: usize = 64;
 
 #[cfg(not(test))]
 const REJOIN_FOR: Duration = Duration::from_secs(60);
@@ -312,6 +315,7 @@ impl Room {
             .into_iter()
             .enumerate()
             .filter(|(_, m)| m.who != me)
+            .take(MEMBERS_MAX)
             .map(|(i, m)| (i, m.into()))
             .collect();
         for pair in &mut self.pairs {
@@ -363,6 +367,9 @@ impl Room {
         self.inviting.retain(|w| *w != member.who);
         if member.state.old_client && !self.aware(member.who) {
             self.old_pair = Some(member.who);
+            return;
+        }
+        if self.members.len() >= MEMBERS_MAX && !self.members.iter().any(|m| m.who == member.who) {
             return;
         }
         match self.members.iter_mut().find(|m| m.who == member.who) {
@@ -577,6 +584,24 @@ impl Room {
         }
     }
 
+    pub(super) fn set_ds_cost(
+        &mut self,
+        pinned: Option<super::links::DsCost>,
+        known: &super::links::DsCosts,
+        measure: bool,
+    ) {
+        for pair in &mut self.pairs {
+            pair.ds_cost = pinned.or_else(|| known.of(pair.cost_key()));
+            pair.ds_measure = measure;
+        }
+    }
+
+    pub(super) fn measured_ds_costs(
+        &self,
+    ) -> impl Iterator<Item = (super::links::CostKey, super::links::DsCost)> + '_ {
+        self.pairs.iter().filter_map(|pair| pair.measured_cost)
+    }
+
     pub(super) fn step(
         &mut self,
         finder: &mut Finder,
@@ -642,15 +667,40 @@ impl Room {
         }
     }
 
-    pub(super) fn flush(&mut self, online: &mut Online) {
+    pub(super) fn flush(
+        &mut self,
+        online: &mut Online,
+        direct: &mut Direct,
+        want: bool,
+        now: Instant,
+    ) {
         if self.lost.is_some() {
             return;
         }
         self.flush_group();
         for pair in &mut self.pairs {
             let aware = self.members.iter().any(|m| m.who == pair.friend);
-            pair.flush(online, aware);
+            pair.flush(online, direct, want, aware, now);
         }
+    }
+
+    pub(super) fn direct_tags(&self) -> Vec<u64> {
+        if !self.is_live() || self.lost.is_some() {
+            return Vec::new();
+        }
+        self.pairs.iter().map(|p| p.direct.tag()).collect()
+    }
+
+    pub(super) fn close_direct(&mut self, direct: &mut Direct, now: Instant) {
+        for pair in &mut self.pairs {
+            if let Some(link) = &mut pair.link {
+                pair.direct.close(link, direct, now);
+            }
+        }
+    }
+
+    pub(super) fn pair_of_tag(&self, tag: u64) -> Option<usize> {
+        self.pairs.iter().position(|p| p.direct.tag() == tag)
     }
 
     pub(super) fn leave(&mut self, online: &mut Online) {
@@ -991,4 +1041,30 @@ fn group_msg(group: &super::LinkGroup, at_frame: u32) -> PlayMsg {
         console: group.console(),
         watchers: group.watchers().to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relay_cannot_grow_the_member_list_without_limit() {
+        let first = OnlineId::new(1).unwrap();
+        let mut room = Room::new(PlaySession::new(first, Role::Host, Stage::Preparing, None));
+        let now = Instant::now();
+        for who in 2..1000 {
+            room.update_member(
+                Member {
+                    who: OnlineId::new(who).unwrap(),
+                    display_name: format!("Player {who}"),
+                    public_key: PublicKey([4; 32]),
+                    state: MemberState::default(),
+                },
+                None,
+                now,
+            );
+        }
+        assert_eq!(room.members.len(), MEMBERS_MAX);
+        assert!(room.pairs.len() <= MEMBERS_MAX + 1);
+    }
 }

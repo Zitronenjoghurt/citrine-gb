@@ -6,6 +6,7 @@ struct Uniforms {
     edge: vec4<u32>,
     fog: vec4<u32>,
     fog_table: array<vec4<u32>, 2>,
+    mips: vec4<u32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -13,6 +14,7 @@ struct Uniforms {
 @group(0) @binding(2) var reference: texture_2d<u32>;
 @group(0) @binding(3) var centers: texture_2d<u32>;
 @group(0) @binding(4) var edged: texture_storage_2d<rgba32uint, write>;
+@group(0) @binding(5) var atlas: texture_2d<u32>;
 
 const WIDTH: i32 = 256;
 const HEIGHT: i32 = 192;
@@ -60,6 +62,8 @@ const SLOT: u32 = 0x20000u;
 const COMPRESSED_INDEX_HIGH: u32 = 0x10000u;
 
 const MARGIN: f32 = 0.125;
+const PLACE_WORD: u32 = 6u;
+const PLACED: u32 = 0x80000000u;
 const WIRE: f32 = 0.5;
 const HOLE: f32 = 1.0;
 
@@ -119,7 +123,10 @@ fn texel(index: u32) -> vec4<u32> {
 }
 
 fn load(record: u32) -> Poly {
-    let head = texel(record);
+    return poly_of(record, texel(record));
+}
+
+fn poly_of(record: u32, head: vec4<u32>) -> Poly {
     let flags = head.z;
     let shape = head.w;
     var p: Poly;
@@ -148,9 +155,12 @@ fn screen(p: Poly, index: u32) -> vec2<i32> {
     return vec2<i32>(i32(value & 0xFFFFu), i32(value >> 16u));
 }
 
-fn fine(p: Poly, index: u32) -> vec2<f32> {
-    let value = vertex_word(p, index, 1u);
+fn fine_of(value: u32) -> vec2<f32> {
     return vec2<f32>(f32(value & 0xFFFFu), f32(value >> 16u)) / 16.0;
+}
+
+fn fine(p: Poly, index: u32) -> vec2<f32> {
+    return fine_of(vertex_word(p, index, 1u));
 }
 
 fn vertex_depth(p: Poly, index: u32) -> i32 {
@@ -579,6 +589,7 @@ struct Sample {
     edges: u32,
     rim: bool,
     fringe: bool,
+    footprint: vec4<f32>,
 }
 
 struct RowSetup {
@@ -767,15 +778,22 @@ fn vertex_first(p: Poly, index: u32) -> vec4<u32> {
     return texel(p.record + HEADER + index * VERTEX);
 }
 
+fn vertex_second(p: Poly, index: u32) -> vec4<u32> {
+    return texel(p.record + HEADER + index * VERTEX + 4u);
+}
+
 fn fine_values(p: Poly, index: u32) -> FineValues {
-    let base = p.record + HEADER + index * VERTEX;
-    let first = texel(base);
-    let second = texel(base + 4u);
-    let color = second.x;
-    let texcoord = second.y;
+    let first = vertex_first(p, index);
+    let second = vertex_second(p, index);
+    return values_of(vec4<u32>(first.z, first.w, second.x, second.y));
+}
+
+fn values_of(packed_values: vec4<u32>) -> FineValues {
+    let color = packed_values.z;
+    let texcoord = packed_values.w;
     var v: FineValues;
-    v.w = f32(bitcast<i32>(first.w));
-    v.depth = f32(bitcast<i32>(first.z));
+    v.w = f32(bitcast<i32>(packed_values.y));
+    v.depth = f32(bitcast<i32>(packed_values.x));
     v.color = vec3<f32>(f32(widen(color & 0xFFu)), f32(widen((color >> 8u) & 0xFFu)), f32(widen((color >> 16u) & 0xFFu)));
     v.texcoord = vec2<f32>(f32(bitcast<i32>(texcoord << 16u) >> 16u), f32(bitcast<i32>(texcoord) >> 16u));
     return v;
@@ -867,30 +885,63 @@ fn boundary_distance(p: Poly, point: vec2<f32>) -> f32 {
     return nearest;
 }
 
-fn upscaled_sample(p: Poly, point: vec2<f32>, pixel: f32, forced: bool) -> Sample {
-    var out: Sample;
-    out.covered = false;
+struct UpRow {
+    live: bool,
+    valued: bool,
+    swapped: bool,
+    top: f32,
+    bottom: f32,
+    xl: f32,
+    xr: f32,
+    tl: f32,
+    tr: f32,
+    left: vec2<u32>,
+    right: vec2<u32>,
+    lv: FineValues,
+    rv: FineValues,
+}
+
+fn upscaled_row(p: Poly, point_y: f32) -> UpRow {
+    var row: UpRow;
+    row.live = false;
+    row.valued = false;
     if p.degenerate || p.count < 3u {
-        return out;
+        return row;
     }
     let top = fine(p, p.fine_top).y;
     let bottom = fine(p, p.fine_bottom).y;
-    let y = clamp(point.y, top, bottom);
+    let y = clamp(point_y, top, bottom);
     let lc = chain(p, y, true);
     let rc = chain(p, y, false);
-    var left = vec2<u32>(lc.start, lc.stop);
-    var right = vec2<u32>(rc.start, rc.stop);
-    var la = lc.a;
-    var lb = lc.b;
-    var ra = rc.a;
-    var rb = rc.b;
+    let left = vec2<u32>(lc.start, lc.stop);
+    let right = vec2<u32>(rc.start, rc.stop);
+    let la = lc.a;
+    let lb = lc.b;
+    let ra = rc.a;
+    let rb = rc.b;
     var xl = edge_x(la, lb, y);
     var xr = edge_x(ra, rb, y);
     if top == bottom {
         xl = min(fine(p, 0u).x, min(fine(p, 1u).x, fine(p, p.count - 1u).x));
         xr = max(fine(p, 0u).x, max(fine(p, 1u).x, fine(p, p.count - 1u).x));
     }
+    return row_between(top, bottom, left, right, la, lb, ra, rb, xl, xr, y);
+}
+
+fn row_between(top: f32, bottom: f32, left_in: vec2<u32>, right_in: vec2<u32>, la_in: vec2<f32>, lb_in: vec2<f32>, ra_in: vec2<f32>, rb_in: vec2<f32>, xl_in: f32, xr_in: f32, y: f32) -> UpRow {
+    var row: UpRow;
+    row.valued = false;
+    row.swapped = false;
+    var left = left_in;
+    var right = right_in;
+    var la = la_in;
+    var lb = lb_in;
+    var ra = ra_in;
+    var rb = rb_in;
+    var xl = xl_in;
+    var xr = xr_in;
     if xl > xr {
+        row.swapped = true;
         let swap_x = xl;
         xl = xr;
         xr = swap_x;
@@ -904,6 +955,36 @@ fn upscaled_sample(p: Poly, point: vec2<f32>, pixel: f32, forced: bool) -> Sampl
         ra = swap_a;
         rb = swap_b;
     }
+    row.live = true;
+    row.top = top;
+    row.bottom = bottom;
+    row.xl = xl;
+    row.xr = xr;
+    row.tl = edge_t(la, lb, y);
+    row.tr = edge_t(ra, rb, y);
+    row.left = left;
+    row.right = right;
+    return row;
+}
+
+fn upscaled_values(p: Poly, row: UpRow) -> UpRow {
+    var out = row;
+    out.lv = fine_mix(p, fine_values(p, row.left.x), fine_values(p, row.left.y), row.tl);
+    out.rv = fine_mix(p, fine_values(p, row.right.x), fine_values(p, row.right.y), row.tr);
+    out.valued = true;
+    return out;
+}
+
+fn upscaled_tail(p: Poly, given: UpRow, point: vec2<f32>, pixel: f32, forced: bool) -> Sample {
+    var out: Sample;
+    out.covered = false;
+    if !given.live {
+        return out;
+    }
+    let top = given.top;
+    let bottom = given.bottom;
+    let xl = given.xl;
+    let xr = given.xr;
     var inside = point.y >= top && point.y < bottom && point.x >= xl && point.x < xr;
     if top == bottom {
         inside = point.y >= top && point.y < top + pixel && point.x >= xl && point.x < xr;
@@ -918,10 +999,12 @@ fn upscaled_sample(p: Poly, point: vec2<f32>, pixel: f32, forced: bool) -> Sampl
     if !covered && !forced {
         return out;
     }
-    let tl = edge_t(la, lb, y);
-    let tr = edge_t(ra, rb, y);
-    let lv = fine_mix(p, fine_values(p, left.x), fine_values(p, left.y), tl);
-    let rv = fine_mix(p, fine_values(p, right.x), fine_values(p, right.y), tr);
+    var row = given;
+    if !row.valued {
+        row = upscaled_values(p, row);
+    }
+    let lv = row.lv;
+    let rv = row.rv;
     var tx = 0.0;
     if xr > xl {
         tx = clamp((point.x - xl) / (xr - xl), 0.0, 1.0);
@@ -932,6 +1015,9 @@ fn upscaled_sample(p: Poly, point: vec2<f32>, pixel: f32, forced: bool) -> Sampl
     out.depth = i32(floor(v.depth));
     out.color = vec3<u32>(max(floor(v.color), vec3<f32>(0.0))) >> vec3<u32>(3u);
     out.texcoord = (vec2<i32>(floor(v.texcoord)) << vec2<u32>(16u)) >> vec2<u32>(16u);
+    if (mipmapped(p) || u.options.x == 3u) && top != bottom {
+        out.footprint = footprint(p, row, point, pixel, v.texcoord);
+    }
     var edges = 0u;
     if point.x - xl < pixel {
         edges = edges | LEFT;
@@ -948,6 +1034,65 @@ fn upscaled_sample(p: Poly, point: vec2<f32>, pixel: f32, forced: bool) -> Sampl
     out.edges = edges;
     out.rim = point.x - xl < 1.0 || xr - point.x <= 1.0 || point.y - top < 1.0 || bottom - point.y <= 1.0;
     return out;
+}
+
+fn row_texcoord(row: UpRow, x: f32) -> vec2<f32> {
+    var t = 0.0;
+    if row.xr > row.xl {
+        t = clamp((x - row.xl) / (row.xr - row.xl), -1.0, 2.0);
+    }
+    let a = row.lv;
+    let b = row.rv;
+    return vec2<f32>(
+        blend_perspective(a.texcoord.x, b.texcoord.x, a.w, b.w, t),
+        blend_perspective(a.texcoord.y, b.texcoord.y, a.w, b.w, t),
+    );
+}
+
+fn footprint(p: Poly, row: UpRow, point: vec2<f32>, pixel: f32, at: vec2<f32>) -> vec4<f32> {
+    var step_x = pixel;
+    if point.x + pixel >= row.xr {
+        step_x = -pixel;
+    }
+    let across = (row_texcoord(row, point.x + step_x) - at) * sign(step_x);
+    var step_y = pixel;
+    if point.y + pixel >= row.bottom {
+        step_y = -pixel;
+    }
+    let below = upscaled_values(p, upscaled_row(p, point.y + step_y));
+    let down = (row_texcoord(below, point.x) - at) * sign(step_y);
+    return vec4<f32>(across, down) / 16.0;
+}
+
+fn upscaled_sample(p: Poly, point: vec2<f32>, pixel: f32, forced: bool) -> Sample {
+    return upscaled_tail(p, upscaled_row(p, point.y), point, pixel, forced);
+}
+
+fn slab_sample(p: Poly, reach: vec2<u32>, corners: vec4<u32>, la: vec4<u32>, lb: vec4<u32>, ra: vec4<u32>, rb: vec4<u32>, point: vec2<f32>, pixel: f32) -> Sample {
+    var out: Sample;
+    out.covered = false;
+    let rows = fine_of(reach.y);
+    if point.y < rows.x || point.y >= rows.y {
+        return out;
+    }
+    let ends = fine_of(reach.x);
+    let a = fine_of(corners.x);
+    let b = fine_of(corners.y);
+    let c = fine_of(corners.z);
+    let d = fine_of(corners.w);
+    var row = row_between(ends.x, ends.y, vec2<u32>(0u), vec2<u32>(0u), a, b, c, d, edge_x(a, b, point.y), edge_x(c, d, point.y), point.y);
+    if point.x < row.xl || point.x >= row.xr {
+        return out;
+    }
+    if row.swapped {
+        row.lv = fine_mix(p, values_of(ra), values_of(rb), row.tl);
+        row.rv = fine_mix(p, values_of(la), values_of(lb), row.tr);
+    } else {
+        row.lv = fine_mix(p, values_of(la), values_of(lb), row.tl);
+        row.rv = fine_mix(p, values_of(ra), values_of(rb), row.tr);
+    }
+    row.valued = true;
+    return upscaled_tail(p, row, point, pixel, false);
 }
 
 struct Texel {
@@ -1074,7 +1219,13 @@ fn sample_texture(param: u32, palette_base: u32, s_in: i32, t_in: i32) -> Texel 
     return out;
 }
 
-fn smooth_texture(param: u32, palette_base: u32, s_in: i32, t_in: i32) -> Texel {
+fn hard_alpha(format: u32) -> bool {
+    return format != 1u && format != 6u;
+}
+
+fn smooth_texture(p: Poly, s_in: i32, t_in: i32) -> Texel {
+    let param = p.texture;
+    let place = atlas_place(p);
     let s = s_in - 8;
     let t = t_in - 8;
     let fs = u32(s & 15);
@@ -1086,19 +1237,380 @@ fn smooth_texture(param: u32, palette_base: u32, s_in: i32, t_in: i32) -> Texel 
     for (var k = 0u; k < 4u; k = k + 1u) {
         let dx = k & 1u;
         let dy = k >> 1u;
-        let texel = sample_texture(param, palette_base, s0 + i32(dx) * 16, t0 + i32(dy) * 16);
         let weight = select(16u - fs, fs, dx == 1u) * select(16u - ft, ft, dy == 1u);
+        if (place & PLACED) != 0u {
+            let tap = vec4<u32>(atlas_load(place, param, 0u, vec2<i32>((s0 >> 4u) + i32(dx), (t0 >> 4u) + i32(dy)))) >> vec4<u32>(6u);
+            weighted = weighted + tap.xyz * weight;
+            coverage = coverage + tap.w * weight;
+            continue;
+        }
+        let texel = sample_texture(param, p.palette, s0 + i32(dx) * 16, t0 + i32(dy) * 16);
         let color = vec3<u32>(texel.color & 0x1Fu, (texel.color >> 5u) & 0x1Fu, (texel.color >> 10u) & 0x1Fu);
         weighted = weighted + color * texel.alpha * weight;
         coverage = coverage + texel.alpha * weight;
     }
     var out: Texel;
     out.alpha = (coverage + 128u) / 256u;
-    if coverage == 0u {
+    let format = (param >> 26u) & 7u;
+    if hard_alpha(format) {
+        out.alpha = select(0u, OPAQUE, coverage * 2u >= OPAQUE * 256u);
+    }
+    if out.alpha == 0u {
         out.color = 0u;
         return out;
     }
     let color = (weighted + coverage / 2u) / coverage;
+    out.color = color.x | (color.y << 5u) | (color.z << 10u);
+    return out;
+}
+
+fn cubic(x: f32) -> vec4<f32> {
+    let x2 = x * x;
+    let x3 = x2 * x;
+    return vec4<f32>(
+        -0.5 * x3 + x2 - 0.5 * x,
+        1.5 * x3 - 2.5 * x2 + 1.0,
+        -1.5 * x3 + 2.0 * x2 + 0.5 * x,
+        0.5 * x3 - 0.5 * x2,
+    );
+}
+
+fn bicubic_texture(p: Poly, s_in: i32, t_in: i32) -> Texel {
+    let param = p.texture;
+    let place = atlas_place(p);
+    let s = s_in - 8;
+    let t = t_in - 8;
+    let ws = cubic(f32(s & 15) / 16.0);
+    let wt = cubic(f32(t & 15) / 16.0);
+    let corner = vec2<i32>((s >> 4u) - 1, (t >> 4u) - 1);
+    var sum = vec4<f32>(0.0);
+    for (var k = 0u; k < 16u; k = k + 1u) {
+        let dx = k & 3u;
+        let dy = k >> 2u;
+        var texel: Texel;
+        if (place & PLACED) != 0u {
+            texel = atlas_texel(place, param, corner + vec2<i32>(i32(dx), i32(dy)));
+        } else {
+            texel = sample_texture(param, p.palette, (corner.x + i32(dx)) << 4u, (corner.y + i32(dy)) << 4u);
+        }
+        let weight = ws[dx] * wt[dy];
+        let color = vec3<f32>(f32(texel.color & 0x1Fu), f32((texel.color >> 5u) & 0x1Fu), f32((texel.color >> 10u) & 0x1Fu));
+        let alpha = f32(texel.alpha);
+        sum = sum + vec4<f32>(color * alpha, alpha) * weight;
+    }
+    var out: Texel;
+    let alpha = clamp(sum.w, 0.0, f32(OPAQUE));
+    out.alpha = u32(round(alpha));
+    let format = (param >> 26u) & 7u;
+    if hard_alpha(format) {
+        out.alpha = select(0u, OPAQUE, alpha * 2.0 >= f32(OPAQUE));
+    }
+    if out.alpha == 0u || sum.w <= 0.0 {
+        out.alpha = 0u;
+        out.color = 0u;
+        return out;
+    }
+    let color = vec3<u32>(clamp(round(sum.xyz / sum.w), vec3<f32>(0.0), vec3<f32>(31.0)));
+    out.color = color.x | (color.y << 5u) | (color.z << 10u);
+    return out;
+}
+
+const XBR_YUV: mat3x3<f32> = mat3x3<f32>(
+    vec3<f32>(0.299, -0.169, 0.5),
+    vec3<f32>(0.587, -0.331, -0.419),
+    vec3<f32>(0.114, 0.5, -0.081),
+);
+const XBR_EQ: f32 = 0.4706;
+const XBR_LV2: f32 = 2.0;
+const XBR_CELLS: f32 = 4.0;
+
+fn xbr_key(texel: Texel) -> vec3<f32> {
+    if texel.alpha == 0u {
+        return vec3<f32>(-1.0);
+    }
+    return XBR_YUV * (vec3<f32>(f32(texel.color & 0x1Fu), f32((texel.color >> 5u) & 0x1Fu), f32((texel.color >> 10u) & 0x1Fu)) / 31.0);
+}
+
+fn xbr_value(texel: Texel) -> vec4<f32> {
+    let alpha = f32(texel.alpha);
+    let color = vec3<f32>(f32(texel.color & 0x1Fu), f32((texel.color >> 5u) & 0x1Fu), f32((texel.color >> 10u) & 0x1Fu));
+    return vec4<f32>(color * alpha, alpha);
+}
+
+fn xbr_dist(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    return dot(abs(a - b), vec3<f32>(1.0));
+}
+
+fn xbr_dist4(a: mat4x3<f32>, b: mat4x3<f32>) -> vec4<f32> {
+    return vec4<f32>(xbr_dist(a[0], b[0]), xbr_dist(a[1], b[1]), xbr_dist(a[2], b[2]), xbr_dist(a[3], b[3]));
+}
+
+fn xbr_eq(a: mat4x3<f32>, b: mat4x3<f32>) -> vec4<f32> {
+    return step(xbr_dist4(a, b), vec4<f32>(XBR_EQ));
+}
+
+fn xbr_neq(a: mat4x3<f32>, b: mat4x3<f32>) -> vec4<f32> {
+    return vec4<f32>(1.0) - xbr_eq(a, b);
+}
+
+fn xbr_diff(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return select(vec4<f32>(0.0), vec4<f32>(1.0), a != b);
+}
+
+fn xbr_lt(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return select(vec4<f32>(0.0), vec4<f32>(1.0), a < b);
+}
+
+fn xbr_weighted(a: mat4x3<f32>, b: mat4x3<f32>, c: mat4x3<f32>, d: mat4x3<f32>, e: mat4x3<f32>, f: mat4x3<f32>, g: mat4x3<f32>, h: mat4x3<f32>) -> vec4<f32> {
+    return xbr_dist4(a, b) + xbr_dist4(a, c) + xbr_dist4(d, e) + xbr_dist4(d, f) + 4.0 * xbr_dist4(g, h);
+}
+
+struct XbrPick {
+    key: vec3<f32>,
+    value: vec4<f32>,
+}
+
+fn xbr_mix(a: XbrPick, b: XbrPick, t: f32) -> XbrPick {
+    var out: XbrPick;
+    out.key = mix(a.key, b.key, t);
+    out.value = mix(a.value, b.value, t);
+    return out;
+}
+
+fn xbr_closer(e: vec3<f32>, a: XbrPick, b: XbrPick) -> XbrPick {
+    return xbr_mix(a, b, step(xbr_dist(e, a.key), xbr_dist(e, b.key)));
+}
+
+fn atlas_texel(place: u32, param: u32, texel: vec2<i32>) -> Texel {
+    let tap = atlas_load(place, param, 0u, texel);
+    var out: Texel;
+    out.alpha = u32(tap.w) >> 6u;
+    out.color = 0u;
+    if tap.w != 0.0 {
+        let color = vec3<u32>(round(tap.xyz / tap.w));
+        out.color = color.x | (color.y << 5u) | (color.z << 10u);
+    }
+    return out;
+}
+
+fn xbr_texture(p: Poly, s_in: i32, t_in: i32, span: f32) -> Texel {
+    let param = p.texture;
+    let place = atlas_place(p);
+    let tx = s_in >> 4u;
+    let ty = t_in >> 4u;
+    let fp = (floor((vec2<f32>(f32(s_in & 15), f32(t_in & 15)) + 0.5) / 16.0 * XBR_CELLS) + 0.5) / XBR_CELLS;
+    var at: array<Texel, 25>;
+    for (var k = 0u; k < 25u; k = k + 1u) {
+        let dx = i32(k % 5u) - 2;
+        let dy = i32(k / 5u) - 2;
+        if (place & PLACED) != 0u {
+            at[k] = atlas_texel(place, param, vec2<i32>(tx + dx, ty + dy));
+        } else {
+            at[k] = sample_texture(param, p.palette, (tx + dx) * 16, (ty + dy) * 16);
+        }
+    }
+    let A1 = xbr_key(at[1]);
+    let B1 = xbr_key(at[2]);
+    let C1 = xbr_key(at[3]);
+    let A0 = xbr_key(at[5]);
+    let A = xbr_key(at[6]);
+    let B = xbr_key(at[7]);
+    let C = xbr_key(at[8]);
+    let C4 = xbr_key(at[9]);
+    let D0 = xbr_key(at[10]);
+    let D = xbr_key(at[11]);
+    let E = xbr_key(at[12]);
+    let F = xbr_key(at[13]);
+    let F4 = xbr_key(at[14]);
+    let G0 = xbr_key(at[15]);
+    let G = xbr_key(at[16]);
+    let H = xbr_key(at[17]);
+    let I = xbr_key(at[18]);
+    let I4 = xbr_key(at[19]);
+    let G5 = xbr_key(at[21]);
+    let H5 = xbr_key(at[22]);
+    let I5 = xbr_key(at[23]);
+
+    let b = mat4x3<f32>(B, D, H, F);
+    let c = mat4x3<f32>(C, A, G, I);
+    let d = mat4x3<f32>(D, H, F, B);
+    let e = mat4x3<f32>(E, E, E, E);
+    let f = mat4x3<f32>(F, B, D, H);
+    let g = mat4x3<f32>(G, I, C, A);
+    let h = mat4x3<f32>(H, F, B, D);
+    let i = mat4x3<f32>(I, C, A, G);
+    let i4 = mat4x3<f32>(I4, C1, A0, G5);
+    let i5 = mat4x3<f32>(I5, C4, A1, G0);
+    let h5 = mat4x3<f32>(H5, F4, B1, D0);
+    let f4 = mat4x3<f32>(F4, B1, D0, H5);
+
+    let v2f = vec3<f32>(65536.0, 256.0, 1.0);
+    let b_ = v2f * b;
+    let c_ = v2f * c;
+    let d_ = b_.yzwx;
+    let e_ = v2f * e;
+    let f_ = b_.wxyz;
+    let g_ = c_.zwxy;
+    let h_ = b_.zwxy;
+
+    let Ao = vec4<f32>(1.0, -1.0, -1.0, 1.0);
+    let Bo = vec4<f32>(1.0, 1.0, -1.0, -1.0);
+    let Co = vec4<f32>(1.5, 0.5, -0.5, 0.5);
+    let Ax = vec4<f32>(1.0, -1.0, -1.0, 1.0);
+    let Bx = vec4<f32>(0.5, 2.0, -0.5, -2.0);
+    let Cx = vec4<f32>(1.0, 1.0, -0.5, 0.0);
+    let Ay = vec4<f32>(1.0, -1.0, -1.0, 1.0);
+    let By = vec4<f32>(2.0, 0.5, -2.0, -0.5);
+    let Cy = vec4<f32>(2.0, 0.0, -1.0, 0.5);
+    let Ci = vec4<f32>(0.25);
+
+    let fx = Ao * fp.y + Bo * fp.x;
+    let fx_l = Ax * fp.y + Bx * fp.x;
+    let fx_u = Ay * fp.y + By * fp.x;
+
+    let irlv0 = xbr_diff(e_, f_) * xbr_diff(e_, h_);
+    let irlv1 = saturate(irlv0 * (xbr_neq(f, b) * xbr_neq(h, d) + xbr_eq(e, i) * xbr_neq(f, i4) * xbr_neq(h, i5) + xbr_eq(e, g) + xbr_eq(e, c)));
+    let irlv2l = xbr_diff(e_, g_) * xbr_diff(d_, g_);
+    let irlv2u = xbr_diff(e_, c_) * xbr_diff(b_, c_);
+
+    let aa = max(2.0 * span, 2.0 / XBR_CELLS);
+    let delta = vec4<f32>(aa);
+    let delta_l = vec4<f32>(0.5, 1.0, 0.5, 1.0) * aa;
+    let delta_u = delta_l.yxwz;
+    var fx45i = saturate(0.5 + (fx - Co - Ci) / delta);
+    var fx45 = saturate(0.5 + (fx - Co) / delta);
+    var fx30 = saturate(0.5 + (fx_l - Cx) / delta_l);
+    var fx60 = saturate(0.5 + (fx_u - Cy) / delta_u);
+
+    let wd1 = xbr_weighted(e, c, g, i, h5, f4, h, f);
+    let wd2 = xbr_weighted(h, d, i5, f, i4, b, e, i);
+    let d_fg = xbr_dist4(f, g);
+    let d_hc = xbr_dist4(h, c);
+
+    let edri = step(wd1, wd2) * irlv0;
+    let edr = xbr_lt(wd1, wd2) * irlv1 * (vec4<f32>(1.0) - edri.yzwx * edri.wxyz);
+    let edr_l = step(XBR_LV2 * d_fg, d_hc) * irlv2l * edr;
+    let edr_u = step(XBR_LV2 * d_hc, d_fg) * irlv2u * edr;
+
+    fx45i = edri * fx45i;
+    fx45 = edr * fx45;
+    fx30 = edr_l * fx30;
+    fx60 = edr_u * fx60;
+
+    let px = step(xbr_dist4(e, f), xbr_dist4(e, h));
+    let most = max(max(fx30, fx60), max(fx45, fx45i));
+
+    let pe = XbrPick(E, xbr_value(at[12]));
+    let ph = XbrPick(H, xbr_value(at[17]));
+    let pf = XbrPick(F, xbr_value(at[13]));
+    let pb = XbrPick(B, xbr_value(at[7]));
+    let pd = XbrPick(D, xbr_value(at[11]));
+
+    var r1 = xbr_mix(pe, xbr_mix(ph, pf, px.x), most.x);
+    var r2 = xbr_mix(pe, xbr_mix(pb, pd, px.z), most.z);
+    let r1a = xbr_closer(E, r1, r2);
+    r1 = xbr_mix(pe, xbr_mix(pf, pb, px.y), most.y);
+    r2 = xbr_mix(pe, xbr_mix(pd, ph, px.w), most.w);
+    let r1b = xbr_closer(E, r1, r2);
+    let picked = xbr_closer(E, r1a, r1b).value;
+
+    var out: Texel;
+    let alpha = clamp(picked.w, 0.0, f32(OPAQUE));
+    out.alpha = u32(round(alpha));
+    let format = (param >> 26u) & 7u;
+    if hard_alpha(format) {
+        out.alpha = select(0u, OPAQUE, alpha * 2.0 >= f32(OPAQUE));
+    }
+    if out.alpha == 0u || picked.w <= 0.0 {
+        out.alpha = 0u;
+        out.color = 0u;
+        return out;
+    }
+    let color = vec3<u32>(clamp(round(picked.xyz / picked.w), vec3<f32>(0.0), vec3<f32>(31.0)));
+    out.color = color.x | (color.y << 5u) | (color.z << 10u);
+    return out;
+}
+
+fn texture_of(p: Poly, sample: Sample) -> Texel {
+    var texel: Texel;
+    if u.options.x == 3u {
+        let span = max(length(sample.footprint.xy), length(sample.footprint.zw));
+        texel = xbr_texture(p, sample.texcoord.x, sample.texcoord.y, span);
+    } else if u.options.x == 2u {
+        texel = bicubic_texture(p, sample.texcoord.x, sample.texcoord.y);
+    } else if u.options.x != 0u {
+        texel = smooth_texture(p, sample.texcoord.x, sample.texcoord.y);
+    } else {
+        texel = sample_texture(p.texture, p.palette, sample.texcoord.x, sample.texcoord.y);
+    }
+    if mipmapped(p) {
+        return mip_texture(p, sample, texel);
+    }
+    return texel;
+}
+
+fn atlas_place(p: Poly) -> u32 {
+    return vertex_word(p, 0u, PLACE_WORD);
+}
+
+fn mipmapped(p: Poly) -> bool {
+    return u.mips.y != 0u && ((p.texture >> 26u) & 7u) != 0u && (atlas_place(p) & PLACED) != 0u;
+}
+
+fn atlas_load(place: u32, param: u32, level: u32, texel: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(8 << ((param >> 20u) & 7u), 8 << ((param >> 23u) & 7u)) >> vec2<u32>(level);
+    let s = wrap(texel.x, size.x, (param & 0x10000u) != 0u, (param & 0x40000u) != 0u);
+    let t = wrap(texel.y, size.y, (param & 0x20000u) != 0u, (param & 0x80000u) != 0u);
+    let origin = (vec2<i32>(i32(place & 0x1FFu), i32((place >> 9u) & 0x1FFu)) * 8) >> vec2<u32>(level);
+    return vec4<f32>(textureLoad(atlas, origin + vec2<i32>(s, t), i32(level)));
+}
+
+fn atlas_level(place: u32, param: u32, level: u32, uv: vec2<f32>) -> vec4<f32> {
+    let at = uv / f32(1u << level);
+    let base = at - 0.5;
+    let corner = vec2<i32>(floor(base));
+    let f = base - floor(base);
+    let a = atlas_load(place, param, level, corner);
+    let b = atlas_load(place, param, level, corner + vec2<i32>(1, 0));
+    let c = atlas_load(place, param, level, corner + vec2<i32>(0, 1));
+    let d = atlas_load(place, param, level, corner + vec2<i32>(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+fn mip_texture(p: Poly, sample: Sample, base: Texel) -> Texel {
+    let across = sample.footprint.xy;
+    let down = sample.footprint.zw;
+    let lx = length(across);
+    let ly = length(down);
+    let major = max(lx, ly);
+    if major <= 1.0 || base.alpha == 0u {
+        return base;
+    }
+    let place = atlas_place(p);
+    let minor = max(min(lx, ly), major / f32(u.mips.y));
+    let probes = ceil(major / minor - 0.001);
+    let taps = u32(probes) * 2u;
+    let last = (place >> 18u) & 0xFu;
+    let lod = clamp(log2(major / probes), 0.0, f32(last));
+    let fine = u32(floor(lod));
+    let blend = lod - floor(lod);
+    let coarse = min(fine + 1u, last);
+    let axis = select(down, across, lx >= ly);
+    let uv = vec2<f32>(sample.texcoord) / 16.0;
+    var sum = vec4<f32>(0.0);
+    for (var i = 0u; i < taps; i = i + 1u) {
+        let at = uv + axis * ((f32(i) + 0.5) / f32(taps) - 0.5);
+        var tap = atlas_level(place, p.texture, fine, at);
+        if blend > 0.0 && coarse > fine {
+            tap = mix(tap, atlas_level(place, p.texture, coarse, at), blend);
+        }
+        sum = sum + tap;
+    }
+    if sum.w <= 0.0 {
+        return base;
+    }
+    let color = vec3<u32>(clamp(round(sum.xyz / sum.w), vec3<f32>(0.0), vec3<f32>(31.0)));
+    var out = base;
     out.color = color.x | (color.y << 5u) | (color.z << 10u);
     return out;
 }
@@ -1214,11 +1726,7 @@ fn apply(p: Poly, sample: Sample, row: u32, state: ptr<function, State>) {
     let textured = (u.frame.y & TEXTURES) != 0u && ((p.texture >> 26u) & 7u) != 0u;
     var texel: Texel;
     if textured {
-        if u.options.x != 0u {
-            texel = smooth_texture(p.texture, p.palette, sample.texcoord.x, sample.texcoord.y);
-        } else {
-            texel = sample_texture(p.texture, p.palette, sample.texcoord.x, sample.texcoord.y);
-        }
+        texel = texture_of(p, sample);
     }
     var pixel = shade(p, sample.color, alpha, textured, texel);
     if alpha == 0u {
@@ -1291,9 +1799,30 @@ fn rear_state() -> State {
     return state;
 }
 
+const HW_RIM: u32 = 0x80000u;
+const HW_FRINGE: u32 = 0x100000u;
+const HW_COVERED: u32 = 0x200000u;
+
+fn opaque_at(at: vec2<i32>) -> u32 {
+    let t = textureLoad(reference, at, 0);
+    if (t.z & HW_COVERED) == 0u || (t.z & HW_FRINGE) != 0u {
+        return NONE;
+    }
+    return t.w;
+}
+
+fn opaque_winner(x: i32, y: i32) -> u32 {
+    let scale = i32(u.frame.x);
+    let at = vec2<i32>(clamp(x, 0, WIDTH - 1), clamp(y, 0, HEIGHT - 1)) * scale;
+    let corner = opaque_at(at);
+    if corner != NONE {
+        return corner;
+    }
+    return opaque_at(at + vec2<i32>(scale / 2));
+}
+
 fn covered_reference(x: i32, y: i32) -> bool {
-    let at = vec2<i32>(clamp(x, 0, WIDTH - 1), clamp(y, 0, HEIGHT - 1));
-    return textureLoad(reference, at, 0).w != NONE;
+    return opaque_winner(x, y) != NONE;
 }
 
 fn segment_nearest(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -1346,7 +1875,7 @@ fn fill_hole(point: vec2<f32>, pixel: f32, native: vec2<i32>, start: u32, count:
     if (*state).winner != NONE {
         return;
     }
-    let winner = textureLoad(reference, native, 0).w;
+    let winner = opaque_winner(native.x, native.y);
     if winner == NONE {
         return;
     }
@@ -1646,12 +2175,6 @@ fn cs_raster(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
 }
 
 @fragment
-fn fs_centers(@builtin(position) position: vec4<f32>) -> @location(0) vec4<u32> {
-    let s = spot(position);
-    return pack(shade_point((vec2<f32>(s.at) + 0.5) * s.pixel, s.pixel, s.native, true));
-}
-
-@fragment
 fn fs_edges(@builtin(position) position: vec4<f32>) -> @location(0) vec4<u32> {
     let s = spot(position);
     let center = textureLoad(centers, s.at, 0);
@@ -1663,7 +2186,7 @@ fn fs_edges(@builtin(position) position: vec4<f32>) -> @location(0) vec4<u32> {
 
 var<workgroup> edge_count: atomic<u32>;
 var<workgroup> edge_at: array<u32, 64>;
-var<workgroup> sample_color: array<vec4<u32>, 512>;
+var<workgroup> sample_color: array<u32, 512>;
 var<workgroup> first_packed: array<vec4<u32>, 64>;
 
 @compute @workgroup_size(8, 8)
@@ -1704,7 +2227,7 @@ fn cs_edges(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_i
         let spot_at = group.xy * GROUP_SIDE + vec2<u32>(spot_index % GROUP_SIDE, spot_index / GROUP_SIDE);
         let point = sample_point(spot_at, pixel, samples, k);
         let state = shade_point(point, pixel, vec2<i32>(spot_at / scale), true);
-        sample_color[t] = state.color;
+        sample_color[t] = packed(state.color);
         if k == 0u {
             first_packed[owner] = pack(state);
         }
@@ -1715,7 +2238,7 @@ fn cs_edges(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_i
         var plain = vec3<u32>(0u);
         var coverage = 0u;
         for (var k = 0u; k < samples; k = k + 1u) {
-            let color = sample_color[slot * samples + k];
+            let color = channels(sample_color[slot * samples + k]);
             weighted = weighted + color.xyz * color.w;
             plain = plain + color.xyz;
             coverage = coverage + color.w;
@@ -1834,4 +2357,292 @@ fn fs_finish(@builtin(position) position: vec4<f32>) -> @location(0) vec4<u32> {
         color = fogged(color, here.y);
     }
     return vec4<u32>(packed(color), here.y, here.z, here.w);
+}
+
+
+const FLAT: u32 = 6u;
+const CLOCKWISE: u32 = 0x100000u;
+const NO_AREA: u32 = 0x200000u;
+const SKIRT: f32 = 0.140625;
+const INSET: f32 = 0.015625;
+const SLAB: u32 = 0x80000000u;
+const EXACT: u32 = 0x40000000u;
+const SLACK: f32 = 0.015625;
+
+struct HwOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) head: vec4<u32>,
+    @location(1) @interpolate(flat) place: vec4<u32>,
+    @location(2) @interpolate(flat) corners: vec4<u32>,
+    @location(3) @interpolate(flat) la: vec4<u32>,
+    @location(4) @interpolate(flat) lb: vec4<u32>,
+    @location(5) @interpolate(flat) ra: vec4<u32>,
+    @location(6) @interpolate(flat) rb: vec4<u32>,
+}
+
+struct HwTargets {
+    @location(0) state: vec4<u32>,
+    @builtin(frag_depth) depth: f32,
+}
+
+fn hw_clip(position: vec2<f32>) -> vec4<f32> {
+    let moved = position + vec2<f32>(f32(u.options.z) * 0.5 / f32(u.frame.x));
+    return vec4<f32>(moved.x / 128.0 - 1.0, 1.0 - moved.y / 96.0, 0.5, 1.0);
+}
+
+fn slab_side(a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, d: vec2<f32>, y: f32, rightmost: bool) -> f32 {
+    let l0 = edge_x(a, b, y - SLACK);
+    let l1 = edge_x(a, b, y + SLACK);
+    let r0 = edge_x(c, d, y - SLACK);
+    let r1 = edge_x(c, d, y + SLACK);
+    if rightmost {
+        return max(max(l0, l1), max(r0, r1)) + SLACK;
+    }
+    return min(min(l0, l1), min(r0, r1)) - SLACK;
+}
+
+fn values_word(first: vec4<u32>, second: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(first.z, first.w, second.x, second.y);
+}
+
+@vertex
+fn vs_hw(@builtin(vertex_index) index: u32, @location(0) instance: vec2<u32>) -> HwOut {
+    let record = instance.x;
+    let head = texel(record);
+    let p = poly_of(record, head);
+    var out: HwOut;
+    out.head = head;
+    out.place = vec4<u32>(record, instance.y, 0u, 0u);
+    out.corners = vec4<u32>(0u);
+    out.la = vec4<u32>(0u);
+    out.lb = vec4<u32>(0u);
+    out.ra = vec4<u32>(0u);
+    out.rb = vec4<u32>(0u);
+    out.position = vec4<f32>(-2.0, -2.0, 0.0, 1.0);
+    if (instance.y & SLAB) != 0u {
+        let ends = (vec4<u32>(instance.y) >> vec4<u32>(0u, 4u, 8u, 12u)) & vec4<u32>(15u);
+        let fa = vertex_first(p, ends.x);
+        let fb = vertex_first(p, ends.y);
+        let fc = vertex_first(p, ends.z);
+        let fd = vertex_first(p, ends.w);
+        let upper = vertex_word(p, (instance.y >> 16u) & 15u, 1u) >> 16u;
+        let lower = vertex_word(p, (instance.y >> 20u) & 15u, 1u) >> 16u;
+        let first_row = vertex_word(p, p.fine_top, 1u) >> 16u;
+        let last_row = vertex_word(p, p.fine_bottom, 1u) >> 16u;
+        out.place = vec4<u32>(record, instance.y, first_row | (last_row << 16u), upper | (lower << 16u));
+        out.corners = vec4<u32>(fa.y, fb.y, fc.y, fd.y);
+        out.la = values_word(fa, vertex_second(p, ends.x));
+        out.lb = values_word(fb, vertex_second(p, ends.y));
+        out.ra = values_word(fc, vertex_second(p, ends.z));
+        out.rb = values_word(fd, vertex_second(p, ends.w));
+        var y = f32(upper) / 16.0 - SLACK;
+        if index == 2u || index >= 4u {
+            y = f32(lower) / 16.0 + SLACK;
+        }
+        let rightmost = index == 1u || index == 2u || index == 4u;
+        let x = slab_side(fine_of(fa.y), fine_of(fb.y), fine_of(fc.y), fine_of(fd.y), y, rightmost);
+        out.position = hw_clip(vec2<f32>(x, y));
+        return out;
+    }
+    if index < FLAT {
+        let top = fine(p, p.fine_top).y;
+        if top != fine(p, p.fine_bottom).y {
+            return out;
+        }
+        let xl = min(fine(p, 0u).x, min(fine(p, 1u).x, fine(p, p.count - 1u).x));
+        let xr = max(fine(p, 0u).x, max(fine(p, 1u).x, fine(p, p.count - 1u).x));
+        let low = top + 1.0 / f32(u.frame.x);
+        var at = vec2<f32>(xl, top);
+        if index == 1u {
+            at = vec2<f32>(xr, top);
+        } else if index == 2u || index == 4u {
+            at = vec2<f32>(xr, low);
+        } else if index == 5u {
+            at = vec2<f32>(xl, low);
+        }
+        out.position = hw_clip(at);
+        return out;
+    }
+    let side = (index - FLAT) / 6u;
+    let corner = (index - FLAT) % 6u;
+    if side >= p.count {
+        return out;
+    }
+    let a = fine(p, side);
+    let b = fine(p, step_index(p, side, true));
+    let reach = distance(a, b);
+    if reach == 0.0 {
+        return out;
+    }
+    let flags = head.z;
+    let along = (b - a) / reach * SKIRT;
+    var outward = vec2<f32>(along.y, -along.x);
+    if (flags & CLOCKWISE) != 0u {
+        outward = -outward;
+    }
+    var inward = -outward * (INSET / SKIRT);
+    if (flags & NO_AREA) != 0u {
+        inward = -outward;
+    }
+    var at = a - along + inward;
+    if corner == 1u {
+        at = b + along + inward;
+    } else if corner == 2u || corner == 4u {
+        at = b + along + outward;
+    } else if corner == 5u {
+        at = a - along + outward;
+    }
+    out.position = hw_clip(at);
+    return out;
+}
+
+@fragment
+fn fs_hw(in: HwOut) -> HwTargets {
+    let record = in.place.x;
+    let p = poly_of(record, in.head);
+    let pixel = 1.0 / f32(u.frame.x);
+    let point = (in.position.xy - vec2<f32>(0.5 * f32(u.options.z))) * pixel;
+    var sample: Sample;
+    if (in.place.y & (SLAB | EXACT)) == SLAB {
+        sample = slab_sample(p, in.place.zw, in.corners, in.la, in.lb, in.ra, in.rb, point, pixel);
+    } else {
+        sample = upscaled_sample(p, point, pixel, false);
+    }
+    if !sample.covered || sample.depth >= bitcast<i32>(u.rear.y) {
+        discard;
+    }
+    let fringe = sample.fringe;
+    let textured = (u.frame.y & TEXTURES) != 0u && ((p.texture >> 26u) & 7u) != 0u;
+    var texel: Texel;
+    if textured {
+        texel = texture_of(p, sample);
+    }
+    let color = shade(p, sample.color, raw_alpha(p), textured, texel);
+    if color.w <= alpha_threshold() {
+        discard;
+    }
+    var bits = polygon_id(p.attributes) | (NO_ID << 6u) | (sample.edges << 15u) | HW_COVERED;
+    if (p.attributes & FOG) != 0u {
+        bits = bits | 0x2000u;
+    }
+    if !p.front {
+        bits = bits | 0x4000u;
+    }
+    if sample.rim {
+        bits = bits | HW_RIM;
+    }
+    if fringe {
+        bits = bits | HW_FRINGE;
+    }
+    var out: HwTargets;
+    out.state = vec4<u32>(packed(vec4<u32>(color.xyz, OPAQUE)), bitcast<u32>(sample.depth), bits, record);
+    out.depth = clamp(f32(sample.depth), 0.0, 16777215.0) / 33554432.0 + select(0.0, 0.5, fringe);
+    return out;
+}
+
+fn hw_state(t: vec4<u32>) -> State {
+    if (t.z & HW_COVERED) == 0u {
+        return rear_state();
+    }
+    var state: State;
+    state.color = channels(t.x);
+    state.depth = bitcast<i32>(t.y);
+    state.opaque_id = t.z & 0x3Fu;
+    state.translucent_id = NO_ID;
+    state.fog = (t.z & 0x2000u) != 0u;
+    state.back = (t.z & 0x4000u) != 0u;
+    state.edges = (t.z >> 15u) & 0xFu;
+    state.stencil = false;
+    state.winner = t.w;
+    state.fringe = (t.z & HW_FRINGE) != 0u;
+    state.rim = (t.z & HW_RIM) != 0u;
+    state.under = u.rear.x;
+    state.under_depth = bitcast<i32>(u.rear.y);
+    return state;
+}
+
+@fragment
+fn fs_tail(@builtin(position) position: vec4<f32>) -> @location(0) vec4<u32> {
+    let s = spot(position);
+    let point = (vec2<f32>(s.at) + vec2<f32>(0.5 * f32(1u - u.options.z))) * s.pixel;
+    let here = textureLoad(centers, s.at, 0);
+    let blends = EDGE_MARKING | ANTIALIASING;
+    if (u.frame.y & blends) == blends && (here.z & (HW_COVERED | HW_RIM)) == (HW_COVERED | HW_RIM) {
+        return pack(shade_point(point, s.pixel, s.native, true));
+    }
+    var state = hw_state(here);
+    let tile = u32(s.native.y / TILE) * u.offsets.w + u32(s.native.x / TILE);
+    let start = word(tile * 2u);
+    let count = word(tile * 2u + 1u);
+    let late_start = word(u.rear.w + tile * 2u);
+    let late_count = word(u.rear.w + tile * 2u + 1u);
+    let row = u32(s.native.y);
+    var filled = false;
+    for (var i = 0u; i < late_count; i = i + 1u) {
+        let e = entry(late_start, i);
+        if !filled && e.translucent {
+            fill_hole(point, s.pixel, s.native, start, count, &state);
+            filled = true;
+        }
+        if !reaches(e, point, near_slack(e, s.pixel)) {
+            if e.mask && mask_clears(e.record, row) {
+                state.stencil = false;
+            }
+            continue;
+        }
+        let p = load(e.record);
+        let sample = upscaled_sample(p, point, s.pixel, false);
+        apply(p, sample, row, &state);
+    }
+    if !filled {
+        fill_hole(point, s.pixel, s.native, start, count, &state);
+    }
+    return pack(state);
+}
+
+struct AtlasOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) entry: vec4<u32>,
+}
+
+@vertex
+fn vs_atlas(@builtin(vertex_index) index: u32, @builtin(instance_index) instance: u32) -> AtlasOut {
+    let level = index / 6u;
+    let corner = index % 6u;
+    let e = texel(u.mips.x + instance * 4u);
+    var out: AtlasOut;
+    out.entry = e;
+    out.position = vec4<f32>(-2.0, -2.0, 0.0, 1.0);
+    if level >= e.w {
+        return out;
+    }
+    let scale = f32(1u << level);
+    let origin = vec2<f32>(f32(e.x & 0xFFFFu), f32(e.x >> 16u)) / scale;
+    let size = vec2<f32>(f32(8u << ((e.y >> 20u) & 7u)), f32(8u << ((e.y >> 23u) & 7u))) / scale;
+    var at = origin;
+    if corner == 1u || corner == 2u || corner == 4u {
+        at.x = origin.x + size.x;
+    }
+    if corner == 2u || corner >= 4u {
+        at.y = origin.y + size.y;
+    }
+    let dims = vec2<f32>(f32(u.mips.z >> level), f32(u.mips.w >> level));
+    out.position = vec4<f32>(at.x / dims.x * 2.0 - 1.0, 1.0 - at.y / dims.y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_decode(in: AtlasOut) -> @location(0) vec4<u32> {
+    let at = vec2<u32>(in.position.xy) - vec2<u32>(in.entry.x & 0xFFFFu, in.entry.x >> 16u);
+    let texel = sample_texture(in.entry.y, in.entry.z, i32(at.x << 4u), i32(at.y << 4u));
+    let color = vec3<u32>(texel.color & 0x1Fu, (texel.color >> 5u) & 0x1Fu, (texel.color >> 10u) & 0x1Fu);
+    return vec4<u32>(color * texel.alpha * 64u, texel.alpha * 64u);
+}
+
+@fragment
+fn fs_reduce(in: AtlasOut) -> @location(0) vec4<u32> {
+    let at = vec2<i32>(in.position.xy) * 2;
+    let sum = textureLoad(atlas, at, 0) + textureLoad(atlas, at + vec2<i32>(1, 0), 0)
+        + textureLoad(atlas, at + vec2<i32>(0, 1), 0) + textureLoad(atlas, at + vec2<i32>(1, 1), 0);
+    return (sum + vec4<u32>(2u)) / 4u;
 }

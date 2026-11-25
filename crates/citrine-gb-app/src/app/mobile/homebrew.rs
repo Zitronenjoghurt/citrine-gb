@@ -1,7 +1,7 @@
 use super::kit::{self, Row};
 use super::sheet;
 use crate::app::Citrine;
-use crate::app::ui_state::settings::{console_name, other_console, plays_on_both};
+use crate::app::ui_state::settings::{console_icon, console_name, other_console, plays_on_both};
 use crate::homebrew::{HOMEBREW_GAMES, HomebrewGame, shelves};
 use crate::icons;
 use egui::{Context, Id, RichText, Ui};
@@ -118,7 +118,10 @@ impl Citrine {
             if let Some(model) = other {
                 ui.add_space(8.0);
                 let label = format!("Play on {}", console_name(model));
-                if kit::list(ui, |list| list.row(Row::new(&label).no_chevron()).clicked()) {
+                if kit::list(ui, |list| {
+                    list.row(Row::new(&label).icon(console_icon(model)).no_chevron())
+                        .clicked()
+                }) {
                     chosen = Some(Some(model));
                 }
             }

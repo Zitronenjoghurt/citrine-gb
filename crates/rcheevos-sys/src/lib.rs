@@ -28,9 +28,16 @@ pub const RC_CONSOLE_GAMEBOY_COLOR: u32 = 6;
 pub const RC_CONSOLE_NINTENDO_DS: u32 = 18;
 
 pub const RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED: u32 = 1;
+pub const RC_CLIENT_EVENT_LEADERBOARD_STARTED: u32 = 2;
+pub const RC_CLIENT_EVENT_LEADERBOARD_FAILED: u32 = 3;
+pub const RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED: u32 = 4;
 pub const RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_SHOW: u32 = 7;
 pub const RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_HIDE: u32 = 8;
 pub const RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_UPDATE: u32 = 9;
+pub const RC_CLIENT_EVENT_LEADERBOARD_TRACKER_SHOW: u32 = 10;
+pub const RC_CLIENT_EVENT_LEADERBOARD_TRACKER_HIDE: u32 = 11;
+pub const RC_CLIENT_EVENT_LEADERBOARD_TRACKER_UPDATE: u32 = 12;
+pub const RC_CLIENT_EVENT_LEADERBOARD_SCOREBOARD: u32 = 13;
 pub const RC_CLIENT_EVENT_RESET: u32 = 14;
 pub const RC_CLIENT_EVENT_GAME_COMPLETED: u32 = 15;
 pub const RC_CLIENT_EVENT_SERVER_ERROR: u32 = 16;
@@ -54,6 +61,22 @@ pub const RC_CLIENT_ACHIEVEMENT_BUCKET_UNSYNCED: u8 = 8;
 pub const RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED: u8 = 2;
 
 pub const RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE: u8 = 1;
+pub const RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE: u8 = 2;
+
+pub const RC_CLIENT_LEADERBOARD_STATE_INACTIVE: u8 = 0;
+pub const RC_CLIENT_LEADERBOARD_STATE_ACTIVE: u8 = 1;
+pub const RC_CLIENT_LEADERBOARD_STATE_TRACKING: u8 = 2;
+pub const RC_CLIENT_LEADERBOARD_STATE_DISABLED: u8 = 3;
+
+pub const RC_CLIENT_LEADERBOARD_FORMAT_TIME: u8 = 0;
+pub const RC_CLIENT_LEADERBOARD_FORMAT_SCORE: u8 = 1;
+pub const RC_CLIENT_LEADERBOARD_FORMAT_VALUE: u8 = 2;
+
+pub const RC_CLIENT_LEADERBOARD_LIST_GROUPING_NONE: c_int = 0;
+
+pub const RC_CLIENT_LEADERBOARD_BUCKET_UNSUPPORTED: u8 = 3;
+
+pub const RC_CLIENT_LEADERBOARD_DISPLAY_SIZE: usize = 24;
 
 pub const RC_CLIENT_LOG_LEVEL_WARN: c_int = 2;
 
@@ -153,6 +176,73 @@ pub struct rc_client_achievement_list_t {
 }
 
 #[repr(C)]
+pub struct rc_client_leaderboard_t {
+    pub title: *const c_char,
+    pub description: *const c_char,
+    pub tracker_value: *const c_char,
+    pub id: u32,
+    pub state: u8,
+    pub format: u8,
+    pub lower_is_better: u8,
+}
+
+#[repr(C)]
+pub struct rc_client_leaderboard_tracker_t {
+    pub display: [c_char; RC_CLIENT_LEADERBOARD_DISPLAY_SIZE],
+    pub id: u32,
+}
+
+#[repr(C)]
+pub struct rc_client_leaderboard_bucket_t {
+    pub leaderboards: *const *const rc_client_leaderboard_t,
+    pub num_leaderboards: u32,
+    pub label: *const c_char,
+    pub subset_id: u32,
+    pub bucket_type: u8,
+}
+
+#[repr(C)]
+pub struct rc_client_leaderboard_list_t {
+    pub buckets: *const rc_client_leaderboard_bucket_t,
+    pub num_buckets: u32,
+}
+
+#[repr(C)]
+pub struct rc_client_leaderboard_entry_t {
+    pub user: *const c_char,
+    pub display: [c_char; RC_CLIENT_LEADERBOARD_DISPLAY_SIZE],
+    pub submitted: time_t,
+    pub rank: u32,
+    pub index: u32,
+}
+
+#[repr(C)]
+pub struct rc_client_leaderboard_entry_list_t {
+    pub entries: *mut rc_client_leaderboard_entry_t,
+    pub num_entries: u32,
+    pub total_entries: u32,
+    pub user_index: i32,
+}
+
+#[repr(C)]
+pub struct rc_client_leaderboard_scoreboard_entry_t {
+    pub username: *const c_char,
+    pub rank: u32,
+    pub score: [c_char; RC_CLIENT_LEADERBOARD_DISPLAY_SIZE],
+}
+
+#[repr(C)]
+pub struct rc_client_leaderboard_scoreboard_t {
+    pub leaderboard_id: u32,
+    pub submitted_score: [c_char; RC_CLIENT_LEADERBOARD_DISPLAY_SIZE],
+    pub best_score: [c_char; RC_CLIENT_LEADERBOARD_DISPLAY_SIZE],
+    pub new_rank: u32,
+    pub num_entries: u32,
+    pub top_entries: *mut rc_client_leaderboard_scoreboard_entry_t,
+    pub num_top_entries: u32,
+}
+
+#[repr(C)]
 pub struct rc_client_server_error_t {
     pub error_message: *const c_char,
     pub api: *const c_char,
@@ -164,9 +254,9 @@ pub struct rc_client_server_error_t {
 pub struct rc_client_event_t {
     pub type_: u32,
     pub achievement: *mut rc_client_achievement_t,
-    pub leaderboard: *mut c_void,
-    pub leaderboard_tracker: *mut c_void,
-    pub leaderboard_scoreboard: *mut c_void,
+    pub leaderboard: *mut rc_client_leaderboard_t,
+    pub leaderboard_tracker: *mut rc_client_leaderboard_tracker_t,
+    pub leaderboard_scoreboard: *mut rc_client_leaderboard_scoreboard_t,
     pub server_error: *mut rc_client_server_error_t,
     pub subset: *mut c_void,
 }
@@ -263,6 +353,13 @@ pub type rc_client_fetch_game_list_callback_t = unsafe extern "C" fn(
     result: c_int,
     error_message: *const c_char,
     list: *mut rc_client_game_list_t,
+    client: *mut rc_client_t,
+    callback_userdata: *mut c_void,
+);
+pub type rc_client_fetch_leaderboard_entries_callback_t = unsafe extern "C" fn(
+    result: c_int,
+    error_message: *const c_char,
+    list: *mut rc_client_leaderboard_entry_list_t,
     client: *mut rc_client_t,
     callback_userdata: *mut c_void,
 );
@@ -382,6 +479,39 @@ unsafe extern "C" {
     pub fn rc_client_destroy_achievement_list(list: *mut rc_client_achievement_list_t);
     pub fn rc_client_has_achievements(client: *mut rc_client_t) -> c_int;
 
+    pub fn rc_client_get_leaderboard_info(
+        client: *const rc_client_t,
+        id: u32,
+    ) -> *const rc_client_leaderboard_t;
+    pub fn rc_client_create_leaderboard_list(
+        client: *mut rc_client_t,
+        grouping: c_int,
+    ) -> *mut rc_client_leaderboard_list_t;
+    pub fn rc_client_destroy_leaderboard_list(list: *mut rc_client_leaderboard_list_t);
+    pub fn rc_client_has_leaderboards(client: *mut rc_client_t) -> c_int;
+    pub fn rc_client_begin_fetch_leaderboard_entries(
+        client: *mut rc_client_t,
+        leaderboard_id: u32,
+        first_entry: u32,
+        count: u32,
+        callback: rc_client_fetch_leaderboard_entries_callback_t,
+        callback_userdata: *mut c_void,
+    ) -> *mut rc_client_async_handle_t;
+    pub fn rc_client_begin_fetch_leaderboard_entries_around_user(
+        client: *mut rc_client_t,
+        leaderboard_id: u32,
+        count: u32,
+        callback: rc_client_fetch_leaderboard_entries_callback_t,
+        callback_userdata: *mut c_void,
+    ) -> *mut rc_client_async_handle_t;
+    pub fn rc_client_destroy_leaderboard_entry_list(list: *mut rc_client_leaderboard_entry_list_t);
+    pub fn rc_client_has_rich_presence(client: *mut rc_client_t) -> c_int;
+    pub fn rc_client_get_rich_presence_message(
+        client: *mut rc_client_t,
+        buffer: *mut c_char,
+        buffer_size: usize,
+    ) -> usize;
+
     pub fn rc_client_set_event_handler(
         client: *mut rc_client_t,
         handler: rc_client_event_handler_t,
@@ -426,6 +556,23 @@ mod tests {
     }
 
     #[test]
+    fn ds_hash_refuses_code_sizes_that_wrap() {
+        let mut rom = vec![0u8; 0x1000];
+        rom[0x2C..0x30].copy_from_slice(&0xFFFF_F000u32.to_le_bytes());
+        rom[0x3C..0x40].copy_from_slice(&0x1000u32.to_le_bytes());
+        let mut hash = [0 as c_char; 33];
+        let ok = unsafe {
+            rcheevos_sys_hash_buffer(
+                hash.as_mut_ptr(),
+                RC_CONSOLE_NINTENDO_DS,
+                rom.as_ptr(),
+                rom.len(),
+            )
+        };
+        assert_eq!(ok, 0);
+    }
+
+    #[test]
     fn struct_sizes_match_c() {
         assert_eq!(size_of::<rc_api_server_response_t>(), c(0));
         assert_eq!(size_of::<rc_client_user_t>(), c(1));
@@ -439,6 +586,14 @@ mod tests {
         assert_eq!(size_of::<rc_client_all_user_progress_entry_t>(), c(9));
         assert_eq!(size_of::<rc_client_hash_library_entry_t>(), c(10));
         assert_eq!(size_of::<rc_client_game_list_entry_t>(), c(11));
+        assert_eq!(size_of::<rc_client_leaderboard_t>(), c(12));
+        assert_eq!(size_of::<rc_client_leaderboard_tracker_t>(), c(13));
+        assert_eq!(size_of::<rc_client_leaderboard_bucket_t>(), c(14));
+        assert_eq!(size_of::<rc_client_leaderboard_list_t>(), c(15));
+        assert_eq!(size_of::<rc_client_leaderboard_entry_t>(), c(16));
+        assert_eq!(size_of::<rc_client_leaderboard_entry_list_t>(), c(17));
+        assert_eq!(size_of::<rc_client_leaderboard_scoreboard_entry_t>(), c(18));
+        assert_eq!(size_of::<rc_client_leaderboard_scoreboard_t>(), c(19));
     }
 
     #[test]
@@ -468,6 +623,24 @@ mod tests {
         assert_eq!(
             offset_of!(rc_client_game_list_entry_t, num_unsupported_hashes),
             c(110)
+        );
+        assert_eq!(offset_of!(rc_client_leaderboard_t, lower_is_better), c(111));
+        assert_eq!(offset_of!(rc_client_leaderboard_entry_t, rank), c(112));
+        assert_eq!(
+            offset_of!(rc_client_leaderboard_entry_list_t, user_index),
+            c(113)
+        );
+        assert_eq!(
+            offset_of!(rc_client_leaderboard_scoreboard_t, num_top_entries),
+            c(114)
+        );
+        assert_eq!(
+            offset_of!(rc_client_leaderboard_scoreboard_t, top_entries),
+            c(115)
+        );
+        assert_eq!(
+            offset_of!(rc_client_event_t, leaderboard_scoreboard),
+            c(116)
         );
     }
 }

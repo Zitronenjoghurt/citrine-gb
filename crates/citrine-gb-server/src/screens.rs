@@ -6,7 +6,6 @@ use axum::response::{IntoResponse, Response};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-pub const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const CACHE: &str = "max-age=60";
 
 #[derive(Default)]

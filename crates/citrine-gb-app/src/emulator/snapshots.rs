@@ -9,9 +9,10 @@ use citrine_gb::persistence::state::StateBody;
 
 impl Emulator {
     pub fn save_snapshot(&mut self, slot: usize) -> GbResult<()> {
-        let Some(key) = self.rom_key.clone() else {
+        let Some(key) = self.saves_key() else {
             return Ok(());
         };
+        let progress = self.achievements_progress();
         let core = self.seat.core_mut();
         let state = core.machine.state_body(now_unix())?;
         let frame = core.machine.frame().to_vec();
@@ -21,6 +22,7 @@ impl Emulator {
             slot,
             state,
             frame,
+            progress,
         });
         self.started_at = Some(web_time::Instant::now());
         self.stat_events.snapshots += 1;
@@ -28,20 +30,22 @@ impl Emulator {
     }
 
     pub fn load_snapshot(&mut self, slot: usize) -> GbResult<bool> {
-        let Some(key) = self.rom_key.clone() else {
+        let Some(key) = self.saves_key().filter(|_| !self.hardcore) else {
             return Ok(false);
         };
         self.writes.settle();
         let Some(state) = self.store.load_snapshot(&key, slot) else {
             return Ok(false);
         };
+        let progress = self.store.load_snapshot_progress(&key, slot, &state);
         self.restore(&state)?;
+        self.achievements_restore(progress.as_deref());
         self.stat_events.loads += 1;
         Ok(true)
     }
 
     pub fn load_autosave(&mut self, id: usize) -> GbResult<bool> {
-        let Some(key) = self.rom_key.clone() else {
+        let Some(key) = self.saves_key().filter(|_| !self.hardcore) else {
             return Ok(false);
         };
         self.writes.settle();
@@ -49,6 +53,7 @@ impl Emulator {
             return Ok(false);
         };
         self.restore(&state)?;
+        self.achievements_restore(None);
         self.stat_events.loads += 1;
         Ok(true)
     }
@@ -74,7 +79,7 @@ impl Emulator {
     }
 
     pub fn delete_autosave(&mut self, id: usize) -> GbResult<()> {
-        if let Some(key) = self.rom_key.clone() {
+        if let Some(key) = self.saves_key() {
             self.writes.settle();
             self.store.delete_autosave(&key, id)?;
         }
@@ -82,7 +87,7 @@ impl Emulator {
     }
 
     pub fn autosave(&mut self) -> GbResult<bool> {
-        let Some(key) = self.rom_key.clone() else {
+        let Some(key) = self.saves_key() else {
             return Ok(false);
         };
         let core = self.seat.core_mut();
@@ -118,7 +123,7 @@ impl Emulator {
         if !self.play.autosave_due(self.autosave_interval) {
             return Ok(false);
         }
-        let Some(key) = self.rom_key.clone() else {
+        let Some(key) = self.saves_key() else {
             return Ok(false);
         };
         match self.play_copy() {
@@ -163,7 +168,7 @@ impl Emulator {
 
     fn keep_copy(&mut self, taken: GbResult<Taken>) {
         self.play.copied();
-        let Some(key) = self.rom_key.clone() else {
+        let Some(key) = self.saves_key() else {
             return;
         };
         let taken = match taken {
@@ -185,7 +190,7 @@ impl Emulator {
     }
 
     pub fn delete_snapshot(&mut self, slot: usize) -> GbResult<()> {
-        if let Some(key) = self.rom_key.clone() {
+        if let Some(key) = self.saves_key() {
             self.writes.settle();
             self.store.delete_snapshot(&key, slot)?;
         }
@@ -193,14 +198,13 @@ impl Emulator {
     }
 
     pub fn snapshot_name(&self, slot: usize) -> String {
-        self.rom_key
-            .as_deref()
-            .and_then(|key| self.store.snapshot_name(key, slot))
+        self.saves_key()
+            .and_then(|key| self.store.spoken_snapshot_name(&key, slot))
             .unwrap_or_else(|| crate::storage::default_slot_name(slot))
     }
 
     pub fn rename_snapshot(&mut self, slot: usize, name: &str) -> GbResult<()> {
-        if let Some(key) = self.rom_key.clone() {
+        if let Some(key) = self.saves_key() {
             self.writes.settle();
             self.store.set_snapshot_name(&key, slot, name)?;
         }

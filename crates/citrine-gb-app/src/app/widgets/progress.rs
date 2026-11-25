@@ -45,6 +45,11 @@ impl Widget for ProgressBar<'_> {
                 ui.spacing_mut().item_spacing.y = LINE_GAP;
                 ui.spacing_mut().interact_size.y = 0.0;
                 match &amount {
+                    Some(amount) if self.label.is_empty() => {
+                        ui.horizontal(|ui| {
+                            ui.add(Label::new(RichText::new(amount).weak()).truncate())
+                        });
+                    }
                     Some(amount) if !fits_beside(ui, ui.available_width(), self.label, &widest) => {
                         ui.horizontal(|ui| ui.add(Label::new(self.label).truncate()));
                         ui.horizontal(|ui| {
@@ -113,7 +118,8 @@ pub fn bar(ui: &mut Ui, fraction: Option<f32>) -> Response {
     let visuals = ui.visuals();
     let radius = CornerRadius::same((BAR_HEIGHT / 2.0) as u8);
     let fill = brand(visuals);
-    let track = crate::app::mobile::bar_track(ui).unwrap_or(visuals.widgets.inactive.bg_fill);
+    let track = crate::app::mobile::bar_track(ui)
+        .unwrap_or_else(|| crate::app::ui_state::ui_theme::track(visuals));
     ui.painter().rect_filled(rect, radius, track);
     let (start, end) = match fraction {
         Some(fraction) if fraction > 0.0 => (0.0, (rect.width() * fraction).max(rect.height())),
@@ -307,7 +313,10 @@ mod tests {
     }
 
     fn track(touch: bool) -> (egui::Color32, egui::Visuals) {
-        let ctx = Context::default();
+        track_in(&Context::default(), touch)
+    }
+
+    fn track_in(ctx: &Context, touch: bool) -> (egui::Color32, egui::Visuals) {
         let mut fills = Vec::new();
         let shapes = ctx
             .run(RawInput::default(), |ctx| {
@@ -330,10 +339,20 @@ mod tests {
     }
 
     #[test]
-    fn a_desktop_bar_runs_in_the_desktop_button_fill() {
-        let (desktop, visuals) = track(false);
-        assert_eq!(desktop, visuals.widgets.inactive.bg_fill);
+    fn a_desktop_track_stands_out_from_the_panel_in_both_themes() {
+        use crate::app::ui_state::ui_theme::{TRACK_CONTRAST, UiTheme, contrast};
+        use strum::IntoEnumIterator;
+        for theme in UiTheme::iter() {
+            let ctx = Context::default();
+            theme.apply(&ctx);
+            let (desktop, visuals) = track_in(&ctx, false);
+            assert!(
+                contrast(desktop, visuals.panel_fill) >= TRACK_CONTRAST,
+                "{theme}: track {desktop:?} on {:?}",
+                visuals.panel_fill
+            );
+        }
         let (phone, visuals) = track(true);
-        assert_ne!(phone, visuals.widgets.inactive.bg_fill);
+        assert_ne!(phone, crate::app::ui_state::ui_theme::track(&visuals));
     }
 }

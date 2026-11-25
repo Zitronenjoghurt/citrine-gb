@@ -1,0 +1,41 @@
+[package]
+name = "citrine-gb-direct"
+description = "Direct data channels between two Citrine apps for Play together: str0m on native, RTCPeerConnection on the web."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+citrine-gb-threads = { workspace = true }
+log = "0.4.29"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+citrine-gb-net = { workspace = true }
+getrandom = "0.2.17"
+str0m = { version = "0.25.0", default-features = false, features = ["rust-crypto"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.70"
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
+web-sys = { version = "0.3.70", features = [
+    "MessageEvent",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcDataChannelInit",
+    "RtcDataChannelState",
+    "RtcDataChannelType",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceConnectionState",
+    "RtcIceServer",
+    "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
+    "RtcSdpType",
+    "RtcSessionDescription",
+    "RtcSessionDescriptionInit",
+] }

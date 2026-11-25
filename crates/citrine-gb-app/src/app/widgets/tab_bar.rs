@@ -39,11 +39,17 @@ pub fn side_tabs<T: Copy + PartialEq>(
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                 for (tab, text) in tabs {
-                    ui.selectable_value(current, *tab, text.as_str());
+                    if side_tab(ui, current == tab, text).clicked() {
+                        *current = *tab;
+                    }
                     ui.add_space(spacing);
                 }
             });
         });
+}
+
+pub fn side_tab(ui: &mut Ui, selected: bool, text: &str) -> egui::Response {
+    ui.selectable_label(selected, text)
 }
 
 pub fn side_tabs_width<T>(ui: &Ui, tabs: &[(T, String)]) -> f32 {

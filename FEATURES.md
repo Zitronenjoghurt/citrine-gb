@@ -3,6 +3,7 @@
 - Full Game Boy, Game Boy Color and Game Boy Advance video and audio
 - Nintendo DS games with both screens, touch, sound, 2D and 3D
 - Support for Windows, MacOS, Linux, Android, Android TV and Web
+- Free and open source under GPL-3.0-or-later
 - In-app updates on desktop and Android
 - MBC1, MBC2, MBC3 with real-time clock, MBC5, MBC6, MBC7, MMM01, TAMA5, HuC1, HuC3, Pocket Camera and Wisdom Tree cartridges
 - Rumble, tilt, sunlight and camera through controllers, phone sensors or a webcam
@@ -44,6 +45,8 @@
 - Game Boy Color palettes for original Game Boy games
 - Screen scaling, refresh rate matching, ghosting, an LCD grid, Game Boy Advance colour correction and UI themes
 - Sound settings for latency, channels, slowdown and the output device
+- Settings in one tree, the same on desktop, phone and big screen, with a search that opens the page at the setting it finds
+- Game settings for the running game's own options, apart from the app's Settings
 - Tabs you can split or pop out into windows, and a focus mode for only the screen
 - Screenshots and recordings
 - Game HUD with FPS, a frame graph and other live values

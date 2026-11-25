@@ -19,9 +19,13 @@ mod sharp;
 mod web;
 
 #[cfg(not(target_arch = "wasm32"))]
-use native::{Output, Pending, Worker};
+pub use native::Output;
+#[cfg(not(target_arch = "wasm32"))]
+use native::{Pending, Worker};
 #[cfg(target_arch = "wasm32")]
-use web::{Output, Pending, Worker};
+pub use web::Output;
+#[cfg(target_arch = "wasm32")]
+use web::{Pending, Worker};
 
 use crate::emulator::layout::ScreenLayout;
 use crate::media::NewMedia;
@@ -262,12 +266,12 @@ pub enum Outcome {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn discard(output: Output) {
+pub fn discard(output: Output) {
     let _ = std::fs::remove_file(output.path);
 }
 
 #[cfg(target_arch = "wasm32")]
-fn discard(_output: Output) {}
+pub fn discard(_output: Output) {}
 
 struct Finishing {
     pending: Pending,
@@ -288,7 +292,6 @@ pub struct ScreenRecorder {
 }
 
 impl ScreenRecorder {
-    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn pictures_waiting(&self) -> usize {
         self.session
             .as_ref()
@@ -552,6 +555,12 @@ impl ScreenRecorder {
             frames: session.video_frames,
             thumbnail,
         });
+    }
+
+    pub fn last_stopped(&mut self) -> Option<&mut RecordingInfo> {
+        self.finishing
+            .last_mut()
+            .map(|finishing| &mut finishing.info)
     }
 
     pub fn take_stopped(&mut self) -> Option<StopReason> {

@@ -1,4 +1,5 @@
 use super::Citrine;
+use super::system_files::SystemFile;
 use crate::utils::file_loader::{FileLoader, PickedFile};
 use citrine_gb::gba::bios::Bios;
 
@@ -24,15 +25,13 @@ impl Citrine {
     }
 
     pub(super) fn handle_load_gba_bios(&mut self, file: PickedFile) {
-        let bios = match Bios::user(&file.data) {
-            Ok(bios) => bios,
-            Err(_) => {
-                self.toasts.error(format!(
-                    "'{}' isn't a GBA BIOS. A GBA BIOS file is 16 KB.",
-                    file.name
-                ));
-                return;
-            }
+        self.handle_system_file(SystemFile::GbaBios, file);
+    }
+
+    pub(super) fn keep_gba_bios(&mut self, file: PickedFile) -> Option<String> {
+        let Ok(bios) = Bios::user(&file.data) else {
+            self.wrong_size(SystemFile::GbaBios, &file);
+            return None;
         };
         if let Err(err) = self
             .settings_store
@@ -40,11 +39,11 @@ impl Citrine {
         {
             self.toasts
                 .error(format!("Could not keep the GBA BIOS: {err}"));
-            return;
+            return None;
         }
         self.emulator.firmware.gba_bios = Some(bios);
         self.emulator.gba_bios_name = file.name;
-        self.toasts.success(self.bios_toast("Your GBA BIOS is set"));
+        Some(self.bios_toast("Your GBA BIOS is set"))
     }
 
     pub(super) fn forget_gba_bios(&mut self) -> std::io::Result<()> {
@@ -72,49 +71,6 @@ impl Citrine {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum BiosChoice<'a> {
-    BuiltIn,
-    File(&'a str),
-    Pick { another: bool },
-}
-
-impl<'a> BiosChoice<'a> {
-    pub fn current(name: Option<&'a str>) -> Self {
-        name.map_or(Self::BuiltIn, Self::File)
-    }
-
-    pub fn all(name: Option<&'a str>) -> Vec<Self> {
-        match name {
-            Some(name) => vec![
-                Self::BuiltIn,
-                Self::File(name),
-                Self::Pick { another: true },
-            ],
-            None => vec![Self::BuiltIn, Self::Pick { another: false }],
-        }
-    }
-
-    pub fn apply(self, events: &mut super::events::AppEventQueue) {
-        match self {
-            Self::BuiltIn => events.use_built_in_bios(),
-            Self::Pick { .. } => events.pick_gba_bios(),
-            Self::File(_) => {}
-        }
-    }
-}
-
-impl std::fmt::Display for BiosChoice<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BuiltIn => f.write_str("Built-in"),
-            Self::File(name) => f.write_str(name),
-            Self::Pick { another: true } => f.write_str("Pick another file"),
-            Self::Pick { another: false } => f.write_str("Pick a file"),
-        }
-    }
-}
-
 pub const BIOS_HINT: &str = "Games run on Cult-of-GBA, a free BIOS built into Citrine. If a game misbehaves, try a BIOS file dumped from your own console.";
 
 #[cfg(all(test, feature = "gba"))]
@@ -124,7 +80,8 @@ mod tests {
     use crate::app::tests::{
         info_frame_out, inside_its_clip, phone_app, play_frame, tap, text_rect,
     };
-    use crate::app::ui_state::settings::{LayoutMode, SettingsTab};
+    use crate::app::ui_state::settings::LayoutMode;
+    use crate::app::ui_state::settings_tree::SettingsTab;
     use crate::utils::file_loader::PickedFile;
     use citrine_gb::gba::bios::BiosKind;
     use egui::Context;
@@ -186,11 +143,11 @@ mod tests {
     #[test]
     fn a_file_of_the_wrong_size_is_not_a_bios() {
         let mut opened = Opened::new("bad-bios");
-        opened.app.handle_load_gba_bios(bios_file(0x100));
+        opened.app.handle_load_gba_bios(bios_file(0x300));
         assert_eq!(opened.app.emulator.gba_bios_kind(), BiosKind::BuiltIn);
         assert_eq!(
             opened.app.toasts.texts(),
-            ["'gba_bios.bin' isn't a GBA BIOS. A GBA BIOS file is 16 KB."]
+            ["'gba_bios.bin' is 768 bytes. A GBA BIOS is 16 KB."]
         );
     }
 
@@ -198,29 +155,29 @@ mod tests {
     fn settings_show_the_bios_on_desktop_and_phone() {
         let mut desktop = Opened::new("bios-desktop");
         desktop.app.ui.settings.layout = LayoutMode::Desktop;
-        desktop.app.ui.settings.current_tab = SettingsTab::General;
+        desktop.app.ui.settings.current_tab = SettingsTab::Gba;
         desktop.app.open_tab(Tab::Settings);
         let ctx = Context::default();
         info_frame_out(&mut desktop.app, &ctx, 1280.0, 900.0);
         let output = info_frame_out(&mut desktop.app, &ctx, 1280.0, 900.0);
-        assert!(text_rect(&output, "GBA BIOS").is_some());
+        assert!(text_rect(&output, "BIOS").is_some());
         assert!(text_rect(&output, "Built-in").is_some());
 
         desktop.app.handle_load_gba_bios(bios_file(0x4000));
         for width in [560.0, 1280.0] {
             info_frame_out(&mut desktop.app, &ctx, width, 900.0);
             let output = info_frame_out(&mut desktop.app, &ctx, width, 900.0);
-            for text in ["GBA BIOS", "gba_bios.bin"] {
+            for text in ["BIOS", "gba_bios.bin"] {
                 assert!(inside_its_clip(&output, text), "{text} at {width}");
             }
         }
 
         let mut phone = Opened::new("bios-phone");
-        phone.app.mobile.nav.open_settings(SettingsTab::General);
+        phone.app.mobile.nav.open_settings(SettingsTab::Gba);
         let ctx = Context::default();
         play_frame(&mut phone.app, &ctx, Vec::new());
         let output = play_frame(&mut phone.app, &ctx, Vec::new());
-        assert!(text_rect(&output, "GBA BIOS").is_some());
+        assert!(text_rect(&output, "BIOS").is_some());
         assert!(text_rect(&output, "Built-in").is_some());
 
         phone.app.handle_load_gba_bios(bios_file(0x4000));

@@ -1,8 +1,9 @@
 use super::region::Region;
 use super::wait::{Access, WaitControl, Width};
+use std::mem::{align_of, offset_of, size_of};
 
-const CAPACITY: u32 = 8;
-const ROM_PAGE: u32 = 0x2_0000;
+pub(crate) const CAPACITY: u32 = 8;
+pub(crate) const ROM_PAGE: u32 = 0x2_0000;
 const ROM_START: u32 = 0x0800_0000;
 const ROM_SPAN: u32 = 0x0600_0000;
 const NEVER: u64 = u64::MAX;
@@ -10,24 +11,46 @@ const NEVER: u64 = u64::MAX;
 #[derive(Debug, Default, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "Saved", into = "Saved"))]
+#[repr(C)]
 pub struct Prefetch {
     pub(crate) clock: u64,
     pub(crate) due: u64,
+    pub(crate) since: u64,
     pub(crate) head: u32,
+    pub(crate) cost: u32,
     pub(crate) count: u32,
+    pub(crate) progress: u32,
+    pub(crate) parked: u32,
+    pub(crate) page_cost: u32,
+    pub(crate) active: bool,
+    pub(crate) flowing: bool,
     pub(crate) paused: bool,
     pub(crate) branched: bool,
-    since: u64,
-    progress: u32,
-    cost: u32,
-    page_cost: u32,
-    parked: u32,
-    active: bool,
-    flowing: bool,
-    stuck: bool,
-    following: bool,
-    force_n: bool,
+    pub(crate) stuck: bool,
+    pub(crate) following: bool,
+    pub(crate) force_n: bool,
+    pub(crate) _pad: u8,
 }
+
+const _: () = {
+    let head = offset_of!(Prefetch, head);
+    assert!(head.is_multiple_of(8));
+    assert!(offset_of!(Prefetch, cost) == head + 4);
+    assert!(offset_of!(Prefetch, count) == head + 8);
+    assert!(offset_of!(Prefetch, progress) == head + 12);
+    assert!(offset_of!(Prefetch, parked) == head + 16);
+    assert!(offset_of!(Prefetch, page_cost) == head + 20);
+    assert!(offset_of!(Prefetch, active) == head + 24);
+    assert!(offset_of!(Prefetch, flowing) == head + 25);
+    assert!(offset_of!(Prefetch, paused) == head + 26);
+    assert!(offset_of!(Prefetch, branched) == head + 27);
+    assert!(offset_of!(Prefetch, stuck) == head + 28);
+    assert!(offset_of!(Prefetch, following) == head + 29);
+    assert!(offset_of!(Prefetch, force_n) == head + 30);
+    assert!(offset_of!(Prefetch, _pad) == head + 31);
+    assert!(size_of::<Prefetch>() == head + 32);
+    assert!(align_of::<Prefetch>() == 8);
+};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -51,10 +74,14 @@ impl From<Saved> for Prefetch {
     fn from(saved: Saved) -> Self {
         Self {
             head: saved.head,
-            count: saved.count,
+            count: if saved.active {
+                saved.count.min(CAPACITY)
+            } else {
+                0
+            },
             paused: saved.paused,
             branched: saved.branched,
-            progress: saved.progress,
+            progress: if saved.active { saved.progress } else { 0 },
             active: saved.active,
             flowing: saved.active && !saved.paused,
             stuck: saved.stuck,
@@ -462,6 +489,42 @@ mod tests {
         (0..count)
             .map(|i| prefetch.fetch(wait, from + 2 * i, Half, Sequential))
             .collect()
+    }
+
+    #[test]
+    fn a_loaded_idle_prefetch_keeps_no_progress() {
+        let saved = Saved {
+            progress: u32::MAX,
+            count: u32::MAX,
+            ..Saved::default()
+        };
+        let mut prefetch = Prefetch::from(saved);
+        prefetch.retime(wait(0x4014));
+        assert_eq!((prefetch.progress, prefetch.count), (0, 0));
+    }
+
+    #[test]
+    fn a_loaded_prefetch_holds_at_most_its_capacity() {
+        let saved = Saved {
+            active: true,
+            head: ROM,
+            count: u32::MAX,
+            progress: u32::MAX,
+            ..Saved::default()
+        };
+        let mut prefetch = Prefetch::from(saved);
+        prefetch.retime(wait(0x4014));
+        assert!(prefetch.count <= CAPACITY && prefetch.progress < prefetch.cost);
+        let _ = halves(&mut prefetch, wait(0x4014), ROM, 12);
+    }
+
+    #[test]
+    fn a_real_prefetch_is_unchanged_by_the_load_clamp() {
+        let mut prefetch = primed(wait(0x4014));
+        let _ = halves(&mut prefetch, wait(0x4014), ROM + 2, 3);
+        prefetch.run(7);
+        let saved = prefetch.saved();
+        assert_eq!(Prefetch::from(saved).saved(), saved);
     }
 
     #[test]

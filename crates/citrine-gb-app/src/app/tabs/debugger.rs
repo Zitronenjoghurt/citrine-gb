@@ -402,7 +402,7 @@ fn stops(viewer: &mut TabViewer, ui: &mut Ui) -> f32 {
 }
 
 fn code_list(viewer: &mut TabViewer, ui: &mut Ui) {
-    let colours = viewer.ui.settings.ui_theme.code_colours();
+    let colours = viewer.ui.settings.ui_theme.resolve(ui.ctx()).code_colours();
     let machine = viewer.emulator.debug_mut();
     let action = DisassemblyView::new(machine, viewer.ui.settings.track_pc, colours).show(ui);
     match action {

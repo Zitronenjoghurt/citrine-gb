@@ -142,3 +142,29 @@ fn an_address_the_ds_never_sent_to_reaches_a_port_that_sent_out() {
     heard.sort();
     assert_eq!(heard, vec![b"known".to_vec(), b"stranger".to_vec()]);
 }
+
+#[test]
+fn a_flood_of_sources_holds_a_bounded_number_of_sockets_and_the_server_gets_through() {
+    let mut rig = Rig::new();
+    let server = remote(Ipv4Addr::LOCALHOST).unwrap();
+    let outside = mapped(&mut rig, &server);
+    let flood: Vec<UdpSocket> = (0..300)
+        .filter_map(|_| remote(Ipv4Addr::LOCALHOST))
+        .collect();
+    for socket in &flood {
+        socket.send_to(b"flood", outside).unwrap();
+    }
+    for _ in 0..200 {
+        rig.client.step(&mut rig.gateway);
+        while rig.heard().is_some() {}
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        rig.gateway.udp_sockets() <= 64,
+        "{} sockets",
+        rig.gateway.udp_sockets()
+    );
+    server.send_to(b"known", outside).unwrap();
+    let heard = rig.until(|rig| rig.heard().filter(|(bytes, _)| bytes == b"known"));
+    assert!(heard.is_some(), "the server still reaches the ds");
+}

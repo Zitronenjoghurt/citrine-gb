@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM archive_access a JOIN archive_games g ON g.id = ?2\n                              WHERE a.account = ?1 AND (a.game IS NULL OR a.game = g.id)) AS \"found!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "found!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "52597d2f0332a992db750d18a3fb179b49f7b3033b2161f87f7504135332633c"
+}

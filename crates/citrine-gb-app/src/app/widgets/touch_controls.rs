@@ -1,4 +1,5 @@
 use crate::app::ui_state::keybinds::GbButton;
+use crate::app::ui_state::screen_layouts::Item;
 use crate::app::ui_state::touch::TouchSettings;
 use citrine_gb::console::Keys;
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
@@ -68,6 +69,8 @@ pub struct TouchLayout {
     face: Vec<(FaceButton, Pos2, f32)>,
     both: (Pos2, f32),
     pills: Vec<(Keys, &'static str, Rect)>,
+    singles: Vec<(Item, &'static str, Rect)>,
+    lit: Vec<Item>,
 }
 
 impl TouchLayout {
@@ -279,6 +282,8 @@ impl TouchLayout {
                 (FaceButton::B, face_centre + b_offset, face_radius),
             ],
             both: (face_centre, face_radius * BOTH_RADIUS),
+            singles: Vec::new(),
+            lit: Vec::new(),
             pills: pills
                 .into_iter()
                 .map(|(keys, centre)| {
@@ -381,30 +386,167 @@ impl TouchLayout {
         for (_, _, pill) in &self.pills {
             rect = rect.union(*pill);
         }
+        for (_, _, single) in &self.singles {
+            rect = rect.union(*single);
+        }
         rect
     }
 
-    pub fn paint(&self, ui: &Ui, held: Keys, settings: &TouchSettings) {
-        let alpha = settings.clamped_opacity();
+    pub fn add_button(&mut self, item: Item, icon: &'static str, default: Rect) {
+        self.singles.retain(|(other, _, _)| *other != item);
+        self.singles.push((item, icon, default));
+    }
+
+    pub fn beside_start(&self) -> Rect {
+        let row = self
+            .group_rect(Item::Select)
+            .or_else(|| self.group_rect(Item::Start))
+            .unwrap_or(self.dpad);
+        let side = row.height();
+        let left = self
+            .singles
+            .iter()
+            .map(|(_, _, rect)| rect.left())
+            .fold(row.left(), f32::min);
+        Rect::from_min_size(pos2(left - side * 1.25, row.top()), Vec2::splat(side))
+    }
+
+    pub fn singles(&self) -> impl Iterator<Item = (Item, Rect)> + '_ {
+        self.singles.iter().map(|(item, _, rect)| (*item, *rect))
+    }
+
+    pub fn light(&mut self, held: Vec<Item>) {
+        self.lit = held;
+    }
+
+    pub fn targets(&self) -> impl Iterator<Item = Rect> + '_ {
+        let circle =
+            |centre: Pos2, radius: f32| Rect::from_center_size(centre, Vec2::splat(radius * 2.0));
+        let (both, both_radius) = self.both;
+        std::iter::once(self.dpad.union(self.dpad_start))
+            .chain(
+                self.face
+                    .iter()
+                    .map(move |(_, centre, radius)| circle(*centre, radius * FACE_REACH)),
+            )
+            .chain(std::iter::once(circle(both, both_radius)))
+            .chain(self.pills.iter().map(|(_, _, pill)| *pill))
+            .chain(self.singles.iter().map(|(_, _, single)| *single))
+    }
+
+    pub fn groups(&self) -> Vec<(Item, Rect)> {
+        [
+            Item::Dpad,
+            Item::Face,
+            Item::L,
+            Item::R,
+            Item::Select,
+            Item::Start,
+        ]
+        .into_iter()
+        .filter_map(|item| Some((item, self.group_rect(item)?)))
+        .chain(self.singles())
+        .collect()
+    }
+
+    pub fn group_rect(&self, item: Item) -> Option<Rect> {
+        let pills = |keys: Keys| {
+            self.pills
+                .iter()
+                .filter(|(k, _, _)| keys.contains(*k))
+                .map(|(_, _, rect)| *rect)
+                .reduce(Rect::union)
+        };
+        match item {
+            Item::Dpad => Some(self.dpad),
+            Item::Face => self
+                .face
+                .iter()
+                .map(|(_, centre, radius)| {
+                    Rect::from_center_size(*centre, Vec2::splat(radius * 2.0))
+                })
+                .reduce(Rect::union),
+            Item::L => pills(Keys::L),
+            Item::R => pills(Keys::R),
+            Item::Select => pills(Keys::SELECT),
+            Item::Start => pills(Keys::START),
+            Item::Talk | Item::MicMark => self
+                .singles
+                .iter()
+                .find(|(single, _, _)| *single == item)
+                .map(|(_, _, rect)| *rect),
+            Item::Screen | Item::TouchScreen => None,
+        }
+    }
+
+    pub fn place_group(&mut self, item: Item, to: Rect) {
+        let Some(from) = self.group_rect(item) else {
+            return;
+        };
+        let scale = if from.width() > 0.0 {
+            to.width() / from.width()
+        } else {
+            1.0
+        };
+        let point = |p: Pos2| to.min + (p - from.min) * scale;
+        let rect = |r: Rect| Rect::from_min_max(point(r.min), point(r.max));
+        match item {
+            Item::Dpad => {
+                self.dpad = rect(self.dpad);
+                self.dpad_start = rect(self.dpad_start);
+            }
+            Item::Face => {
+                for (_, centre, radius) in &mut self.face {
+                    *centre = point(*centre);
+                    *radius *= scale;
+                }
+                self.both = (point(self.both.0), self.both.1 * scale);
+            }
+            Item::L | Item::R | Item::Select | Item::Start => {
+                let keys = match item {
+                    Item::L => Keys::L,
+                    Item::R => Keys::R,
+                    Item::Select => Keys::SELECT,
+                    _ => Keys::START,
+                };
+                for (k, _, pill) in &mut self.pills {
+                    if keys.contains(*k) {
+                        *pill = rect(*pill);
+                    }
+                }
+            }
+            Item::Talk | Item::MicMark => {
+                for (single, _, at) in &mut self.singles {
+                    if *single == item {
+                        *at = to;
+                    }
+                }
+            }
+            Item::Screen | Item::TouchScreen => {}
+        }
+    }
+
+    pub fn claim(&self, ui: &mut Ui) {
+        for target in self.targets() {
+            ui.allocate_rect(target, Sense::CLICK | Sense::DRAG);
+        }
+    }
+
+    pub fn paint(&self, ui: &Ui, held: Keys, settings: &TouchSettings, screens: &[Rect]) {
+        let opacity = settings.clamped_opacity();
         let visuals = ui.visuals();
         let painter = ui.painter();
+        let paints = |rect: Rect| Paints::of(visuals, button_alpha(opacity, rect, screens));
 
-        let idle = visuals.widgets.inactive.bg_fill.gamma_multiply(alpha);
-        let down = visuals.widgets.active.bg_fill.gamma_multiply(alpha);
-        let edge = Stroke::new(
-            1.0_f32,
-            visuals
-                .widgets
-                .inactive
-                .bg_stroke
-                .color
-                .gamma_multiply(alpha),
-        );
-        let ink = visuals.strong_text_color().gamma_multiply(alpha);
-
-        self.paint_dpad(ui, held, idle, down, edge, ink);
+        self.paint_dpad(ui, held, paints(self.dpad));
 
         for (button, centre, radius) in &self.face {
+            let Paints {
+                idle,
+                down,
+                edge,
+                ink,
+            } = paints(Rect::from_center_size(*centre, Vec2::splat(radius * 2.0)));
             let pressed = held.contains(button.key());
             painter.circle(*centre, *radius, if pressed { down } else { idle }, edge);
             painter.text(
@@ -417,6 +559,12 @@ impl TouchLayout {
         }
 
         for (keys, label, rect) in &self.pills {
+            let Paints {
+                idle,
+                down,
+                edge,
+                ink,
+            } = paints(*rect);
             let pressed = held.contains(*keys);
             painter.rect(
                 *rect,
@@ -431,6 +579,25 @@ impl TouchLayout {
                 egui::Align2::CENTER_CENTER,
                 *label,
                 font,
+                ink,
+            );
+        }
+
+        for (item, icon, rect) in &self.singles {
+            let Paints {
+                idle,
+                down,
+                edge,
+                ink,
+            } = paints(*rect);
+            let radius = rect.width().min(rect.height()) / 2.0;
+            let fill = if self.lit.contains(item) { down } else { idle };
+            painter.circle(rect.center(), radius, fill, edge);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                *icon,
+                FontId::proportional(radius),
                 ink,
             );
         }
@@ -454,10 +621,12 @@ impl TouchLayout {
         &self,
         ui: &Ui,
         held: Keys,
-        idle: Color32,
-        down: Color32,
-        edge: Stroke,
-        ink: Color32,
+        Paints {
+            idle,
+            down,
+            edge,
+            ink,
+        }: Paints,
     ) {
         let painter = ui.painter();
         let arm = self.dpad.width() * DPAD_ARM;
@@ -539,6 +708,7 @@ pub struct Transitions {
 #[derive(Default)]
 pub struct TouchInput {
     contacts: Vec<(Contact, Keys)>,
+    at: Vec<(Contact, Pos2)>,
     dpad_owner: Option<Contact>,
     previous: Keys,
 }
@@ -588,8 +758,20 @@ impl TouchInput {
         self.combined()
     }
 
+    pub fn holds(&self, rect: Rect) -> bool {
+        self.at.iter().any(|(_, at)| rect.contains(*at))
+    }
+
+    fn touch_at(&mut self, contact: Contact, pos: Pos2) {
+        match self.at.iter_mut().find(|(c, _)| *c == contact) {
+            Some(entry) => entry.1 = pos,
+            None => self.at.push((contact, pos)),
+        }
+    }
+
     fn press(&mut self, contact: Contact, pos: Pos2, layout: &TouchLayout) {
         self.lift(contact);
+        self.touch_at(contact, pos);
         let state = if self.dpad_owner.is_none() && layout.starts_dpad(pos) {
             self.dpad_owner = Some(contact);
             layout.steer(pos, Keys::empty())
@@ -604,6 +786,7 @@ impl TouchInput {
             self.press(contact, pos, layout);
             return;
         };
+        self.touch_at(contact, pos);
         let state = if self.dpad_owner == Some(contact) {
             layout.steer(pos, held)
         } else {
@@ -648,6 +831,7 @@ impl TouchInput {
     #[must_use = "the buttons that were held still need releasing"]
     pub fn reset(&mut self) -> Keys {
         self.contacts.clear();
+        self.at.clear();
         self.dpad_owner = None;
         std::mem::replace(&mut self.previous, Keys::empty())
     }
@@ -655,6 +839,8 @@ impl TouchInput {
     fn forget_stale_fingers(&mut self, any_touches: bool) {
         if !any_touches {
             self.contacts
+                .retain(|(contact, _)| !matches!(contact, Contact::Finger(_)));
+            self.at
                 .retain(|(contact, _)| !matches!(contact, Contact::Finger(_)));
             if matches!(self.dpad_owner, Some(Contact::Finger(_))) {
                 self.dpad_owner = None;
@@ -671,16 +857,72 @@ impl TouchInput {
 
     fn clear(&mut self, contact: Contact) {
         self.contacts.retain(|(c, _)| *c != contact);
+        self.at.retain(|(c, _)| *c != contact);
     }
 }
 
-pub fn claim(ui: &mut Ui, rect: Rect) {
-    ui.allocate_rect(rect, Sense::click_and_drag());
+fn button_alpha(opacity: f32, rect: Rect, screens: &[Rect]) -> f32 {
+    if screens.iter().any(|screen| screen.intersects(rect)) {
+        opacity
+    } else {
+        (1.0 + opacity) / 2.0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Paints {
+    idle: Color32,
+    down: Color32,
+    edge: Stroke,
+    ink: Color32,
+}
+
+impl Paints {
+    fn of(visuals: &egui::Visuals, alpha: f32) -> Self {
+        Self {
+            idle: visuals.widgets.inactive.bg_fill.gamma_multiply(alpha),
+            down: visuals.widgets.active.bg_fill.gamma_multiply(alpha),
+            edge: Stroke::new(
+                1.0_f32,
+                visuals
+                    .widgets
+                    .inactive
+                    .bg_stroke
+                    .color
+                    .gamma_multiply(alpha),
+            ),
+            ink: visuals
+                .strong_text_color()
+                .gamma_multiply((1.0 + alpha) / 2.0),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_button_over_the_game_takes_the_opacity_and_one_beside_it_fades_half_as_much() {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let over = Rect::from_min_size(pos2(10.0, 250.0), vec2(100.0, 40.0));
+        let beside = Rect::from_min_size(pos2(10.0, 320.0), vec2(100.0, 40.0));
+        assert_eq!(button_alpha(0.5, over, &[screen]), 0.5);
+        assert_eq!(button_alpha(0.5, beside, &[screen]), 0.75);
+        assert_eq!(button_alpha(1.0, beside, &[screen]), 1.0);
+        assert_eq!(button_alpha(0.5, over, &[]), 0.75);
+    }
+
+    #[test]
+    fn a_see_through_button_keeps_its_label_stronger_than_its_fill() {
+        for visuals in [egui::Visuals::light(), egui::Visuals::dark()] {
+            let half = Paints::of(&visuals, 0.5);
+            let full = Paints::of(&visuals, 1.0);
+            let share = |part: Color32, whole: Color32| f32::from(part.a()) / f32::from(whole.a());
+            assert!(share(half.idle, full.idle) < 0.55);
+            assert!(share(half.ink, full.ink) > 0.7);
+        }
+    }
 
     fn phone(width: f32) -> Rect {
         let height = TouchLayout::bar_height(width, &TouchSettings::default(), false) * 1.15;
@@ -1209,6 +1451,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_columns_layout_claims_only_where_a_press_reaches_a_button() {
+        let left = Rect::from_min_size(Pos2::ZERO, vec2(180.0, 320.0));
+        let right = Rect::from_min_size(pos2(600.0, 0.0), vec2(180.0, 320.0));
+        let layout = TouchLayout::columns(left, right, &TouchSettings::default(), true);
+        let claimed = |pos: Pos2| layout.targets().any(|target| target.contains(pos));
+
+        for x in 0..=156 {
+            for y in 0..=64 {
+                let pos = pos2(x as f32 * 5.0, y as f32 * 5.0);
+                let reaches = layout.starts_dpad(pos) || !layout.buttons(pos).is_empty();
+                assert!(
+                    !reaches || claimed(pos),
+                    "a press at {pos:?} is not claimed"
+                );
+            }
+        }
+        for y in 0..=64 {
+            let pos = pos2(390.0, y as f32 * 5.0);
+            assert!(
+                !claimed(pos),
+                "the screen between the columns is claimed at {pos:?}"
+            );
+        }
+    }
+
     fn phone_layout() -> TouchLayout {
         TouchLayout::bar(
             Rect::from_min_size(pos2(0.0, 622.0), vec2(412.0, 293.0)),
@@ -1435,5 +1703,37 @@ mod tests {
             assert!(x.y < a.y && a.y < b.y);
             assert_eq!(a.x > y.x, !mirrored);
         }
+    }
+
+    #[test]
+    fn a_one_button_item_joins_the_groups_moves_and_takes_no_key() {
+        let mut layout = layout();
+        let default = layout.beside_start();
+        let select = layout.group_rect(Item::Select).expect("select");
+        assert!(
+            default.right() < select.left(),
+            "{default:?} left of {select:?}"
+        );
+        layout.add_button(Item::Talk, "M", default);
+        assert!(layout.groups().contains(&(Item::Talk, default)));
+        assert!(layout.targets().any(|target| target == default));
+        assert_eq!(layout.buttons(default.center()), Keys::empty());
+        let to = default.translate(vec2(-40.0, 0.0));
+        layout.place_group(Item::Talk, to);
+        assert_eq!(layout.group_rect(Item::Talk), Some(to));
+    }
+
+    #[test]
+    fn a_held_spot_follows_the_finger_until_it_lifts() {
+        let layout = layout();
+        let mut input = TouchInput::default();
+        let spot = Rect::from_center_size(pos2(5.0, 5.0), Vec2::splat(10.0));
+        input.press(Contact::Finger(1), pos2(5.0, 5.0), &layout);
+        assert!(input.holds(spot));
+        input.slide(Contact::Finger(1), pos2(50.0, 5.0), &layout);
+        assert!(!input.holds(spot));
+        input.slide(Contact::Finger(1), pos2(4.0, 4.0), &layout);
+        input.lift(Contact::Finger(1));
+        assert!(!input.holds(spot));
     }
 }

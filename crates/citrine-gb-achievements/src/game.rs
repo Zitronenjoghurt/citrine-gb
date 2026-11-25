@@ -4,6 +4,8 @@ use crate::library::{GameProgress, SetInfo};
 pub enum Console {
     GameBoy,
     GameBoyColor,
+    GameBoyAdvance,
+    NintendoDs,
 }
 
 impl Console {
@@ -11,6 +13,8 @@ impl Console {
         match self {
             Console::GameBoy => 4,
             Console::GameBoyColor => 6,
+            Console::GameBoyAdvance => 5,
+            Console::NintendoDs => 18,
         }
     }
 
@@ -18,6 +22,8 @@ impl Console {
         match id {
             4 => Some(Console::GameBoy),
             6 => Some(Console::GameBoyColor),
+            5 => Some(Console::GameBoyAdvance),
+            18 => Some(Console::NintendoDs),
             _ => None,
         }
     }
@@ -84,6 +90,62 @@ pub struct Summary {
     pub points_unlocked: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreFormat {
+    Time,
+    Score,
+    Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leaderboard {
+    pub id: u32,
+    pub title: String,
+    pub description: String,
+    pub format: ScoreFormat,
+    pub lower_is_better: bool,
+    pub tracking: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub rank: u32,
+    pub user: String,
+    pub score: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attempt {
+    pub board: u32,
+    pub title: String,
+    pub score: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fetch {
+    Top,
+    AroundMe,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entries {
+    pub board: u32,
+    pub fetch: Fetch,
+    pub total: u32,
+    pub entries: Vec<Entry>,
+    pub mine: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scoreboard {
+    pub board: u32,
+    pub submitted: String,
+    pub best: String,
+    pub rank: u32,
+    pub entries: u32,
+    pub top: Vec<Entry>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct GameState {
     pub id: u32,
@@ -92,6 +154,19 @@ pub struct GameState {
     pub badge_url: Option<String>,
     pub summary: Summary,
     pub groups: Vec<Group>,
+    pub leaderboards: Vec<Leaderboard>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Load {
+    #[default]
+    Idle,
+    Loading,
+    Loaded,
+    UnknownGame,
+    NoSet,
+    Unreachable,
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,10 +185,22 @@ pub enum Event {
         message: String,
     },
     GameLoaded,
-    NoSet,
-    GameLoadFailed(String),
     Unlocked(Achievement),
     GameCompleted,
+    BoardStarted(Leaderboard),
+    BoardFailed(Leaderboard),
+    BoardSubmitted {
+        board: Leaderboard,
+        score: String,
+    },
+    TrackersChanged,
+    Scoreboard(Scoreboard),
+    Entries(Entries),
+    EntriesFailed {
+        board: u32,
+        fetch: Fetch,
+        message: String,
+    },
     ServerError(String),
     Disconnected,
     Reconnected,

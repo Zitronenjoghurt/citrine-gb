@@ -66,6 +66,19 @@ impl Progress {
     }
 }
 
+pub fn size_words(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * KB;
+    let bytes = bytes as f64;
+    if bytes >= 10.0 * MB {
+        format!("{:.0}\u{a0}MB", bytes / MB)
+    } else if bytes >= MB {
+        format!("{:.1}\u{a0}MB", bytes / MB)
+    } else {
+        format!("{:.0}\u{a0}KB", (bytes / KB).ceil())
+    }
+}
+
 fn bytes_of(done: u64, total: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * KB;

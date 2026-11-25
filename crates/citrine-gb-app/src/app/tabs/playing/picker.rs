@@ -129,12 +129,7 @@ pub fn picker(
             if !recent.is_empty() {
                 pick_heading(ui, "Recent");
                 for entry in recent.entries() {
-                    let folder = entry
-                        .path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                    let folder = entry.folder();
                     let title = entry.display_name();
                     if fits(&title, &folder) && pick_row(ui, &title, &folder, false) {
                         pick = Some(Pick::Recent(entry.path.clone()));

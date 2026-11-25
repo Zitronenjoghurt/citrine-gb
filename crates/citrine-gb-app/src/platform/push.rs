@@ -16,6 +16,7 @@ pub enum Opened {
     Friend(OnlineId),
     Invite { from: OnlineId, session: SessionId },
     Chat(OnlineId),
+    Walker,
 }
 
 #[cfg_attr(
@@ -24,6 +25,9 @@ pub enum Opened {
 )]
 impl Opened {
     pub fn parse(kind: &str, from: &str, session: &str) -> Option<Self> {
+        if kind == "walker" {
+            return Some(Self::Walker);
+        }
         let from = from.parse().ok()?;
         match kind {
             "friend_request" => Some(Self::Friend(from)),

@@ -17,6 +17,7 @@ pub enum Glyph {
     Shoulder(PadButton),
     Sideways,
     Arrows,
+    Select,
     Start,
 }
 
@@ -68,7 +69,7 @@ fn face_letter(family: Family, button: PadButton) -> Option<&'static str> {
     }
 }
 
-fn shoulder_text(family: Family, button: PadButton) -> &'static str {
+pub(crate) fn shoulder_text(family: Family, button: PadButton) -> &'static str {
     let names = match family {
         Family::Xbox => ["LB", "RB", "LT", "RT"],
         Family::Nintendo => ["L", "R", "ZL", "ZR"],
@@ -79,6 +80,24 @@ fn shoulder_text(family: Family, button: PadButton) -> &'static str {
         PadButton::RightTrigger => names[1],
         PadButton::LeftTrigger2 => names[2],
         _ => names[3],
+    }
+}
+
+fn select_text(family: Family) -> &'static str {
+    match family {
+        Family::Xbox => "View",
+        Family::PlayStation => "Create",
+        Family::Nintendo => "\u{2212}",
+        _ => "Select",
+    }
+}
+
+fn start_text(family: Family) -> &'static str {
+    match family {
+        Family::Xbox => "Menu",
+        Family::PlayStation => "Options",
+        Family::Nintendo => "+",
+        _ => "Start",
     }
 }
 
@@ -122,14 +141,8 @@ pub fn paint(ui: &mut Ui, family: Family, glyph: Glyph, confirm: PadButton, size
             face(ui, rect, family, button, ink, paper);
         }
         Glyph::Shoulder(button) => pill(ui, shoulder_text(family, button)),
-        Glyph::Start => pill(
-            ui,
-            if family == Family::PlayStation {
-                "Options"
-            } else {
-                "Start"
-            },
-        ),
+        Glyph::Select => pill(ui, select_text(family)),
+        Glyph::Start => pill(ui, start_text(family)),
         Glyph::Sideways => pill(ui, "\u{25C0} \u{25B6}"),
         Glyph::Arrows => {
             let (rect, _) = ui.allocate_exact_size(vec2(size * 2.6, size), Sense::hover());
@@ -330,5 +343,14 @@ mod tests {
             Family::Xbox
         );
         assert_eq!(family_of(&pad("8BitDo Lite", "2dc8:5112")), Family::Plain);
+    }
+
+    #[test]
+    fn select_and_start_carry_the_pads_own_names() {
+        let names = |family| (select_text(family), start_text(family));
+        assert_eq!(names(Family::Xbox), ("View", "Menu"));
+        assert_eq!(names(Family::PlayStation), ("Create", "Options"));
+        assert_eq!(names(Family::Nintendo), ("\u{2212}", "+"));
+        assert_eq!(names(Family::Plain), ("Select", "Start"));
     }
 }

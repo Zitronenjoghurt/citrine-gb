@@ -6,7 +6,7 @@ use crate::now;
 use crate::settings::Check;
 use crate::stats::Refused;
 use citrine_gb_net::{
-    AuthKey, ChatMessage, DeviceId, DeviceInfo, DeviceKey, ErrorCode, InviteCode,
+    AuthKey, ChatMessage, DIRECT_PROTOCOL, DeviceId, DeviceInfo, DeviceKey, ErrorCode, InviteCode,
     MAX_PUSH_TOKEN_BYTES, Notice, OldChat, OneTimeCode, PROTOCOL_VERSION, Presence, PublicKey,
     PushKinds, RelayPassword, ServerMsg, display_name, speaks_protocol,
 };
@@ -199,6 +199,14 @@ impl Client {
             .map(|(row, state)| self.friend(&row, state))
             .collect();
         self.send(ServerMsg::Friends(friends)).await;
+        if let Some(port) = self.app.stun_port
+            && self
+                .hello
+                .is_some_and(|protocol| protocol >= DIRECT_PROTOCOL)
+        {
+            self.send(ServerMsg::Stun { port }).await;
+        }
+        self.send_archive(account.id).await?;
         for invite in self.app.hub.open_invites(account.id) {
             self.send(invite).await;
         }
@@ -287,11 +295,15 @@ impl Client {
             Some(token) if token.is_empty() || token.len() > MAX_PUSH_TOKEN_BYTES => {
                 Err(ErrorCode::TooLarge)
             }
-            Some(token) => db(self
-                .app
-                .db
-                .set_push_token(me, device, &token, kinds, now())
-                .await),
+            Some(token) => {
+                db(self
+                    .app
+                    .db
+                    .set_push_token(me, device, &token, kinds, now())
+                    .await)?;
+                log::info!("{}", crate::push::registered(kinds));
+                Ok(())
+            }
             None => db(self.app.db.remove_push_token(device).await),
         }
     }

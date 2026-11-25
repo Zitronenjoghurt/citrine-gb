@@ -2,6 +2,7 @@ use super::{RomError, slice, u16_at, u32_at};
 use crate::texture::rgb555;
 
 const TILE: usize = 8;
+const MAX_SIDE: usize = 4096;
 
 fn chunk<'a>(file: &'a [u8], tag: &'static str) -> Result<&'a [u8], RomError> {
     let mut at = usize::from(u16_at(file, 0x0C)?);
@@ -201,6 +202,13 @@ impl<'a> Nscr<'a> {
         let entries = scrn
             .get(0x14..(0x14 + len).min(scrn.len()))
             .ok_or(RomError::Truncated(0x14))?;
+        if width > MAX_SIDE || height > MAX_SIDE {
+            return Err(RomError::TooLarge(width, height));
+        }
+        let needed = (width / TILE) * (height / TILE) * 2;
+        if entries.len() < needed {
+            return Err(RomError::Truncated(0x14 + needed));
+        }
         Ok(Self {
             width,
             height,
@@ -374,6 +382,26 @@ mod tests {
         let flipped = 15 * 4;
         assert_eq!(&picture.rgba[flipped..flipped + 4], &[0, 0, 255, 255]);
         assert_eq!(&picture.rgba[8 * 4..8 * 4 + 4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_huge_screen_is_an_error() {
+        let file = build_nscr(0xFFFF, 0xFFFF, &[0; 4]);
+        assert_eq!(
+            Nscr::parse(&file).unwrap_err(),
+            RomError::TooLarge(0xFFFF, 0xFFFF)
+        );
+    }
+
+    #[test]
+    fn a_screen_bigger_than_its_entries_is_an_error() {
+        let file = build_nscr(256, 192, &[0; 4]);
+        assert_eq!(
+            Nscr::parse(&file).unwrap_err(),
+            RomError::Truncated(0x14 + 32 * 24 * 2)
+        );
+        let full = build_nscr(256, 192, &[0; 32 * 24]);
+        assert_eq!(Nscr::parse(&full).unwrap().width, 256);
     }
 
     #[test]

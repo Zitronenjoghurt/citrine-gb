@@ -197,7 +197,7 @@ fn header(open: &mut OpenFile, ui: &mut Ui, phone: bool, files: &mut FileChannel
 }
 
 fn export(open: &OpenFile, ui: &mut Ui, files: &mut FileChannels) {
-    ui.menu_button(format!("{}  Export", icons::EXPORT), |ui| {
+    ui.menu_button(format!("{}  Export", icons::DOWNLOAD_SIMPLE), |ui| {
         let name = file_name(open);
         let extension = name
             .rsplit_once('.')

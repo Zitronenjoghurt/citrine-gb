@@ -218,7 +218,7 @@ pub fn version_text(version: i32) -> String {
 mod tests {
     use super::*;
     use crate::app::ui_state::keybinds::{BindingCapture, GbButton, KeyBindings};
-    use crate::pad_input::{PadAction, route};
+    use crate::pad_input::{PadAction, route_alone};
 
     #[test]
     fn sdl_buttons_take_the_binding_names() {
@@ -321,7 +321,7 @@ mod tests {
         let actions = |events: Vec<PadEvent>| -> Vec<PadAction> {
             events
                 .into_iter()
-                .map(|e| route(e.input, &bindings, &capture, None, false))
+                .map(|e| route_alone(e.input, &bindings, &capture, false))
                 .collect()
         };
         assert_eq!(

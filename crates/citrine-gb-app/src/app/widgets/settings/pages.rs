@@ -1,0 +1,12 @@
+pub mod about;
+pub mod app;
+pub mod capture;
+pub mod controls;
+pub mod developer;
+pub mod ds;
+pub mod game_boy;
+pub mod gba;
+pub mod playing;
+pub mod screen;
+pub mod sound;
+pub mod sync;

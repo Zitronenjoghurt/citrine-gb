@@ -1,5 +1,7 @@
 use super::CheatTarget;
 
+const STEP_BUDGET: u32 = 1 << 22;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Assign,
@@ -80,6 +82,7 @@ pub(crate) fn run(ops: &[Op], target: &mut (impl CheatTarget + ?Sized)) {
     let mut else_at = 0;
     let mut end_at = 0;
     let mut i = 0;
+    let mut budget = STEP_BUDGET;
     while i < ops.len() {
         let op = ops[i];
         let mut operand = op.operand as i32;
@@ -89,6 +92,10 @@ pub(crate) fn run(ops: &[Op], target: &mut (impl CheatTarget + ?Sized)) {
         let mut condition_left = 0;
         let mut negative_left = 0;
         while remaining > 0 {
+            let Some(left) = budget.checked_sub(1) else {
+                return;
+            };
+            budget = left;
             let (write, test) = match op.kind {
                 Kind::Assign => (Some(operand), None),
                 #[cfg(feature = "gba")]
@@ -166,4 +173,44 @@ pub(crate) fn run(ops: &[Op], target: &mut (impl CheatTarget + ?Sized)) {
 #[cfg(feature = "gba")]
 fn read(target: &mut (impl CheatTarget + ?Sized), address: u32, width: u8) -> i32 {
     target.cheat_read(address, width) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Counter {
+        writes: u64,
+    }
+
+    impl CheatTarget for Counter {
+        fn cheat_read(&mut self, _address: u32, _width: u8) -> u32 {
+            0
+        }
+
+        fn cheat_write(&mut self, _address: u32, _width: u8, _value: u32) {
+            self.writes += 1;
+        }
+
+        fn cheat_rom(&self) -> &[u8] {
+            &[]
+        }
+
+        fn rom_offsets(&self, _address: u32, _out: &mut Vec<usize>) {}
+
+        fn set_rom_patches(&mut self, _patches: &[(usize, u8)]) {}
+    }
+
+    #[test]
+    fn a_huge_repeat_stops_at_the_step_budget() {
+        let op = Op {
+            repeat: u32::MAX,
+            address_offset: 1,
+            ..Op::new(Kind::Assign, 1, 0x0200_0000, 0)
+        };
+        let mut target = Counter::default();
+        run(&[op, op], &mut target);
+        assert_eq!(target.writes, u64::from(STEP_BUDGET));
+    }
 }

@@ -8,10 +8,10 @@ use crate::app::viewer::{ItemKey, Source};
 use crate::app::widgets::action::wide_button;
 use crate::app::widgets::row::row_highlight;
 use crate::app::widgets::text::faint;
-use crate::app::widgets::{avatar, confirm, emoji, scroll};
+use crate::app::widgets::{avatar, confirm, emoji, scroll, soft_keyboard};
 use crate::icons;
 use crate::media::{MediaItem, MediaStore};
-use crate::online::chat::{ChatEntry, Delivery, Fetch};
+use crate::online::chat::{Change, ChatEntry, Delivery, Fetch};
 use crate::online::{Online, chat_media};
 use bubble::entry_ui;
 use citrine_gb_net::{Body, FileId, Friend, OnlineId, ShareKind};
@@ -19,7 +19,7 @@ use clock::Clock;
 use composer::{composer, picker};
 use egui::{
     Align, CursorIcon, Key, Label, Layout, Modifiers, RichText, Sense, TextureHandle,
-    TextureOptions, Ui, vec2,
+    TextureOptions, Ui, Vec2, vec2,
 };
 use jiff::civil::Date;
 use share::{from_media, kind_word, replay_error, save_received, share_entry, share_item};
@@ -31,6 +31,7 @@ mod clock;
 mod composer;
 mod menu;
 mod palette;
+mod reply;
 pub(crate) mod share;
 
 const HEADER_AVATAR: f32 = 34.0;
@@ -42,9 +43,26 @@ const BIG_EMOJI_GAP: f32 = 2.0;
 const STAMP_GAP: f32 = 6.0;
 const TEXT_STAMP_GAP: f32 = 8.0;
 const MESSAGES_PER_PAGE: usize = 200;
+const OFFSCREEN_MARGIN: f32 = 400.0;
 const BUBBLE_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
 const PICKER_EMOJI: f32 = 28.0;
 const PICKER_HEIGHT: f32 = 176.0;
+const PICKER_MARGIN: f32 = 6.0;
+pub(crate) const GESTURE_HANDLE: f32 = 4.0;
+const FOOT: f32 = 10.0;
+const FOOT_GAP: f32 = 4.0;
+const EMOJI_SHARE: f32 = 0.38;
+const EMOJI_MIN: f32 = 150.0;
+const EMOJI_MAX: f32 = 320.0;
+const CLOSING_SECS: f64 = 0.4;
+const JUMP_AFTER: f32 = 160.0;
+const LIST_MIN: f32 = 96.0;
+const TIGHT: f32 = 240.0;
+const SLIM_HEADER: f32 = 28.0;
+const SLIM_AVATAR: f32 = 22.0;
+const SLIM_GAP: f32 = 8.0;
+const JUMP_STRIP: f32 = 44.0;
+const JUMP_HEIGHT: f32 = 34.0;
 const PREVIEW_MAX: f32 = 320.0;
 const LONG_PRESS_SECS: f64 = 0.5;
 const LONG_PRESS_SLOP: f32 = 8.0;
@@ -74,6 +92,8 @@ enum Action {
     Edit(u64),
     AskDelete(u64),
     AddPalette(u64),
+    Reply(u64),
+    ShowOriginal(u64),
 }
 
 struct Editing {
@@ -104,6 +124,64 @@ pub struct ChatUi {
     focus_draft: bool,
     leave_draft: bool,
     deleting: Option<u64>,
+    replying: HashMap<OnlineId, u64>,
+    swipe: Option<(u64, f32)>,
+    jump_to: Option<u64>,
+    flash: Option<(u64, f64)>,
+    heights: HashMap<u64, (RowKey, f32)>,
+    closing: Closing,
+    list: Option<ListMemo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Closing {
+    No,
+    Asked,
+    Since(f64),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ListMemo {
+    height: f32,
+    offset: f32,
+    seen: usize,
+    strip: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct RowKey {
+    width: u32,
+    day: bool,
+    delivery: Delivery,
+    change: Change,
+    size: usize,
+    quote: bool,
+    note: bool,
+    receipt: bool,
+    preview: Option<bool>,
+    busy: bool,
+}
+
+impl RowKey {
+    fn of(state: &ChatUi, online: &Online, entry: &ChatEntry, width: f32, day: bool) -> Self {
+        let share = matches!(entry.body, Body::Share(_));
+        Self {
+            width: width.to_bits(),
+            day,
+            delivery: entry.delivery,
+            change: entry.change,
+            size: match &entry.body {
+                Body::Text(text) | Body::Palette(text) => text.len(),
+                _ => 0,
+            },
+            quote: entry.reply.is_some(),
+            note: state.notes.contains_key(&entry.id),
+            receipt: state.receipt == Some(entry.id),
+            preview: state.previews.get(&entry.id).map(Option::is_some),
+            busy: online.change_failure(entry.id).is_some()
+                || share && state.wanted.values().any(|(_, _, id)| *id == entry.id),
+        }
+    }
 }
 
 impl Default for ChatUi {
@@ -131,6 +209,13 @@ impl Default for ChatUi {
             focus_draft: false,
             leave_draft: false,
             deleting: None,
+            replying: HashMap::new(),
+            swipe: None,
+            jump_to: None,
+            flash: None,
+            heights: HashMap::new(),
+            closing: Closing::No,
+            list: None,
         }
     }
 }
@@ -140,9 +225,14 @@ impl ChatUi {
         if self.open != Some(friend) {
             self.end_edit();
             self.older = 0;
+            self.jump_to = None;
+            self.flash = None;
+            self.heights.clear();
+            self.list = None;
         }
         self.open = Some(friend);
         self.picker = false;
+        self.closing = Closing::No;
         self.from_media = false;
         self.jump = true;
     }
@@ -152,7 +242,24 @@ impl ChatUi {
         self.deleting = None;
         self.open = None;
         self.picker = false;
+        self.closing = Closing::No;
         self.from_media = false;
+    }
+
+    pub fn emoji_room(&self, ctx: &egui::Context) -> f32 {
+        if !(self.touch && self.picker && self.open.is_some()) {
+            return 0.0;
+        }
+        (emoji_height(ctx) - soft_keyboard::shown(ctx)).max(0.0)
+    }
+
+    pub fn panel_open(&self) -> bool {
+        self.touch && self.picker && self.open.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn show_older_for_test(&mut self, pages: usize) {
+        self.older = pages;
     }
 
     pub fn current(&self) -> Option<OnlineId> {
@@ -168,7 +275,11 @@ impl ChatUi {
     }
 
     pub fn leaves_on_escape(&self) -> bool {
-        !self.picker && self.composing().is_some()
+        !self.picker
+            && self.composing().is_some()
+            && self
+                .open
+                .is_none_or(|friend| !self.replying.contains_key(&friend))
     }
 
     pub fn field(&self) -> Option<egui::Id> {
@@ -183,10 +294,16 @@ impl ChatUi {
     pub fn escape(&mut self) -> bool {
         if self.picker {
             self.picker = false;
+            self.closing = Closing::No;
             return true;
         }
         if self.editing.is_some() {
             self.end_edit();
+            return true;
+        }
+        if let Some(friend) = self.open
+            && self.replying.remove(&friend).is_some()
+        {
             return true;
         }
         if self.open.is_some() {
@@ -198,11 +315,29 @@ impl ChatUi {
 
     fn start_edit(&mut self, friend: OnlineId, id: u64, text: &str) {
         self.end_edit();
+        self.replying.remove(&friend);
         let draft = self.drafts.entry(friend).or_default();
         let stash = std::mem::replace(draft, text.to_owned());
         self.editing = Some(Editing { friend, id, stash });
-        self.picker = false;
+        self.hide_picker();
         self.focus_draft = true;
+    }
+
+    fn start_reply(&mut self, friend: OnlineId, id: u64) {
+        self.end_edit();
+        self.replying.insert(friend, id);
+        self.hide_picker();
+        self.focus_draft = true;
+    }
+
+    fn hide_picker(&mut self) {
+        if self.touch && self.picker {
+            if self.closing == Closing::No {
+                self.closing = Closing::Asked;
+            }
+        } else {
+            self.picker = false;
+        }
     }
 
     fn end_edit(&mut self) {
@@ -272,6 +407,10 @@ impl ChatUi {
 
 pub fn draft_id(friend: OnlineId) -> egui::Id {
     egui::Id::new(("chat_draft", friend))
+}
+
+pub fn jump_id(friend: OnlineId) -> egui::Id {
+    egui::Id::new(("chat_jump", friend))
 }
 
 pub fn take_escape(ctx: &egui::Context) -> bool {
@@ -364,7 +503,16 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) -> bool {
     } else {
         None
     };
-    match header(ui, viewer.online, &person, mobile, chip.as_ref()) {
+    let keyboard = soft_keyboard::shown(ui.ctx());
+    let tight = mobile
+        && (keyboard > 0.0 || viewer.ui.friends.chat.panel_open())
+        && ui.available_height() + keyboard - emoji_height(ui.ctx()).max(keyboard) < TIGHT;
+    let action = if tight {
+        slim_header(ui, viewer.online, &person)
+    } else {
+        header(ui, viewer.online, &person, mobile, chip.as_ref())
+    };
+    match action {
         Some(Header::Back) => {
             viewer.ui.friends.chat.close();
             return false;
@@ -401,20 +549,46 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) -> bool {
         },
         None => {}
     }
-    ui.separator();
+    if tight {
+        ui.add_space(SLIM_GAP);
+    } else {
+        ui.separator();
+    }
 
     let can_chat = viewer.online.can_chat(friend);
+    settle_picker(ui.ctx(), &mut viewer.ui.friends.chat);
+    let composer_id = egui::Id::new(("chat_composer_height", friend));
+    let composer_was = ui.data(|d| d.get_temp::<f32>(composer_id)).unwrap_or(0.0);
+    let room = viewer
+        .ui
+        .friends
+        .chat
+        .emoji_room(ui.ctx())
+        .min((ui.available_height() - composer_was - list_min(ui.ctx())).max(0.0));
+    let typing = (can_chat && viewer.online.is_typing(friend, web_time::Instant::now()))
+        .then(|| {
+            crate::app::widgets::typing::chat_line(&[(
+                person.display_name.as_str(),
+                viewer.online.typing_text(friend),
+            )])
+        })
+        .flatten();
     let bottom = egui::TopBottomPanel::bottom(egui::Id::new(("chat_bottom", friend)))
         .frame(egui::Frame::NONE.inner_margin(egui::Margin {
-            bottom: if mobile { 10 } else { 4 },
+            bottom: if mobile { 0 } else { 4 },
             ..Default::default()
         }))
         .show_separator_line(false)
         .resizable(false)
         .show_inside(ui, |ui| {
-            if can_chat {
+            if can_chat && !mobile {
                 let typing = viewer.online.is_typing(friend, web_time::Instant::now());
-                let typing = typing.then_some(person.display_name.as_str());
+                let typing = typing.then(|| {
+                    (
+                        person.display_name.as_str(),
+                        viewer.online.typing_text(friend),
+                    )
+                });
                 let to_game =
                     !viewer.ui.friends.chat.touch && viewer.emulator.open_game().is_some();
                 let field = if viewer.ui.friends.chat.editing(friend).is_some() {
@@ -427,24 +601,45 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) -> bool {
                 let key = viewer.ui.settings.hotkeys.key_name(HotkeyAction::FocusChat);
                 typing_slot(ui, slot(typing, to_game, field, key.as_deref()), to_game);
             }
-            if can_chat && viewer.ui.friends.chat.picker {
-                picker(ui, viewer, friend);
+            if can_chat && !mobile && viewer.ui.friends.chat.picker {
+                picker(ui, viewer, friend, PICKER_HEIGHT);
             }
             if can_chat {
                 composer(ui, viewer, friend);
+            } else if viewer.online.key_changed(friend) {
+                ui.add_space(4.0);
+                let warn = ui.visuals().warn_fg_color;
+                ui.label(
+                    RichText::new(format!(
+                        "{}'s security code changed, so chats are paused.",
+                        person.display_name
+                    ))
+                    .color(warn),
+                );
+                if ui.link("Compare the new code").clicked() {
+                    profile = true;
+                }
             } else {
                 ui.add_space(4.0);
                 ui.label(RichText::new("You aren't friends anymore").weak());
+            }
+            if mobile {
+                foot(ui, viewer, friend, room);
             }
         });
     let height_id = egui::Id::new(("chat_bottom_height", friend));
     let height = bottom.response.rect.height();
     let was = ui.data(|d| d.get_temp::<f32>(height_id));
-    ui.data_mut(|d| d.insert_temp(height_id, height));
+    let composer = height - if mobile { room + FOOT } else { 0.0 };
+    ui.data_mut(|d| {
+        d.insert_temp(height_id, height);
+        d.insert_temp(composer_id, composer);
+    });
     if was.is_some_and(|was| (was - height).abs() >= 0.5) {
         ui.ctx().request_discard("chat composer height");
     }
-    messages(ui, viewer, friend);
+    let typing = typing.filter(|_| mobile);
+    messages(ui, viewer, friend, typing.as_deref());
     from_media(ui.ctx(), viewer, friend);
     ask_delete(ui.ctx(), viewer, &person);
     profile
@@ -549,8 +744,13 @@ enum Slot {
     Tip(String),
 }
 
-fn slot(typing: Option<&str>, to_game: bool, field: Field, key: Option<&str>) -> Option<Slot> {
-    if let Some(text) = typing.and_then(|name| crate::app::widgets::typing::chat_line(&[name])) {
+fn slot(
+    typing: Option<(&str, Option<&str>)>,
+    to_game: bool,
+    field: Field,
+    key: Option<&str>,
+) -> Option<Slot> {
+    if let Some(text) = typing.and_then(|who| crate::app::widgets::typing::chat_line(&[who])) {
         return Some(Slot::Typing(text));
     }
     if !to_game {
@@ -635,6 +835,43 @@ fn header(
     action
 }
 
+fn slim_header(ui: &mut Ui, online: &Online, person: &Friend) -> Option<Header> {
+    let mut action = None;
+    ui.allocate_ui_with_layout(
+        vec2(ui.available_width(), SLIM_HEADER),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            let (rect, back) = ui.allocate_exact_size(Vec2::splat(SLIM_HEADER), Sense::click());
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::ARROW_LEFT,
+                egui::FontId::proportional(20.0),
+                ui.visuals().text_color(),
+            );
+            back.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Back"));
+            if back.on_hover_text("Back to friends").clicked() {
+                action = Some(Header::Back);
+            }
+            let face = avatar::avatar(
+                ui,
+                &person.display_name,
+                person.online_id.value(),
+                SLIM_AVATAR,
+                online.presence(person),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+            let strong = ui.visuals().strong_text_color();
+            let name = emoji::line(ui, &person.display_name, egui::TextStyle::Body, strong)
+                .on_hover_cursor(CursorIcon::PointingHand);
+            if face.clicked() || name.clicked() {
+                action = Some(Header::Profile);
+            }
+        },
+    );
+    action
+}
+
 fn person_line(
     ui: &mut Ui,
     online: &Online,
@@ -674,7 +911,57 @@ fn person_line(
     });
 }
 
-fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
+fn list_min(ctx: &egui::Context) -> f32 {
+    if soft_keyboard::full(ctx).is_some() {
+        0.0
+    } else {
+        LIST_MIN
+    }
+}
+
+fn emoji_height(ctx: &egui::Context) -> f32 {
+    soft_keyboard::full(ctx)
+        .unwrap_or_else(|| (ctx.viewport_rect().height() * EMOJI_SHARE).clamp(EMOJI_MIN, EMOJI_MAX))
+}
+
+fn settle_picker(ctx: &egui::Context, state: &mut ChatUi) {
+    if !state.picker {
+        state.closing = Closing::No;
+        return;
+    }
+    let now = ctx.input(|i| i.time);
+    let since = match state.closing {
+        Closing::No => return,
+        Closing::Asked => now,
+        Closing::Since(since) => since,
+    };
+    let risen = soft_keyboard::shown(ctx) >= emoji_height(ctx) - 0.5;
+    if risen || now - since >= CLOSING_SECS {
+        state.picker = false;
+        state.closing = Closing::No;
+    } else {
+        state.closing = Closing::Since(since);
+        ctx.request_repaint();
+    }
+}
+
+fn foot(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId, room: f32) {
+    let size = vec2(ui.available_width(), room + FOOT);
+    ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+        ui.set_min_size(size);
+        let under = if viewer.ui.friends.chat.touch {
+            FOOT
+        } else {
+            0.0
+        };
+        let panel = room + under - FOOT_GAP - 2.0 * PICKER_MARGIN;
+        if panel > 0.0 {
+            picker(ui, viewer, friend, panel);
+        }
+    });
+}
+
+fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId, typing: Option<&str>) {
     let state = &mut viewer.ui.friends.chat;
     let names = &viewer.ui.settings.game_names;
     let palettes = &viewer.ui.settings.palettes;
@@ -694,67 +981,150 @@ fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
         state.receipt = None;
     }
     scroll::gutter(ui);
-    egui::ScrollArea::vertical()
+    let height = ui.available_height();
+    let memo = state.list;
+    let strip = state.touch && memo.is_some_and(|memo| memo.strip) && !jump;
+    let list_height = if strip {
+        (height - JUMP_STRIP).max(0.0)
+    } else {
+        height
+    };
+    let mut area = egui::ScrollArea::vertical()
         .id_salt(("chat_scroll", friend))
         .stick_to_bottom(true)
-        .auto_shrink([false, false])
-        .show_following(ui, |ui| {
-            let all = online
-                .conversation(friend)
-                .map(|c| c.entries.as_slice())
-                .unwrap_or_default();
-            if all.is_empty() {
-                ui.add_space(12.0);
-                ui.vertical_centered(|ui| ui.label(RichText::new("No messages yet").weak()));
-            }
-            let start = all
-                .len()
-                .saturating_sub(MESSAGES_PER_PAGE * (state.older + 1));
-            if start > 0 {
-                ui.add_space(8.0);
-                ui.vertical_centered(|ui| {
-                    if ui.button("Show older messages").clicked() {
-                        state.older += 1;
-                    }
-                });
-                ui.add_space(4.0);
-            }
-            let entries = &all[start..];
-            let mut last_day = None;
-            for entry in entries {
-                let day = clock.day(entry.at);
-                if day != last_day {
-                    if let Some(day) = day {
-                        date_row(ui, &clock, day);
-                    }
-                    last_day = day;
+        .min_scrolled_height(0.0)
+        .max_height(list_height)
+        .auto_shrink([false, false]);
+    if let Some(memo) = memo
+        && !jump
+        && (memo.height - height).abs() >= 0.5
+    {
+        area = area.vertical_scroll_offset((memo.offset + memo.height - height).max(0.0));
+    }
+    let all = online
+        .conversation(friend)
+        .map(|c| c.entries.as_slice())
+        .unwrap_or_default();
+    let scrolled = area.show_following(ui, |ui| {
+        if all.is_empty() {
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| ui.label(RichText::new("No messages yet").weak()));
+        }
+        let start = all
+            .len()
+            .saturating_sub(MESSAGES_PER_PAGE * (state.older + 1));
+        if start > 0 {
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                if ui.button("Show older messages").clicked() {
+                    state.older += 1;
                 }
-                let bubble = entry_ui(
-                    ui,
-                    state,
-                    online,
-                    friend,
-                    entry,
-                    &clock,
-                    rom,
-                    names,
-                    palettes,
-                    &mut actions,
-                );
-                if focused && entry.delivery == Delivery::Received && ui.is_rect_visible(bubble) {
-                    seen.push(entry.id);
-                }
-            }
-            if state.reading > 0 {
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    ui.label(faint("Getting the file ready…"));
-                });
-            }
+            });
             ui.add_space(4.0);
-            if jump {
-                ui.scroll_to_cursor(Some(Align::BOTTOM));
+        }
+        let mut last_day = None;
+        let time = ui.input(|i| i.time);
+        state.flash = state.flash.filter(|(_, at)| time - at < reply::FLASH_SECS);
+        let width = ui.available_width();
+        let view = ui.clip_rect().expand(OFFSCREEN_MARGIN);
+        for (at, entry) in all.iter().enumerate().skip(start) {
+            let day = clock.day(entry.at);
+            let new_day = day.filter(|_| day != last_day);
+            last_day = day;
+            let key = RowKey::of(state, online, entry, width, new_day.is_some());
+            let row_top = ui.cursor().top();
+            let pinned = state.jump_to == Some(entry.id)
+                || state.flash.is_some_and(|(id, _)| id == entry.id)
+                || state.swipe.is_some_and(|(id, _)| id == entry.id);
+            if let Some(&(known, height)) = state.heights.get(&entry.id)
+                && known == key
+                && !pinned
+                && !view
+                    .y_range()
+                    .intersects(egui::Rangef::new(row_top, row_top + height))
+            {
+                let gap = ui.spacing().item_spacing.y;
+                ui.allocate_space(vec2(width, (height - gap).max(0.0)));
+                continue;
             }
-        });
+            if let Some(day) = new_day {
+                date_row(ui, &clock, day);
+            }
+            let quote = entry
+                .reply
+                .as_ref()
+                .map(|quote| reply::QuoteView::of(online, friend, entry, quote, &all[..at]));
+            let flash = state
+                .flash
+                .filter(|(id, _)| *id == entry.id)
+                .map(|(_, since)| (ui.painter().add(egui::Shape::Noop), since));
+            let top = ui.cursor().top();
+            let bubble = entry_ui(
+                ui,
+                state,
+                online,
+                friend,
+                entry,
+                quote.as_ref(),
+                &clock,
+                rom,
+                names,
+                palettes,
+                &mut actions,
+            );
+            if let Some((spot, since)) = flash {
+                reply::flash(ui, spot, top, bubble, time - since);
+            }
+            if state.jump_to == Some(entry.id) {
+                state.jump_to = None;
+                ui.scroll_to_rect(bubble, Some(Align::Center));
+            }
+            if focused && entry.delivery == Delivery::Received && ui.is_rect_visible(bubble) {
+                seen.push(entry.id);
+            }
+            let height = ui.cursor().top() - row_top;
+            state.heights.insert(entry.id, (key, height));
+        }
+        if state.reading > 0 {
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                ui.label(faint("Getting the file ready…"));
+            });
+        }
+        if let Some(text) = typing {
+            let color = ui.visuals().weak_text_color();
+            crate::app::widgets::typing::line(ui, text, egui::TextStyle::Small, color);
+        }
+        ui.add_space(4.0);
+        if jump {
+            ui.scroll_to_cursor(Some(Align::BOTTOM));
+        }
+    });
+    let offset = scrolled.state.offset.y;
+    let end = (scrolled.content_size.y - scrolled.inner_rect.height()).max(0.0);
+    let at_end = offset >= end - 1.0;
+    let seen_len = match memo {
+        Some(memo) if !at_end => memo.seen.min(all.len()),
+        _ => all.len(),
+    };
+    let wants_strip = state.touch && !jump && end - offset > JUMP_AFTER;
+    state.list = Some(ListMemo {
+        height,
+        offset,
+        seen: seen_len,
+        strip: wants_strip,
+    });
+    if wants_strip != strip {
+        ui.ctx().request_discard("chat jump strip");
+    } else if strip {
+        let unread = all[seen_len..].iter().filter(|e| !e.mine).count();
+        let (rect, _) = ui.allocate_exact_size(
+            vec2(scrolled.inner_rect.width(), JUMP_STRIP),
+            Sense::hover(),
+        );
+        if jump_button(ui, rect, friend, unread).clicked() {
+            state.jump = true;
+        }
+    }
     viewer.online.mark_seen(friend, &seen);
     for action in actions {
         match action {
@@ -785,6 +1155,20 @@ fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
                 }
             }
             Action::AskDelete(id) => viewer.ui.friends.chat.deleting = Some(id),
+            Action::Reply(id) => viewer.ui.friends.chat.start_reply(friend, id),
+            Action::ShowOriginal(id) => {
+                let all = viewer
+                    .online
+                    .conversation(friend)
+                    .map(|c| c.entries.as_slice())
+                    .unwrap_or_default();
+                if let Some(at) = all.iter().position(|e| e.id == id) {
+                    let state = &mut viewer.ui.friends.chat;
+                    state.older = state.older.max(pages_to_show(all.len(), at));
+                    state.jump_to = Some(id);
+                    state.flash = Some((id, ui.input(|i| i.time)));
+                }
+            }
             Action::AddPalette(id) => {
                 let shared = viewer
                     .online
@@ -800,12 +1184,74 @@ fn messages(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
     }
 }
 
+fn jump_button(ui: &mut Ui, strip: egui::Rect, friend: OnlineId, unread: usize) -> egui::Response {
+    let label = match unread {
+        0 => "Newest messages".to_owned(),
+        1 => "1 new message".to_owned(),
+        n => format!("{n} new messages"),
+    };
+    let visuals = ui.visuals().clone();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.clone(), font, visuals.text_color());
+    let caret = ui.painter().layout_no_wrap(
+        icons::CARET_DOWN.to_owned(),
+        egui::FontId::proportional(18.0),
+        visuals.text_color(),
+    );
+    let gap = 6.0;
+    let width = 14.0 * 2.0 + caret.size().x + gap + text.size().x;
+    let rect = egui::Rect::from_center_size(strip.center(), vec2(width, JUMP_HEIGHT));
+    let response = ui
+        .interact(rect, jump_id(friend), egui::Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+    let fill = crate::app::mobile::kit::card_fill(&visuals);
+    let painter = ui.painter();
+    let radius = JUMP_HEIGHT / 2.0;
+    painter.add(
+        egui::epaint::Shadow {
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
+            color: visuals.window_shadow.color,
+        }
+        .as_shape(rect, radius),
+    );
+    painter.rect(
+        rect,
+        radius,
+        fill,
+        visuals.widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let left = rect.left() + 14.0;
+    painter.galley(
+        egui::pos2(left, rect.center().y - caret.size().y / 2.0),
+        caret.clone(),
+        visuals.text_color(),
+    );
+    painter.galley(
+        egui::pos2(
+            left + caret.size().x + gap,
+            rect.center().y - text.size().y / 2.0,
+        ),
+        text,
+        visuals.text_color(),
+    );
+    response
+}
+
+fn pages_to_show(len: usize, at: usize) -> usize {
+    (len - at).div_ceil(MESSAGES_PER_PAGE).saturating_sub(1)
+}
+
 fn date_row(ui: &mut Ui, clock: &Clock, day: Date) {
-    ui.add_space(6.0);
+    ui.add_space(12.0);
     ui.vertical_centered(|ui| {
         ui.label(faint(clock.day_label(day)));
     });
-    ui.add_space(2.0);
 }
 
 pub fn pick_friend(ctx: &egui::Context, online: &Online, id: &str) -> Option<Option<OnlineId>> {
@@ -917,6 +1363,208 @@ mod tests {
     }
 
     #[test]
+    fn escape_ends_the_picker_then_the_edit_then_the_reply_then_the_chat() {
+        let ana = OnlineId::new(7).unwrap();
+        let mut chat = ChatUi::default();
+        chat.open(ana);
+        chat.start_reply(ana, 1);
+        assert!(!chat.leaves_on_escape());
+        chat.start_edit(ana, 2, "typo");
+        assert_eq!(chat.replying.get(&ana).copied(), None);
+        chat.start_reply(ana, 1);
+        assert_eq!(chat.editing(ana), None);
+        chat.start_edit(ana, 2, "typo");
+        chat.replying.insert(ana, 1);
+        chat.picker = true;
+        assert!(chat.escape());
+        assert!(chat.editing(ana).is_some());
+        assert!(chat.escape());
+        assert_eq!(chat.editing(ana), None);
+        assert_eq!(chat.replying.get(&ana).copied(), Some(1));
+        assert!(chat.escape());
+        assert_eq!(chat.replying.get(&ana).copied(), None);
+        assert_eq!(chat.current(), Some(ana));
+        assert!(chat.leaves_on_escape());
+        assert!(chat.escape());
+        assert_eq!(chat.current(), None);
+    }
+
+    #[test]
+    fn showing_an_original_opens_enough_older_pages() {
+        let page = MESSAGES_PER_PAGE;
+        assert_eq!(pages_to_show(2000, 1999), 0);
+        assert_eq!(pages_to_show(2000, 2000 - page), 0);
+        assert_eq!(pages_to_show(2000, 2000 - page - 1), 1);
+        assert_eq!(pages_to_show(2000, 0), 9);
+        assert_eq!(pages_to_show(150, 0), 0);
+    }
+
+    fn text_entry(id: u64, mine: bool, text: &str) -> ChatEntry {
+        ChatEntry {
+            id,
+            mine,
+            at: 1_793_448_000 + id,
+            body: Body::Text(text.into()),
+            delivery: if mine {
+                Delivery::Sent
+            } else {
+                Delivery::Received
+            },
+            change: Change::Kept,
+            reply: None,
+        }
+    }
+
+    #[test]
+    fn a_quote_names_its_author_and_shows_the_original_as_it_is_now() {
+        use citrine_gb_net::Quote;
+        let online = Online::default();
+        let ana = OnlineId::new(7).unwrap();
+        let mut edited = text_entry(1, false, "see you at 4");
+        edited.change = Change::Edited { told: true };
+        let mut gone = text_entry(2, true, "");
+        gone.change = Change::Deleted { told: true };
+        let before = [edited, gone];
+        let quote = |id: u64, by_sender: bool, line: &str| Quote {
+            id,
+            by_sender,
+            line: line.into(),
+        };
+        let mut answer = text_entry(3, true, "ok");
+        answer.reply = Some(quote(1, false, "see you at 3"));
+        let view = reply::QuoteView::of(
+            &online,
+            ana,
+            &answer,
+            answer.reply.as_ref().unwrap(),
+            &before,
+        );
+        assert_eq!(view.author, "Friend");
+        assert_eq!(view.line, "see you at 4");
+        assert_eq!(view.target, Some(1));
+        answer.reply = Some(quote(2, true, "lost words"));
+        let view = reply::QuoteView::of(
+            &online,
+            ana,
+            &answer,
+            answer.reply.as_ref().unwrap(),
+            &before,
+        );
+        assert_eq!(view.author, "You");
+        assert_eq!(view.line, reply::DELETED);
+        assert!(view.gone);
+        assert_eq!(view.target, None);
+        answer.reply = Some(quote(99, true, "from long ago"));
+        let view = reply::QuoteView::of(
+            &online,
+            ana,
+            &answer,
+            answer.reply.as_ref().unwrap(),
+            &before,
+        );
+        assert_eq!(view.line, "from long ago");
+        assert_eq!(view.target, None);
+        let mut theirs = text_entry(4, false, "ok");
+        theirs.reply = Some(quote(1, false, "see you at 4"));
+        let view = reply::QuoteView::of(
+            &online,
+            ana,
+            &theirs,
+            theirs.reply.as_ref().unwrap(),
+            &before,
+        );
+        assert_eq!(view.author, "You");
+    }
+
+    #[test]
+    fn a_reply_bubble_shows_the_quote_above_its_text_and_fits_both() {
+        let ctx = egui::Context::default();
+        let entry = text_entry(3, true, "ok");
+        let view = reply::QuoteView {
+            author: "Mia".into(),
+            line: "did you beat the second castle yet?".into(),
+            gone: false,
+            target: Some(1),
+        };
+        let mut state = ChatUi::default();
+        let mut actions = Vec::new();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(412.0, 600.0))),
+            ..Default::default()
+        };
+        let mut output = None;
+        let mut bubble = Rect::NOTHING;
+        for _ in 0..2 {
+            output = Some(ctx.run(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    bubble = entry_ui(
+                        ui,
+                        &mut state,
+                        &Online::default(),
+                        OnlineId::new(7).unwrap(),
+                        &entry,
+                        Some(&view),
+                        &test_clock(),
+                        None,
+                        &crate::game_name::GameNames::default(),
+                        &PaletteLibrary::default(),
+                        &mut actions,
+                    );
+                });
+            }));
+        }
+        let shown = texts(&output.unwrap().shapes);
+        let find = |text: &str| {
+            shown
+                .iter()
+                .find(|(t, _)| t == text)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("{text} in {shown:?}"))
+        };
+        let author = find("Mia");
+        let line = find("did you beat the second castle yet?");
+        let body = find("ok");
+        assert!(author.bottom() <= line.top() + 1.0);
+        assert!(line.bottom() <= body.top());
+        assert!(bubble.contains_rect(line), "{bubble:?} {line:?}");
+        assert!(bubble.width() > line.width());
+    }
+
+    #[test]
+    fn the_reply_bar_shows_the_quote_as_the_bubble_does_with_a_touch_sized_cancel() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(412.0, 600.0))),
+            ..Default::default()
+        };
+        let mut cancel = Rect::NOTHING;
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                reply::reply_bar(ui, "Mia", "did you beat the second castle yet?", 44.0);
+                cancel = composer::cancel_button(ui, 44.0, "Cancel reply").rect;
+            });
+        });
+        let shown = texts(&output.shapes);
+        let find = |text: &str| {
+            shown
+                .iter()
+                .find(|(t, _)| t == text)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("{text} in {shown:?}"))
+        };
+        let author = find("Mia");
+        let line = find("did you beat the second castle yet?");
+        assert!(author.bottom() <= line.top() + 1.0, "{author:?} {line:?}");
+        assert!((author.left() - line.left()).abs() < 1.0);
+        assert!(
+            !shown
+                .iter()
+                .any(|(t, _)| t.contains(icons::ARROW_BEND_UP_LEFT))
+        );
+        assert_eq!(cancel.size(), vec2(44.0, 44.0));
+    }
+
+    #[test]
     fn escape_closes_the_picker_before_the_chat() {
         let mut chat = ChatUi::default();
         chat.open(OnlineId::new(7).unwrap());
@@ -975,6 +1623,7 @@ mod tests {
                         &online,
                         OnlineId::new(7).unwrap(),
                         entry,
+                        None,
                         &test_clock(),
                         None,
                         names,
@@ -1015,6 +1664,7 @@ mod tests {
             body: Body::Text("😋".into()),
             delivery: Delivery::Sent,
             change: Change::Kept,
+            reply: None,
         };
         let width = 400.0;
         let shapes = shapes_of(&entry, &GameNames::default(), width);
@@ -1050,6 +1700,7 @@ mod tests {
             body: Body::Text("Hii".into()),
             delivery: Delivery::Sent,
             change: Change::Kept,
+            reply: None,
         };
         let width = 400.0;
         let shapes = shapes_of(&entry, &GameNames::default(), width);
@@ -1086,6 +1737,7 @@ mod tests {
             ),
             delivery: Delivery::Sent,
             change: Change::Kept,
+            reply: None,
         };
         let ctx = egui::Context::default();
         ctx.style_mut(|style| style.spacing.interact_size.y = 44.0);
@@ -1123,6 +1775,7 @@ mod tests {
             body: Body::Text(text.into()),
             delivery: Delivery::Sent,
             change: Change::Kept,
+            reply: None,
         };
         for width in [412.0, 640.0] {
             let ctx = egui::Context::default();
@@ -1167,6 +1820,7 @@ mod tests {
             ),
             delivery: if mine { Delivery::Sent } else { Delivery::Received },
             change: Change::Kept,
+            reply: None,
         };
             for width in (200..=520).step_by(4) {
                 let width = width as f32;
@@ -1223,6 +1877,7 @@ mod tests {
             body,
             delivery,
             change: Change::Kept,
+            reply: None,
         };
         let text = |t: &str| Body::Text(t.into());
         let mut received = share(ShareKind::Screenshot, 2_048, None);
@@ -1339,6 +1994,7 @@ mod tests {
             body: Body::Text("Hii".into()),
             delivery: Delivery::Read(1_793_448_060),
             change: Change::Kept,
+            reply: None,
         };
         let frame = |time: f64, events: Vec<egui::Event>, state: &mut ChatUi| {
             let input = egui::RawInput {
@@ -1357,6 +2013,7 @@ mod tests {
                             &online,
                             OnlineId::new(7).unwrap(),
                             &entry,
+                            None,
                             &test_clock(),
                             None,
                             &GameNames::default(),
@@ -1407,6 +2064,7 @@ mod tests {
             body: Body::Share(screenshot),
             delivery: Delivery::Received,
             change: Change::Kept,
+            reply: None,
         };
         let shown: Vec<String> = texts(&shapes_of(&entry, &names, 400.0))
             .into_iter()
@@ -1430,9 +2088,9 @@ mod tests {
             tip("Tab or Esc to go back to the game")
         );
         assert_eq!(slot(None, true, Field::Editing, key), None);
-        assert_eq!(slot(Some("Mia"), true, Field::Away, key), typing);
-        assert_eq!(slot(Some("Mia"), true, Field::Focused, key), typing);
-        assert_eq!(slot(Some("Mia"), false, Field::Away, key), typing);
+        assert_eq!(slot(Some(("Mia", None)), true, Field::Away, key), typing);
+        assert_eq!(slot(Some(("Mia", None)), true, Field::Focused, key), typing);
+        assert_eq!(slot(Some(("Mia", None)), false, Field::Away, key), typing);
         assert_eq!(slot(None, false, Field::Away, key), None);
         assert_eq!(slot(None, false, Field::Focused, key), None);
         assert_eq!(slot(None, true, Field::Away, None), None);

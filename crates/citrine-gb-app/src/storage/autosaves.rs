@@ -1,6 +1,7 @@
 use super::{
     SaveStore, SnapshotInfo, autosave_blob, autosave_cloud, autosave_meta, autosave_thumb,
-    compress, decode_meta, downscale, encode_meta, now_unix,
+    compress, decode_meta, downscale, encode_meta, now_unix, snapshot_blob, snapshot_meta,
+    snapshot_thumb,
 };
 use citrine_gb::console::ConsoleKind;
 
@@ -99,18 +100,17 @@ impl SaveStore {
         Ok(())
     }
 
+    pub fn autosave_saved_at(&self, rom_key: &str, id: usize) -> Option<u64> {
+        self.backend
+            .read(rom_key, &autosave_meta(id))
+            .and_then(|meta| decode_meta(&meta).0)
+    }
+
     pub fn autosave_ids(&self, rom_key: &str) -> Vec<usize> {
         let mut ids: Vec<(u64, usize)> = self
             .numbered(rom_key, "auto")
             .into_iter()
-            .map(|id| {
-                let saved_at = self
-                    .backend
-                    .read(rom_key, &autosave_meta(id))
-                    .and_then(|meta| decode_meta(&meta).0)
-                    .unwrap_or(0);
-                (saved_at, id)
-            })
+            .map(|id| (self.autosave_saved_at(rom_key, id).unwrap_or(0), id))
             .collect();
         ids.sort_unstable();
         ids.into_iter().map(|(_, id)| id).collect()
@@ -145,6 +145,57 @@ impl SaveStore {
 
     pub fn load_autosave(&self, rom_key: &str, id: usize) -> Option<Vec<u8>> {
         self.backend.read(rom_key, &autosave_blob(id))
+    }
+
+    #[cfg(test)]
+    pub fn move_autosave(&self, from: &str, id: usize, to: &str) -> std::io::Result<usize> {
+        let moved = self.next_autosave_id(to);
+        self.copy_files(
+            from,
+            to,
+            &[
+                (autosave_blob(id), autosave_blob(moved)),
+                (autosave_meta(id), autosave_meta(moved)),
+                (autosave_thumb(id), autosave_thumb(moved)),
+            ],
+        )?;
+        self.delete_autosave(from, id)?;
+        Ok(moved)
+    }
+
+    pub fn autosave_to_snapshot(&self, from: &str, id: usize, to: &str) -> std::io::Result<usize> {
+        let slot = self.next_free_slot(to);
+        self.copy_files(
+            from,
+            to,
+            &[
+                (autosave_blob(id), snapshot_blob(slot)),
+                (autosave_meta(id), snapshot_meta(slot)),
+                (autosave_thumb(id), snapshot_thumb(slot)),
+            ],
+        )?;
+        self.delete_autosave(from, id)?;
+        Ok(slot)
+    }
+
+    pub fn snapshot_to_autosave(
+        &self,
+        from: &str,
+        slot: usize,
+        to: &str,
+    ) -> std::io::Result<usize> {
+        let id = self.next_autosave_id(to);
+        self.copy_files(
+            from,
+            to,
+            &[
+                (snapshot_blob(slot), autosave_blob(id)),
+                (snapshot_meta(slot), autosave_meta(id)),
+                (snapshot_thumb(slot), autosave_thumb(id)),
+            ],
+        )?;
+        self.delete_snapshot(from, slot)?;
+        Ok(id)
     }
 
     pub fn delete_autosave(&self, rom_key: &str, id: usize) -> std::io::Result<()> {

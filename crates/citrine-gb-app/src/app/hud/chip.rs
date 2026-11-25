@@ -19,6 +19,24 @@ pub fn label() -> String {
     format!("{}  HUD  {}", icons::GAUGE, icons::CARET_DOWN)
 }
 
+pub fn compact_label() -> String {
+    format!("{}  {}", icons::GAUGE, icons::CARET_DOWN)
+}
+
+pub fn width(ui: &Ui, label: &str) -> f32 {
+    WidgetText::from(label)
+        .into_galley(ui, None, f32::INFINITY, egui::TextStyle::Button)
+        .size()
+        .x
+        + TAB_PADDING
+}
+
+pub fn label_for(ui: &Ui, room: f32) -> Option<String> {
+    [label(), compact_label()]
+        .into_iter()
+        .find(|label| width(ui, label) <= room)
+}
+
 pub fn button<R>(
     ui: &Ui,
     id: Id,
@@ -30,6 +48,25 @@ pub fn button<R>(
 ) -> (Option<R>, Rect) {
     let menu = id.with("menu");
     let open = egui::Popup::is_id_open(ui.ctx(), menu);
+    tab_button(ui, id, after, label, hover, open, |response| {
+        egui::Popup::menu(response)
+            .id(menu)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(width)
+            .show(list)
+            .and_then(|shown| shown.inner)
+    })
+}
+
+pub fn tab_button<R>(
+    ui: &Ui,
+    id: Id,
+    after: Rect,
+    label: impl Into<WidgetText>,
+    hover: &str,
+    open: bool,
+    popup: impl FnOnce(&egui::Response) -> Option<R>,
+) -> (Option<R>, Rect) {
     let galley = label
         .into()
         .into_galley(ui, None, f32::INFINITY, egui::TextStyle::Button);
@@ -52,13 +89,7 @@ pub fn button<R>(
             let text = rect.center() - galley.size() / 2.0;
             painter.galley(text, galley, widgets.inactive.text_color());
             let response = response.on_hover_text(hover);
-            let picked = egui::Popup::menu(&response)
-                .id(menu)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .width(width)
-                .show(list)
-                .and_then(|shown| shown.inner);
-            (picked, rect)
+            (popup(&response), rect)
         });
     shown.inner
 }

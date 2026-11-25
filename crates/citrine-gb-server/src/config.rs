@@ -41,10 +41,13 @@ pub struct Config {
     pub invites: bool,
     pub bind: IpAddr,
     pub port: u16,
+    pub stun_port: u16,
     pub public_url: Option<String>,
     pub limits: Limits,
     pub trusted_proxy_hops: usize,
     pub fcm_key_file: Option<PathBuf>,
+    pub archive_key_file: Option<PathBuf>,
+    pub archive_covers: bool,
     pub fcm_url: String,
     pub ds_net_public_ip: Option<std::net::Ipv4Addr>,
     pub ds_net_private: bool,
@@ -75,10 +78,13 @@ impl std::fmt::Debug for Config {
             .field("invites", &self.invites)
             .field("bind", &self.bind)
             .field("port", &self.port)
+            .field("stun_port", &self.stun_port)
             .field("public_url", &self.public_url)
             .field("limits", &self.limits)
             .field("trusted_proxy_hops", &self.trusted_proxy_hops)
             .field("fcm_key_file", &self.fcm_key_file)
+            .field("archive_key_file", &self.archive_key_file)
+            .field("archive_covers", &self.archive_covers)
             .field("fcm_url", &self.fcm_url)
             .field("ds_net_public_ip", &self.ds_net_public_ip)
             .field("ds_net_private", &self.ds_net_private)
@@ -103,6 +109,7 @@ const VARS: &[&str] = &[
     "CITRINE_INVITES",
     "CITRINE_BIND",
     "CITRINE_PORT",
+    "CITRINE_STUN_PORT",
     "CITRINE_PUBLIC_URL",
     "CITRINE_TRUSTED_PROXY_HOPS",
     "CITRINE_DS_NET_PUBLIC_IP",
@@ -110,6 +117,8 @@ const VARS: &[&str] = &[
     "CITRINE_DS_NET_STUN",
     "CITRINE_FCM_KEY_FILE",
     "CITRINE_FCM_URL",
+    "CITRINE_ARCHIVE_KEY_FILE",
+    "CITRINE_ARCHIVE_COVERS",
 ];
 
 fn switch(var: &'static str, value: Option<String>, default: bool) -> Result<bool, ConfigError> {
@@ -184,6 +193,11 @@ impl Config {
             invites: switch("CITRINE_INVITES", var("CITRINE_INVITES"), false)?,
             bind,
             port: number("CITRINE_PORT", var("CITRINE_PORT"), 13707)?,
+            stun_port: number(
+                "CITRINE_STUN_PORT",
+                var("CITRINE_STUN_PORT"),
+                citrine_gb_net::STUN_PORT,
+            )?,
             public_url: var("CITRINE_PUBLIC_URL")
                 .map(|u| u.trim().trim_end_matches('/').to_string()),
             limits: Limits::from_vars(var)?,
@@ -193,6 +207,12 @@ impl Config {
                 0,
             )?,
             fcm_key_file: var("CITRINE_FCM_KEY_FILE").map(PathBuf::from),
+            archive_key_file: var("CITRINE_ARCHIVE_KEY_FILE").map(PathBuf::from),
+            archive_covers: switch(
+                "CITRINE_ARCHIVE_COVERS",
+                var("CITRINE_ARCHIVE_COVERS"),
+                true,
+            )?,
             fcm_url: var("CITRINE_FCM_URL").unwrap_or_else(|| crate::push::DEFAULT_ENDPOINT.into()),
             ds_net_public_ip: var("CITRINE_DS_NET_PUBLIC_IP")
                 .map(|text| text.trim().parse().map_err(|_| ConfigError::DsNetIp(text)))
@@ -247,6 +267,7 @@ mod tests {
         assert!(!c.game_sharing);
         assert!(!c.invites);
         assert_eq!(c.port, 13707);
+        assert_eq!(c.stun_port, 3478);
         assert_eq!(c.bind, IpAddr::from([0, 0, 0, 0]));
         assert_eq!(c.public_url, None);
         assert_eq!(c.trusted_proxy_hops, 0);
@@ -268,6 +289,7 @@ mod tests {
             ("CITRINE_GAME_SHARING", "true"),
             ("CITRINE_INVITES", "true"),
             ("CITRINE_PORT", "8080"),
+            ("CITRINE_STUN_PORT", "0"),
             ("CITRINE_BIND", "127.0.0.1"),
             ("CITRINE_PUBLIC_URL", "https://gb.example.com/"),
             ("CITRINE_TRUSTED_PROXY_HOPS", "1"),
@@ -286,6 +308,7 @@ mod tests {
         assert!(c.game_sharing);
         assert!(c.invites);
         assert_eq!(c.port, 8080);
+        assert_eq!(c.stun_port, 0);
         assert_eq!(c.bind, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(c.public_url.as_deref(), Some("https://gb.example.com"));
         assert_eq!(c.trusted_proxy_hops, 1);

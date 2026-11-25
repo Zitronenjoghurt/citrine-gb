@@ -1,9 +1,9 @@
-use super::device::device_name;
 use super::work::Scanned;
 use super::{
     Action, CloudState, Conflict, ConflictSide, Entry, Mark, Remote, Step, SyncState, UNKNOWN,
     copy_name, decide, default_name, name_of, slot_order,
 };
+use crate::storage::SaveStore;
 use crate::storage::cloud::{LocalSave, thumb_of};
 use crate::storage::cloud::{SlotKind, battery_slot, slot_kind};
 use citrine_gb_net::{GameKey, SavePayload};
@@ -194,7 +194,7 @@ impl CloudState {
                             save: item.map(|i| i.save.clone()),
                             name,
                             here: item.map(|i| ConflictSide {
-                                device: device_name(),
+                                device: self.device_name(),
                                 saved_at: i.saved_at,
                                 thumb: thumb_of(&i.payload),
                             }),
@@ -237,43 +237,25 @@ impl CloudState {
         action
     }
 
-    pub(super) fn write_fetched(
+    pub(super) fn fetched_store(&self, rom: &str, payload: &SavePayload) -> Option<SaveStore> {
+        let store = self.store.clone()?;
+        if !store.takes(rom, payload) {
+            log::warn!("a cloud save of {rom} is for another console");
+            return None;
+        }
+        Some(store)
+    }
+
+    pub(super) fn kept_fetched(
         &mut self,
         rom: &str,
         slot: &str,
-        payload: &SavePayload,
-        hash: [u8; 32],
         version: u64,
-    ) -> bool {
-        let Some(store) = self.store.clone() else {
-            return false;
-        };
-        if !store.takes(rom, payload) {
-            log::warn!("a cloud save of {rom} is for another console");
-            return false;
-        }
-        let written = match self.local_save(rom, slot) {
-            Some(save) => store.write_payload(rom, &save, payload).map(|()| save),
-            None if slot_kind(slot) == Some(SlotKind::Autosave) => store
-                .add_autosave(rom, slot, payload)
-                .map(LocalSave::Autosave),
-            None => return false,
-        };
-        let save = match written {
-            Ok(save) => save,
-            Err(err) => {
-                log::warn!("could not keep a save from the cloud: {err}");
-                return false;
-            }
-        };
+        (save, hash): (LocalSave, [u8; 32]),
+    ) {
         if save == LocalSave::Battery && self.open.as_ref().is_some_and(|(r, _)| r == rom) {
             self.reload = true;
         }
-        let hash = match store.read_payload(rom, &save) {
-            Some(kept) if kept == *payload => hash,
-            Some(kept) => kept.hash(),
-            None => UNKNOWN,
-        };
         self.set_entry(
             rom,
             slot,
@@ -283,7 +265,6 @@ impl CloudState {
                 mark: Mark::Synced,
             }),
         );
-        true
     }
 
     pub(super) fn keep_both(
@@ -308,5 +289,50 @@ impl CloudState {
             }
             Some(SlotKind::Autosave) | None => Ok(()),
         }
+    }
+}
+
+pub(super) fn keep_fetched(
+    store: &SaveStore,
+    rom: &str,
+    slot: &str,
+    payload: &SavePayload,
+    hash: [u8; 32],
+) -> Option<(LocalSave, [u8; 32])> {
+    let written = match local_save(store, rom, slot) {
+        Some(save) => store.write_payload(rom, &save, payload).map(|()| save),
+        None if slot_kind(slot) == Some(SlotKind::Autosave) => store
+            .add_autosave(rom, slot, payload)
+            .map(LocalSave::Autosave),
+        None => return None,
+    };
+    let save = match written {
+        Ok(save) => save,
+        Err(err) => {
+            log::warn!("could not keep a save from the cloud: {err}");
+            return None;
+        }
+    };
+    let hash = match store.read_payload(rom, &save) {
+        Some(kept) if kept == *payload => hash,
+        Some(kept) => kept.hash(),
+        None => UNKNOWN,
+    };
+    Some((save, hash))
+}
+
+fn local_save(store: &SaveStore, rom: &str, slot: &str) -> Option<LocalSave> {
+    match slot_kind(slot)? {
+        SlotKind::Battery => Some(LocalSave::Battery),
+        SlotKind::OtherBattery => slot
+            .strip_prefix(&battery_slot(Some("")))
+            .filter(|token| !token.is_empty() && !token.contains('.'))
+            .map(|token| LocalSave::OtherBattery(token.to_string())),
+        SlotKind::Snapshot(n) => Some(LocalSave::Snapshot(n)),
+        SlotKind::Autosave => store
+            .autosave_ids(rom)
+            .into_iter()
+            .find(|id| store.autosave_slot(rom, *id).as_deref() == Some(slot))
+            .map(LocalSave::Autosave),
     }
 }

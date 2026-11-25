@@ -79,6 +79,10 @@ struct Hidden {
 }
 
 impl Hidden {
+    fn clamp_loaded(&mut self) {
+        self.len = self.len.min(QUEUE as u8);
+    }
+
     fn hide(&mut self, irq: Irq, wait: u32) {
         let len = usize::from(self.len);
         if len == QUEUE {
@@ -125,6 +129,10 @@ struct Delayed {
 }
 
 impl Delayed {
+    fn clamp_loaded(&mut self) {
+        self.len = self.len.min(QUEUE as u8);
+    }
+
     fn set(&mut self, value: bool, wait: u32) {
         if value == self.target {
             return;
@@ -210,6 +218,12 @@ pub struct Interrupts {
 }
 
 impl Interrupts {
+    pub(crate) fn clamp_loaded(&mut self) {
+        self.line.clamp_loaded();
+        self.wake.clamp_loaded();
+        self.hidden.clamp_loaded();
+    }
+
     pub fn request(&mut self, irq: Irq) {
         self.raise(irq, 0);
     }
@@ -339,6 +353,35 @@ impl Interrupts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loaded_queue_longer_than_its_slots_is_cut_to_fit() {
+        let mut interrupts = Interrupts::default();
+        interrupts.line.len = u8::MAX;
+        interrupts.wake.len = u8::MAX;
+        interrupts.hidden.len = u8::MAX;
+        interrupts.clamp_loaded();
+        interrupts.write_ie(0xFFFF, 0xFFFF, 0);
+        interrupts.write_ime(1, 1, 0);
+        interrupts.raise(Irq::VBLANK, 2);
+        let _ = interrupts.if_at(1);
+        interrupts.elapse(8);
+        let _ = interrupts.until_line();
+        assert!(usize::from(interrupts.line.len) <= QUEUE);
+    }
+
+    #[test]
+    fn a_real_queue_is_unchanged_by_the_load_clamp() {
+        let mut interrupts = Interrupts::default();
+        interrupts.write_ie(0xFFFF, 0xFFFF, 0);
+        interrupts.write_ime(1, 1, 0);
+        for at in 0..6u32 {
+            interrupts.raise(Irq::timer(at as usize % 4), at);
+        }
+        let before = interrupts;
+        interrupts.clamp_loaded();
+        assert_eq!(interrupts, before);
+    }
 
     #[test]
     fn timer_and_dma_sources_follow_their_index() {

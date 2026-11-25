@@ -1,12 +1,21 @@
+use super::super::super::QuickFetch;
 use super::super::super::fast::{
     CODE_CYCLES, Fast, HALF_CYCLES, HALF_SEQUENTIAL, LONG_AFTER, LONG_HALF, LONG_WORD, MAIN,
     PAGE_SHIFT, PAGE_SIZE, Page, SEQUENTIAL_CYCLES, Spec, WORD_CYCLES, Window,
 };
-use super::super::super::helpers::{EXIT, LAST, THUMB};
-use super::super::super::lookup::{Link, SLOT_GENERATION, SLOT_LINKS, SLOT_PIPELINE};
+use super::super::super::helpers::{
+    EXIT, IDLES_SHIFT, LAST, RUN_COUNT_MASK, RUN_CYCLES_SHIFT, THUMB,
+};
+use super::super::super::lookup::{
+    CELL_BASE, HASH, HASH_SHIFT, LINK_SHIFT, Link, NO_KEY, SLOT_CODE, SLOT_GENERATION,
+    SLOT_PIPELINE, SLOT_SIZE, SLOT_START, SLOT_TAG, SLOT_WORDS,
+};
 use super::super::super::marks::PAGE_BITS;
 use super::super::super::scan::Width;
-use super::super::{CODE_CLASS, Offsets, PSR_RESTORE, RESTORE_FIELDS, Runtime, STUBS, Setup, Stub};
+use super::super::{
+    BIOS_FETCH, CODE_CLASS, IWRAM_FETCH, IWRAM_IDLES, IWRAM_RUN, Offsets, PSR_RESTORE,
+    RESTORE_FIELDS, ROM_LITERAL, Runtime, STUBS, Setup, Stub,
+};
 use super::asm::{Asm, Indexed, LR, Label, Logic, R, SP, Shift, ZR, logical_immediate};
 use super::{
     CTX, DEBT, GUEST, KEEP, LEAVE_PENDING, LEAVE_RD, OLD, PSR_RESULT, S, SEQUENTIAL, at_shift,
@@ -15,14 +24,23 @@ use super::{
 use crate::gba::cpu::psr::{FLAG_I, FLAG_T};
 use std::mem::{offset_of, size_of};
 
-const FRAME: i32 = 96;
+#[derive(Clone, Copy)]
+enum Field {
+    Byte,
+    Word,
+    Wide,
+}
+
+const FRAME: i32 = 112;
+const FLAGS: u32 = 96;
 const SAVED: i32 = 96;
 const NZCV_MASK: u32 = 0xF000_0000;
 const CYCLES_MASK: u32 = EXIT as u32 - 1;
-const DATA_OVERLAP: u32 = 6;
+pub(super) const DATA_OVERLAP: u32 = 6;
 const CODE_OVERLAP: u32 = 3;
 const RETURN_INFO: u32 = 0x1A00;
 const STEPPED_INFO: u32 = 0x1E00;
+const RESTARTED: u32 = 0x0101;
 const _: () = assert!(DATA_OVERLAP == LONG_AFTER);
 const _: () = assert!(size_of::<Page>() == 32);
 const _: () = assert!(offset_of!(Page, meta) == 8 && offset_of!(Page, code) == 24);
@@ -55,6 +73,33 @@ const LIVE: Scratch = Scratch {
     cycles: [2, LR],
     cache: 5,
     line: 7,
+};
+
+struct Lookup {
+    pc: R,
+    tmp: R,
+    key: R,
+    entry: R,
+    start: R,
+    pipe: [R; 2],
+}
+
+const FIND_STORED: Lookup = Lookup {
+    pc: 9,
+    tmp: 10,
+    key: 11,
+    entry: 12,
+    start: 13,
+    pipe: [13, 14],
+};
+
+const FIND_LIVE: Lookup = Lookup {
+    pc: 0,
+    tmp: 5,
+    key: 17,
+    entry: LR,
+    start: 4,
+    pipe: [17, 5],
 };
 
 struct Build<'a> {
@@ -107,19 +152,19 @@ pub fn runtime(setup: &Setup) -> Option<Runtime> {
     build.leave(helpers.branch, Leave::Restore, setup.specs, next, live)?;
     let load = build.here();
     let windows = if setup.pages { &[][..] } else { setup.specs };
-    let tail = build.memory(helpers.load, false, setup.pages, windows, false)?;
+    let tail = build.memory(helpers.load, false, setup.pages, windows, false, true)?;
     let swap = build.a.label();
     build.a.b(swap);
     let store = build.here();
-    build.memory(helpers.store, true, setup.pages, windows, false)?;
+    build.memory(helpers.store, true, setup.pages, windows, false, true)?;
     let load_leave = build.here();
-    build.memory(helpers.load, false, setup.pages, windows, true)?;
+    build.memory(helpers.load, false, setup.pages, windows, true, true)?;
     let store_leave = build.here();
-    build.memory(helpers.store, true, setup.pages, windows, true)?;
+    build.memory(helpers.store, true, setup.pages, windows, true, true)?;
     let gather = build.here();
-    build.block(helpers.load_word, false, setup.pages, windows, tail)?;
+    build.block(helpers.load_word, false, setup.pages, windows, tail, true)?;
     let scatter = build.here();
-    build.block(helpers.store_word, true, setup.pages, windows, tail)?;
+    build.block(helpers.store_word, true, setup.pages, windows, tail, true)?;
     let collect = build.here();
     let collected = build.a.label();
     build.block(
@@ -128,6 +173,7 @@ pub fn runtime(setup: &Setup) -> Option<Runtime> {
         setup.pages && setup.v5,
         windows,
         collected,
+        false,
     )?;
     build.a.bind(collected);
     build.a.msr_nzcv(3);
@@ -141,7 +187,7 @@ pub fn runtime(setup: &Setup) -> Option<Runtime> {
     let load_pc = build.here();
     build.load_pc(helpers.load, setup.pages && setup.v5, windows, returned)?;
     build.a.bind(swap);
-    build.memory(helpers.swap, true, false, &[], false)?;
+    build.memory(helpers.swap, true, false, &[], false, false)?;
     let fetch = build.here();
     if setup.timed {
         build.fetch(helpers.fetch, None);
@@ -238,6 +284,20 @@ impl Build<'_> {
         self.a.str(false, cpsr, core, self.o.cpsr);
     }
 
+    fn keep_flags(&mut self, core: R, cpsr: R, scratch: R) {
+        self.a.ldr(false, cpsr, core, self.o.cpsr);
+        self.a.mrs_nzcv(scratch);
+        self.a.str(false, scratch, SP, FLAGS);
+    }
+
+    fn merge_flags(&mut self, core: R, cpsr: R, scratch: R) {
+        self.a.ldr(false, cpsr, core, self.o.cpsr);
+        self.a.ldr(false, scratch, SP, FLAGS);
+        self.a.lsr(scratch, scratch, 28);
+        self.a.bfi(cpsr, scratch, 28, 4);
+        self.a.str(false, cpsr, core, self.o.cpsr);
+    }
+
     fn call(&mut self, helper: usize) {
         self.a.mov_imm64(17, helper as u64);
         self.a.blr(17);
@@ -325,8 +385,12 @@ impl Build<'_> {
         if live.is_none() {
             self.guest_regs(false, 1);
         }
+        if live.is_some() {
+            self.keep_flags(0, 2, 3);
+        } else {
+            self.store_cpsr(0, 2, 3);
+        }
         let finish = live.unwrap_or(finish);
-        self.store_cpsr(0, 2, 3);
         self.a.ubfx(3, info, 22, 10);
         self.a.arith(false, true, false, S, S, 3, Shift::Lsl, 0);
         let (counted, old, done) = (self.a.label(), self.a.label(), self.a.label());
@@ -398,14 +462,24 @@ impl Build<'_> {
     ) -> Option<()> {
         let o = self.o;
         self.a.ldr(true, 1, CTX, o.core);
-        self.store_cpsr(1, 3, 4);
+        self.keep_flags(1, 3, 4);
         self.a.ubfx(4, 16, 22, 10);
         self.a.arith(false, true, false, S, S, 4, Shift::Lsl, 0);
         let (slow, called) = (self.a.label(), self.a.label());
-        if self.refills(leave, specs) {
+        let refills = self.refills(leave, specs);
+        let linked = refills && self.linked(leave);
+        if linked {
+            let normal = self.a.label();
+            self.hop_linked(leave == Leave::Exchange, normal);
+            self.a.bind(normal);
+        }
+        if refills {
             self.refetch(leave, specs, slow, called, LIVE)?;
+        } else if let Some(q) = self.quick_leave(leave) {
+            self.quick_branch(&q, leave, slow, called)?;
         }
         self.a.bind(slow);
+        self.merge_flags(1, 3, 4);
         self.a.add_imm(true, false, 2, 1, o.regs);
         self.guest_regs(false, 2);
         self.a.mov64(19, 16);
@@ -435,6 +509,12 @@ impl Build<'_> {
         self.a.mov_imm(5, 0);
         self.a.b(finish);
         self.a.bind(called);
+        if linked {
+            self.a.str(false, 0, CTX, o.hop + 4);
+            self.a.ubfx(2, 3, FLAG_T.trailing_zeros(), 1);
+            self.a.logical(Logic::Orr, false, 2, 2, 6, Shift::Lsl, 0);
+            self.a.str(false, 2, CTX, o.hop);
+        }
         self.own_cost(leave, 16);
         self.a.arith(false, true, false, S, S, 0, Shift::Lsl, 0);
         if self.timed {
@@ -480,6 +560,8 @@ impl Build<'_> {
         let (slow, called) = (self.a.label(), self.a.label());
         if self.refills(leave, specs) {
             self.refetch(leave, specs, slow, called, STORED)?;
+        } else if let Some(q) = self.quick_leave(leave) {
+            self.quick_branch(&q, leave, slow, called)?;
         }
         self.a.bind(slow);
         self.a.mov(2, 0);
@@ -531,12 +613,354 @@ impl Build<'_> {
         }
     }
 
+    fn quick_leave(&self, leave: Leave) -> Option<QuickFetch> {
+        let branches = matches!(leave, Leave::Branch | Leave::Exchange);
+        self.o
+            .quick
+            .filter(|_| branches && self.timed && !self.v5 && !self.pages)
+    }
+
+    fn quick_branch(
+        &mut self,
+        q: &QuickFetch,
+        leave: Leave,
+        slow: Label,
+        called: Label,
+    ) -> Option<()> {
+        let thumb = self.a.label();
+        if leave == Leave::Exchange {
+            self.a.tbz(true, 0, 0, thumb);
+        } else {
+            self.a.tbz(true, 3, FLAG_T.trailing_zeros(), thumb);
+        }
+        self.mask(6, 0, 3);
+        self.a.cbz(true, 6, slow);
+        self.a.mov(6, 0);
+        let (bios, landed) = (self.a.label(), self.a.label());
+        self.quick_iwram_arm(q, bios, slow);
+        self.a.bind(landed);
+        self.quick_landed(leave, 4, called);
+        self.a.bind(bios);
+        self.quick_bios_arm(q, slow);
+        self.a.b(landed);
+        self.a.bind(thumb);
+        self.mask(6, 0, !1);
+        self.quick_rom_thumb(q, slow)?;
+        self.quick_landed(leave, 2, called);
+        Some(())
+    }
+
+    fn quick_iwram_arm(&mut self, q: &QuickFetch, other: Label, slow: Label) {
+        let o = self.o;
+        self.a.lsr(5, 6, 24);
+        self.a.cmp_imm(5, q.iwram_page);
+        self.a.b_cond(0x1, other);
+        self.a.add_imm(false, false, 5, 6, 4);
+        self.a.ubfx(5, 5, 0, PAGE_SHIFT);
+        self.a.cbz(false, 5, slow);
+        self.a.ldr(true, 5, CTX, o.fast);
+        self.a.ldr(true, 5, 5, offset_of!(Fast, pages) as u32);
+        self.a.cbz_wide(false, 5, slow);
+        self.a.lsr(7, 6, PAGE_SHIFT);
+        self.a.arith(true, false, false, 5, 5, 7, Shift::Lsl, 5);
+        self.a.pair(true, true, 7, 2, 5, 0);
+        self.a.cbz(false, 2, slow);
+        self.quick_arm_words(q, q.open_iwram, slow);
+    }
+
+    fn quick_bios_arm(&mut self, q: &QuickFetch, slow: Label) {
+        let o = self.o;
+        self.a.mov_imm(5, q.bios_end - 8);
+        self.a.cmp(6, 5);
+        self.a.b_cond(0x8, slow);
+        self.a.ldr(true, 7, CTX, o.fast);
+        self.a.ldr(true, 7, 7, offset_of!(Fast, bios) as u32);
+        self.a.cbz_wide(false, 7, slow);
+        self.quick_arm_words(q, q.open_bios, slow);
+    }
+
+    fn quick_arm_words(&mut self, q: &QuickFetch, latch: i32, slow: Label) {
+        let o = self.o;
+        let bit = q.prefetch_bit.trailing_zeros();
+        self.a.indexed(Indexed::LoadWord, 2, 7, 6);
+        self.a.add_imm(false, false, 5, 6, 4);
+        self.a.indexed(Indexed::LoadWord, LR, 7, 5);
+        self.a.ldr(true, 4, CTX, o.bus);
+        self.bus_field(Field::Word, false, 5, q.now);
+        self.bus_field(Field::Word, false, 7, q.dma_check);
+        self.a.arith(true, true, false, 7, 7, 5, Shift::Lsl, 0);
+        self.a.sub_imm(true, false, 7, 7, 2);
+        self.a.tbz(true, 7, 63, slow);
+        self.bus_field(Field::Byte, false, 7, q.wait_bits + (bit / 8) as i32);
+        self.a.tbz(false, 7, bit % 8, slow);
+        self.a.add_imm(false, false, 5, 5, 2);
+        self.bus_field(Field::Word, true, 5, q.now);
+        self.bus_field(Field::Word, true, 5, q.sample);
+        self.bus_field(Field::Wide, false, 7, q.clock);
+        self.a.add_imm(true, false, 7, 7, 2);
+        self.bus_field(Field::Wide, true, 7, q.clock);
+        self.bus_field(Field::Byte, true, ZR, q.branched);
+        self.a.add_imm(false, false, 5, 6, 4);
+        self.bus_field(Field::Word, true, 5, q.open_addr);
+        self.bus_field(Field::Word, true, LR, latch);
+        self.bus_field(Field::Word, true, LR, q.open_last);
+        self.a.str(false, 2, 1, o.pipeline);
+        self.a.str(false, LR, 1, o.pipeline + 4);
+        self.a.mov_imm(2, 2);
+    }
+
+    fn quick_rom_thumb(&mut self, q: &QuickFetch, slow: Label) -> Option<()> {
+        let o = self.o;
+        let bit = q.prefetch_bit.trailing_zeros();
+        let page = q.rom_page - 1;
+        let (end_r, end_s) = logical_immediate(page & !3)?;
+        let (mirror_r, mirror_s) = logical_immediate(q.rom_mirror)?;
+        let (page_r, page_s) = logical_immediate(page)?;
+        let (top, done, none, glitched) = (
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+        );
+        self.a.mov_imm(5, q.rom_start);
+        self.a.arith(false, true, false, 5, 6, 5, Shift::Lsl, 0);
+        self.a.mov_imm(7, q.rom_span);
+        self.a.cmp(5, 7);
+        self.a.b_cond(0x2, slow);
+        self.a.add_imm(false, false, 5, 6, 4);
+        self.a.logical_imm(Logic::And, 5, 5, end_r, end_s);
+        self.a.cbz(false, 5, slow);
+        self.a.logical_imm(Logic::And, 5, 6, mirror_r, mirror_s);
+        self.a.sub_imm(false, false, 7, 5, q.rom_skip);
+        self.a.add_imm(true, false, 7, 7, 2);
+        self.a.ldr(true, 4, CTX, o.bus);
+        self.bus_field(Field::Wide, false, 2, q.plain_rom_end);
+        self.a.arith(true, true, false, 7, 7, 2, Shift::Lsl, 0);
+        self.a.tbz(false, 7, 63, slow);
+        self.bus_field(Field::Byte, false, 7, q.wait_bits + (bit / 8) as i32);
+        self.a.tbz(false, 7, bit % 8, slow);
+        self.bus_field(Field::Word, false, 7, q.head);
+        self.a.cmp(7, 6);
+        self.a.b_cond(0x0, slow);
+        self.bus_field(Field::Byte, false, 7, q.stuck);
+        self.a.cbz(true, 7, slow);
+        self.bus_field(Field::Byte, false, 7, q.flowing);
+        self.a.cbz(false, 7, none);
+        self.bus_field(Field::Wide, false, 5, q.clock);
+        self.bus_field(Field::Word, false, 7, q.cost);
+        self.bus_field(Field::Word, false, 3, q.progress);
+        self.a.arith(false, true, false, 7, 7, 3, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, false, LR, q.since);
+        self.a.arith(true, false, false, 7, LR, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Word, false, 3, q.count);
+        self.bus_field(Field::Word, false, LR, q.head);
+        self.a.bind(top);
+        self.a.arith(true, true, true, ZR, 5, 7, Shift::Lsl, 0);
+        self.a.b_cond(0x3, done);
+        self.a.add_imm(false, false, 3, 3, 1);
+        self.a.cmp_imm(3, q.capacity);
+        self.a.b_cond(0x0, none);
+        self.a.b_cond(0x8, slow);
+        self.a.arith(false, false, false, 2, LR, 3, Shift::Lsl, 1);
+        self.a.logical_imm(Logic::And, 2, 2, page_r, page_s);
+        self.a.cbz(false, 2, slow);
+        self.bus_field(Field::Word, false, 2, q.cost);
+        self.a.arith(true, false, false, 7, 7, 2, Shift::Lsl, 0);
+        self.a.b(top);
+        self.a.bind(done);
+        self.a.arith(true, true, false, 7, 7, 5, Shift::Lsl, 0);
+        self.a.sub_imm(true, true, ZR, 7, 1);
+        self.a.cset(2, 0x0);
+        self.a.b(glitched);
+        self.a.bind(none);
+        self.a.mov_imm(2, 0);
+        self.a.bind(glitched);
+        self.a.ubfx(7, 6, 25, 2);
+        self.bus_byte(5, 7, q.first_halves);
+        self.a.arith(false, false, false, 2, 2, 5, Shift::Lsl, 0);
+        self.bus_field(Field::Word, false, 5, q.now);
+        self.a.arith(true, false, false, LR, 5, 2, Shift::Lsl, 0);
+        self.bus_field(Field::Word, false, 5, q.dma_check);
+        self.a.arith(true, true, false, 5, 5, LR, Shift::Lsl, 0);
+        self.a.sub_imm(true, false, 5, 5, 1);
+        self.a.tbz(true, 5, 63, slow);
+        self.a.ldr(true, 7, CTX, o.fast);
+        self.a.ldr(true, 7, 7, offset_of!(Fast, rom) as u32);
+        self.a.cbz_wide(false, 7, slow);
+        self.a.logical_imm(Logic::And, 5, 6, mirror_r, mirror_s);
+        self.a.indexed(Indexed::LoadHalf, 3, 7, 5);
+        self.a.add_imm(false, false, 5, 5, 2);
+        self.a.indexed(Indexed::LoadHalf, 5, 7, 5);
+        self.a.str(false, 3, 1, o.pipeline);
+        self.a.str(false, 5, 1, o.pipeline + 4);
+        self.a.logical(Logic::Orr, false, 5, 5, 5, Shift::Lsl, 16);
+        self.bus_field(Field::Word, true, 5, q.open_last);
+        self.a.add_imm(false, false, 5, 6, 2);
+        self.bus_field(Field::Word, true, 5, q.open_addr);
+        self.a.ubfx(7, 6, 25, 2);
+        self.bus_byte(3, 7, q.sequential_halves);
+        self.a.add_imm(false, false, 5, LR, 1);
+        self.bus_field(Field::Word, true, 5, q.sample);
+        self.a.arith(false, false, false, 5, LR, 3, Shift::Lsl, 0);
+        self.bus_field(Field::Word, true, 5, q.now);
+        self.bus_field(Field::Word, true, 3, q.cost);
+        self.bus_field(Field::Wide, false, 5, q.clock);
+        self.bus_field(Field::Wide, true, 5, q.since);
+        self.a.arith(true, false, false, 5, 5, 3, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 5, q.due);
+        self.a.logical_imm(Logic::Orr, 5, 6, page_r, page_s);
+        self.a.add_imm(false, false, 5, 5, 1);
+        self.a.ubfx(5, 5, 25, 2);
+        self.bus_byte(5, 5, q.sequential_halves);
+        self.bus_field(Field::Word, true, 5, q.page_cost);
+        self.a.add_imm(false, false, 5, 6, 4);
+        self.bus_field(Field::Word, true, 5, q.head);
+        self.restart(q, 5);
+        self.a.arith(false, false, false, 2, 2, 3, Shift::Lsl, 0);
+        Some(())
+    }
+
+    fn quick_landed(&mut self, leave: Leave, step: u32, called: Label) {
+        let o = self.o;
+        self.a.ldr(false, 3, 1, o.cpsr);
+        if leave == Leave::Exchange {
+            if step == 2 {
+                self.mask_or(3, FLAG_T);
+            } else {
+                self.mask(3, 3, !FLAG_T);
+            }
+        }
+        self.a.ldr(false, 5, 1, o.data);
+        self.a.arith(false, false, false, 2, 2, 5, Shift::Lsl, 0);
+        for field in [o.fetched, o.data, o.refetched] {
+            self.a.str(false, ZR, 1, field);
+        }
+        self.refilled(leave, step, called, LIVE);
+    }
+
+    fn bus_byte(&mut self, rt: R, index: R, offset: i32) {
+        let offset = offset as u32;
+        if offset < 0x1000 {
+            self.a
+                .arith(true, false, false, 17, 4, index, Shift::Lsl, 0);
+            self.a.ldrb(rt, 17, offset);
+        } else {
+            self.a.mov_imm(17, offset);
+            self.a.arith(true, false, false, 17, 4, 17, Shift::Lsl, 0);
+            self.a.indexed(Indexed::LoadByte, rt, 17, index);
+        }
+    }
+
     fn refills(&self, leave: Leave, specs: &[Spec]) -> bool {
         if self.v5 || !self.pages {
             specs.iter().any(|spec| spec.code)
         } else {
             leave != Leave::Return
         }
+    }
+
+    fn linked(&self, leave: Leave) -> bool {
+        matches!(leave, Leave::Branch | Leave::Exchange) && (self.v5 || self.pages && !self.timed)
+    }
+
+    fn hop_linked(&mut self, exchange: bool, normal: Label) {
+        let o = self.o;
+        let link = |field: usize| field as u32;
+        self.a.lsr64(5, 16, 32);
+        self.a.cbz(false, 5, normal);
+        self.a.ldr(true, 6, CTX, o.slot);
+        self.a
+            .arith(true, false, false, 6, 6, 5, Shift::Lsl, LINK_SHIFT);
+        self.a.sub_imm(true, false, 6, 6, -CELL_BASE as u32);
+        self.a.ldr(true, 7, 6, link(offset_of!(Link, slot)));
+        self.a.cbz_wide(false, 7, normal);
+        self.a.ldr(false, 4, 6, link(offset_of!(Link, generation)));
+        self.a.ldr(false, 2, 7, SLOT_GENERATION);
+        self.a.cmp(4, 2);
+        self.a.b_cond(0x1, normal);
+        if exchange {
+            self.a.ldr(false, 2, 7, SLOT_TAG);
+            self.a.logical(Logic::Eor, false, 2, 2, 0, Shift::Lsl, 0);
+            self.a.cmp_imm(2, NO_KEY);
+            self.a.b_cond(0x1, normal);
+        }
+        self.a.ldr(true, 2, CTX, o.stall_flag);
+        self.a.ldr(false, 2, 2, 0);
+        self.a.cbz(true, 2, normal);
+        if !self.v5 {
+            self.a.ldrb(2, 1, o.ldm_glitch);
+            self.a.cbz(true, 2, normal);
+        }
+        self.a.ldr(false, 2, 6, link(offset_of!(Link, cost)));
+        self.a.add_imm(false, false, 4, 2, 1);
+        self.a.cbz(false, 4, normal);
+        self.a.arith(false, true, false, 17, S, 2, Shift::Lsl, 0);
+        if self.timed {
+            self.a.ldr(false, 5, CTX, o.last);
+            self.a.arith(false, false, false, 2, 2, 5, Shift::Lsl, 0);
+        }
+        self.a.mov(4, DEBT);
+        self.settle(2, 4, 5, 2);
+        self.a.ldr(false, 5, 6, link(offset_of!(Link, ahead)));
+        self.a.arith(false, false, false, 5, 5, 4, Shift::Lsl, 0);
+        self.a.cmp(17, 5);
+        self.a.b_cond(0xD, normal);
+        self.a.mov(S, 17);
+        self.a.mov(DEBT, 4);
+        self.a.str(false, 2, 1, o.cycles);
+        self.a.strb(ZR, 1, o.irq_held);
+        self.store_debt(5);
+        if exchange {
+            self.mask(5, 0, 1);
+            self.mask(3, 3, !FLAG_T);
+            self.a.logical(
+                Logic::Orr,
+                false,
+                3,
+                3,
+                5,
+                Shift::Lsl,
+                FLAG_T.trailing_zeros(),
+            );
+            self.a.str(false, 3, 1, o.cpsr);
+            self.mask(0, 0, !1);
+        }
+        self.a.ldr(false, 5, 6, link(offset_of!(Link, pc) + 4));
+        self.a.arith(false, false, false, 5, 0, 5, Shift::Lsl, 2);
+        self.a.str(false, 5, 1, o.regs + 60);
+        if !self.timed {
+            self.a.str(false, 0, 1, o.landed);
+        }
+        self.a.mov_imm(5, SEQUENTIAL);
+        self.a.strb(5, 1, o.next_fetch);
+        self.a.ubfx(5, 3, FLAG_I.trailing_zeros(), 1);
+        self.a.strb(5, 1, o.irq_masked);
+        self.a.pair(true, false, 4, 5, 7, SLOT_PIPELINE as i32);
+        self.a.add_imm(true, false, 17, 1, o.pipeline);
+        self.a.pair(false, false, 4, 5, 17, 0);
+        self.mask(4, 16, 0xFF);
+        self.a.pair(true, false, 3, 5, CTX, o.budget as i32);
+        self.a.arith(false, true, false, 4, 4, 5, Shift::Lsl, 0);
+        self.a.ldr(false, 5, CTX, o.acc);
+        self.a.arith(false, false, false, 5, 5, 4, Shift::Lsl, 0);
+        self.a.str(false, 5, CTX, o.acc);
+        self.a.ldr(false, 4, 6, link(offset_of!(Link, start)));
+        self.a.pair(false, false, 3, 4, CTX, o.budget as i32);
+        self.a.ldr(true, 4, 6, link(offset_of!(Link, words)));
+        self.a.str(true, 4, CTX, o.words);
+        self.a.ldr(true, 4, 6, link(offset_of!(Link, pc)));
+        self.a.str(true, 4, CTX, o.base);
+        self.a.ldr(false, 4, CTX, o.chains);
+        self.a.add_imm(false, false, 4, 4, 1);
+        self.a.str(false, 4, CTX, o.chains);
+        self.a.str(true, 7, CTX, o.slot);
+        self.a.ldr(false, 4, 6, link(offset_of!(Link, pending)));
+        self.a.arith(false, false, false, S, S, 4, Shift::Lsl, 0);
+        self.a.ldr(true, 16, 6, link(offset_of!(Link, jump)));
+        self.a.ldr(false, 17, SP, FLAGS);
+        self.a.msr_nzcv(17);
+        self.a.mov_imm(0, KEEP);
+        self.a.br(16);
     }
 
     fn refetch(
@@ -661,7 +1085,13 @@ impl Build<'_> {
             Indexed::LoadWord
         };
         self.a.ldr(true, 4, CTX, o.fast);
-        for (index, spec) in specs.iter().enumerate() {
+        let windows = specs.iter().enumerate();
+        let order: Vec<_> = if self.v5 {
+            windows.rev().collect()
+        } else {
+            windows.collect()
+        };
+        for (index, spec) in order {
             if !spec.code {
                 continue;
             }
@@ -802,20 +1232,22 @@ impl Build<'_> {
             self.a.label(),
             self.a.label(),
         );
+        let (rust, to_rust) = (self.a.label(), self.a.label());
         self.a.bind(live);
         self.a.cbz(true, 5, to_finish);
         self.hop(to_call, to_refuse, jump);
-        for (from, to) in [(to_call, called), (to_refuse, refused), (to_finish, finish)] {
+        self.a.bind(to_call);
+        self.find(&FIND_LIVE, to_rust, to_refuse, jump);
+        for (from, to) in [(to_rust, rust), (to_refuse, refused), (to_finish, finish)] {
             self.a.bind(from);
             self.a.ldr(true, 4, CTX, o.core);
+            self.merge_flags(4, 2, 3);
             self.a.add_imm(true, false, 4, 4, o.regs);
             self.guest_regs(false, 4);
             self.a.b(to);
         }
         self.a.bind(jump);
-        self.a.ldr(true, 4, CTX, o.core);
-        self.a.ldr(false, 17, 4, o.cpsr);
-        self.mask(17, 17, NZCV_MASK);
+        self.a.ldr(false, 17, SP, FLAGS);
         self.a.msr_nzcv(17);
         self.a.mov_imm(0, KEEP);
         self.a.br(16);
@@ -823,6 +1255,8 @@ impl Build<'_> {
         self.a.cbz(true, 5, finish);
         self.hop(called, refused, enter);
         self.a.bind(called);
+        self.find(&FIND_STORED, rust, refused, enter);
+        self.a.bind(rust);
         self.a.push_pair(DEBT, S, 32);
         self.a.str(true, 16, SP, 16);
         self.a.arith(false, true, false, 1, S, DEBT, Shift::Lsl, 0);
@@ -850,18 +1284,101 @@ impl Build<'_> {
         self.a.b(finish);
     }
 
+    fn find(&mut self, r: &Lookup, called: Label, refused: Label, enter: Label) {
+        let o = self.o;
+        self.a.lsr64(3, 16, 32);
+        self.a.cbz(true, 3, called);
+        self.a.ldr(true, 2, CTX, o.stall_flag);
+        self.a.cbz_wide(false, 2, called);
+        self.a.ldr(false, 2, 2, 0);
+        self.a.cbz(true, 2, called);
+        self.a.ldr(true, 6, CTX, o.slots);
+        self.a.cbz_wide(false, 6, called);
+        self.a.ldr(true, 4, CTX, o.core);
+        if !self.v5 {
+            self.a.ldrb(2, 4, o.ldm_glitch);
+            self.a.cbz(true, 2, refused);
+        }
+        self.a.ldr(false, 3, 4, o.cpsr);
+        self.a.ubfx(3, 3, FLAG_T.trailing_zeros(), 1);
+        self.a.ldr(false, r.pc, 4, o.regs + 60);
+        self.a.mov_imm(r.tmp, 8);
+        self.a.lsrv64(r.tmp, r.tmp, 3);
+        self.a
+            .arith(false, true, false, r.key, r.pc, r.tmp, Shift::Lsl, 0);
+        self.a.mov_imm(r.tmp, 3);
+        self.a.lsrv64(r.tmp, r.tmp, 3);
+        self.a.tst(r.key, r.tmp);
+        self.a.b_cond(0x1, refused);
+        self.a
+            .logical(Logic::Orr, false, r.key, r.key, 3, Shift::Lsl, 0);
+        self.a.mov_imm(r.tmp, HASH);
+        self.a.mul(r.entry, r.key, r.tmp, ZR);
+        self.a.lsr(r.entry, r.entry, HASH_SHIFT);
+        self.a.mov_imm(r.tmp, SLOT_SIZE);
+        self.a.mul(r.entry, r.entry, r.tmp, ZR);
+        self.a
+            .arith(true, false, false, 6, 6, r.entry, Shift::Lsl, 0);
+        self.a.ldr(false, r.tmp, 6, SLOT_TAG);
+        self.a
+            .logical(Logic::Eor, false, r.tmp, r.tmp, r.key, Shift::Lsl, 0);
+        self.a.cmp_imm(r.tmp, NO_KEY);
+        self.a.b_cond(0x1, refused);
+        self.a.add_imm(true, false, 7, 4, o.pipeline);
+        self.a.pair(true, false, 1, 2, 7, 0);
+        self.a
+            .pair(true, false, r.pipe[0], r.pipe[1], 6, SLOT_PIPELINE as i32);
+        self.a
+            .logical(Logic::Eor, false, 1, 1, r.pipe[0], Shift::Lsl, 0);
+        self.a
+            .logical(Logic::Eor, false, 2, 2, r.pipe[1], Shift::Lsl, 0);
+        self.a.logical(Logic::Orr, false, 1, 1, 2, Shift::Lsl, 0);
+        self.a.cbz(true, 1, refused);
+        self.a.ldr(true, 7, 6, SLOT_CODE);
+        self.a.tbz(false, 7, 0, refused);
+        self.a.sub_imm(true, false, 7, 7, 1);
+        self.a.ldr(false, r.start, 6, SLOT_START);
+        self.a.add_ext(r.tmp, 7, r.start, 2);
+        self.a.ldr(false, r.entry, r.tmp, 0);
+        self.a.arith(false, true, false, 1, S, DEBT, Shift::Lsl, 0);
+        self.a.lsr(2, r.entry, 27);
+        self.a.cmp(1, 2);
+        self.a.b_cond(0xD, refused);
+        self.a.str(true, 6, CTX, o.slot);
+        self.mask(2, 16, 0xFF);
+        self.a.ldr(false, 5, CTX, o.budget + 4);
+        self.a.arith(false, true, false, 2, 2, 5, Shift::Lsl, 0);
+        self.a.ldr(false, 5, CTX, o.acc);
+        self.a.arith(false, false, false, 5, 5, 2, Shift::Lsl, 0);
+        self.a.str(false, 5, CTX, o.acc);
+        self.a.str(false, r.start, CTX, o.budget + 4);
+        self.a.ldr(true, 2, 6, SLOT_WORDS);
+        self.a.str(true, 2, CTX, o.words);
+        self.a.mov_imm(2, 2);
+        self.a.arith(false, true, false, 2, 2, 3, Shift::Lsl, 0);
+        self.a.lslv(5, r.start, 2);
+        self.a
+            .arith(false, true, false, r.pc, r.pc, 5, Shift::Lsl, 0);
+        self.a.pair(false, false, r.pc, 2, CTX, o.base as i32);
+        self.a.ldr(false, 2, CTX, o.chains);
+        self.a.add_imm(false, false, 2, 2, 1);
+        self.a.str(false, 2, CTX, o.chains);
+        self.a.ubfx(2, r.entry, 16, 11);
+        self.a.arith(false, false, false, S, S, 2, Shift::Lsl, 0);
+        self.mask(2, r.entry, 0xFFFF);
+        self.a.add_ext(16, 7, 2, 2);
+        self.a.b(enter);
+    }
+
     fn hop(&mut self, called: Label, refused: Label, enter: Label) {
         let o = self.o;
         let link = |field: usize| field as u32;
-        let first = self.a.label();
         self.a.lsr64(3, 16, 32);
         self.a.cbz(false, 3, called);
         self.a.ldr(true, 6, CTX, o.slot);
-        self.a.cbz_wide(false, 6, called);
-        self.a.add_imm(true, false, 6, 6, SLOT_LINKS);
-        self.a.tbz(false, 3, 1, first);
-        self.a.add_imm(true, false, 6, 6, size_of::<Link>() as u32);
-        self.a.bind(first);
+        self.a
+            .arith(true, false, false, 6, 6, 3, Shift::Lsl, LINK_SHIFT);
+        self.a.sub_imm(true, false, 6, 6, -CELL_BASE as u32);
         self.a.ldr(true, 7, 6, link(offset_of!(Link, slot)));
         self.a.cbz_wide(false, 7, called);
         self.a.ldr(false, 4, 6, link(offset_of!(Link, generation)));
@@ -917,6 +1434,7 @@ impl Build<'_> {
         pages: bool,
         specs: &[Spec],
         leave: bool,
+        ram: bool,
     ) -> Option<Label> {
         let o = self.o;
         let (slow, tail) = (self.a.label(), self.a.label());
@@ -925,6 +1443,14 @@ impl Build<'_> {
         let pending = if leave && !store { LEAVE_PENDING } else { 10 };
         self.a.ubfx(3, 2, 16, pending);
         self.a.arith(false, true, false, S, S, 3, Shift::Lsl, 0);
+        let quick_ram = match o.quick {
+            Some(q) if ram && !self.v5 && !pages && specs.is_empty() => Some(q),
+            _ => None,
+        };
+        let ram_tail = match quick_ram {
+            Some(q) => Some(self.ram(&q, store, slow)?),
+            None => None,
+        };
         if pages {
             let (half, word) = (self.a.label(), self.a.label());
             if !self.v5 {
@@ -994,11 +1520,368 @@ impl Build<'_> {
         } else if !specs.is_empty() {
             self.fast_tails(tails, out);
         }
+        if let Some(ram_tail) = ram_tail {
+            self.a.bind(ram_tail);
+            self.ram_spent(out);
+        }
         if let Some(out) = out {
             self.a.bind(out);
             self.leave_memory(store)?;
         }
         Some(tail)
+    }
+
+    fn ram(&mut self, q: &QuickFetch, store: bool, slow: Label) -> Option<Label> {
+        let tail = self.a.label();
+        let (half, word) = (self.a.label(), self.a.label());
+        let rom = (!store && self.timed).then(|| self.a.label());
+        if let Some(rom) = rom {
+            debug_assert!(q.rom_start.is_power_of_two());
+            self.a.tbz(true, 0, q.rom_start.trailing_zeros(), rom);
+        }
+        self.a.ldr(true, 6, CTX, self.o.fast);
+        self.a.ldr(true, 6, 6, offset_of!(Fast, pages) as u32);
+        self.a.cbz_wide(false, 6, slow);
+        self.a.lsr(5, 0, PAGE_SHIFT);
+        self.a.arith(true, false, false, 5, 6, 5, Shift::Lsl, 5);
+        self.a.pair(true, true, 6, 7, 5, 0);
+        self.a.cbz(false, 7, slow);
+        if store {
+            self.a
+                .pair(true, true, 16, 17, 5, offset_of!(Page, dirty) as i32);
+            self.a
+                .ubfx(3, 0, PAGE_BITS as u32, PAGE_SHIFT - PAGE_BITS as u32);
+            self.a.indexed(Indexed::LoadByte, 3, 17, 3);
+            self.a.cbz(true, 3, slow);
+        }
+        self.a.ldr(true, 4, CTX, self.o.bus);
+        if store {
+            for hit in q.code_hits {
+                self.bus_field(Field::Byte, false, 3, hit);
+                self.a.cbz(true, 3, slow);
+            }
+            self.bus_field(Field::Word, false, 3, q.now);
+            self.bus_field(Field::Word, false, 5, q.dma_check);
+            self.a.arith(true, true, false, 5, 5, 3, Shift::Lsl, 0);
+            self.a.sub_imm(true, false, 5, 5, 1);
+            self.a.tbz(true, 5, 63, slow);
+        }
+        self.a.tbz(true, 2, 1, word);
+        self.a.tbz(true, 2, 0, half);
+        self.ram_access(q, store, Width::Byte, slow, tail)?;
+        self.a.bind(half);
+        self.ram_access(q, store, Width::Half, slow, tail)?;
+        self.a.bind(word);
+        self.ram_access(q, store, Width::Word, slow, tail)?;
+        if let Some(rom) = rom {
+            self.a.bind(rom);
+            self.rom(q, slow, tail)?;
+        }
+        Some(tail)
+    }
+
+    fn ram_access(
+        &mut self,
+        q: &QuickFetch,
+        store: bool,
+        width: Width,
+        slow: Label,
+        tail: Label,
+    ) -> Option<()> {
+        let shift = match width {
+            Width::Word => WORD_CYCLES,
+            Width::Byte | Width::Half => HALF_CYCLES,
+        };
+        if !store && width == Width::Half {
+            self.a.tbz(true, 0, 0, slow);
+        }
+        self.a.ubfx(7, 7, shift, 8);
+        if store {
+            self.a.mov_imm(3, 1);
+            self.a.strb(3, 16, 0);
+        } else {
+            self.bus_field(Field::Word, false, 3, q.now);
+            self.bus_field(Field::Word, false, 16, q.dma_check);
+            self.a.arith(true, true, false, 16, 16, 3, Shift::Lsl, 0);
+            self.a.arith(true, true, false, 16, 16, 7, Shift::Lsl, 0);
+            self.a.sub_imm(true, false, 16, 16, 1);
+            self.a.tbz(true, 16, 63, slow);
+            self.a.add_imm(false, false, 7, 7, 1);
+            self.a.arith(false, false, false, 3, 3, 7, Shift::Lsl, 0);
+            self.bus_field(Field::Word, true, 3, q.now);
+            self.bus_field(Field::Word, true, 3, q.sample);
+        }
+        let at = self.aligned(width)?;
+        let op = match (store, width) {
+            (true, Width::Byte) => Indexed::StoreByte,
+            (true, Width::Half) => Indexed::StoreHalf,
+            (true, Width::Word) => Indexed::StoreWord,
+            (false, Width::Byte) => Indexed::LoadByte,
+            (false, Width::Half) => Indexed::LoadHalf,
+            (false, Width::Word) => Indexed::LoadWord,
+        };
+        let value = if store { 1 } else { 3 };
+        self.a.indexed(op, value, 6, at);
+        let (ewram, merged) = (self.a.label(), self.a.label());
+        let lane = match width {
+            Width::Byte => Some(3),
+            Width::Half => Some(2),
+            Width::Word => None,
+        };
+        if let Some(lane) = lane {
+            let (immr, imms) = logical_immediate(lane)?;
+            self.a.logical_imm(Logic::And, 5, 0, immr, imms);
+        }
+        self.a.tbz(false, 0, 24, ewram);
+        self.open_lane(width, q.open_iwram, value);
+        if !store {
+            if width == Width::Word {
+                self.bus_field(Field::Word, true, value, q.open_last);
+            } else {
+                self.bus_field(Field::Word, false, 16, q.open_iwram);
+                self.bus_field(Field::Word, true, 16, q.open_last);
+            }
+            self.a.b(merged);
+        }
+        self.a.bind(ewram);
+        if store {
+            self.open_lane(width, q.open_last, value);
+        } else {
+            let latch = match width {
+                Width::Byte => {
+                    self.a.logical(Logic::Orr, false, 16, 3, 3, Shift::Lsl, 8);
+                    self.a
+                        .logical(Logic::Orr, false, 16, 16, 16, Shift::Lsl, 16);
+                    16
+                }
+                Width::Half => {
+                    self.a.logical(Logic::Orr, false, 16, 3, 3, Shift::Lsl, 16);
+                    16
+                }
+                Width::Word => value,
+            };
+            self.bus_field(Field::Word, true, latch, q.open_last);
+        }
+        self.a.bind(merged);
+        if store {
+            self.bus_field(Field::Word, false, 3, q.now);
+            self.a.add_imm(false, false, 16, 3, 1);
+            self.bus_field(Field::Word, true, 16, q.sample);
+            self.a.arith(false, false, false, 3, 3, 7, Shift::Lsl, 0);
+            self.bus_field(Field::Word, true, 3, q.now);
+        } else {
+            match width {
+                Width::Word => {
+                    self.a.lsl(5, 0, 3);
+                    self.a.rorv(0, 3, 5);
+                }
+                Width::Byte | Width::Half => {
+                    let (unsigned, loaded) = (self.a.label(), self.a.label());
+                    let top = if width == Width::Byte { 7 } else { 15 };
+                    self.a.tbz(false, 2, 2, unsigned);
+                    self.a.sbfm(0, 3, 0, top);
+                    self.a.b(loaded);
+                    self.a.bind(unsigned);
+                    self.a.mov(0, 3);
+                    self.a.bind(loaded);
+                }
+            }
+        }
+        self.bus_field(Field::Wide, false, 16, q.clock);
+        self.a.arith(true, false, false, 16, 16, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 16, q.clock);
+        self.a.ldr(true, 16, CTX, self.o.core);
+        self.a.strb(ZR, 16, self.o.next_fetch);
+        self.a.b(tail);
+        Some(())
+    }
+
+    fn rom(&mut self, q: &QuickFetch, slow: Label, tail: Label) -> Option<()> {
+        let shift = 32 - q.rom_page.trailing_zeros();
+        let (flowing, top, done, glitched) = (
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+        );
+        let (half, word, commit) = (self.a.label(), self.a.label(), self.a.label());
+        let literal = self.a.label();
+        self.a.ldr(true, 4, CTX, self.o.bus);
+        self.a.mov_imm(1, 0);
+        self.bus_field(Field::Byte, false, 6, q.flowing);
+        self.a.cbz(true, 6, flowing);
+        self.bus_field(Field::Byte, false, 6, q.active);
+        self.a.cbz(false, 6, glitched);
+        self.bus_field(Field::Byte, false, 6, q.paused);
+        self.a.cbz(false, 6, slow);
+        self.a.b(glitched);
+        self.a.bind(flowing);
+        self.bus_field(Field::Byte, false, 6, q.stuck);
+        self.a.cbz(true, 6, slow);
+        self.bus_field(Field::Word, false, 7, q.cost);
+        self.a.cbz(false, 7, slow);
+        self.bus_field(Field::Word, false, 6, q.progress);
+        self.a.arith(false, true, false, 6, 7, 6, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, false, 5, q.since);
+        self.a.arith(true, false, false, 5, 5, 6, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, false, 3, q.clock);
+        self.bus_field(Field::Word, false, 16, q.count);
+        self.bus_field(Field::Word, false, 6, q.head);
+        self.a.bind(top);
+        self.a.arith(true, true, false, 17, 3, 5, Shift::Lsl, 0);
+        self.a.tbz(true, 17, 63, done);
+        self.a.add_imm(false, false, 16, 16, 1);
+        self.a.sub_imm(false, false, 17, 16, q.capacity);
+        self.a.cbz(false, 17, glitched);
+        self.a.tbz(false, 17, 31, slow);
+        self.a.arith(false, false, false, 17, 6, 16, Shift::Lsl, 1);
+        self.a.lsl(17, 17, shift);
+        self.a.cbz(false, 17, slow);
+        self.a.arith(true, false, false, 5, 5, 7, Shift::Lsl, 0);
+        self.a.b(top);
+        self.a.bind(done);
+        self.a.arith(true, true, false, 5, 5, 3, Shift::Lsl, 0);
+        self.a.sub_imm(true, false, 5, 5, 1);
+        self.a.cbz_wide(true, 5, glitched);
+        self.a.mov_imm(1, 1);
+        self.a.bind(glitched);
+        self.a.tbz(true, 2, 1, word);
+        self.a.tbz(true, 2, 0, half);
+        self.rom_bounds(q, slow);
+        self.rom_access(q, Width::Byte, slow)?;
+        self.a.b(commit);
+        self.a.bind(half);
+        self.rom_bounds(q, slow);
+        self.rom_access(q, Width::Half, slow)?;
+        self.a.b(commit);
+        self.a.bind(word);
+        self.a.tbz(true, 2, ROM_LITERAL.trailing_zeros(), literal);
+        self.rom_bounds(q, slow);
+        self.rom_access(q, Width::Word, slow)?;
+        self.a.b(commit);
+        self.a.bind(literal);
+        self.rom_literal(q, slow);
+        self.a.bind(commit);
+        self.bus_field(Field::Wide, false, 6, q.clock);
+        self.stopped(q);
+        self.a.ldr(true, 6, CTX, self.o.core);
+        self.a.strb(ZR, 6, self.o.next_fetch);
+        self.a.add_imm(false, false, 7, 7, 1);
+        self.a.b(tail);
+        Some(())
+    }
+
+    fn rom_access(&mut self, q: &QuickFetch, width: Width, slow: Label) -> Option<()> {
+        let (align, op): (u32, Indexed) = match width {
+            Width::Byte => (!0, Indexed::LoadByte),
+            Width::Half => (!1, Indexed::LoadHalf),
+            Width::Word => (!3, Indexed::LoadWord),
+        };
+        let (immr, imms) = logical_immediate(q.rom_mirror & align)?;
+        if width == Width::Half {
+            self.a.tbz(true, 0, 0, slow);
+        }
+        self.a.logical_imm(Logic::And, 5, 0, immr, imms);
+        self.a.sub_imm(false, false, 6, 5, q.rom_skip);
+        self.bus_field(Field::Wide, false, 7, q.plain_rom_end);
+        self.a.arith(true, true, false, 6, 6, 7, Shift::Lsl, 0);
+        self.a.tbz(false, 6, 63, slow);
+        self.rom_wait(q, width, slow);
+        self.a.ldr(true, 16, CTX, self.o.fast);
+        self.a.ldr(true, 16, 16, offset_of!(Fast, rom) as u32);
+        self.a.cbz_wide(false, 16, slow);
+        self.rom_now(q);
+        self.a.indexed(op, 3, 16, 5);
+        match width {
+            Width::Byte => {
+                self.a.logical(Logic::Orr, false, 6, 3, 3, Shift::Lsl, 8);
+                self.a.logical(Logic::Orr, false, 6, 6, 6, Shift::Lsl, 16);
+            }
+            Width::Half => self.a.logical(Logic::Orr, false, 6, 3, 3, Shift::Lsl, 16),
+            Width::Word => self.a.mov(6, 3),
+        }
+        self.bus_field(Field::Word, true, 6, q.open_last);
+        match width {
+            Width::Word => {
+                self.a.lsl(5, 0, 3);
+                self.a.rorv(0, 3, 5);
+            }
+            Width::Byte | Width::Half => {
+                let (unsigned, loaded) = (self.a.label(), self.a.label());
+                let top = if width == Width::Byte { 7 } else { 15 };
+                self.a.tbz(false, 2, 2, unsigned);
+                self.a.sbfm(0, 3, 0, top);
+                self.a.b(loaded);
+                self.a.bind(unsigned);
+                self.a.mov(0, 3);
+                self.a.bind(loaded);
+            }
+        }
+        Some(())
+    }
+
+    fn rom_bounds(&mut self, q: &QuickFetch, slow: Label) {
+        self.a.mov_imm(6, q.rom_start);
+        self.a.arith(false, true, false, 5, 0, 6, Shift::Lsl, 0);
+        self.a.mov_imm(6, q.rom_span);
+        self.a.arith(true, true, false, 6, 5, 6, Shift::Lsl, 0);
+        self.a.tbz(false, 6, 63, slow);
+    }
+
+    fn rom_wait(&mut self, q: &QuickFetch, width: Width, slow: Label) {
+        self.a.ubfx(6, 0, 25, 2);
+        self.bus_byte(7, 6, q.first_halves);
+        if width == Width::Word {
+            self.bus_byte(3, 6, q.sequential_halves);
+            self.a.arith(false, false, false, 7, 7, 3, Shift::Lsl, 0);
+        }
+        self.a.arith(false, false, false, 7, 7, 1, Shift::Lsl, 0);
+        self.bus_field(Field::Word, false, 3, q.now);
+        self.bus_field(Field::Word, false, 6, q.dma_check);
+        self.a.arith(true, false, false, 3, 3, 7, Shift::Lsl, 0);
+        self.a.arith(true, true, false, 6, 6, 3, Shift::Lsl, 0);
+        self.a.sub_imm(true, false, 6, 6, 1);
+        self.a.tbz(true, 6, 63, slow);
+    }
+
+    fn rom_now(&mut self, q: &QuickFetch) {
+        self.a.add_imm(false, false, 3, 3, 1);
+        self.bus_field(Field::Word, true, 3, q.now);
+        self.bus_field(Field::Word, true, 3, q.sample);
+    }
+
+    fn rom_literal(&mut self, q: &QuickFetch, slow: Label) {
+        self.rom_wait(q, Width::Word, slow);
+        self.rom_now(q);
+        self.a.lsr64(0, 2, 32);
+        self.bus_field(Field::Word, true, 0, q.open_last);
+    }
+
+    fn open_lane(&mut self, width: Width, field: i32, value: R) {
+        let op = match width {
+            Width::Byte => Indexed::StoreByte,
+            Width::Half => Indexed::StoreHalf,
+            Width::Word => {
+                self.bus_field(Field::Word, true, value, field);
+                return;
+            }
+        };
+        self.a.mov_imm(17, field as u32);
+        self.a.arith(true, false, false, 17, 4, 17, Shift::Lsl, 0);
+        self.a.indexed(op, value, 17, 5);
+    }
+
+    fn ram_spent(&mut self, out: Option<Label>) {
+        let o = self.o;
+        self.a.mrs_nzcv(3);
+        self.a.arith(false, true, false, S, S, 7, Shift::Lsl, 0);
+        self.a.ldr(false, 6, CTX, o.last);
+        self.a.arith(false, false, false, 6, 6, 7, Shift::Lsl, 0);
+        self.a.str(false, 6, CTX, o.last);
+        self.a.str(false, ZR, CTX, o.force);
+        self.spent(out);
+        self.a.msr_nzcv(3);
+        self.a.ret();
     }
 
     fn leave_memory(&mut self, store: bool) -> Option<()> {
@@ -1225,8 +2108,13 @@ impl Build<'_> {
         pages: bool,
         specs: &[Spec],
         tail: Label,
+        ram: bool,
     ) -> Option<()> {
         let slow = self.a.label();
+        let quick_ram = match self.o.quick {
+            Some(q) if ram && self.timed && !self.v5 && !pages && specs.is_empty() => Some(q),
+            _ => None,
+        };
         self.a.mrs_nzcv(3);
         self.a.ubfx(4, 2, 16, 10);
         self.a.arith(false, true, false, S, S, 4, Shift::Lsl, 0);
@@ -1240,6 +2128,8 @@ impl Build<'_> {
             for (index, spec) in specs.iter().enumerate() {
                 self.window_span(index, spec, store, slow, tail)?;
             }
+        } else if let Some(q) = quick_ram {
+            self.ram_block(&q, store, slow, tail)?;
         }
         self.a.bind(slow);
         self.a.push_pair(8, 9, 128);
@@ -1302,6 +2192,98 @@ impl Build<'_> {
         self.a.pair(true, true, 20, 21, SP, 96);
         self.a.ldr(true, 22, SP, 112);
         self.a.pop_pair(8, 9, 128);
+        self.a.b(tail);
+        Some(())
+    }
+
+    fn ram_block(&mut self, q: &QuickFetch, store: bool, slow: Label, tail: Label) -> Option<()> {
+        let (offset_r, offset_s) = logical_immediate((PAGE_SIZE - 1) & !3)?;
+        let (word_r, word_s) = logical_immediate(!3)?;
+        let pages = PAGE_SHIFT - PAGE_BITS as u32;
+        let (copy, ewram) = (self.a.label(), self.a.label());
+        self.a.ldr(true, 6, CTX, self.o.fast);
+        self.a.ldr(true, 6, 6, offset_of!(Fast, pages) as u32);
+        self.a.cbz_wide(false, 6, slow);
+        self.a.lsr(5, 0, PAGE_SHIFT);
+        self.a.arith(true, false, false, 5, 6, 5, Shift::Lsl, 5);
+        self.a.pair(true, true, 6, 7, 5, 0);
+        self.a.cbz(false, 7, slow);
+        self.a.ubfx(1, 2, 26, 5);
+        self.a.logical_imm(Logic::And, 16, 0, offset_r, offset_s);
+        self.a.arith(false, false, false, 16, 16, 1, Shift::Lsl, 2);
+        self.a.sub_imm(false, false, 16, 16, 4);
+        self.a.tbz(true, 16, PAGE_SHIFT, slow);
+        if store {
+            self.a.ldr(true, 17, 5, offset_of!(Page, code) as u32);
+            for first in [true, false] {
+                if first {
+                    self.a.ubfx(16, 0, PAGE_BITS as u32, pages);
+                } else {
+                    self.a.arith(false, false, false, 16, 0, 1, Shift::Lsl, 2);
+                    self.a.sub_imm(false, false, 16, 16, 4);
+                    self.a.ubfx(16, 16, PAGE_BITS as u32, pages);
+                }
+                self.a.indexed(Indexed::LoadByte, 16, 17, 16);
+                self.a.cbz(true, 16, slow);
+            }
+        }
+        self.a.ldr(true, 4, CTX, self.o.bus);
+        if store {
+            for hit in q.code_hits {
+                self.bus_field(Field::Byte, false, 16, hit);
+                self.a.cbz(true, 16, slow);
+            }
+        }
+        self.a.logical_imm(Logic::And, 17, 0, word_r, word_s);
+        self.a.arith(true, false, false, 6, 6, 17, Shift::Lsl, 0);
+        self.a.ubfx(7, 7, WORD_CYCLES, 8);
+        self.a.mul(1, 1, 7, ZR);
+        self.bus_field(Field::Word, false, 16, q.now);
+        self.a.arith(true, false, false, 16, 16, 1, Shift::Lsl, 0);
+        if store {
+            self.a.arith(true, true, false, 16, 16, 7, Shift::Lsl, 0);
+        }
+        self.bus_field(Field::Word, false, 17, q.dma_check);
+        self.a.arith(true, true, false, 17, 16, 17, Shift::Lsl, 0);
+        self.a.tbz(false, 17, 63, slow);
+        if store {
+            self.a.ldr(true, 5, 5, offset_of!(Page, dirty) as u32);
+            self.a.mov_imm(17, 1);
+            self.a.strb(17, 5, 0);
+            self.a.add_imm(false, false, 5, 16, 1);
+            self.bus_field(Field::Word, true, 5, q.sample);
+            self.a.arith(false, false, false, 16, 16, 7, Shift::Lsl, 0);
+            self.bus_field(Field::Word, true, 16, q.now);
+        } else {
+            self.a.add_imm(false, false, 16, 16, 1);
+            self.bus_field(Field::Word, true, 16, q.now);
+            self.bus_field(Field::Word, true, 16, q.sample);
+            self.a.add_imm(false, false, 1, 1, 1);
+        }
+        self.bus_field(Field::Wide, false, 16, q.clock);
+        self.a.arith(true, false, false, 16, 16, 1, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 16, q.clock);
+        self.a.mov(7, 1);
+        self.a.ldr(true, 16, CTX, self.o.core);
+        self.a.strb(ZR, 16, self.o.next_fetch);
+        self.a.add_imm(true, false, 5, CTX, self.o.block);
+        self.a.ubfx(1, 2, 26, 5);
+        self.a.lsl(1, 1, 2);
+        self.a.bind(copy);
+        self.a.sub_imm(false, false, 1, 1, 4);
+        let (from, to) = if store { (5, 6) } else { (6, 5) };
+        self.a.indexed(Indexed::LoadWord, 17, from, 1);
+        self.a.indexed(Indexed::StoreWord, 17, to, 1);
+        self.a.cbz(true, 1, copy);
+        self.a.ubfx(1, 2, 26, 5);
+        self.a.lsl(1, 1, 2);
+        self.a.sub_imm(false, false, 1, 1, 4);
+        self.a.indexed(Indexed::LoadWord, 16, 6, 1);
+        self.bus_field(Field::Word, true, 16, q.open_last);
+        self.a.tbz(false, 0, 24, ewram);
+        self.bus_field(Field::Word, true, 16, q.open_iwram);
+        self.a.bind(ewram);
+        self.a.mov(0, 7);
         self.a.b(tail);
         Some(())
     }
@@ -1680,6 +2662,14 @@ impl Build<'_> {
     fn fetch(&mut self, helper: usize, mode: Option<u32>) {
         let o = self.o;
         let known = self.a.label();
+        if let Some(quick) = o.quick {
+            let slow = self.a.label();
+            match mode {
+                Some(mode) => self.quick_fetch(&quick, mode == THUMB, slow),
+                None => self.idles_iwram(&quick, slow),
+            }
+            self.a.bind(slow);
+        }
         self.a.push_pair(8, 9, SAVED);
         self.a.pair(false, true, 10, 11, SP, 16);
         self.a.pair(false, true, 12, 13, SP, 32);
@@ -1708,8 +2698,399 @@ impl Build<'_> {
         self.a.ret();
     }
 
+    fn quick_fetch(&mut self, q: &QuickFetch, thumb: bool, slow: Label) {
+        let o = self.o;
+        let halves = if thumb { 1 } else { 2 };
+        let tail = self.a.label();
+        let iwram = if thumb { slow } else { self.a.label() };
+        let [due, elsewhere, drained] = if thumb {
+            [self.a.label(), self.a.label(), self.a.label()]
+        } else {
+            [slow; 3]
+        };
+        self.a.tbz(true, 2, 31, iwram);
+        self.a.ldr(true, 4, CTX, o.bus);
+        self.bus_field(Field::Word, false, 5, q.now);
+        self.bus_field(Field::Word, false, 6, q.dma_check);
+        self.a.arith(true, true, false, 6, 5, 6, Shift::Lsl, 0);
+        self.a.tbz(false, 6, 63, slow);
+        self.bus_field(Field::Wide, false, 6, q.plain_rom_end);
+        self.a.arith(true, true, false, 6, 2, 6, Shift::Lsl, 0);
+        self.a.tbz(false, 6, 63, slow);
+        self.bus_field(Field::Word, false, 6, q.head);
+        self.a.arith(false, true, false, 6, 6, 1, Shift::Lsl, 0);
+        self.a.cbz(true, 6, elsewhere);
+        self.bus_field(Field::Wide, false, 6, q.clock);
+        self.bus_field(Field::Wide, false, 16, q.due);
+        self.a.arith(true, true, false, 2, 6, 16, Shift::Lsl, 0);
+        self.a.logical(Logic::Orr, true, 2, 2, 16, Shift::Lsl, 0);
+        self.a.tbz(false, 2, 63, due);
+        self.bus_field(Field::Word, false, 2, q.count);
+        if thumb {
+            let flight = self.a.label();
+            self.a.cbz(false, 2, flight);
+            self.quick_hit(q, halves, drained);
+            self.a.b(tail);
+            self.a.bind(flight);
+            self.quick_flight(q, slow);
+        } else {
+            self.a.cbz(false, 2, slow);
+            self.quick_hit(q, halves, slow);
+        }
+        self.a.bind(tail);
+        self.a.add_imm(false, false, 7, 5, 1);
+        self.bus_field(Field::Word, true, 7, q.sample);
+        self.a.arith(false, false, false, 5, 5, 2, Shift::Lsl, 0);
+        self.bus_field(Field::Word, true, 5, q.now);
+        self.bus_field(Field::Word, true, 1, q.open_addr);
+        self.bus_field(Field::Word, true, 3, q.open_last);
+        self.a.arith(false, true, false, S, S, 2, Shift::Lsl, 0);
+        self.a.str(false, 2, CTX, o.last);
+        self.a.ret();
+        if thumb {
+            self.a.bind(due);
+            self.quick_settled(q, slow);
+            self.a.b(tail);
+            self.a.bind(elsewhere);
+            self.quick_elsewhere(q, slow);
+            self.a.b(tail);
+            self.a.bind(drained);
+            self.quick_drained(q);
+            self.a.b(tail);
+        } else {
+            let bios = self.a.label();
+            self.a.bind(iwram);
+            self.quick_word(q, IWRAM_FETCH, q.open_iwram, bios, slow);
+            self.a.bind(bios);
+            self.quick_word(q, BIOS_FETCH, q.open_bios, slow, slow);
+        }
+    }
+
+    fn quick_word(&mut self, q: &QuickFetch, marker: u32, latch: i32, next: Label, slow: Label) {
+        let bit = q.prefetch_bit.trailing_zeros();
+        self.a.add_imm(false, false, 6, 2, marker.wrapping_neg());
+        self.a.cbz(true, 6, next);
+        self.a.ldr(true, 4, CTX, self.o.bus);
+        self.bus_field(Field::Word, false, 5, q.now);
+        self.bus_field(Field::Word, false, 6, q.dma_check);
+        self.a.arith(true, true, false, 6, 5, 6, Shift::Lsl, 0);
+        self.a.tbz(false, 6, 63, slow);
+        self.bus_field(Field::Byte, false, 6, q.wait_bits + (bit / 8) as i32);
+        self.a.tbz(false, 6, bit % 8, slow);
+        self.bus_field(Field::Wide, false, 6, q.clock);
+        self.a.add_imm(true, false, 6, 6, 1);
+        self.bus_field(Field::Wide, true, 6, q.clock);
+        self.bus_field(Field::Byte, true, ZR, q.branched);
+        self.bus_field(Field::Word, true, 3, latch);
+        self.a.add_imm(false, false, 5, 5, 1);
+        self.bus_field(Field::Word, true, 5, q.sample);
+        self.bus_field(Field::Word, true, 5, q.now);
+        self.bus_field(Field::Word, true, 1, q.open_addr);
+        self.bus_field(Field::Word, true, 3, q.open_last);
+        self.a.sub_imm(false, false, S, S, 1);
+        self.a.mov_imm(2, 1);
+        self.a.str(false, 2, CTX, self.o.last);
+        self.a.ret();
+    }
+
+    fn idles_iwram(&mut self, q: &QuickFetch, slow: Label) {
+        let bit = q.prefetch_bit.trailing_zeros();
+        self.a.tbz(false, 2, IWRAM_IDLES.trailing_zeros(), slow);
+        self.a.ldr(true, 4, CTX, self.o.bus);
+        self.a.lsr(7, 2, IDLES_SHIFT);
+        self.bus_field(Field::Word, false, 5, q.now);
+        self.bus_field(Field::Word, false, 6, q.dma_check);
+        self.a.arith(true, true, false, 6, 6, 5, Shift::Lsl, 0);
+        self.a.arith(true, true, false, 6, 6, 7, Shift::Lsl, 0);
+        self.a.sub_imm(true, false, 6, 6, 1);
+        self.a.tbz(true, 6, 63, slow);
+        self.bus_field(Field::Byte, false, 6, q.wait_bits + (bit / 8) as i32);
+        self.a.tbz(false, 6, bit % 8, slow);
+        self.a.add_imm(false, false, 7, 7, 1);
+        self.bus_field(Field::Wide, false, 6, q.clock);
+        self.a.arith(true, false, false, 6, 6, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 6, q.clock);
+        self.bus_field(Field::Byte, true, ZR, q.branched);
+        self.a.arith(false, false, false, 5, 5, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Word, true, 5, q.sample);
+        self.bus_field(Field::Word, true, 5, q.now);
+        self.bus_field(Field::Word, true, 3, q.open_iwram);
+        self.bus_field(Field::Word, true, 3, q.open_last);
+        self.bus_field(Field::Word, true, 1, q.open_addr);
+        self.a.str(false, 7, CTX, self.o.last);
+        self.a.arith(false, true, false, S, S, 7, Shift::Lsl, 0);
+        self.a.ret();
+    }
+
+    fn flat_iwram(&mut self, q: &QuickFetch, slow: Label) {
+        let bit = q.prefetch_bit.trailing_zeros();
+        self.a.tbz(false, 2, IWRAM_RUN.trailing_zeros(), slow);
+        self.a.ldr(true, 4, CTX, self.o.bus);
+        self.a.lsr(7, 2, RUN_CYCLES_SHIFT);
+        self.a.arith(false, true, false, 6, S, 7, Shift::Lsl, 0);
+        self.a.tbz(true, 6, 31, slow);
+        self.a.cbz(false, 6, slow);
+        self.bus_field(Field::Word, false, 5, q.now);
+        self.bus_field(Field::Word, false, 6, q.dma_check);
+        self.a.arith(true, true, false, 6, 6, 5, Shift::Lsl, 0);
+        self.a.arith(true, true, false, 6, 6, 7, Shift::Lsl, 0);
+        self.a.tbz(true, 6, 63, slow);
+        self.bus_field(Field::Byte, false, 6, q.wait_bits + (bit / 8) as i32);
+        self.a.tbz(false, 6, bit % 8, slow);
+        self.bus_field(Field::Wide, false, 6, q.clock);
+        self.a.arith(true, false, false, 6, 6, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 6, q.clock);
+        self.bus_field(Field::Byte, true, ZR, q.branched);
+        self.a.arith(false, false, false, 5, 5, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Word, true, 5, q.sample);
+        self.bus_field(Field::Word, true, 5, q.now);
+        self.bus_field(Field::Word, true, 3, q.open_iwram);
+        self.bus_field(Field::Word, true, 3, q.open_last);
+        self.a.ubfx(0, 2, IDLES_SHIFT, RUN_COUNT_MASK.count_ones());
+        self.a.lsl(0, 0, 2);
+        self.a.ubfx(6, 2, THUMB.trailing_zeros(), 1);
+        self.a.lsrv64(0, 0, 6);
+        self.a.arith(false, false, false, 0, 1, 0, Shift::Lsl, 0);
+        self.bus_field(Field::Word, true, 0, q.open_addr);
+        self.a.mov_imm(6, 1);
+        self.a.str(false, 6, CTX, self.o.last);
+        self.a.arith(false, true, false, S, S, 7, Shift::Lsl, 0);
+        self.a.ret();
+    }
+
+    fn quick_hit(&mut self, q: &QuickFetch, halves: u32, slow: Label) {
+        self.bus_field(Field::Byte, false, 7, q.paused);
+        self.a.arith(true, true, false, 7, 2, 7, Shift::Lsl, 0);
+        self.a.sub_imm(true, false, 7, 7, halves);
+        self.a.tbz(true, 7, 63, slow);
+        self.bus_field(Field::Byte, true, ZR, q.branched);
+        self.a.sub_imm(false, false, 2, 2, halves);
+        self.bus_field(Field::Word, true, 2, q.count);
+        self.a.add_imm(false, false, 2, 1, 2 * halves);
+        self.bus_field(Field::Word, true, 2, q.head);
+        self.a.add_imm(true, false, 6, 6, 1);
+        self.bus_field(Field::Wide, true, 6, q.clock);
+        self.a.mov_imm(2, 1);
+    }
+
+    fn quick_flight(&mut self, q: &QuickFetch, slow: Label) {
+        self.a.add_imm(false, false, 2, 1, 2);
+        self.a.lsl(2, 2, 32 - q.rom_page.trailing_zeros());
+        self.a.cbz(false, 2, slow);
+        self.bus_field(Field::Byte, false, 2, q.branched);
+        self.bus_field(Field::Byte, false, 7, q.stuck);
+        self.a.logical(Logic::Orr, false, 2, 2, 7, Shift::Lsl, 0);
+        self.a.cbz(true, 2, slow);
+        self.a.arith(true, true, false, 2, 16, 6, Shift::Lsl, 0);
+        self.bus_field(Field::Byte, false, 7, q.following);
+        self.bus_field(Field::Wide, false, 16, q.since);
+        self.a.arith(true, true, false, 16, 16, 6, Shift::Lsl, 0);
+        self.a.lsr64(16, 16, 63);
+        self.a.logical(Logic::Orr, false, 7, 7, 16, Shift::Lsl, 0);
+        self.bus_field(Field::Word, false, 16, q.progress);
+        self.a.arith(true, true, false, 16, ZR, 16, Shift::Lsl, 0);
+        self.a.lsr64(16, 16, 63);
+        self.a.logical(Logic::Orr, false, 7, 7, 16, Shift::Lsl, 0);
+        self.bus_field(Field::Byte, true, 7, q.following);
+        self.bus_field(Field::Word, true, ZR, q.progress);
+        self.bus_field(Field::Wide, true, 6, q.since);
+        self.a.add_imm(false, false, 7, 1, 2);
+        self.bus_field(Field::Word, true, 7, q.head);
+        self.bus_field(Field::Word, false, 7, q.cost);
+        self.a.arith(true, false, false, 7, 6, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 7, q.due);
+    }
+
+    fn quick_settled(&mut self, q: &QuickFetch, slow: Label) {
+        let shift = 32 - q.rom_page.trailing_zeros();
+        let (top, settled, paused, hit) = (
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+        );
+        self.a.arith(true, true, false, 2, 6, 16, Shift::Lsl, 0);
+        self.bus_field(Field::Byte, false, 7, q.flowing);
+        self.a.cbz(false, 7, slow);
+        self.bus_field(Field::Byte, false, 7, q.stuck);
+        self.a.cbz(true, 7, slow);
+        self.bus_field(Field::Word, false, 7, q.cost);
+        self.a.cbz(false, 7, slow);
+        self.bus_field(Field::Word, false, 16, q.count);
+        self.a.bind(top);
+        self.a.add_imm(false, false, 16, 16, 1);
+        self.a.sub_imm(false, false, 17, 16, q.capacity);
+        self.a.cbz(false, 17, paused);
+        self.a.tbz(false, 17, 31, slow);
+        self.a.arith(false, false, false, 17, 1, 16, Shift::Lsl, 1);
+        self.a.lsl(17, 17, shift);
+        self.a.cbz(false, 17, slow);
+        self.a.arith(true, true, false, 17, 2, 7, Shift::Lsl, 0);
+        self.a.tbz(true, 17, 63, settled);
+        self.a.mov64(2, 17);
+        self.a.b(top);
+        self.a.bind(settled);
+        self.a.sub_imm(false, false, 16, 16, 1);
+        self.bus_field(Field::Word, true, 16, q.count);
+        self.bus_field(Field::Word, true, 2, q.progress);
+        self.a.arith(true, false, false, 16, 6, 7, Shift::Lsl, 0);
+        self.a.arith(true, true, false, 16, 16, 2, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 16, q.due);
+        self.a.b(hit);
+        self.a.bind(paused);
+        self.a.mov_imm(16, q.capacity - 1);
+        self.bus_field(Field::Word, true, 16, q.count);
+        self.bus_field(Field::Word, true, ZR, q.progress);
+        self.a.mov_imm(7, 1);
+        self.bus_field(Field::Byte, true, 7, q.paused);
+        self.bus_field(Field::Byte, true, ZR, q.flowing);
+        self.a.logical(Logic::Orn, true, 16, ZR, ZR, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 16, q.due);
+        self.a.bind(hit);
+        self.bus_field(Field::Wide, true, 6, q.since);
+        self.a.mov_imm(7, 1);
+        self.bus_field(Field::Byte, true, 7, q.following);
+        self.bus_field(Field::Byte, true, ZR, q.branched);
+        self.a.add_imm(false, false, 7, 1, 2);
+        self.bus_field(Field::Word, true, 7, q.head);
+        self.a.add_imm(true, false, 6, 6, 1);
+        self.bus_field(Field::Wide, true, 6, q.clock);
+        self.a.mov_imm(2, 1);
+    }
+
+    fn quick_elsewhere(&mut self, q: &QuickFetch, slow: Label) {
+        let o = self.o;
+        let bit = q.prefetch_bit.trailing_zeros();
+        let page_bits = q.rom_page.trailing_zeros();
+        let (known, first, priced) = (self.a.label(), self.a.label(), self.a.label());
+        self.bus_field(Field::Byte, false, 6, q.wait_bits + (bit / 8) as i32);
+        self.a.tbz(false, 6, bit % 8, slow);
+        self.bus_field(Field::Byte, false, 6, q.flowing);
+        self.a.cbz(true, 6, slow);
+        self.a.add_imm(false, false, 6, 1, 2);
+        self.a.lsl(6, 6, 32 - page_bits);
+        self.a.cbz(false, 6, slow);
+        self.a.sub_imm(false, false, 7, 0, KEEP);
+        self.a.cbz(true, 7, known);
+        self.a.ldr(true, 7, CTX, o.core);
+        self.a.ldrb(0, 7, o.next_fetch);
+        self.a.bind(known);
+        self.a.ubfx(6, 1, 25, 2);
+        self.a.tbz(false, 0, SEQUENTIAL.trailing_zeros(), first);
+        self.bus_field(Field::Byte, false, 7, q.force_n);
+        self.a.cbz(true, 7, first);
+        self.a.lsl(7, 1, 32 - page_bits);
+        self.a.cbz(false, 7, first);
+        self.bus_byte(2, 6, q.sequential_halves);
+        self.a.b(priced);
+        self.a.bind(first);
+        self.bus_byte(2, 6, q.first_halves);
+        self.a.bind(priced);
+        self.bus_byte(7, 6, q.sequential_halves);
+        self.bus_field(Field::Word, true, 7, q.cost);
+        self.bus_field(Field::Wide, false, 6, q.clock);
+        self.bus_field(Field::Wide, true, 6, q.since);
+        self.a.arith(true, false, false, 6, 6, 7, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 6, q.due);
+        self.a.lsr(6, 1, page_bits);
+        self.a.add_imm(false, false, 6, 6, 1);
+        self.a.ubfx(6, 6, 25 - page_bits, 2);
+        self.bus_byte(6, 6, q.sequential_halves);
+        self.bus_field(Field::Word, true, 6, q.page_cost);
+        self.a.add_imm(false, false, 6, 1, 2);
+        self.bus_field(Field::Word, true, 6, q.head);
+        self.restart(q, 7);
+    }
+
+    fn quick_drained(&mut self, q: &QuickFetch) {
+        self.stopped(q);
+        self.a.mov_imm(7, 1);
+        self.bus_field(Field::Byte, true, 7, q.force_n);
+        self.a.mov_imm(2, 1);
+    }
+
+    fn stopped(&mut self, q: &QuickFetch) {
+        self.bus_field(Field::Wide, true, 6, q.since);
+        self.a.add_imm(true, false, 6, 6, 1);
+        self.bus_field(Field::Wide, true, 6, q.clock);
+        self.a.logical(Logic::Orn, true, 16, ZR, ZR, Shift::Lsl, 0);
+        self.bus_field(Field::Wide, true, 16, q.due);
+        if q.packed() {
+            for zero in [q.head, q.count, q.parked] {
+                self.bus_field(Field::Wide, true, ZR, zero);
+            }
+            self.bus_field(Field::Word, true, ZR, q.active);
+            for off in [q.stuck, q.following] {
+                self.bus_field(Field::Byte, true, ZR, off);
+            }
+            return;
+        }
+        for zero in [q.head, q.count, q.progress, q.cost, q.page_cost, q.parked] {
+            self.bus_field(Field::Word, true, ZR, zero);
+        }
+        for off in [
+            q.paused,
+            q.branched,
+            q.active,
+            q.flowing,
+            q.stuck,
+            q.following,
+        ] {
+            self.bus_field(Field::Byte, true, ZR, off);
+        }
+    }
+
+    fn restart(&mut self, q: &QuickFetch, one: R) {
+        if q.packed() {
+            self.bus_field(Field::Wide, true, ZR, q.count);
+            self.bus_field(Field::Word, true, ZR, q.parked);
+            self.a.mov_imm(one, RESTARTED);
+            self.bus_field(Field::Wide, true, one, q.active);
+            return;
+        }
+        for zero in [q.count, q.progress, q.parked] {
+            self.bus_field(Field::Word, true, ZR, zero);
+        }
+        for off in [q.paused, q.branched, q.stuck, q.following, q.force_n] {
+            self.bus_field(Field::Byte, true, ZR, off);
+        }
+        self.a.mov_imm(one, 1);
+        for on in [q.active, q.flowing] {
+            self.bus_field(Field::Byte, true, one, on);
+        }
+    }
+
+    fn bus_field(&mut self, field: Field, store: bool, rt: R, offset: i32) {
+        let offset = offset as u32;
+        let scale = match field {
+            Field::Byte => 1,
+            Field::Word => 4,
+            Field::Wide => 8,
+        };
+        let (base, offset) = if offset.is_multiple_of(scale) && offset / scale < 0x1000 {
+            (4, offset)
+        } else {
+            self.a.mov_imm(17, offset);
+            self.a.arith(true, false, false, 17, 4, 17, Shift::Lsl, 0);
+            (17, 0)
+        };
+        match (field, store) {
+            (Field::Byte, false) => self.a.ldrb(rt, base, offset),
+            (Field::Byte, true) => self.a.strb(rt, base, offset),
+            (Field::Word, false) => self.a.ldr(false, rt, base, offset),
+            (Field::Word, true) => self.a.str(false, rt, base, offset),
+            (Field::Wide, false) => self.a.ldr(true, rt, base, offset),
+            (Field::Wide, true) => self.a.str(true, rt, base, offset),
+        }
+    }
+
     fn fetch_flat(&mut self, helper: usize) {
         let o = self.o;
+        if let Some(quick) = o.quick {
+            let slow = self.a.label();
+            self.flat_iwram(&quick, slow);
+            self.a.bind(slow);
+        }
         let known = self.a.label();
         self.a.push_pair(8, 9, SAVED);
         self.a.pair(false, true, 10, 11, SP, 16);

@@ -26,6 +26,7 @@ chmod +x "$APP/Contents/MacOS/citrine"
 
 cp "$ROOT/crates/citrine-gb-app/assets/icon.icns" "$APP/Contents/Resources/icon.icns"
 cp "$ROOT/LICENSE"              "$APP/Contents/Resources/LICENSE"
+cp "$ROOT/NOTICE.md"            "$APP/Contents/Resources/NOTICE.md"
 sed "s/__VERSION__/${VERSION}/g" "$ROOT/crates/citrine-gb-app/macos/Info.plist" > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 

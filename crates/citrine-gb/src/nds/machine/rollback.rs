@@ -3,6 +3,7 @@ use crate::console::Rollback;
 use crate::error::GbResult;
 use crate::nds::sound::output::Output;
 use crate::netplay::state::CheckHash;
+use crate::utils::unsaved;
 
 impl Rollback for Nds {
     fn clone_state(&self) -> Nds {
@@ -100,9 +101,7 @@ impl Rollback for Nds {
     }
 
     fn state_hash(&self, _scratch: &mut Nds) -> u64 {
-        let mut hash = CheckHash::new();
-        self.write_hashed(&mut hash);
-        hash.finish()
+        self.check_hash()
     }
 
     fn encode_state(&self) -> GbResult<Vec<u8>> {
@@ -125,5 +124,15 @@ impl Rollback for Nds {
 
     fn set_muted(&mut self, muted: bool) {
         self.buses.set_sound_muted(muted);
+    }
+}
+
+impl Nds {
+    pub(crate) fn check_hash(&self) -> u64 {
+        unsaved::hashing(|| {
+            let mut hash = CheckHash::new();
+            self.write_hashed(&mut hash);
+            hash.finish()
+        })
     }
 }

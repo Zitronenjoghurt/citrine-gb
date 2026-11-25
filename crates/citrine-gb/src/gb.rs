@@ -245,6 +245,10 @@ impl GameBoy {
         self.ppu.write_naive(0xFF6A, 0x90);
     }
 
+    pub fn set_boot_rom(&mut self, rom: Option<&[u8]>) {
+        self.boot_rom.rom = rom.map(<[u8]>::to_vec).unwrap_or_default();
+    }
+
     pub fn load_boot_rom(&mut self, rom: &[u8]) {
         let sample_rate = self.apu.output_sample_rate;
         let muted_channels = self.apu.muted_channels;
@@ -539,6 +543,10 @@ impl GameBoy {
         self.cartridge.set_tilt(x, y);
     }
 
+    pub fn has_huc3_clock(&self) -> bool {
+        self.cartridge.header.cartridge_type == Some(crate::rom::header::RomCartridgeType::HuC3)
+    }
+
     pub fn has_rumble(&self) -> bool {
         self.cartridge.has_rumble()
     }
@@ -580,7 +588,7 @@ impl GameBoy {
     #[cfg(feature = "persistence")]
     pub fn dump_full(&mut self, now: u64) -> GbResult<Vec<u8>> {
         let sram = self.poll_sram_dump(true, now);
-        let dump_ref = super::persistence::full_dump::FullDumpRef { gb: self, sram };
+        let dump_ref = self.full_dump(sram);
         #[cfg(feature = "brotli")]
         {
             dump_ref.to_brotli()
@@ -594,8 +602,20 @@ impl GameBoy {
     #[cfg(all(feature = "persistence", feature = "serde_json"))]
     pub fn dump_json(&mut self, now: u64) -> GbResult<String> {
         let sram = self.poll_sram_dump(true, now);
-        let dump_ref = super::persistence::full_dump::FullDumpRef { gb: self, sram };
+        let dump_ref = self.full_dump(sram);
         dump_ref.to_json_pretty()
+    }
+
+    #[cfg(feature = "persistence")]
+    pub(crate) fn full_dump(
+        &self,
+        sram: Option<crate::persistence::sram_dump::SramDump>,
+    ) -> crate::persistence::full_dump::FullDumpRef<'_> {
+        crate::persistence::full_dump::FullDumpRef {
+            gb: self,
+            sram,
+            game: crate::utils::digest::game_key(self.cartridge.pristine_rom()),
+        }
     }
 
     #[cfg(feature = "persistence")]
@@ -610,15 +630,25 @@ impl GameBoy {
                 super::persistence::full_dump::FullDump::from_rmp(data)?
             }
         };
+        Self::from_full_dump(dump, rom, now)
+    }
 
+    #[cfg(feature = "persistence")]
+    pub(crate) fn from_full_dump(
+        dump: super::persistence::full_dump::FullDump,
+        rom: &Rom,
+        now: u64,
+    ) -> GbResult<Self> {
+        crate::persistence::state::check_game(dump.game, &rom.data)?;
         let mut gb = dump.gb;
         gb.cartridge.restore_rom(rom)?;
         gb.memory.ensure_wram_banks(gb.model);
         gb.cgb.ensure_model(gb.model);
         gb.apu.restore(gb.model);
+        gb.ppu.clamp_loaded();
         gb.serial.forget_link();
         if let Some(sram) = dump.sram {
-            gb.put_sram_dump(sram, now);
+            gb.cartridge.put_state_sram_dump(sram, now);
         }
 
         Ok(gb)

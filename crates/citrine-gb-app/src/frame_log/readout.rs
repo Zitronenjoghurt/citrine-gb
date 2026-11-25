@@ -106,7 +106,9 @@ pub fn readout(samples: &VecDeque<FrameSample>) -> Option<Readout> {
     let budget = newest.budget;
     let rate = 1.0 / budget.game.as_secs_f64();
     let fps = per_second(
-        within(FPS_WINDOW).map(|sample| sample.game_frames).sum(),
+        within(FPS_WINDOW)
+            .filter(|sample| sample.game_frames > 0)
+            .count() as u64,
         FPS_WINDOW,
     );
     let game_frames: u64 = within(WINDOW).map(|sample| sample.game_frames).sum();
@@ -232,6 +234,29 @@ mod tests {
         assert!((refresh - 180.0).abs() < 0.01, "{refresh}");
         let low = readout.low.unwrap();
         assert!((low - 45.0).abs() < 0.1, "{low}");
+    }
+
+    #[test]
+    fn frames_that_reach_the_screen_in_one_update_count_once() {
+        let mut samples = VecDeque::new();
+        for refresh in 0..10 * 180 {
+            let slot = refresh % 30;
+            let frames = match slot {
+                5 => 0,
+                8 => 2,
+                _ if slot % 3 == 2 => 1,
+                _ => 0,
+            };
+            samples.push_back(sample(
+                REFRESH * (refresh + 1),
+                frames,
+                u64::from(slot == 5),
+            ));
+        }
+        let emulated: u64 = samples.iter().map(|sample| sample.game_frames).sum();
+        assert_eq!(emulated, 600);
+        let readout = readout(&samples).unwrap();
+        assert!((readout.fps - 54.0).abs() < 1.0, "{}", readout.fps);
     }
 
     #[test]

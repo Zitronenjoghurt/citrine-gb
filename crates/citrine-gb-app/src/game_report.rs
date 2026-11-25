@@ -178,6 +178,7 @@ fn firmware_info(firmware: &citrine_gb::machine::Firmware) -> FirmwareInfo {
     #[cfg_attr(not(feature = "gba"), expect(unused_mut))]
     let mut info = FirmwareInfo {
         gb_boot_rom_sha1: firmware.gb_boot_rom.as_deref().map(sha1),
+        gbc_boot_rom_sha1: firmware.gbc_boot_rom.as_deref().map(sha1),
         ..FirmwareInfo::default()
     };
     #[cfg(feature = "gba")]

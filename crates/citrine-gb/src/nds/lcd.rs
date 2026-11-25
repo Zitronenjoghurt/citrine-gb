@@ -66,6 +66,11 @@ impl Lcd {
         }
     }
 
+    pub fn until_vblank(&self) -> u32 {
+        let lines = (VISIBLE_LINES + LINES - self.line - 1) % LINES;
+        u32::from(lines) * LINE_CYCLES + LINE_CYCLES - self.dot
+    }
+
     pub fn in_vblank(&self) -> bool {
         (VISIBLE_LINES..LAST_LINE).contains(&self.line)
     }

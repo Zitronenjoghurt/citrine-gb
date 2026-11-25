@@ -1,21 +1,26 @@
 mod common;
 
-use citrine_gb_nds_gpu::{Antialiasing, Picture, Textures, Upscale};
+use citrine_gb_nds_gpu::{Antialiasing, Mipmaps, Picture, Textures, Upscale};
 use common::{Gpu, Scene, scenes};
 
 fn smooth(gpu: &mut Gpu, scene: &Scene, scale: u32) -> Picture {
+    smooth_with(gpu, scene, scale, Textures::Smooth)
+}
+
+fn smooth_with(gpu: &mut Gpu, scene: &Scene, scale: u32, textures: Textures) -> Picture {
     gpu.render_with(
         scene,
         Upscale {
             scale,
             antialiasing: Antialiasing::Off,
-            textures: Textures::Smooth,
+            textures,
+            mipmaps: Mipmaps::Off,
         },
     )
 }
 
 #[test]
-fn smooth_cut_out_edges_have_no_dark_fringe() {
+fn smooth_cut_out_edges_stay_opaque_without_a_dark_fringe() {
     let Some(mut gpu) = Gpu::open() else {
         return;
     };
@@ -34,7 +39,7 @@ fn smooth_cut_out_edges_have_no_dark_fringe() {
                 }
             }
         }
-        assert!(partial > 0, "{scale}x: the cut-out edge was not smoothed");
+        assert_eq!(partial, 0, "{scale}x: translucent cut-out pixels");
         assert!(darker.is_empty(), "{scale}x: darker pixels {darker:?}");
     }
 }
@@ -50,6 +55,41 @@ fn nearest_cut_out_edges_stay_hard() {
         .filter(|&(x, y)| (1..31).contains(&picture.pixel(x, y).alpha))
         .count();
     assert_eq!(partial, 0);
+}
+
+#[test]
+fn filtered_cut_out_edges_keep_the_edge_marks_of_nearest() {
+    let Some(mut gpu) = Gpu::open() else {
+        return;
+    };
+    let last_dark =
+        |picture: &Picture, y: usize| (0..picture.width()).rfind(|&x| picture.pixel(x, y).r < 32);
+    for blending in [false, true] {
+        let scene = scenes::edge_marked_cut_out(blending);
+        let nearest = gpu.render(&scene, 4);
+        for textures in [Textures::Smooth, Textures::Bicubic, Textures::Xbr] {
+            let picture = smooth_with(&mut gpu, &scene, 4, textures);
+            let (mut partial, mut marked, mut moved) = (0, 0, Vec::new());
+            for y in 0..picture.height() {
+                partial += (0..picture.width())
+                    .filter(|&x| (1..31).contains(&picture.pixel(x, y).alpha))
+                    .count();
+                match (last_dark(&nearest, y), last_dark(&picture, y)) {
+                    (Some(sharp), Some(filtered)) if sharp.abs_diff(filtered) <= 8 => marked += 1,
+                    (None, None) => {}
+                    pair if moved.len() < 5 => moved.push((y, pair)),
+                    _ => {}
+                }
+            }
+            let case = format!("{textures:?}, blending {blending}");
+            assert_eq!(partial, 0, "{case}: translucent cut-out pixels");
+            assert!(marked > 0, "{case}: no edge marks");
+            assert!(
+                moved.is_empty(),
+                "{case}: rows where the edge mark moved {moved:?}"
+            );
+        }
+    }
 }
 
 struct Row {

@@ -39,6 +39,32 @@ impl Db {
         Ok((count as u64, bytes as u64))
     }
 
+    pub async fn sent_bytes(&self, from: i64) -> Result<u64> {
+        let n = sqlx::query_scalar!(
+            r#"SELECT COALESCE(SUM(LENGTH(body) + 64), 0) AS "n!: i64" FROM messages WHERE from_id = ?1"#,
+            from,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n as u64)
+    }
+
+    pub async fn trim_sent(&self, from: i64, keep: u64) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM messages WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, SUM(LENGTH(body) + 64) OVER (ORDER BY id DESC) AS newer
+                    FROM messages WHERE from_id = ?1
+                ) WHERE newer > ?2
+             ) AND NOT EXISTS (SELECT 1 FROM message_deliveries d WHERE d.message_id = messages.id)",
+        )
+        .bind(from)
+        .bind(i64::try_from(keep).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn insert_message(
         &self,
         from: i64,
@@ -311,6 +337,33 @@ mod tests {
         db.ack_messages(b_web, &[first, second]).await.unwrap();
         assert_eq!(db.waiting_between(a.id, b.id).await.unwrap(), (0, 0));
         assert_eq!(db.stored_messages().await.unwrap(), (2, 6));
+    }
+
+    #[tokio::test]
+    async fn trimming_drops_only_the_oldest_delivered_messages() {
+        let (_dir, db) = db().await;
+        let a = account(&db, 1, "a").await;
+        let b = account(&db, 2, "b").await;
+        let b_mac = db.add_device(b.id, &[3; 32], "Mac", 5).await.unwrap();
+        let mut ids = Vec::new();
+        for at in 1..=4 {
+            let id = db
+                .insert_message(a.id, b.id, None, at, None, &sealed(at as u8))
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        assert_eq!(db.sent_bytes(a.id).await.unwrap(), 4 * 67);
+        db.trim_sent(a.id, 67).await.unwrap();
+        assert_eq!(db.sent_bytes(a.id).await.unwrap(), 4 * 67);
+        db.ack_messages(b_mac, &ids[1..3]).await.unwrap();
+        db.trim_sent(a.id, 67).await.unwrap();
+        assert_eq!(db.sent_bytes(a.id).await.unwrap(), 2 * 67);
+        let left = db.pending_messages(b_mac, 0, 10).await.unwrap();
+        assert_eq!(
+            left.iter().map(|m| m.id).collect::<Vec<_>>(),
+            [ids[0], ids[3]]
+        );
     }
 
     #[tokio::test]

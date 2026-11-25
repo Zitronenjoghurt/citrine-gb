@@ -286,7 +286,7 @@ mod tests {
     const KEY: &str = "GAME";
 
     fn store(name: &str) -> (SaveStore, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::storage::scratch_dir().join(format!(
             "citrine-autosave-test-{}-{name}",
             std::process::id()
         ));

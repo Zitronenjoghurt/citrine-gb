@@ -267,6 +267,15 @@ impl Hub {
         true
     }
 
+    pub fn send_speaking(&self, user: i64, protocol: u16, msg: ServerMsg) {
+        let state = self.state();
+        for conn in state.conns.get(&user).into_iter().flatten() {
+            if conn.protocol >= protocol {
+                conn.push(msg.clone());
+            }
+        }
+    }
+
     pub fn send_others(&self, user: i64, conn_id: u64, msg: ServerMsg) {
         let state = self.state();
         for conn in state.conns.get(&user).into_iter().flatten() {

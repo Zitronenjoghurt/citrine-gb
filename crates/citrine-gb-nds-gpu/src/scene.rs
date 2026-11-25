@@ -1,7 +1,9 @@
-use citrine_gb::nds::geometry::frame::{Frame, Polygon, SUBPIXEL_BITS};
+use citrine_gb::nds::geometry::frame::{Frame, MAX_POLYGON_VERTICES, Polygon, SUBPIXEL_BITS};
 use citrine_gb::nds::render::texture::{PALETTE_SIZE, TEXTURE_SIZE, TextureMemory};
 use citrine_gb::nds::render::{Attribute, Pixel};
 use citrine_gb::nds::video::{HEIGHT, WIDTH};
+
+use crate::atlas::{self, Atlas};
 
 pub const DATA_WIDTH: u32 = 1024;
 pub const TILE: usize = 8;
@@ -10,8 +12,12 @@ pub const TILES_Y: usize = HEIGHT / TILE;
 
 const HEADER_WORDS: usize = 12;
 const VERTEX_WORDS: usize = 8;
+const PLACE_WORD: usize = 6;
 const MASK_WORDS: usize = HEIGHT / 32;
 const SHADOW: u32 = 3;
+const DECAL: u32 = 1;
+const FORMAT_SHIFT: u32 = 26;
+const COLOR_0_CLEAR: u32 = 1 << 29;
 const MODE_SHIFT: u32 = 4;
 const ID_SHIFT: u32 = 24;
 const ID_MASK: u32 = 0x3F;
@@ -19,6 +25,13 @@ const BOUNDS_MARGIN: i32 = 2;
 const ENTRY_WORDS: usize = 4;
 const ENTRY_TRANSLUCENT: u32 = 1 << 31;
 const ENTRY_MASK: u32 = 1 << 30;
+const DEPTH_EQUAL: u32 = 1 << 14;
+const ALPHA_SHIFT: u32 = 16;
+const ALPHA_MASK: u32 = 31;
+const CLOCKWISE: u32 = 1 << 20;
+const NO_AREA: u32 = 1 << 21;
+const SLAB: u32 = 1 << 31;
+const EXACT: u32 = 1 << 30;
 const ROW_WORDS: usize = DATA_WIDTH as usize * 4;
 const HEADS: usize = TILES_X * TILES_Y * 2;
 const VRAM_AT: usize = HEADS;
@@ -31,6 +44,8 @@ pub struct Offsets {
     pub bins: u32,
     pub vram: u32,
     pub palette: u32,
+    pub tail: u32,
+    pub atlas: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +59,146 @@ enum Kind {
 #[derive(Debug, Default)]
 pub struct Scene {
     pub words: Vec<u32>,
+    pub hardware: Vec<[u32; 2]>,
+    pub slabs: u32,
+    pub smooth: bool,
+    pub upscaled: bool,
+    pub mipmaps: bool,
+    pub atlased: bool,
+    pub atlas_limit: u32,
+    pub atlas: Atlas,
+    places: Vec<(usize, usize)>,
+    backs: Vec<[u32; 2]>,
+    slabs_front: Vec<[u32; 2]>,
+    slabs_back: Vec<[u32; 2]>,
+    cut_slabs_front: Vec<[u32; 2]>,
+    cut_slabs_back: Vec<[u32; 2]>,
+    cut_fronts: Vec<[u32; 2]>,
+    cut_backs: Vec<[u32; 2]>,
     bins: Vec<Vec<([u32; ENTRY_WORDS], Kind)>>,
+    tails: Vec<u32>,
     filled: bool,
     textures_changed: bool,
+}
+
+struct Outline {
+    points: [[u32; 2]; MAX_POLYGON_VERTICES],
+    count: usize,
+    bounds: [u32; 2],
+    top: usize,
+    bottom: usize,
+    winding: u32,
+    columns: std::ops::Range<usize>,
+    rows: std::ops::Range<usize>,
+}
+
+impl Outline {
+    fn new(frame: &Frame, polygon: &Polygon) -> Self {
+        let count = usize::from(polygon.count);
+        let mut points = [[0u32; 2]; MAX_POLYGON_VERTICES];
+        let (mut low, mut high) = ([u32::MAX; 2], [0u32; 2]);
+        let (mut near, mut far) = ([i32::MAX; 2], [i32::MIN; 2]);
+        let (mut top, mut bottom) = (0, 0);
+        let (mut top_y, mut bottom_y) = (u32::MAX, 0);
+        for (index, point) in points[..count].iter_mut().enumerate() {
+            let vertex = frame.vertex(polygon, index);
+            *point = [0, 1].map(|axis| {
+                (u32::from(vertex.screen[axis]) << SUBPIXEL_BITS) + u32::from(vertex.subpixel[axis])
+            });
+            let y = (u32::from(vertex.screen[1]) << SUBPIXEL_BITS) | u32::from(vertex.subpixel[1]);
+            if index == 0 || y < top_y {
+                (top, top_y) = (index, y);
+            }
+            if index == 0 || y >= bottom_y {
+                (bottom, bottom_y) = (index, y);
+            }
+            for axis in 0..2 {
+                low[axis] = low[axis].min(point[axis]);
+                high[axis] = high[axis].max(point[axis]);
+                near[axis] = near[axis].min(i32::from(vertex.screen[axis]));
+                far[axis] = far[axis].max(i32::from(vertex.screen[axis]));
+            }
+        }
+        let area: i64 = (0..count)
+            .map(|index| {
+                let [ax, ay] = points[index].map(i64::from);
+                let [bx, by] = points[(index + 1) % count].map(i64::from);
+                ax * by - bx * ay
+            })
+            .sum();
+        let winding = match area {
+            0 => NO_AREA,
+            area if area < 0 => CLOCKWISE,
+            _ => 0,
+        };
+        let corner = |[x, y]: [u32; 2]| (x & 0xFFFF) | (y & 0xFFFF) << 16;
+        let tile = |value: i32, limit: usize| (value.max(0) as usize / TILE).min(limit);
+        let span = |axis: usize, tiles: usize| {
+            tile(near[axis] - BOUNDS_MARGIN, tiles)..tile(far[axis] + BOUNDS_MARGIN, tiles - 1) + 1
+        };
+        Self {
+            points,
+            count,
+            bounds: [corner(low), corner(high)],
+            top,
+            bottom,
+            winding,
+            columns: span(0, TILES_X),
+            rows: span(1, TILES_Y),
+        }
+    }
+
+    fn chain(&self, y: u32, forward: bool) -> [usize; 2] {
+        let step = |index: usize| {
+            if forward {
+                (index + 1) % self.count
+            } else {
+                (index + self.count - 1) % self.count
+            }
+        };
+        let (mut start, mut stop) = (self.top, step(self.top));
+        for _ in 0..self.count {
+            if y < self.points[stop][1] || start == self.bottom {
+                break;
+            }
+            (start, stop) = (stop, step(stop));
+        }
+        [start, stop]
+    }
+
+    fn slabs(&self, front: bool, mut push: impl FnMut(u32)) {
+        if self.count < 3 || self.winding == NO_AREA {
+            return;
+        }
+        let mut order = [0usize; MAX_POLYGON_VERTICES];
+        let order = &mut order[..self.count];
+        for (index, slot) in order.iter_mut().enumerate() {
+            *slot = index;
+        }
+        order.sort_unstable_by_key(|&index| self.points[index][1]);
+        for pair in order.windows(2) {
+            let [upper, lower] = [pair[0], pair[1]];
+            let y = self.points[upper][1];
+            if y == self.points[lower][1] {
+                continue;
+            }
+            let [left, right] = [self.chain(y, front), self.chain(y, !front)];
+            let ends = [left[0], left[1], right[0], right[1], upper, lower];
+            let packed = ends.iter().enumerate().fold(SLAB, |word, (slot, &index)| {
+                word | (index as u32) << (slot * 4)
+            });
+            push(packed);
+        }
+    }
+
+    fn convex(&self) -> bool {
+        let at = |index: usize| self.points[index % self.count].map(i64::from);
+        let mut turns = (0..self.count).map(|index| {
+            let [a, b, c] = [at(index), at(index + 1), at(index + 2)];
+            (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+        });
+        turns.clone().all(|turn| turn >= 0) || turns.all(|turn| turn <= 0)
+    }
 }
 
 impl Scene {
@@ -58,43 +210,100 @@ impl Scene {
         self.filled = true;
         self.bins.resize_with(TILES_X * TILES_Y, Vec::new);
         self.bins.iter_mut().for_each(Vec::clear);
-        let clears = mask_clears(frame);
-        for (index, polygon) in frame.polygons.iter().enumerate() {
+        self.hardware.clear();
+        self.backs.clear();
+        self.slabs_front.clear();
+        self.slabs_back.clear();
+        self.cut_slabs_front.clear();
+        self.cut_slabs_back.clear();
+        self.cut_fronts.clear();
+        self.cut_backs.clear();
+        self.atlas.clear();
+        self.places.clear();
+        let mut depth_mode = None;
+        let mut masked = [0u32; MASK_WORDS];
+        let mut masks = false;
+        for polygon in &frame.polygons {
             if !drawable(polygon) {
                 continue;
             }
+            let mask = is_mask(polygon);
+            let mut clears = [0; MASK_WORDS];
+            if mask || masks {
+                let rows = row_bits(frame, polygon);
+                for ((clears, masked), rows) in clears.iter_mut().zip(&mut masked).zip(rows) {
+                    if mask {
+                        *clears = rows & !*masked;
+                        *masked |= rows;
+                    } else {
+                        *masked &= !rows;
+                    }
+                }
+                masks |= mask;
+            }
+            let outline = Outline::new(frame, polygon);
             self.words.resize(self.words.len().next_multiple_of(4), 0);
             let record = self.words.len() as u32;
-            let [low, high] = self.push_record(frame, polygon, clears[index]);
+            self.push_record(frame, polygon, &outline, clears);
+            if self.atlased
+                && let Some(index) = self.atlas.add(polygon.texture, u32::from(polygon.palette))
+            {
+                self.places
+                    .push((record as usize + HEADER_WORDS + PLACE_WORD, index));
+            }
             let flags = if polygon.translucent {
                 ENTRY_TRANSLUCENT
             } else {
                 0
-            } | if is_mask(polygon) { ENTRY_MASK } else { 0 };
-            let entry = [record | flags, low, high, 0];
-            let (near, rows) = tiles(frame, polygon);
-            let mask = is_mask(polygon);
-            let columns = if mask { 0..TILES_X } else { near.clone() };
-            for row in rows {
+            } | if mask { ENTRY_MASK } else { 0 };
+            let drawn = hardware(polygon)
+                && outline.convex()
+                && *depth_mode.get_or_insert(polygon.w_buffer) == polygon.w_buffer;
+            if drawn {
+                let cut = self.smooth && cutout(polygon);
+                let (slabs, edges) = match (polygon.front, cut) {
+                    (true, false) => (&mut self.slabs_front, &mut self.hardware),
+                    (false, false) => (&mut self.slabs_back, &mut self.backs),
+                    (true, true) => (&mut self.cut_slabs_front, &mut self.cut_fronts),
+                    (false, true) => (&mut self.cut_slabs_back, &mut self.cut_backs),
+                };
+                edges.push([record, 0]);
+                if self.upscaled && !polygon.degenerate {
+                    let exact = if cut { EXACT } else { 0 };
+                    outline.slabs(polygon.front, |slab| slabs.push([record, slab | exact]));
+                }
+            }
+            let [low, high] = outline.bounds;
+            let entry = [record | flags, low, high, u32::from(!drawn)];
+            let plain = if mode(polygon) == SHADOW {
+                Kind::Shadow
+            } else {
+                Kind::Plain
+            };
+            let columns = if mask {
+                0..TILES_X
+            } else {
+                outline.columns.clone()
+            };
+            for row in outline.rows.clone() {
+                let far = Kind::FarMask {
+                    clears: (clears[row * TILE / 32] >> (row * TILE % 32)) as u8,
+                };
                 for column in columns.clone() {
                     let kind = if !mask {
-                        if mode(polygon) == SHADOW {
-                            Kind::Shadow
-                        } else {
-                            Kind::Plain
-                        }
-                    } else if near.contains(&column) {
+                        plain
+                    } else if outline.columns.contains(&column) {
                         Kind::Mask
                     } else {
-                        Kind::FarMask {
-                            clears: (clears[index][row * TILE / 32] >> (row * TILE % 32)) as u8,
-                        }
+                        far
                     };
                     self.bins[row * TILES_X + column].push((entry, kind));
                 }
             }
         }
-        self.bins.iter_mut().for_each(prune);
+        if masks {
+            self.bins.iter_mut().for_each(prune);
+        }
         self.words
             .resize(self.words.len().next_multiple_of(ENTRY_WORDS), 0);
         let bins = self.words.len() as u32;
@@ -104,8 +313,44 @@ impl Scene {
             self.words[tile * 2 + 1] = list.len() as u32;
             start += list.len() as u32;
         }
+        self.words
+            .reserve(start as usize * ENTRY_WORDS * 2 + HEADS + ROW_WORDS);
+        for (entry, _) in self.bins.iter().flatten() {
+            self.words.extend_from_slice(entry);
+        }
+        self.slabs = (self.slabs_front.len()
+            + self.slabs_back.len()
+            + self.cut_slabs_front.len()
+            + self.cut_slabs_back.len()) as u32;
+        self.slabs_front.append(&mut self.slabs_back);
+        self.slabs_front.append(&mut self.cut_slabs_front);
+        self.slabs_front.append(&mut self.cut_slabs_back);
+        self.slabs_front.append(&mut self.hardware);
+        self.slabs_front.append(&mut self.backs);
+        self.slabs_front.append(&mut self.cut_fronts);
+        self.slabs_front.append(&mut self.cut_backs);
+        std::mem::swap(&mut self.hardware, &mut self.slabs_front);
+        self.tails.clear();
         for list in &self.bins {
-            self.words.extend(list.iter().flat_map(|(entry, _)| entry));
+            let before = self.words.len();
+            for (entry, _) in list.iter().filter(|(entry, _)| entry[3] != 0) {
+                self.words.extend_from_slice(entry);
+            }
+            let count = ((self.words.len() - before) / ENTRY_WORDS) as u32;
+            self.tails.extend([start, count]);
+            start += count;
+        }
+        let tail = self.words.len() as u32;
+        self.words.extend_from_slice(&self.tails);
+        self.atlas.place(self.atlas_limit);
+        for &(at, index) in &self.places {
+            self.words[at] = self.atlas.word(index);
+        }
+        self.words
+            .resize(self.words.len().next_multiple_of(atlas::ENTRY_WORDS), 0);
+        let atlas = self.words.len() as u32;
+        for entry in self.atlas.entries() {
+            self.words.extend_from_slice(&entry);
         }
         self.words
             .resize(self.words.len().div_ceil(ROW_WORDS) * ROW_WORDS, 0);
@@ -113,6 +358,8 @@ impl Scene {
             bins,
             vram: VRAM_AT as u32,
             palette: PALETTE_AT as u32,
+            tail,
+            atlas,
         }
     }
 
@@ -126,6 +373,10 @@ impl Scene {
         } else {
             1..(RECORDS_AT / ROW_WORDS) as u32
         }
+    }
+
+    pub fn atlas_changed(&self) -> bool {
+        self.textures_changed || self.atlas.moved()
     }
 
     fn fill_textures<M: TextureMemory>(&mut self, memory: &M) -> bool {
@@ -148,51 +399,32 @@ impl Scene {
         &mut self,
         frame: &Frame,
         polygon: &Polygon,
+        outline: &Outline,
         clears: [u32; MASK_WORDS],
-    ) -> [u32; 2] {
-        let count = usize::from(polygon.count);
-        let fine_y = |index: usize| {
-            let vertex = frame.vertex(polygon, index);
-            (u32::from(vertex.screen[1]) << SUBPIXEL_BITS) | u32::from(vertex.subpixel[1])
-        };
-        let fine = |index: usize| {
-            let vertex = frame.vertex(polygon, index);
-            [0, 1].map(|axis| {
-                (u32::from(vertex.screen[axis]) << SUBPIXEL_BITS) + u32::from(vertex.subpixel[axis])
-            })
-        };
-        let corner = |pick: fn(u32, u32) -> u32| {
-            let [x, y] = (0..count)
-                .map(fine)
-                .reduce(|a, b| [pick(a[0], b[0]), pick(a[1], b[1])])
-                .unwrap_or([0, 0]);
-            (x & 0xFFFF) | (y & 0xFFFF) << 16
-        };
-        let fine_top = (0..count).min_by_key(|&index| fine_y(index)).unwrap_or(0);
-        let fine_bottom = (0..count).max_by_key(|&index| fine_y(index)).unwrap_or(0);
-        let flags = u32::from(polygon.palette)
+    ) {
+        let flags = outline.winding
+            | u32::from(polygon.palette)
             | u32::from(polygon.front) << 16
             | u32::from(polygon.w_buffer) << 17
             | u32::from(polygon.degenerate) << 18
             | u32::from(polygon.translucent) << 19;
-        let shape = count as u32
+        let shape = outline.count as u32
             | u32::from(polygon.top) << 8
             | u32::from(polygon.bottom) << 16
-            | (fine_top as u32) << 24
-            | (fine_bottom as u32) << 28;
+            | (outline.top as u32) << 24
+            | (outline.bottom as u32) << 28;
         self.words
             .extend_from_slice(&[polygon.attributes, polygon.texture, flags, shape]);
         self.words.extend_from_slice(&clears);
-        let bounds = [corner(u32::min), corner(u32::max)];
-        self.words.extend_from_slice(&bounds);
+        self.words.extend_from_slice(&outline.bounds);
         debug_assert_eq!(6 + MASK_WORDS, HEADER_WORDS);
-        for index in 0..count {
+        for (index, point) in outline.points[..outline.count].iter().enumerate() {
             let vertex = frame.vertex(polygon, index);
             let [r, g, b] = vertex.color.map(u32::from);
             let [s, t] = vertex.texcoord.map(|value| u32::from(value as u16));
             let vertex_words: [u32; VERTEX_WORDS] = [
                 u32::from(vertex.screen[0]) | u32::from(vertex.screen[1]) << 16,
-                fine(index)[0] | fine(index)[1] << 16,
+                point[0] | point[1] << 16,
                 polygon.depth[index] as u32,
                 polygon.w[index] as u32,
                 r | g << 8 | b << 16,
@@ -202,7 +434,6 @@ impl Scene {
             ];
             self.words.extend_from_slice(&vertex_words);
         }
-        bounds
     }
 }
 
@@ -277,6 +508,22 @@ fn drawable(polygon: &Polygon) -> bool {
     !polygon.degenerate && polygon.count >= 3
 }
 
+fn hardware(polygon: &Polygon) -> bool {
+    !polygon.translucent
+        && mode(polygon) != SHADOW
+        && polygon.attributes & DEPTH_EQUAL == 0
+        && (polygon.attributes >> ALPHA_SHIFT) & ALPHA_MASK == ALPHA_MASK
+}
+
+fn cutout(polygon: &Polygon) -> bool {
+    let holed = match (polygon.texture >> FORMAT_SHIFT) & 7 {
+        5 | 7 => true,
+        2..=4 => polygon.texture & COLOR_0_CLEAR != 0,
+        _ => false,
+    };
+    holed && mode(polygon) != DECAL
+}
+
 fn mode(polygon: &Polygon) -> u32 {
     (polygon.attributes >> MODE_SHIFT) & 3
 }
@@ -311,50 +558,19 @@ fn prune(list: &mut Vec<([u32; ENTRY_WORDS], Kind)>) {
     list.retain(|_| kept.next().unwrap_or(true));
 }
 
-fn screen(frame: &Frame, polygon: &Polygon, index: u8) -> [i32; 2] {
-    frame
-        .vertex(polygon, usize::from(index))
-        .screen
-        .map(i32::from)
-}
-
-fn on_row(frame: &Frame, polygon: &Polygon, y: i32) -> bool {
-    let top = screen(frame, polygon, polygon.top)[1];
-    let bottom = screen(frame, polygon, polygon.bottom)[1];
-    (top..bottom).contains(&y) || (top == bottom && y == top)
-}
-
-fn mask_clears(frame: &Frame) -> Vec<[u32; MASK_WORDS]> {
-    let mut clears = vec![[0; MASK_WORDS]; frame.polygons.len()];
-    for y in 0..HEIGHT {
-        let mut after_mask = false;
-        for (index, polygon) in frame.polygons.iter().enumerate() {
-            if !drawable(polygon) || !on_row(frame, polygon, y as i32) {
-                continue;
-            }
-            let mask = is_mask(polygon);
-            if mask && !after_mask {
-                clears[index][y / 32] |= 1 << (y % 32);
-            }
-            after_mask = mask;
+fn row_bits(frame: &Frame, polygon: &Polygon) -> [u32; MASK_WORDS] {
+    let y = |index: u8| usize::from(frame.vertex(polygon, usize::from(index)).screen[1]);
+    let (top, bottom) = (y(polygon.top), y(polygon.bottom));
+    let end = if top == bottom { top + 1 } else { bottom }.min(HEIGHT);
+    let mut bits = [0; MASK_WORDS];
+    for (word, bits) in bits.iter_mut().enumerate() {
+        let low = top.max(word * 32);
+        let high = end.min(word * 32 + 32);
+        if low < high {
+            *bits = (u32::MAX >> (32 - (high - low))) << (low - word * 32);
         }
     }
-    clears
-}
-
-fn tiles(frame: &Frame, polygon: &Polygon) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
-    let points = (0..polygon.count).map(|index| screen(frame, polygon, index));
-    let (mut left, mut top, mut right, mut bottom) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for [x, y] in points {
-        left = left.min(x);
-        right = right.max(x);
-        top = top.min(y);
-        bottom = bottom.max(y);
-    }
-    let tile = |value: i32, limit: usize| (value.max(0) as usize / TILE).min(limit);
-    let columns = tile(left - BOUNDS_MARGIN, TILES_X)..tile(right + BOUNDS_MARGIN, TILES_X - 1) + 1;
-    let rows = tile(top - BOUNDS_MARGIN, TILES_Y)..tile(bottom + BOUNDS_MARGIN, TILES_Y - 1) + 1;
-    (columns, rows)
+    bits
 }
 
 #[cfg(test)]
@@ -391,6 +607,21 @@ mod tests {
         polygon.top = (0..points.len()).min_by_key(|&i| points[i][1]).unwrap() as u8;
         polygon.bottom = (0..points.len()).max_by_key(|&i| points[i][1]).unwrap() as u8;
         frame.polygons.push(polygon);
+    }
+
+    fn mask_clears(frame: &Frame) -> Vec<[u32; MASK_WORDS]> {
+        let mut scene = Scene::default();
+        scene.pack(frame, &Blank);
+        let mut at = RECORDS_AT;
+        frame
+            .polygons
+            .iter()
+            .map(|polygon| {
+                let clears = scene.words[at + 4..at + 4 + MASK_WORDS].try_into().unwrap();
+                at += HEADER_WORDS + usize::from(polygon.count) * VERTEX_WORDS;
+                clears
+            })
+            .collect()
     }
 
     fn tile_counts(scene: &Scene) -> Vec<u32> {

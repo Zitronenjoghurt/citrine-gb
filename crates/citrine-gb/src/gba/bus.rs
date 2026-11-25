@@ -175,6 +175,8 @@ impl Bus {
             return self.load_bios(&bios);
         }
         self.bios = bios;
+        #[cfg(jit)]
+        self.code.moved();
         self.open_bus
             .latch_bios(read_le(&self.bios, BIOS_BOOT_LATCH, Width::Word));
     }
@@ -213,8 +215,10 @@ impl Bus {
             owed,
             quiet,
             #[cfg(jit)]
-                code: _,
+            code,
         } = self;
+        #[cfg(jit)]
+        code.moved();
         ewram.copy_from(&source.ewram);
         iwram.copy_from(&source.iwram);
         io.copy_from_slice(&source.io);
@@ -248,6 +252,22 @@ impl Bus {
         slot.vram.snapshot_from(&mut self.vram);
     }
 
+    #[cfg(feature = "persistence")]
+    pub(crate) fn has_hardware_sizes(&self) -> bool {
+        self.ewram.len() == EWRAM_SIZE
+            && self.iwram.len() == IWRAM_SIZE
+            && self.io.len() == IO_SIZE
+            && self.palette.len() == PALETTE_SIZE
+            && self.vram.len() == VRAM_SIZE
+            && self.oam.len() == OAM_SIZE
+    }
+
+    pub(crate) fn clamp_loaded(&mut self) {
+        self.interrupts.clamp_loaded();
+        self.ppu.clamp_loaded();
+        self.sound.clamp_loaded();
+    }
+
     pub fn adopt_rom(&mut self, source: &Bus) -> bool {
         let changed = !Arc::ptr_eq(&self.rom, &source.rom);
         if changed {
@@ -259,6 +279,8 @@ impl Bus {
         self.patches.clone_from(&source.patches);
         if !Arc::ptr_eq(&self.bios, &source.bios) {
             self.bios = Arc::clone(&source.bios);
+            #[cfg(jit)]
+            self.code.moved();
         }
         changed
     }
@@ -327,6 +349,14 @@ impl Bus {
 
     pub fn dma(&self) -> Dma {
         self.dma
+    }
+
+    pub fn iwram(&self) -> &[u8] {
+        &self.iwram
+    }
+
+    pub fn ewram(&self) -> &[u8] {
+        &self.ewram
     }
 
     pub fn backup(&self) -> &Backup {
@@ -867,6 +897,34 @@ mod tests {
 
     fn bus() -> Bus {
         Bus::new(&rom_counting(0x100))
+    }
+
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn a_state_whose_memory_sizes_differ_from_the_hardware_is_refused() {
+        use crate::console::Console;
+        use crate::gba::machine::Gba;
+        let program = rom_counting(0x100);
+        let wrong: [fn(&mut Bus); 10] = [
+            |bus| bus.ewram = Paged::zeroed(EWRAM_SIZE * 2),
+            |bus| bus.ewram = Paged::zeroed(0x1000),
+            |bus| bus.iwram = Paged::zeroed(IWRAM_SIZE * 2),
+            |bus| bus.iwram = Paged::zeroed(0),
+            |bus| bus.vram = Paged::zeroed(0x1000),
+            |bus| bus.io = zeroed(0x10),
+            |bus| bus.palette = zeroed(PALETTE_SIZE * 2),
+            |bus| bus.oam = zeroed(0),
+            |bus| bus.vram = Paged::zeroed(VRAM_SIZE * 2),
+            |bus| bus.io = zeroed(IO_SIZE * 2),
+        ];
+        for (index, wrong) in wrong.into_iter().enumerate() {
+            let mut gba = Gba::new(&program);
+            wrong(gba.bus_mut());
+            let state = gba.save_state(0).unwrap();
+            assert!(Gba::new(&program).restore(&state).is_err(), "case {index}");
+        }
+        let state = Gba::new(&program).save_state(0).unwrap();
+        assert!(Gba::new(&program).restore(&state).is_ok());
     }
 
     #[test]
@@ -1586,7 +1644,7 @@ mod tests {
     #[test]
     fn iwram_runs_match_fetching_one_at_a_time() {
         let rom = rom_counting(0x4_0000);
-        let mut flat = 0;
+        let (mut flat, mut idled) = (0, 0);
         for seed in 1..=64u32 {
             let mut rng = Xorshift(seed.wrapping_mul(0x85EB_CA6B));
             let mut fast = Bus::new(&rom);
@@ -1641,11 +1699,22 @@ mod tests {
                             [rng.below(4) as usize];
                         let addr = base + step_bytes * rng.below(8);
                         let count = 2 + rng.below(8);
-                        let room = 1 + rng.below(14);
-                        let ran = fast.iwram_run(addr, width, count, room);
+                        let idles: Vec<u32> = (0..count)
+                            .map(|index| {
+                                if index + 1 < count && rng.below(3) == 0 {
+                                    1 + rng.below(4)
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect();
+                        let total = count + idles.iter().sum::<u32>();
+                        let room = 1 + rng.below(24);
+                        let ran = fast.iwram_run(addr, width, count, total, room);
                         flat += u32::from(ran);
+                        idled += u32::from(ran && total > count);
                         let mut access = Access::NonSequential;
-                        for index in 0..count {
+                        for (index, &idle) in (0..count).zip(&idles) {
                             let at = addr.wrapping_add(index * step_bytes);
                             let (cycles, value) = slow.timed_code(at, width, access);
                             if ran {
@@ -1653,7 +1722,9 @@ mod tests {
                             } else {
                                 let fetched = fast.timed_code(at, width, access);
                                 assert_eq!(fetched, (cycles, value), "seed {seed} step {step}");
+                                (0..idle).for_each(|_| fast.cpu_idle());
                             }
+                            (0..idle).for_each(|_| slow.cpu_idle());
                             access = Access::Sequential;
                         }
                     }
@@ -1662,5 +1733,6 @@ mod tests {
             }
         }
         assert!(flat > 1000, "only {flat} flat runs");
+        assert!(idled > 200, "only {idled} flat runs with idles");
     }
 }

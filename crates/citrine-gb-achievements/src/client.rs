@@ -1,5 +1,6 @@
 use crate::game::{
-    Achievement, Console, Event, GameState, Group, GroupKind, SignInError, Summary, User,
+    Achievement, Attempt, Console, Entries, Entry, Event, Fetch, GameState, Group, GroupKind,
+    Leaderboard, Load, ScoreFormat, Scoreboard, SignInError, Summary, User,
 };
 use crate::library::{GameProgress, SetInfo};
 use rcheevos_sys as sys;
@@ -113,6 +114,9 @@ struct Inner {
     unsent: BTreeSet<u32>,
     events: Vec<Event>,
     runs_frames: bool,
+    load: Load,
+    next_fetch: usize,
+    fetches: Vec<(usize, u32, Fetch)>,
 }
 
 const LOGIN_PASSWORD: usize = 1;
@@ -166,11 +170,6 @@ impl Client {
             return product.to_owned();
         }
         format!("{product} {}", text(buffer.as_ptr()).unwrap_or_default())
-    }
-
-    pub fn set_host(&mut self, host: &str) {
-        let host = CString::new(host).unwrap_or_default();
-        unsafe { sys::rc_client_set_host(self.raw(), host.as_ptr()) };
     }
 
     pub fn take_requests(&mut self) -> Vec<Request> {
@@ -247,6 +246,7 @@ impl Client {
 
     pub fn sign_out(&mut self) {
         self.inner().runs_frames = false;
+        self.inner().load = Load::Idle;
         self.inner().unsent.clear();
         unsafe {
             sys::rc_client_unload_game(self.raw());
@@ -261,6 +261,7 @@ impl Client {
 
     pub fn load_game(&mut self, console: Console, rom: &[u8], memory: &mut dyn Memory) {
         self.inner().runs_frames = false;
+        self.inner().load = Load::Loading;
         self.with_memory(memory, |raw| unsafe {
             sys::rc_client_begin_identify_and_load_game(
                 raw,
@@ -277,6 +278,11 @@ impl Client {
     pub fn unload_game(&mut self) {
         self.inner().runs_frames = false;
         unsafe { sys::rc_client_unload_game(self.raw()) };
+        self.inner().load = Load::Idle;
+    }
+
+    pub fn load(&self) -> &Load {
+        unsafe { &(*self.inner).load }
     }
 
     pub fn runs_frames(&self) -> bool {
@@ -300,6 +306,49 @@ impl Client {
 
     pub fn reset(&mut self) {
         unsafe { sys::rc_client_reset(self.raw()) };
+    }
+
+    pub fn set_hardcore(&mut self, on: bool) {
+        if self.hardcore() != on {
+            unsafe { sys::rc_client_set_hardcore_enabled(self.raw(), c_int::from(on)) };
+        }
+    }
+
+    pub fn hardcore(&self) -> bool {
+        unsafe { sys::rc_client_get_hardcore_enabled(self.raw()) != 0 }
+    }
+
+    pub fn can_pause(&mut self) -> Result<(), u32> {
+        let mut frames = 0;
+        match unsafe { sys::rc_client_can_pause(self.raw(), &mut frames) } {
+            0 => Err(frames.max(1)),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn progress(&mut self) -> Option<Vec<u8>> {
+        if !self.has_game() {
+            return None;
+        }
+        let size = unsafe { sys::rc_client_progress_size(self.raw()) };
+        let mut bytes = vec![0; size];
+        let result = unsafe {
+            sys::rc_client_serialize_progress_sized(self.raw(), bytes.as_mut_ptr(), bytes.len())
+        };
+        (result == sys::RC_OK).then_some(bytes)
+    }
+
+    pub fn restore_progress(&mut self, progress: Option<&[u8]>) {
+        if !self.has_game() {
+            return;
+        }
+        let (ptr, len) =
+            progress.map_or((std::ptr::null(), 0), |bytes| (bytes.as_ptr(), bytes.len()));
+        let result = unsafe { sys::rc_client_deserialize_progress_sized(self.raw(), ptr, len) };
+        if result != sys::RC_OK {
+            log::warn!("achievements: saved progress didn't load ({result}), starting it over");
+            unsafe { sys::rc_client_deserialize_progress_sized(self.raw(), std::ptr::null(), 0) };
+        }
     }
 
     pub fn fetch_progress(&mut self, console: Console) {
@@ -340,6 +389,7 @@ impl Client {
             )
         };
         let mut groups = Vec::new();
+        let unlock_bit = unlock_bit(self.hardcore());
         if let Some(entries) = unsafe { list.as_ref() } {
             for bucket in unsafe { slice(entries.buckets, entries.num_buckets) } {
                 let Some(kind) = group_kind(bucket.bucket_type) else {
@@ -348,7 +398,7 @@ impl Client {
                 let achievements = unsafe { slice(bucket.achievements, bucket.num_achievements) }
                     .iter()
                     .filter_map(|&a| unsafe { a.as_ref() })
-                    .map(achievement_from)
+                    .map(|a| achievement_from(a, unlock_bit))
                     .collect();
                 groups.push(Group { kind, achievements });
             }
@@ -366,7 +416,80 @@ impl Client {
                 points_unlocked: summary.points_unlocked,
             },
             groups,
+            leaderboards: leaderboards(raw),
         })
+    }
+
+    pub fn rich_presence(&mut self) -> Option<String> {
+        let raw = self.raw();
+        if unsafe { sys::rc_client_has_rich_presence(raw) } == 0 {
+            return None;
+        }
+        let mut buffer = [0 as c_char; 256];
+        let len = unsafe {
+            sys::rc_client_get_rich_presence_message(raw, buffer.as_mut_ptr(), buffer.len())
+        };
+        if len == 0 {
+            return None;
+        }
+        Some(chars(&buffer))
+    }
+
+    pub fn attempts(&self) -> Vec<Attempt> {
+        let raw = self.raw();
+        if unsafe { sys::rc_client_is_game_loaded(raw) } == 0 {
+            return Vec::new();
+        }
+        let list = unsafe {
+            sys::rc_client_create_leaderboard_list(
+                raw,
+                sys::RC_CLIENT_LEADERBOARD_LIST_GROUPING_NONE,
+            )
+        };
+        let Some(entries) = (unsafe { list.as_ref() }) else {
+            return Vec::new();
+        };
+        let attempts = unsafe { slice(entries.buckets, entries.num_buckets) }
+            .iter()
+            .flat_map(|bucket| unsafe { slice(bucket.leaderboards, bucket.num_leaderboards) })
+            .filter_map(|&board| unsafe { board.as_ref() })
+            .filter(|board| board.state == sys::RC_CLIENT_LEADERBOARD_STATE_TRACKING)
+            .map(|board| Attempt {
+                board: board.id,
+                title: text(board.title).unwrap_or_default(),
+                score: text(board.tracker_value).unwrap_or_default(),
+            })
+            .collect();
+        unsafe { sys::rc_client_destroy_leaderboard_list(list) };
+        attempts
+    }
+
+    pub fn fetch_entries(&mut self, board: u32, fetch: Fetch, count: u32) {
+        let inner = self.inner();
+        inner.next_fetch += 1;
+        let key = inner.next_fetch;
+        inner.fetches.push((key, board, fetch));
+        let raw = self.raw();
+        let data = key as *mut c_void;
+        unsafe {
+            match fetch {
+                Fetch::Top => sys::rc_client_begin_fetch_leaderboard_entries(
+                    raw,
+                    board,
+                    1,
+                    count,
+                    entries_fetched,
+                    data,
+                ),
+                Fetch::AroundMe => sys::rc_client_begin_fetch_leaderboard_entries_around_user(
+                    raw,
+                    board,
+                    count,
+                    entries_fetched,
+                    data,
+                ),
+            }
+        };
     }
 
     fn with_memory<R>(
@@ -452,7 +575,15 @@ fn user_from(user: &sys::rc_client_user_t) -> User {
     }
 }
 
-fn achievement_from(a: &sys::rc_client_achievement_t) -> Achievement {
+fn unlock_bit(hardcore: bool) -> u8 {
+    if hardcore {
+        sys::RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE
+    } else {
+        sys::RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE
+    }
+}
+
+fn achievement_from(a: &sys::rc_client_achievement_t, unlock_bit: u8) -> Achievement {
     let measured = chars(&a.measured_progress);
     let unlock_time: sys::time_t = a.unlock_time;
     Achievement {
@@ -460,13 +591,64 @@ fn achievement_from(a: &sys::rc_client_achievement_t) -> Achievement {
         title: text(a.title).unwrap_or_default(),
         description: text(a.description).unwrap_or_default(),
         points: a.points,
-        unlocked: a.unlocked & sys::RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE != 0,
+        unlocked: a.unlocked & unlock_bit != 0,
         badge_name: chars(&a.badge_name),
         badge_url: text(a.badge_url),
         badge_locked_url: text(a.badge_locked_url),
         progress: (!measured.is_empty()).then_some((measured, a.measured_percent)),
         unlock_time: unlock_time as i64,
         rarity: a.rarity,
+    }
+}
+
+fn leaderboards(raw: *mut sys::rc_client_t) -> Vec<Leaderboard> {
+    let list = unsafe {
+        sys::rc_client_create_leaderboard_list(raw, sys::RC_CLIENT_LEADERBOARD_LIST_GROUPING_NONE)
+    };
+    let Some(entries) = (unsafe { list.as_ref() }) else {
+        return Vec::new();
+    };
+    let boards = unsafe { slice(entries.buckets, entries.num_buckets) }
+        .iter()
+        .filter(|bucket| bucket.bucket_type != sys::RC_CLIENT_LEADERBOARD_BUCKET_UNSUPPORTED)
+        .flat_map(|bucket| unsafe { slice(bucket.leaderboards, bucket.num_leaderboards) })
+        .filter_map(|&board| unsafe { board.as_ref() })
+        .map(leaderboard_from)
+        .collect();
+    unsafe { sys::rc_client_destroy_leaderboard_list(list) };
+    boards
+}
+
+fn leaderboard_from(board: &sys::rc_client_leaderboard_t) -> Leaderboard {
+    Leaderboard {
+        id: board.id,
+        title: text(board.title).unwrap_or_default(),
+        description: text(board.description).unwrap_or_default(),
+        format: match board.format {
+            sys::RC_CLIENT_LEADERBOARD_FORMAT_TIME => ScoreFormat::Time,
+            sys::RC_CLIENT_LEADERBOARD_FORMAT_SCORE => ScoreFormat::Score,
+            _ => ScoreFormat::Value,
+        },
+        lower_is_better: board.lower_is_better != 0,
+        tracking: board.state == sys::RC_CLIENT_LEADERBOARD_STATE_TRACKING,
+    }
+}
+
+fn scoreboard_from(board: &sys::rc_client_leaderboard_scoreboard_t) -> Scoreboard {
+    Scoreboard {
+        board: board.leaderboard_id,
+        submitted: chars(&board.submitted_score),
+        best: chars(&board.best_score),
+        rank: board.new_rank,
+        entries: board.num_entries,
+        top: unsafe { slice(board.top_entries, board.num_top_entries) }
+            .iter()
+            .map(|entry| Entry {
+                rank: entry.rank,
+                user: text(entry.username).unwrap_or_default(),
+                score: chars(&entry.score),
+            })
+            .collect(),
     }
 }
 
@@ -554,15 +736,23 @@ unsafe extern "C" fn finished(
                 },
             }
         }
-        LOAD_GAME => match result {
-            sys::RC_OK => {
-                inner.runs_frames = unsafe { sys::rc_client_is_processing_required(client) } != 0;
-                Event::GameLoaded
-            }
-            sys::RC_NO_GAME_LOADED | sys::RC_NOT_FOUND => Event::NoSet,
-            sys::RC_ABORTED | sys::RC_LOGIN_REQUIRED => return,
-            _ => Event::GameLoadFailed(message),
-        },
+        LOAD_GAME => {
+            inner.load = match result {
+                sys::RC_OK => {
+                    inner.runs_frames =
+                        unsafe { sys::rc_client_is_processing_required(client) } != 0;
+                    inner.events.push(Event::GameLoaded);
+                    Load::Loaded
+                }
+                sys::RC_NO_GAME_LOADED => Load::UnknownGame,
+                sys::RC_NOT_FOUND => Load::NoSet,
+                sys::RC_NO_RESPONSE => Load::Unreachable,
+                sys::RC_ABORTED => return,
+                sys::RC_LOGIN_REQUIRED => Load::Idle,
+                _ => Load::Failed(message),
+            };
+            return;
+        }
         _ => return,
     };
     inner.events.push(event);
@@ -576,10 +766,41 @@ unsafe extern "C" fn event_handler(
     let event = unsafe { &*event };
     let event = match event.type_ {
         sys::RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED => match unsafe { event.achievement.as_ref() } {
-            Some(a) => Event::Unlocked(achievement_from(a)),
+            Some(a) => {
+                let hardcore = unsafe { sys::rc_client_get_hardcore_enabled(client) } != 0;
+                Event::Unlocked(achievement_from(a, unlock_bit(hardcore)))
+            }
             None => return,
         },
         sys::RC_CLIENT_EVENT_GAME_COMPLETED => Event::GameCompleted,
+        sys::RC_CLIENT_EVENT_LEADERBOARD_STARTED
+        | sys::RC_CLIENT_EVENT_LEADERBOARD_FAILED
+        | sys::RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED => {
+            let Some(board) = (unsafe { event.leaderboard.as_ref() }) else {
+                return;
+            };
+            let score = text(board.tracker_value).unwrap_or_default();
+            let board = leaderboard_from(board);
+            match event.type_ {
+                sys::RC_CLIENT_EVENT_LEADERBOARD_STARTED => Event::BoardStarted(board),
+                sys::RC_CLIENT_EVENT_LEADERBOARD_FAILED => Event::BoardFailed(board),
+                _ => Event::BoardSubmitted { board, score },
+            }
+        }
+        sys::RC_CLIENT_EVENT_LEADERBOARD_TRACKER_SHOW
+        | sys::RC_CLIENT_EVENT_LEADERBOARD_TRACKER_UPDATE
+        | sys::RC_CLIENT_EVENT_LEADERBOARD_TRACKER_HIDE => {
+            if inner.events.last() == Some(&Event::TrackersChanged) {
+                return;
+            }
+            Event::TrackersChanged
+        }
+        sys::RC_CLIENT_EVENT_LEADERBOARD_SCOREBOARD => {
+            match unsafe { event.leaderboard_scoreboard.as_ref() } {
+                Some(board) => Event::Scoreboard(scoreboard_from(board)),
+                None => return,
+            }
+        }
         sys::RC_CLIENT_EVENT_SERVER_ERROR => Event::ServerError(
             unsafe { event.server_error.as_ref() }
                 .and_then(|e| text(e.error_message))
@@ -663,4 +884,48 @@ unsafe extern "C" fn game_list_fetched(
         .collect();
     unsafe { sys::rc_client_destroy_game_list(list) };
     inner.events.push(Event::GameList { console, sets });
+}
+
+unsafe extern "C" fn entries_fetched(
+    result: c_int,
+    error_message: *const c_char,
+    list: *mut sys::rc_client_leaderboard_entry_list_t,
+    client: *mut sys::rc_client_t,
+    userdata: *mut c_void,
+) {
+    let inner = unsafe { &mut *inner_of(client) };
+    let key = userdata as usize;
+    let Some(at) = inner.fetches.iter().position(|&(k, _, _)| k == key) else {
+        if !list.is_null() {
+            unsafe { sys::rc_client_destroy_leaderboard_entry_list(list) };
+        }
+        return;
+    };
+    let (_, board, fetch) = inner.fetches.remove(at);
+    let Some(list_ref) = (unsafe { list.as_ref() }).filter(|_| result == sys::RC_OK) else {
+        inner.events.push(Event::EntriesFailed {
+            board,
+            fetch,
+            message: text(error_message).unwrap_or_default(),
+        });
+        return;
+    };
+    let entries = unsafe { slice(list_ref.entries, list_ref.num_entries) }
+        .iter()
+        .map(|e| Entry {
+            rank: e.rank,
+            user: text(e.user).unwrap_or_default(),
+            score: chars(&e.display),
+        })
+        .collect();
+    let mine = usize::try_from(list_ref.user_index).ok();
+    let total = list_ref.total_entries;
+    unsafe { sys::rc_client_destroy_leaderboard_entry_list(list) };
+    inner.events.push(Event::Entries(Entries {
+        board,
+        fetch,
+        total,
+        entries,
+        mine,
+    }));
 }

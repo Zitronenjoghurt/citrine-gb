@@ -1,66 +1,71 @@
 use crate::app::ui_state::settings::Settings;
+use crate::app::ui_state::settings_tree::Surface;
+use crate::app::ui_state::settings_tree::rows::RowId;
 use crate::app::widgets::generic_select::GenericSelect;
 use crate::app::widgets::settings::form::Form;
-use crate::app::widgets::settings::page::{Heading, Page};
-use crate::discord::{GameNow, Presence, ShotInterval, presence};
-use crate::icons;
+use crate::app::widgets::settings::pages::app::{
+    DISCORD_DETAILS_HINT, DISCORD_PICTURES_OFF, DISCORD_SCREENSHOT_HINT,
+};
+use crate::discord::{GameNow, Presence, ShotInterval, ShotScreens, presence};
 use egui::{CornerRadius, RichText, Ui, Widget, vec2};
 
-const DISCORD_NOTE: &str =
-    "Your Discord profile shows what you play while Discord runs on this computer.";
-
-pub fn section(
-    page: &mut Page,
-    s: &mut Settings,
-    game: Option<&GameNow>,
-    screen: Option<egui::TextureId>,
-    pictures_off: bool,
-) {
-    page.section(Heading::new(icons::DISCORD_LOGO, "Discord").hint(DISCORD_NOTE), |ui| {
-        Form::show(ui, "discord", |form| {
-            s.dirty |= form.toggle("Show activity", &mut s.discord.enabled);
-            if !s.discord.enabled {
-                return;
-            }
-            s.dirty |= form.toggle("Game name", &mut s.discord.game);
-            s.dirty |= form.toggle_with_hint(
-                "Details",
-                "In Pokémon games: badges, Pokédex and play time. Hovering over the image shows your first Pokémon and money.",
-                &mut s.discord.details,
-            );
-            s.dirty |= form.toggle("Session time", &mut s.discord.play_time);
+pub fn row(form: &mut Form, s: &mut Settings, row: RowId, pictures_off: bool) {
+    let label = row.label(Surface::Desktop);
+    let d = &mut s.discord;
+    let mut dirty = false;
+    match row {
+        RowId::DiscordActivity => dirty |= form.toggle(label, &mut d.enabled),
+        RowId::DiscordGame if d.enabled => dirty |= form.toggle(label, &mut d.game),
+        RowId::DiscordDetails if d.enabled => {
+            dirty |= form.toggle_with_hint(label, DISCORD_DETAILS_HINT, &mut d.details);
+        }
+        RowId::DiscordTime if d.enabled => dirty |= form.toggle(label, &mut d.play_time),
+        RowId::DiscordShot if d.enabled => {
             let mut off = false;
             let shot = if pictures_off {
                 &mut off
             } else {
-                &mut s.discord.screenshot
+                &mut d.screenshot
             };
-            let changed = form.toggle_when(
-                "Screenshot",
-                Some("Your Discord profile shows your game screen instead of the Citrine icon."),
-                !pictures_off,
-                shot,
-            );
-            s.dirty |= changed;
+            dirty |= form.toggle_when(label, Some(DISCORD_SCREENSHOT_HINT), !pictures_off, shot);
             if pictures_off {
-                form.hint("Off on this server.");
-            } else if s.discord.screenshot {
-                form.row("Every", |ui| {
-                    s.dirty |=
-                        GenericSelect::from_enum(&mut s.discord.every, "enum_select_discord_every")
-                            .default_value(ShotInterval::default())
-                            .ui(ui)
-                            .changed();
-                });
+                form.hint(DISCORD_PICTURES_OFF);
             }
-            if let Some(shown) = presence(&s.discord, game, None) {
-                form.custom(|ui| {
-                    ui.weak("Your Discord profile");
-                    card(ui, &shown, screen.filter(|_| !pictures_off));
-                });
-            }
+        }
+        RowId::DiscordEvery if d.enabled && d.screenshot && !pictures_off => {
+            form.row(label, |ui| {
+                dirty |= GenericSelect::from_enum(&mut d.every, "enum_select_discord_every")
+                    .default_value(ShotInterval::default())
+                    .ui(ui)
+                    .changed();
+            });
+        }
+        RowId::DiscordDsScreens if d.enabled && d.screenshot && !pictures_off => {
+            form.row(label, |ui| {
+                dirty |= GenericSelect::from_enum(&mut d.screens, "enum_select_discord_screens")
+                    .default_value(ShotScreens::default())
+                    .ui(ui)
+                    .changed();
+            });
+        }
+        _ => {}
+    }
+    s.dirty |= dirty;
+}
+
+pub fn preview(
+    form: &mut Form,
+    s: &Settings,
+    game: Option<&GameNow>,
+    screen: Option<egui::TextureId>,
+    pictures_off: bool,
+) {
+    if let Some(shown) = presence(&s.discord, game, None) {
+        form.custom(|ui| {
+            ui.weak("Your Discord profile");
+            card(ui, &shown, screen.filter(|_| !pictures_off));
         });
-    });
+    }
 }
 
 fn aspect_of(ui: &Ui, texture: egui::TextureId) -> f32 {
@@ -105,7 +110,7 @@ fn card(ui: &mut Ui, shown: &Presence, screen: Option<egui::TextureId>) {
                 }
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Citrine").strong());
-                    ui.add(egui::Label::new(&shown.details).truncate());
+                    ui.add(egui::Label::new(&shown.details).wrap());
                     if let Some(state) = &shown.state {
                         ui.add(egui::Label::new(state).truncate());
                     }

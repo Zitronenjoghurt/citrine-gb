@@ -22,6 +22,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=tools /tools/bin/wasm-bindgen /usr/local/bin/wasm-bindgen
 COPY --from=planner /citrine/recipe.json recipe.json
+COPY vendor vendor
 RUN cargo chef cook --release --recipe-path recipe.json --bin citrine-gb-server
 COPY . .
 RUN cargo build --release --bin citrine-gb-server
@@ -33,6 +34,7 @@ FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 WORKDIR /citrine
 COPY --from=builder /citrine/target/release/citrine-gb-server /usr/local/bin/server
 COPY --from=builder /citrine/crates/citrine-gb-app/dist /citrine/static
+COPY --from=builder /citrine/LICENSE /citrine/NOTICE.md /citrine/
 COPY --from=builder --chown=nonroot:nonroot /citrine/empty /citrine/data
 EXPOSE 13707
 CMD ["/usr/local/bin/server"]

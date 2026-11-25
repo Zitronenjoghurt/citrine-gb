@@ -1,11 +1,14 @@
+use crate::achievements::boards::View;
 use crate::achievements::{Achievements, SIGN_UP_URL, Status};
 use crate::app::tabs::TabViewer;
 use crate::app::widgets::action::{main_button, more_button};
 use crate::app::widgets::avatar;
 use crate::app::widgets::settings::page::{Heading, Page};
 use crate::icons;
-use citrine_gb_achievements::{Achievement, GameState, GroupKind, User};
+use citrine_gb_achievements::{Achievement, GameState, GroupKind, Load, User};
 use egui::{Align, Key, Label, Layout, RichText, Sense, TextEdit, Ui, vec2};
+
+pub mod boards;
 
 pub const FEW: usize = 5;
 pub const ABOUT: &str = "RetroAchievements.org adds achievements to classic games. Sign in with your RetroAchievements account to unlock them as you play.";
@@ -14,28 +17,64 @@ const SIGN_IN_WIDTH: f32 = 280.0;
 pub const SIGN_IN_ID: &str = "achievements_sign_in";
 const MARK: f32 = 30.0;
 
+pub const HARDCORE_HINT: &str = "Off in hardcore: rewind, loading states, cheats, link play";
+
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     let touch = viewer.ui.settings.layout.is_touch(ui.ctx());
     let shown = Shown {
         has_game: viewer.emulator.has_game(),
         now: crate::storage::now_unix(),
+        hardcore: hardcore_switch(viewer),
     };
     let pane = &mut *viewer.achievements;
-    egui::ScrollArea::vertical()
+    let asked = egui::ScrollArea::vertical()
         .id_salt("achievements_scroll")
         .auto_shrink(false)
         .show(ui, |ui| {
             if touch {
-                crate::app::mobile::achievements::body(ui, pane, &shown);
+                crate::app::mobile::achievements::body(ui, pane, &shown)
             } else {
-                body(ui, pane, &shown);
+                body(ui, pane, &shown)
             }
-        });
+        })
+        .inner;
+    match asked {
+        Some(false) => crate::app::hardcore::turn_off(&mut viewer.ui.settings),
+        Some(true) if shown.has_game => viewer.achievements.asking_hardcore = true,
+        Some(true) => {
+            viewer.ui.settings.achievements.hardcore = true;
+            viewer.ui.settings.dirty = true;
+        }
+        None => {}
+    }
 }
 
 pub struct Shown {
     pub has_game: bool,
     pub now: u64,
+    pub hardcore: Option<HardcoreSwitch>,
+}
+
+pub struct HardcoreSwitch {
+    pub on: bool,
+    pub off_why: Option<&'static str>,
+}
+
+fn hardcore_switch(viewer: &TabViewer) -> Option<HardcoreSwitch> {
+    if !viewer.ui.settings.dev_mode || cfg!(target_arch = "wasm32") {
+        return None;
+    }
+    let off_why = if viewer.emulator.linked() || viewer.emulator.partnered() {
+        Some("Off while a game is linked")
+    } else if viewer.play.is_live() {
+        Some("Off while you play together")
+    } else {
+        None
+    };
+    Some(HardcoreSwitch {
+        on: viewer.ui.settings.achievements.hardcore,
+        off_why,
+    })
 }
 
 pub struct Lists<'a> {
@@ -65,21 +104,27 @@ pub fn lists(game: &GameState) -> Lists<'_> {
     lists
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Empty {
     NoGame,
     Loading,
+    UnknownGame,
     NoSet,
+    Unreachable,
+    Failed,
 }
 
 pub fn empty(pane: &Achievements, shown: &Shown) -> Option<Empty> {
     if !shown.has_game {
-        Some(Empty::NoGame)
-    } else if pane.no_set {
-        Some(Empty::NoSet)
-    } else if pane.game.is_none() {
-        Some(Empty::Loading)
-    } else {
-        None
+        return Some(Empty::NoGame);
+    }
+    match &pane.load {
+        Load::Loaded if pane.game.is_some() => None,
+        Load::Idle | Load::Loading | Load::Loaded => Some(Empty::Loading),
+        Load::UnknownGame => Some(Empty::UnknownGame),
+        Load::NoSet => Some(Empty::NoSet),
+        Load::Unreachable => Some(Empty::Unreachable),
+        Load::Failed(_) => Some(Empty::Failed),
     }
 }
 
@@ -88,9 +133,30 @@ impl Empty {
         match self {
             Empty::NoGame => "Open a game to see its achievements",
             Empty::Loading => "Loading achievements",
+            Empty::UnknownGame => "This version of the game has no achievements",
             Empty::NoSet => "This game has no achievements yet",
+            Empty::Unreachable => "Can't reach RetroAchievements",
+            Empty::Failed => "Achievements didn't load",
         }
     }
+
+    pub fn can_try_again(&self) -> bool {
+        matches!(self, Empty::Unreachable | Empty::Failed)
+    }
+}
+
+pub fn empty_state(ui: &mut Ui, pane: &mut Achievements, empty: Empty) {
+    ui.add_space(16.0);
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new(empty.text()).weak());
+        if empty.can_try_again() {
+            ui.add_space(8.0);
+            let label = format!("{}  Try again", icons::ARROW_CLOCKWISE);
+            if ui.add(main_button(ui, label)).clicked() {
+                pane.try_again();
+            }
+        }
+    });
 }
 
 pub fn points(points: u32) -> String {
@@ -198,15 +264,37 @@ pub fn achievement_row(
     });
 }
 
-fn body(ui: &mut Ui, pane: &mut Achievements, shown: &Shown) {
-    match pane.user().cloned() {
-        Some(user) => {
-            account(ui, pane, &user);
-            ui.add_space(12.0);
-            game(ui, pane, shown);
-        }
-        None => sign_in(ui, pane),
-    }
+fn body(ui: &mut Ui, pane: &mut Achievements, shown: &Shown) -> Option<bool> {
+    let user = pane.user().cloned();
+    let Some(user) = user else {
+        sign_in(ui, pane);
+        return None;
+    };
+    account(ui, pane, &user);
+    let asked = shown
+        .hardcore
+        .as_ref()
+        .and_then(|switch| hardcore_row(ui, switch));
+    ui.add_space(12.0);
+    game(ui, pane, shown);
+    asked
+}
+
+fn hardcore_row(ui: &mut Ui, switch: &HardcoreSwitch) -> Option<bool> {
+    ui.add_space(6.0);
+    let mut on = switch.on;
+    let response = ui
+        .horizontal(|ui| {
+            let check = crate::app::widgets::check::Check::new(&mut on, "Hardcore");
+            let response = ui.add_enabled(switch.off_why.is_none(), check);
+            if let Some(why) = switch.off_why {
+                response.clone().on_disabled_hover_text(why);
+            }
+            crate::app::widgets::info_mark::info_mark(ui, HARDCORE_HINT);
+            response
+        })
+        .inner;
+    response.changed().then_some(on)
 }
 
 fn sign_in(ui: &mut Ui, pane: &mut Achievements) {
@@ -355,13 +443,44 @@ fn account(ui: &mut Ui, pane: &mut Achievements, user: &User) {
 
 fn game(ui: &mut Ui, pane: &mut Achievements, shown: &Shown) {
     if let Some(empty) = empty(pane, shown) {
-        ui.add_space(16.0);
-        ui.vertical_centered(|ui| ui.label(RichText::new(empty.text()).weak()));
+        empty_state(ui, pane, empty);
         return;
     }
     let Some(game) = pane.game.take() else {
         return;
     };
+    let me = pane
+        .user()
+        .map(|user| crate::achievements::boards::me(user).to_owned())
+        .unwrap_or_default();
+    if let Some(id) = pane.boards.open {
+        boards::rankings(ui, pane, id, &me);
+        pane.game = Some(game);
+        return;
+    }
+    ui.add(Label::new(RichText::new(&game.title).weak()).truncate());
+    if let Some(line) = pane.boards.presence.clone() {
+        boards::presence(ui, &line);
+    }
+    let tabs = pane.boards.tabs() && shown.hardcore.is_some();
+    if tabs {
+        ui.add_space(4.0);
+        crate::app::widgets::tab_bar::tab_bar(
+            ui,
+            &mut pane.boards.view,
+            &[
+                (View::Achievements, "Achievements".to_owned()),
+                (View::Leaderboards, "Leaderboards".to_owned()),
+            ],
+        );
+        ui.separator();
+        ui.add_space(4.0);
+        if pane.boards.view == View::Leaderboards {
+            boards::list(ui, pane);
+            pane.game = Some(game);
+            return;
+        }
+    }
     summary(ui, &game);
     let lists = lists(&game);
     let show_all = pane.show_all;
@@ -424,7 +543,6 @@ pub fn fraction(game: &GameState) -> f32 {
 }
 
 fn summary(ui: &mut Ui, game: &GameState) {
-    ui.add(Label::new(RichText::new(&game.title).weak()).truncate());
     ui.label(RichText::new(unlocked_line(game)).strong().size(16.0));
     crate::app::widgets::progress::bar(ui, Some(fraction(game)));
     ui.label(RichText::new(points_line(game)).weak().small());

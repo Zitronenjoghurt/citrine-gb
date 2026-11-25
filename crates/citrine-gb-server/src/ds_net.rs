@@ -1,7 +1,9 @@
 use crate::hub::Outbox;
 use crate::limit::{Bucket, Buckets};
+use crate::tasks::Tasks;
 use citrine_gb_net::{
-    MAX_DATAGRAM_BYTES, MAX_NET_READ_BYTES, NET_WINDOW_BYTES, NetAddr, OnlineId, ServerMsg,
+    DsHost, MAX_DATAGRAM_BYTES, MAX_DS_HOST_KEYS, MAX_DS_HOST_TEXT, MAX_DS_HOSTS_LISTED,
+    MAX_DS_MESSAGE_BYTES, MAX_NET_READ_BYTES, NET_WINDOW_BYTES, NetAddr, OnlineId, ServerMsg,
 };
 use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -12,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 
 pub const TCP_PORTS: &[u16] = &[80, 443, 28910, 29900, 29901, 29920];
 pub const DATAGRAM_OVERHEAD: usize = 28;
@@ -25,8 +27,15 @@ const STUN_TRIES: u32 = 2;
 const PACE_CHUNK: usize = 4 * 1024;
 const PACE_WAIT: Duration = Duration::from_millis(20);
 const PEERS_KEPT: usize = 64;
+const MET_KEPT: usize = 256;
 const LAN_NET: [u8; 2] = [10, 77];
 const LAN_HOSTS: u32 = 254 * 254;
+const HOST_STALE: Duration = Duration::from_secs(120);
+const NATNEG_STALE: Duration = Duration::from_secs(30);
+const NATNEGS_KEPT: usize = 4096;
+const NATNEGS_PER_NET: usize = 8;
+const NATNEG_SIDES: usize = 4;
+const NATNEG_BYTES: usize = 32;
 
 #[derive(Default)]
 struct Peers(Mutex<VecDeque<SocketAddrV4>>);
@@ -58,6 +67,28 @@ impl Peers {
     }
 }
 
+#[derive(Default)]
+struct Met(Mutex<VecDeque<Ipv4Addr>>);
+
+impl Met {
+    fn meet(&self, ip: Ipv4Addr) {
+        let mut met = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = met.iter().position(|known| *known == ip) {
+            met.remove(at);
+        } else if met.len() >= MET_KEPT {
+            met.pop_front();
+        }
+        met.push_back(ip);
+    }
+
+    fn knows(&self, ip: Ipv4Addr) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&ip)
+    }
+}
+
 #[derive(Clone)]
 struct Owner {
     net: u64,
@@ -71,17 +102,36 @@ struct Lessee {
     net: u64,
     who: OnlineId,
     outbox: Outbox,
+    met: Arc<Met>,
+}
+
+struct Hosted {
+    game: String,
+    port: u16,
+    keys: Vec<(String, String)>,
+    seen: Instant,
+}
+
+struct Side {
+    index: u8,
+    addr: NetAddr,
+    net: u64,
+    outbox: Outbox,
+    met: Arc<Met>,
+    seen: Instant,
 }
 
 #[derive(Default)]
 struct Leases {
     held: HashMap<Ipv4Addr, Lessee>,
     next: u32,
+    hosts: HashMap<Ipv4Addr, Hosted>,
 }
 
 pub struct Ports {
     owners: Mutex<HashMap<u16, Owner>>,
     leases: Mutex<Leases>,
+    natnegs: Mutex<HashMap<u32, Vec<Side>>>,
     nets: AtomicU64,
     own: Vec<Ipv4Addr>,
     account_bytes: Buckets<i64>,
@@ -119,6 +169,7 @@ impl Ports {
         Self {
             owners: Mutex::default(),
             leases: Mutex::default(),
+            natnegs: Mutex::default(),
             nets: AtomicU64::new(0),
             own,
             account_bytes: Buckets::new(bytes, bytes * 2.0),
@@ -171,6 +222,13 @@ impl Ports {
                 lan_host(index)
             }
         };
+        if leases
+            .held
+            .get(&ip)
+            .is_none_or(|held| held.net != lessee.net)
+        {
+            leases.hosts.remove(&ip);
+        }
         leases.held.insert(ip, lessee);
         Some(ip)
     }
@@ -179,6 +237,94 @@ impl Ports {
         let mut leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
         if leases.held.get(&ip).is_some_and(|lessee| lessee.net == net) {
             leases.held.remove(&ip);
+            leases.hosts.remove(&ip);
+        }
+    }
+
+    fn host(&self, ip: Ipv4Addr, net: u64, hosted: Option<Hosted>) {
+        let mut leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
+        if !leases.held.get(&ip).is_some_and(|lessee| lessee.net == net) {
+            return;
+        }
+        match hosted {
+            Some(hosted) => leases.hosts.insert(ip, hosted),
+            None => leases.hosts.remove(&ip),
+        };
+    }
+
+    fn hosts(&self, game: &str, now: Instant) -> Vec<DsHost> {
+        let mut leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
+        leases
+            .hosts
+            .retain(|_, hosted| now.duration_since(hosted.seen) < HOST_STALE);
+        let mut found: Vec<(&Ipv4Addr, &Hosted)> = leases
+            .hosts
+            .iter()
+            .filter(|(_, hosted)| hosted.game == game)
+            .collect();
+        found.sort_by_key(|(_, hosted)| std::cmp::Reverse(hosted.seen));
+        found
+            .into_iter()
+            .take(MAX_DS_HOSTS_LISTED)
+            .map(|(ip, hosted)| DsHost {
+                addr: NetAddr {
+                    ip: ip.octets(),
+                    port: hosted.port,
+                },
+                keys: hosted.keys.clone(),
+            })
+            .collect()
+    }
+
+    fn natneg(&self, cookie: u32, side: Side) {
+        let mut natnegs = self.natnegs.lock().unwrap_or_else(|e| e.into_inner());
+        natnegs.retain(|_, sides| {
+            sides.retain(|kept| side.seen.duration_since(kept.seen) < NATNEG_STALE);
+            !sides.is_empty()
+        });
+        let mine: Vec<(Instant, u32)> = natnegs
+            .iter()
+            .filter(|(kept, _)| **kept != cookie)
+            .filter_map(|(kept, sides)| {
+                let seen = sides
+                    .iter()
+                    .filter(|held| held.net == side.net)
+                    .map(|held| held.seen)
+                    .min()?;
+                Some((seen, *kept))
+            })
+            .collect();
+        if mine.len() >= NATNEGS_PER_NET
+            && let Some(&(_, oldest)) = mine.iter().min()
+            && let Some(sides) = natnegs.get_mut(&oldest)
+        {
+            sides.retain(|held| held.net != side.net);
+            if sides.is_empty() {
+                natnegs.remove(&oldest);
+            }
+        }
+        if !natnegs.contains_key(&cookie) && natnegs.len() >= NATNEGS_KEPT {
+            return;
+        }
+        let sides = natnegs.entry(cookie).or_default();
+        sides.retain(|kept| kept.net != side.net || kept.index != side.index);
+        if let Some(peer) = sides
+            .iter()
+            .find(|kept| kept.index != side.index && kept.net != side.net)
+        {
+            peer.met.meet(side.addr.ip.into());
+            side.met.meet(peer.addr.ip.into());
+            peer.outbox.try_push(ServerMsg::DsNatneg {
+                cookie,
+                peer: side.addr,
+            });
+            side.outbox.try_push(ServerMsg::DsNatneg {
+                cookie,
+                peer: peer.addr,
+            });
+        }
+        if sides.len() < NATNEG_SIDES {
+            sides.push(side);
         }
     }
 
@@ -289,7 +435,7 @@ impl Activity {
 
 struct Udp {
     socket: Arc<UdpSocket>,
-    reader: JoinHandle<()>,
+    reader: AbortHandle,
     public: u16,
     claimed: bool,
     activity: Arc<Activity>,
@@ -307,16 +453,18 @@ struct Tcp {
     queued: Arc<AtomicUsize>,
     read: Arc<AtomicU64>,
     taken: watch::Sender<u64>,
-    task: JoinHandle<()>,
+    task: AbortHandle,
 }
 
 pub struct Net {
     id: u64,
     ports: Arc<Ports>,
+    tasks: Arc<Tasks>,
     udp: HashMap<u16, Udp>,
     tcp: HashMap<u32, Tcp>,
     budget: Arc<Mutex<Budget>>,
     peers: Arc<Peers>,
+    met: Arc<Met>,
     idle: Duration,
     dns_port: u16,
     stun: Option<(String, SocketAddr)>,
@@ -324,11 +472,17 @@ pub struct Net {
 }
 
 impl Net {
-    pub fn new(ports: Arc<Ports>, bytes_per_second: u64, packets_per_second: u64) -> Self {
+    pub fn new(
+        ports: Arc<Ports>,
+        tasks: Arc<Tasks>,
+        bytes_per_second: u64,
+        packets_per_second: u64,
+    ) -> Self {
         let (bytes, packets) = (bytes_per_second as f64, packets_per_second as f64);
         Self {
             id: ports.nets.fetch_add(1, Ordering::Relaxed),
             ports,
+            tasks,
             udp: HashMap::new(),
             tcp: HashMap::new(),
             budget: Arc::new(Mutex::new(Budget {
@@ -336,6 +490,7 @@ impl Net {
                 packets: Bucket::new(packets, packets * 2.0),
             })),
             peers: Arc::default(),
+            met: Arc::default(),
             idle: UDP_IDLE,
             dns_port: DNS_PORT,
             stun: None,
@@ -362,10 +517,100 @@ impl Net {
                 net: self.id,
                 who,
                 outbox: outbox.clone(),
+                met: self.met.clone(),
             };
             self.lease = self.ports.lease(want, lessee);
         }
         self.lease
+    }
+
+    pub fn host(&mut self, game: String, port: u16, keys: Vec<(String, String)>) -> bool {
+        let Some(lease) = self.lease else {
+            return false;
+        };
+        let fits = |text: &String| text.len() <= MAX_DS_HOST_TEXT && !text.contains('\0');
+        if !fits(&game)
+            || keys.len() > MAX_DS_HOST_KEYS
+            || !keys.iter().all(|(key, value)| fits(key) && fits(value))
+        {
+            return false;
+        }
+        let hosted = Hosted {
+            game,
+            port,
+            keys,
+            seen: Instant::now(),
+        };
+        self.ports.host(lease, self.id, Some(hosted));
+        true
+    }
+
+    pub fn unhost(&mut self) {
+        if let Some(lease) = self.lease {
+            self.ports.host(lease, self.id, None);
+        }
+    }
+
+    pub fn hosts(&self, game: &str) -> Vec<DsHost> {
+        if self.lease.is_none() {
+            return Vec::new();
+        }
+        let hosts = self.ports.hosts(game, Instant::now());
+        for host in &hosts {
+            self.met.meet(host.addr.ip.into());
+        }
+        hosts
+    }
+
+    pub fn message(&mut self, rules: &Rules, to: NetAddr, data: Vec<u8>) -> bool {
+        if data.len() > MAX_DS_MESSAGE_BYTES
+            || !self.egress(rules).take(data.len() + DATAGRAM_OVERHEAD, 1)
+        {
+            return false;
+        }
+        let ip = Ipv4Addr::from(to.ip);
+        let (Some(lease), Some(lessee)) = (self.lease, self.ports.lessee(ip)) else {
+            return false;
+        };
+        if lessee.net == self.id {
+            return false;
+        }
+        self.met.meet(ip);
+        lessee.met.meet(lease);
+        lessee.outbox.try_push(ServerMsg::DsMessage {
+            from: lease.octets(),
+            port: to.port,
+            data,
+        })
+    }
+
+    pub fn natneg(
+        &mut self,
+        rules: &Rules,
+        outbox: &Outbox,
+        cookie: u32,
+        index: u8,
+        port: u16,
+    ) -> bool {
+        let Some(lease) = self.lease else {
+            return false;
+        };
+        if !self.egress(rules).take(NATNEG_BYTES + DATAGRAM_OVERHEAD, 1) {
+            return false;
+        }
+        let side = Side {
+            index,
+            addr: NetAddr {
+                ip: lease.octets(),
+                port,
+            },
+            net: self.id,
+            outbox: outbox.clone(),
+            met: self.met.clone(),
+            seen: Instant::now(),
+        };
+        self.ports.natneg(cookie, side);
+        true
     }
 
     pub async fn send(
@@ -386,9 +631,10 @@ impl Net {
             let (Some(lease), Some(lessee)) = (self.lease, self.ports.lessee(*to.ip())) else {
                 return false;
             };
-            if lessee.net == self.id {
+            if lessee.net == self.id || !self.met.knows(*to.ip()) {
                 return false;
             }
+            lessee.met.meet(lease);
             return lessee.outbox.try_push(ServerMsg::NetHeard {
                 port: to.port(),
                 from: NetAddr {
@@ -474,7 +720,7 @@ impl Net {
             );
         }
         let activity = Arc::new(Activity::new());
-        let reader = tokio::spawn(
+        let reader = self.tasks.spawn(
             Reader {
                 socket: socket.clone(),
                 ports: self.ports.clone(),
@@ -557,7 +803,7 @@ impl Net {
             queued: queued.clone(),
             read: read.clone(),
         };
-        let task = tokio::spawn(flow.run(rx, taken_rx));
+        let task = self.tasks.spawn(flow.run(rx, taken_rx));
         self.tcp.insert(
             stream,
             Tcp {
@@ -837,7 +1083,11 @@ mod tests {
 
     fn net(ports: &Arc<Ports>) -> (Net, Outbox, mpsc::Receiver<Queued>) {
         let (outbox, rx) = Outbox::new(1 << 20);
-        (Net::new(ports.clone(), 1 << 20, 1 << 16), outbox, rx)
+        (
+            Net::new(ports.clone(), Arc::default(), 1 << 20, 1 << 16),
+            outbox,
+            rx,
+        )
     }
 
     fn addr(addr: SocketAddr) -> NetAddr {
@@ -1079,6 +1329,9 @@ mod tests {
             ip: to.octets(),
             port: 2000,
         };
+        assert!(a.natneg(&rules, &a_box, 7, 0, 1000));
+        assert!(b.natneg(&rules, &b_box, 7, 1, 2000));
+        assert!(matches!(heard(&mut b_rx).await, ServerMsg::DsNatneg { .. }));
         assert!(a.send(&rules, &a_box, 1000, at, b"hi".to_vec()).await);
         assert_eq!(
             heard(&mut b_rx).await,
@@ -1110,6 +1363,176 @@ mod tests {
         assert!(!c.send(&rules, &c_box, 3000, at, b"unleased".to_vec()).await);
     }
 
+    async fn lan(net: &mut Net, outbox: &Outbox, port: u16, ip: Ipv4Addr, to: u16) -> bool {
+        let to = NetAddr {
+            ip: ip.octets(),
+            port: to,
+        };
+        net.send(&rules(4), outbox, port, to, b"hi".to_vec()).await
+    }
+
+    #[tokio::test]
+    async fn a_lease_hears_only_players_it_was_matched_with_or_answers() {
+        let ports = ports();
+        let rules = rules(4);
+        let (mut a, a_box, mut a_rx) = net(&ports);
+        let (mut b, b_box, mut b_rx) = net(&ports);
+        let (mut c, c_box, mut c_rx) = net(&ports);
+        let (mut d, d_box, mut d_rx) = net(&ports);
+        let a_ip = a.lease(&a_box, OnlineId::random(), None).unwrap();
+        let b_ip = b.lease(&b_box, OnlineId::random(), None).unwrap();
+        let c_ip = c.lease(&c_box, OnlineId::random(), None).unwrap();
+        let d_ip = d.lease(&d_box, OnlineId::random(), None).unwrap();
+
+        assert!(!lan(&mut a, &a_box, 1000, b_ip, 2000).await);
+        assert!(b_rx.try_recv().is_err());
+
+        assert!(a.host("mariokartds".into(), 56400, Vec::new()));
+        assert_eq!(b.hosts("mariokartds").len(), 1);
+        assert!(lan(&mut b, &b_box, 2000, a_ip, 56400).await);
+        assert!(matches!(heard(&mut a_rx).await, ServerMsg::NetHeard { .. }));
+        assert!(lan(&mut a, &a_box, 56400, b_ip, 2000).await);
+        assert!(matches!(heard(&mut b_rx).await, ServerMsg::NetHeard { .. }));
+
+        assert!(!lan(&mut c, &c_box, 3000, a_ip, 56400).await);
+        assert!(c.natneg(&rules, &c_box, 9, 0, 3000));
+        assert!(a.natneg(&rules, &a_box, 9, 1, 56400));
+        assert!(matches!(heard(&mut a_rx).await, ServerMsg::DsNatneg { .. }));
+        assert!(matches!(heard(&mut c_rx).await, ServerMsg::DsNatneg { .. }));
+        assert!(lan(&mut c, &c_box, 3000, a_ip, 56400).await);
+        assert!(matches!(heard(&mut a_rx).await, ServerMsg::NetHeard { .. }));
+        assert!(lan(&mut a, &a_box, 56400, c_ip, 3000).await);
+        assert!(!lan(&mut b, &b_box, 2000, c_ip, 3000).await);
+
+        assert!(!lan(&mut d, &d_box, 4000, a_ip, 56400).await);
+        let host = NetAddr {
+            ip: a_ip.octets(),
+            port: 56400,
+        };
+        assert!(d.message(&rules, host, b"SBCM".to_vec()));
+        assert!(matches!(
+            heard(&mut a_rx).await,
+            ServerMsg::DsMessage { .. }
+        ));
+        assert!(lan(&mut a, &a_box, 56400, d_ip, 4000).await);
+        assert!(matches!(heard(&mut d_rx).await, ServerMsg::NetHeard { .. }));
+        assert!(lan(&mut d, &d_box, 4000, a_ip, 56400).await);
+    }
+
+    #[tokio::test]
+    async fn a_ds_message_reaches_the_hosts_player_with_the_sender_lease() {
+        let ports = ports();
+        let rules = rules(4);
+        let (mut a, a_box, _a_rx) = net(&ports);
+        let (mut b, b_box, mut b_rx) = net(&ports);
+        let from = a.lease(&a_box, OnlineId::random(), None).unwrap();
+        let to = b.lease(&b_box, OnlineId::random(), None).unwrap();
+        let host = NetAddr {
+            ip: to.octets(),
+            port: 56400,
+        };
+        assert!(a.message(&rules, host, b"SBCM".to_vec()));
+        assert_eq!(
+            heard(&mut b_rx).await,
+            ServerMsg::DsMessage {
+                from: from.octets(),
+                port: 56400,
+                data: b"SBCM".to_vec(),
+            }
+        );
+        let own = NetAddr {
+            ip: from.octets(),
+            port: 56400,
+        };
+        assert!(!a.message(&rules, own, b"self".to_vec()));
+        let long = vec![0; MAX_DS_MESSAGE_BYTES + 1];
+        assert!(!a.message(&rules, host, long));
+        let (mut c, _c_box, _c_rx) = net(&ports);
+        assert!(!c.message(&rules, host, b"unleased".to_vec()));
+        b.finish();
+        assert!(!a.message(&rules, host, b"gone".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn two_sides_of_one_cookie_learn_each_others_lease_and_port() {
+        let ports = ports();
+        let rules = rules(4);
+        let (mut a, a_box, mut a_rx) = net(&ports);
+        let (mut b, b_box, mut b_rx) = net(&ports);
+        let (mut c, c_box, mut c_rx) = net(&ports);
+        let a_ip = a.lease(&a_box, OnlineId::random(), None).unwrap();
+        let b_ip = b.lease(&b_box, OnlineId::random(), None).unwrap();
+        c.lease(&c_box, OnlineId::random(), None).unwrap();
+        assert!(a.natneg(&rules, &a_box, 7, 0, 50000));
+        assert!(a.natneg(&rules, &a_box, 7, 0, 50001));
+        assert!(c.natneg(&rules, &c_box, 8, 1, 56400));
+        assert!(b.natneg(&rules, &b_box, 7, 1, 56400));
+        assert_eq!(
+            heard(&mut a_rx).await,
+            ServerMsg::DsNatneg {
+                cookie: 7,
+                peer: NetAddr {
+                    ip: b_ip.octets(),
+                    port: 56400,
+                },
+            }
+        );
+        assert_eq!(
+            heard(&mut b_rx).await,
+            ServerMsg::DsNatneg {
+                cookie: 7,
+                peer: NetAddr {
+                    ip: a_ip.octets(),
+                    port: 50001,
+                },
+            }
+        );
+        assert!(c_rx.try_recv().is_err());
+        assert!(a_rx.try_recv().is_err());
+        let (mut d, d_box, _d_rx) = net(&ports);
+        assert!(!d.natneg(&rules, &d_box, 7, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn one_connection_holds_only_its_newest_cookies() {
+        let ports = ports();
+        let rules = rules(4);
+        let (mut a, a_box, mut a_rx) = net(&ports);
+        let (mut b, b_box, _b_rx) = net(&ports);
+        a.lease(&a_box, OnlineId::random(), None).unwrap();
+        let b_ip = b.lease(&b_box, OnlineId::random(), None).unwrap();
+        for cookie in 100..100 + 3 * NATNEGS_PER_NET as u32 {
+            assert!(a.natneg(&rules, &a_box, cookie, 0, 50000));
+        }
+        assert!(b.natneg(&rules, &b_box, 100, 1, 56400));
+        assert!(a_rx.try_recv().is_err());
+        let newest = 100 + 3 * NATNEGS_PER_NET as u32 - 1;
+        assert!(b.natneg(&rules, &b_box, newest, 1, 56400));
+        assert_eq!(
+            heard(&mut a_rx).await,
+            ServerMsg::DsNatneg {
+                cookie: newest,
+                peer: NetAddr {
+                    ip: b_ip.octets(),
+                    port: 56400,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn a_host_with_a_nul_in_its_text_is_refused() {
+        let ports = ports();
+        let (mut a, a_box, _a_rx) = net(&ports);
+        a.lease(&a_box, OnlineId::random(), None).unwrap();
+        let keys = |value: &str| vec![("hostname".to_string(), value.to_string())];
+        assert!(!a.host("mariokartds".into(), 1, keys("a\0b")));
+        assert!(!a.host("mario\0kartds".into(), 1, keys("ab")));
+        assert!(a.hosts("mariokartds").is_empty());
+        assert!(a.host("mariokartds".into(), 1, keys("ab")));
+        assert_eq!(a.hosts("mariokartds").len(), 1);
+    }
+
     #[tokio::test]
     async fn empty_datagrams_count_against_the_packet_and_byte_limits() {
         let ports = ports();
@@ -1117,7 +1540,7 @@ mod tests {
         let (far, _saw) = far_end(false).await;
         let rules = rules(8);
 
-        let mut packets = Net::new(ports.clone(), 1 << 20, 10);
+        let mut packets = Net::new(ports.clone(), Arc::default(), 1 << 20, 10);
         let mut sent = 0;
         for _ in 0..100 {
             sent += usize::from(
@@ -1129,7 +1552,7 @@ mod tests {
         assert!((20..=22).contains(&sent), "{sent} sent at 10 per second");
 
         let overhead = DATAGRAM_OVERHEAD as u64;
-        let mut bytes = Net::new(ports.clone(), 16 * overhead, 1 << 20);
+        let mut bytes = Net::new(ports.clone(), Arc::default(), 16 * overhead, 1 << 20);
         let mut sent = 0;
         for _ in 0..100 {
             sent += usize::from(

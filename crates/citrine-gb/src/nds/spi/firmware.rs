@@ -284,6 +284,16 @@ impl Firmware {
         online::connections(self.bytes())
     }
 
+    pub fn wfc_user_id(&self) -> u64 {
+        online::attested_user_id(self.bytes())
+    }
+
+    pub fn answer_wfc_user_id(&mut self, id: u64) {
+        let mut image = self.bytes().to_vec();
+        online::set_user_id(&mut image, id);
+        self.flash.load(&image);
+    }
+
     pub fn calibration(&self) -> Calibration {
         self.user_settings()
             .map_or_else(Calibration::default, Calibration::from_settings)

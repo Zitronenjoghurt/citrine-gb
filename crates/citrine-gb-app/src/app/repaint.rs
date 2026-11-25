@@ -36,6 +36,8 @@ pub(crate) struct Repaint {
     link: Option<crate::platform::vsync::VsyncLink>,
     #[cfg(target_os = "macos")]
     tried: bool,
+    #[cfg(target_os = "macos")]
+    display: Option<u64>,
     seen: Option<u64>,
     armed: bool,
 }
@@ -58,6 +60,7 @@ impl Repaint {
         idle_refreshes: Option<u64>,
         measured: Option<f64>,
         idle_tick: Duration,
+        not_before: Option<web_time::Instant>,
     ) {
         let link_period = self.link_period();
         match wake(busy, idle_refreshes, periods_agree(link_period, measured)) {
@@ -67,7 +70,14 @@ impl Repaint {
             }
             Wake::EveryRefresh => {
                 self.arm(None);
-                ctx.request_repaint_after(NEXT_REFRESH);
+                ctx.request_repaint_after(match not_before {
+                    Some(at) => {
+                        let wait = at.saturating_duration_since(web_time::Instant::now());
+                        let predicted = Duration::from_secs_f32(ctx.input(|i| i.predicted_dt));
+                        (wait + predicted).max(NEXT_REFRESH)
+                    }
+                    None => NEXT_REFRESH,
+                });
             }
             Wake::After(refreshes) => {
                 let period = link_period.unwrap_or_default();
@@ -91,6 +101,22 @@ impl Repaint {
     fn count(&mut self, _ctx: &egui::Context) -> Option<u64> {
         None
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn follow_display(&mut self, display: Option<u64>) {
+        let (Some(link), Some(id)) = (&self.link, display) else {
+            return;
+        };
+        if self.display != display
+            && let Ok(id) = u32::try_from(id)
+        {
+            link.show_on(id);
+            self.display = display;
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn follow_display(&mut self, _display: Option<u64>) {}
 
     #[cfg(target_os = "macos")]
     fn link_period(&self) -> Option<f64> {
@@ -142,13 +168,29 @@ mod tests {
         let ctx = egui::Context::default();
         let mut repaint = Repaint::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            repaint.finish(ctx, true, Some(1), None, Duration::from_secs(1));
+            repaint.finish(ctx, true, Some(1), None, Duration::from_secs(1), None);
         });
         let out = ctx.run(egui::RawInput::default(), |ctx| {
             ctx.request_repaint_after(Duration::from_millis(30));
         });
         let delay = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
         assert!(delay > Duration::ZERO, "{delay:?}");
+    }
+
+    #[test]
+    fn a_paced_refresh_waits_until_the_monitor_is_due() {
+        let ctx = egui::Context::default();
+        let mut repaint = Repaint::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let out = ctx.run(egui::RawInput::default(), |ctx| {
+            let at = web_time::Instant::now() + Duration::from_millis(16);
+            repaint.finish(ctx, true, Some(1), None, Duration::from_secs(1), Some(at));
+        });
+        let delay = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(
+            (Duration::from_millis(14)..=Duration::from_millis(16)).contains(&delay),
+            "{delay:?}"
+        );
     }
 
     #[test]

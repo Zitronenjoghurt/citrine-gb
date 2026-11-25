@@ -3,16 +3,17 @@ use crate::app::mobile::kit;
 use crate::app::tabs::chat::{self, ChatUi};
 use crate::app::tabs::playing;
 use crate::app::tabs::{Tab, TabViewer};
-use crate::app::ui_state::settings::SettingsTab;
+use crate::app::ui_state::settings_tree::SettingsTab;
 use crate::app::widgets::action::{action_height, main_button, quiet_button, wide_button};
 use crate::app::widgets::avatar;
 use crate::app::widgets::badge;
 use crate::app::widgets::confirm;
-use crate::app::widgets::copy::copy_button;
+use crate::app::widgets::copy::{copy_button, copy_icon};
 use crate::app::widgets::emoji;
 use crate::app::widgets::field::row_field;
 use crate::app::widgets::problem::problem_text;
 use crate::app::widgets::row::row_highlight;
+use crate::app::widgets::security_code::{self, SecurityCode};
 use crate::app::widgets::settings::online::{connection_line, my_seen, retry_row};
 use crate::app::widgets::typing;
 use crate::icons;
@@ -141,6 +142,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
             if !touch {
                 if me_row(ui, online, stored.as_ref(), now) {
                     ui_state.settings.current_tab = SettingsTab::Online;
+                    ui_state.settings_list_open = false;
                     viewer.events.open_tab(Tab::Settings);
                 }
                 ui.add_space(8.0);
@@ -257,7 +259,11 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                     }
                     let id = person.online_id;
                     let presence = online.presence(person);
-                    let note = playing::invite_note(play, online, id);
+                    let note = if online.key_changed(id) {
+                        Some(KEY_CHANGED_NOTE.to_owned())
+                    } else {
+                        playing::invite_note(play, online, id)
+                    };
                     let shown = playing::play_subtitle(play, id);
                     let in_session = shown.is_some();
                     let subtitle = shown.unwrap_or_else(|| subtitle(online, person, unix_now));
@@ -276,7 +282,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
                         _ => subtitle,
                     };
                     let subtitle = if online.is_typing(id, now) {
-                        Line::Typing
+                        Line::Typing(online.typing_text(id))
                     } else {
                         Line::Text(&subtitle)
                     };
@@ -531,9 +537,9 @@ enum PlayStyle {
 }
 
 fn play_together(ui: &mut Ui, style: PlayStyle) -> bool {
-    let label = format!("{}  Play together", icons::GAME_CONTROLLER);
+    let label = format!("{}  Play together", icons::USERS);
     let response = match style {
-        PlayStyle::Icon => ui.add(egui::Button::new(icons::GAME_CONTROLLER)),
+        PlayStyle::Icon => ui.add(egui::Button::new(icons::USERS)),
         PlayStyle::Wide(size) => ui.add_sized(size, main_button(ui, label)),
     };
     response.on_hover_text("Play together").clicked()
@@ -818,7 +824,7 @@ struct RowClicks {
 #[derive(Clone, Copy)]
 enum Line<'a> {
     Text(&'a str),
-    Typing,
+    Typing(Option<&'a str>),
 }
 
 impl Line<'_> {
@@ -961,9 +967,10 @@ fn person_row_sized(
                     let line = match subtitle.line {
                         Line::Text("") => None,
                         Line::Text(text) => Some(emoji::line(ui, text, TextStyle::Small, color)),
-                        Line::Typing => {
+                        Line::Typing(text) => {
                             let accent = crate::app::ui_state::ui_theme::brand_mark(ui.visuals());
-                            Some(typing::line(ui, "typing", TextStyle::Small, accent))
+                            let text = typing::list_line(text);
+                            Some(typing::line(ui, text, TextStyle::Small, accent))
                         }
                     };
                     if let Some(line) = line {
@@ -1013,7 +1020,8 @@ pub fn last_message(online: &Online, id: OnlineId) -> Option<String> {
         citrine_gb_net::Body::Palette(_) => Some("Palette".to_owned()),
         citrine_gb_net::Body::Receipt(_)
         | citrine_gb_net::Body::Edit(_)
-        | citrine_gb_net::Body::Delete(_) => None,
+        | citrine_gb_net::Body::Delete(_)
+        | citrine_gb_net::Body::TypingText(_) => None,
     }
 }
 
@@ -1053,6 +1061,25 @@ pub fn ago(then: u64, now: u64) -> String {
     }
 }
 
+const KEY_CHANGED_NOTE: &str = "Security code changed";
+fn code_hint(name: &str) -> String {
+    format!(
+        "Compare this code with {name} in person or on a call. If both screens show the same digits, no one else can read your chats."
+    )
+}
+
+fn new_code_hint(name: &str) -> String {
+    format!(
+        "Compare this code with {name} in person or on a call. Different digits mean someone else may read your chats, so leave chats paused."
+    )
+}
+
+fn key_changed_line(name: &str) -> String {
+    format!(
+        "{name}'s security code changed. Chats and Play are paused until you compare the new code with {name} in person or on a call."
+    )
+}
+
 #[derive(Default)]
 struct Offer {
     play: bool,
@@ -1086,6 +1113,7 @@ fn profile(
         return None;
     };
     let connected = online.is_connected();
+    let changed = online.key_changed(id);
     let mut close = false;
     let mut invite = None;
     let modal = egui::Modal::new(egui::Id::new("friend_profile")).show(ctx, |ui| {
@@ -1098,23 +1126,87 @@ fn profile(
             ui.add_space(4.0);
             ui.add(Label::new(RichText::new(&person.display_name).strong().size(17.0)).truncate());
             let line = match person.state {
-                FriendState::Friend => subtitle(online, &person, unix_now),
-                FriendState::Incoming => "Wants to be your friend".into(),
-                FriendState::Outgoing => "Waiting for an answer".into(),
-                FriendState::Blocked => "Blocked".into(),
+                FriendState::Friend if !connected => None,
+                FriendState::Friend => Some(subtitle(online, &person, unix_now)),
+                FriendState::Incoming => Some("Wants to be your friend".into()),
+                FriendState::Outgoing => Some("Waiting for an answer".into()),
+                FriendState::Blocked => Some("Blocked".into()),
             };
-            ui.label(RichText::new(line).weak());
+            if let Some(line) = line {
+                ui.label(RichText::new(line).weak());
+            }
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            let touch = crate::app::mobile::touch_square(ui) > 0.0;
+            let line = if touch {
+                ui.text_style_height(&TextStyle::Body)
+            } else {
+                ui.spacing().interact_size.y
+            };
+            let size = egui::vec2(ui.available_width(), line);
+            ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
                 let text = id.to_string();
+                let used = if touch {
+                    let width = |text: &str, style: TextStyle| {
+                        let font = style.resolve(ui.style());
+                        let color = egui::Color32::PLACEHOLDER;
+                        ui.painter()
+                            .layout_no_wrap(text.to_owned(), font, color)
+                            .size()
+                            .x
+                    };
+                    width("Online ID", TextStyle::Body)
+                        + width(&text, TextStyle::Monospace)
+                        + ui.text_style_height(&TextStyle::Body)
+                        + 2.0 * ui.spacing().item_spacing.x
+                } else {
+                    190.0
+                };
                 let width = ui.available_width();
-                ui.add_space((width - 230.0).max(0.0) / 2.0);
+                ui.add_space((width - used).max(0.0) / 2.0);
                 ui.label(RichText::new("Online ID").weak());
                 ui.label(RichText::new(&text).monospace());
-                if copy_button(ui, &text, state.copied_at, now) {
+                let copied = if touch {
+                    copy_icon(ui, &text, state.copied_at, now)
+                } else {
+                    copy_button(ui, &text, state.copied_at, now)
+                };
+                if copied {
                     state.copied_at = Some(now);
                 }
             });
+            if person.state == FriendState::Friend {
+                let name = &person.display_name;
+                if changed {
+                    ui.add_space(6.0);
+                    let warn = ui.visuals().warn_fg_color;
+                    ui.label(RichText::new(key_changed_line(name)).color(warn));
+                }
+                let code = if changed {
+                    online.new_safety_code(id)
+                } else {
+                    online.safety_code(id)
+                };
+                if let Some(code) = code {
+                    ui.add_space(10.0);
+                    let title = if changed {
+                        "New security code"
+                    } else {
+                        security_code::TITLE
+                    };
+                    let hint = if changed {
+                        new_code_hint(name)
+                    } else {
+                        code_hint(name)
+                    };
+                    SecurityCode {
+                        title,
+                        hint: &hint,
+                        lines: &code.lines(),
+                        compare: None,
+                    }
+                    .show(ui);
+                }
+            }
         });
         ui.add_space(10.0);
         let button = |ui: &mut Ui, text: String| {
@@ -1126,6 +1218,13 @@ fn profile(
         match person.state {
             FriendState::Friend => {
                 let size = egui::vec2(ui.available_width(), action_height(ui));
+                if changed {
+                    let text = format!("{} Digits match, continue", icons::CHECK);
+                    if ui.add_sized(size, egui::Button::new(text)).clicked() {
+                        online.trust_friend_key(id);
+                    }
+                    ui.add_space(4.0);
+                }
                 if let Some(note) = &offer.note {
                     let warn = ui.visuals().warn_fg_color;
                     ui.vertical_centered(|ui| ui.label(RichText::new(note).color(warn)));
@@ -1134,7 +1233,7 @@ fn profile(
                 match (offer.play, offer.watch) {
                     (true, true) => ui.columns(2, |columns| {
                         let half = egui::vec2(columns[0].available_width(), size.y);
-                        let join = egui::Button::new(format!("{}  Join", icons::GAME_CONTROLLER));
+                        let join = egui::Button::new(format!("{}  Join", icons::USERS));
                         if columns[0].add_sized(half, join).clicked() {
                             invite = Some((id, Way::Play));
                             close = true;

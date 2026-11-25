@@ -58,6 +58,15 @@ impl CheatBook {
         }
         Some(cheat)
     }
+
+    pub fn turn_off_unknown(&mut self, known: &CheatBook) {
+        for (rom_key, list) in &mut self.0 {
+            let known = known.list(rom_key);
+            for cheat in list {
+                cheat.on &= known.iter().any(|old| old.on && old.code == cheat.code);
+            }
+        }
+    }
 }
 
 pub fn formats_text(console: ConsoleKind) -> String {
@@ -85,11 +94,11 @@ pub fn format_of(console: ConsoleKind, code: &str) -> Option<Format> {
     Cheat::parse(console, code).ok().map(|cheat| cheat.format())
 }
 
-pub fn compile(console: ConsoleKind, saved: &[SavedCheat]) -> Vec<Cheat> {
+pub fn compile(console: ConsoleKind, saved: &[SavedCheat]) -> Vec<String> {
     saved
         .iter()
-        .filter(|cheat| cheat.on)
-        .filter_map(|cheat| Cheat::parse(console, &cheat.code).ok())
+        .filter(|cheat| cheat.on && Cheat::parse(console, &cheat.code).is_ok())
+        .map(|cheat| cheat.code.clone())
         .collect()
 }
 

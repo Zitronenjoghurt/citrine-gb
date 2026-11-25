@@ -5,9 +5,17 @@ pub mod controls;
 pub mod discord;
 #[cfg(feature = "nds")]
 pub mod ds;
+#[cfg(feature = "nds")]
 pub mod ds_screens;
+pub mod file_row;
 pub mod form;
 pub mod online;
 pub mod page;
+pub mod page_list;
+pub mod pages;
 pub mod palette;
+pub mod scope;
+pub mod spotlight;
+pub mod storage;
+pub mod this_game;
 pub mod your_data;

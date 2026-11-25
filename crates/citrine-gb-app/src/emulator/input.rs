@@ -1,17 +1,21 @@
 use super::Emulator;
 use super::runner::Hooks;
+use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
 use crate::app::ui_state::keybinds::{
-    BindingCapture, BindingKind, Captured, GbButton, KeyBindings, PadButton,
+    BindingCapture, BindingKind, Fire, GameButton, GbButton, KeyBindings,
 };
+use crate::combo::{Bound, Edge, Mods};
 use crate::controller_debug::PadLog;
 use crate::held::{Change, InputSource};
 use crate::local_link::{Game, Source};
-use crate::pad_input::{Ignored, PadAction, PadAxis, PadEvent, PadInput, PadKey, PadSource};
+use crate::pad_input::{PadAction, PadAxis, PadEvent, PadInput, PadSource, PadTable};
 use crate::recorder::InputRecorder;
 use citrine_gb::console::{Console, ConsoleKind, Keys};
 use strum::IntoEnumIterator;
 
 const STICK_TILT_DEADZONE: f32 = 0.15;
+
+pub type KeyFire = Fire<(Game, GameButton)>;
 
 impl Emulator {
     pub fn press(&mut self, source: InputSource, button: Keys) -> bool {
@@ -62,6 +66,7 @@ impl Emulator {
     }
 
     pub fn release_keyboard(&mut self) {
+        self.key_chords.clear();
         let all = Keys::all();
         let none = Keys::empty();
         self.set_game_source(Game::First, InputSource::Keyboard, all, none);
@@ -71,6 +76,8 @@ impl Emulator {
     }
 
     pub fn release_all(&mut self) {
+        self.key_chords.clear();
+        self.pad_chords.clear();
         let change = self.held.clear();
         self.apply(change);
     }
@@ -152,10 +159,11 @@ impl Emulator {
                 let down = on.map_or(Keys::empty(), GbButton::key);
                 self.set_source(source, mask, down)
             }
-            PadAction::Capture(pad) => {
-                capture.record(Captured::Pad(pad));
+            PadAction::Capture(pad, true) => {
+                capture.press_pad(pad);
                 true
             }
+            PadAction::Capture(pad, false) => capture.release_pad(pad),
             PadAction::Unplugged => {
                 let before = self.held.held();
                 let change = match source {
@@ -170,16 +178,87 @@ impl Emulator {
                 self.apply(change);
                 before.bits() != self.held.held().bits()
             }
-            PadAction::Ignore(_) => false,
+            PadAction::Button(..) | PadAction::Shortcut(..) | PadAction::Ignore(_) => false,
         }
     }
 
-    pub fn take_loose_presses(&mut self) -> Vec<PadButton> {
-        std::mem::take(&mut self.loose_presses)
+    pub fn set_hotkeys(&mut self, hotkeys: &Hotkeys) {
+        if self.hotkeys != *hotkeys {
+            self.hotkeys = hotkeys.clone();
+        }
     }
 
-    pub fn loose_held(&self) -> &[PadButton] {
-        &self.loose_held
+    pub fn take_shortcuts(&mut self) -> Vec<HotkeyAction> {
+        std::mem::take(&mut self.shortcuts)
+    }
+
+    pub fn holds_shortcut(&self, action: HotkeyAction) -> bool {
+        self.key_chords.holds(Fire::Shortcut(action))
+            || self.pad_chords.holds(Fire::Shortcut(action))
+    }
+
+    fn shortcut(&mut self, action: HotkeyAction, capture: &BindingCapture) {
+        if !capture.is_waiting() {
+            self.shortcuts.push(action);
+        }
+    }
+
+    fn fire_pad(
+        &mut self,
+        source: InputSource,
+        edges: &[Edge<Fire<GameButton>>],
+        capture: &BindingCapture,
+    ) -> bool {
+        let mut changed = false;
+        for edge in edges {
+            changed |= match *edge {
+                Edge::Down(Fire::Button(button)) => self.press(source, button.key()),
+                Edge::Up(Fire::Button(button)) => self.release(source, button.key()),
+                Edge::Down(Fire::Shortcut(action)) => {
+                    self.shortcut(action, capture);
+                    true
+                }
+                Edge::Up(Fire::Shortcut(_)) => true,
+            };
+        }
+        changed
+    }
+
+    fn fire_keys(&mut self, edges: &[Edge<KeyFire>], capture: &BindingCapture) {
+        for edge in edges {
+            match *edge {
+                Edge::Down(Fire::Button((game, button))) => {
+                    let keys = button.key();
+                    self.set_game_source(game, InputSource::Keyboard, keys, keys);
+                }
+                Edge::Up(Fire::Button((game, button))) => {
+                    let keys = button.key();
+                    self.set_game_source(game, InputSource::Keyboard, keys, Keys::empty());
+                }
+                Edge::Down(Fire::Shortcut(action)) => self.shortcut(action, capture),
+                Edge::Up(Fire::Shortcut(_)) => {}
+            }
+        }
+    }
+
+    fn key_table(&self, bindings: &KeyBindings) -> Vec<Bound<egui::Key, KeyFire>> {
+        let game: Vec<Bound<egui::Key, (Game, GameButton)>> = match self.link() {
+            Some(link) => link.key_table(bindings),
+            None => bindings
+                .key_table(self.kind() == ConsoleKind::Nds)
+                .into_iter()
+                .map(|bound| bound.map(|button| (Game::First, button)))
+                .collect(),
+        };
+        game.into_iter()
+            .map(|bound| bound.map(Fire::Button))
+            .chain(
+                self.hotkeys
+                    .key_table()
+                    .into_iter()
+                    .map(|bound| bound.map(Fire::Shortcut)),
+            )
+            .collect()
     }
 
     pub fn handle_pads(
@@ -190,6 +269,7 @@ impl Emulator {
         mut log: Option<&mut PadLog>,
     ) {
         let ds = self.kind() == ConsoleKind::Nds;
+        let mut table: Option<PadTable> = None;
         while let Some(PadEvent { pad, input, code }) = pads.next_event() {
             match input {
                 PadInput::Moved(PadAxis::RightStickX, value) => {
@@ -206,21 +286,21 @@ impl Emulator {
             };
             let zone = self.held_of(pad, source);
             let steering = GbButton::iter().find(|b| zone.contains(b.key()));
-            let action = crate::pad_input::route(input, bindings, capture, steering, ds);
-            if let (PadInput::Pressed(PadKey::Known(button)), PadAction::Ignore(Ignored::Unbound)) =
-                (input, action)
-            {
-                self.loose_presses.push(button);
-                self.loose_held.push(button);
-            }
-            match input {
-                PadInput::Released(PadKey::Known(button)) => {
-                    self.loose_held.retain(|held| *held != button);
+            let action = crate::pad_input::route(input, bindings, capture, steering);
+            let (action, changed) = match action {
+                PadAction::Button(button, down) => {
+                    let table: &PadTable = table.get_or_insert_with(|| {
+                        crate::pad_input::pad_table(bindings, &self.hotkeys, ds)
+                    });
+                    let edges = self.pad_chords.change(pad, button, down, table);
+                    let action = crate::pad_input::resolved(button, down, &edges, table);
+                    (action, self.fire_pad(source, &edges, capture))
                 }
-                PadInput::Disconnected | PadInput::Dropped => self.loose_held.clear(),
-                _ => {}
+                action => (action, self.apply_pad(source, action, capture)),
+            };
+            if input == PadInput::Disconnected {
+                self.pad_chords.forget(pad);
             }
-            let changed = self.apply_pad(source, action, capture);
             let Some(log) = log.as_deref_mut() else {
                 continue;
             };
@@ -260,26 +340,33 @@ impl Emulator {
         #[cfg(not(threaded))]
         let events = key_events(ctx);
 
+        let mut table: Option<Vec<Bound<egui::Key, KeyFire>>> = None;
         for (key, pressed, modifiers) in events {
-            if capture.wants(BindingKind::Keyboard) {
-                if pressed && key != egui::Key::Escape {
-                    capture.record(Captured::Key(key, modifiers));
+            if pressed && capture.wants(BindingKind::Keyboard) {
+                if key != egui::Key::Escape {
+                    capture.press_key(key, modifiers);
                 }
                 continue;
             }
-            let routed = match self.link() {
-                Some(link) => link
-                    .key(key, bindings)
-                    .map(|(game, button)| (game, button.key())),
-                None => bindings
-                    .input_for_key(key, self.kind() == ConsoleKind::Nds)
-                    .map(|keys| (Game::First, keys)),
+            if !pressed && capture.release_key(key) {
+                continue;
+            }
+            let table = match &mut table {
+                Some(table) => table,
+                None => table.insert(self.key_table(bindings)),
             };
-            if let Some((game, joypad)) = routed {
-                let down = if pressed { joypad } else { Keys::empty() };
-                self.set_game_source(game, InputSource::Keyboard, joypad, down);
-            } else if self.cart().motion() {
-                self.gimmicks.tilt_key(key, pressed);
+            let edges = if pressed {
+                self.key_chords.press(key, Mods::of(modifiers), table)
+            } else {
+                self.key_chords.release(key)
+            };
+            self.fire_keys(&edges, capture);
+            let bound = table.iter().any(|bound| bound.combo.contains(&key));
+            if !bound
+                && self.cart().motion()
+                && let Some(tilt) = bindings.tilt_for_key(key)
+            {
+                self.gimmicks.tilt(tilt, pressed);
             }
         }
     }

@@ -12,7 +12,8 @@ use axum::response::{IntoResponse, Response};
 use citrine_gb_net::Sealer;
 use citrine_gb_net::{
     ClientMsg, ErrorCode, FileId, GameKey, MAX_FRAME_BYTES, MAX_GTS_TARGET_CHARS, MessageId,
-    Notice, OnlineId, PROTOCOL_VERSION, Presence, ServerInfo, ServerMsg, Tag, speaks_protocol,
+    Notice, OnlineId, PROTOCOL_VERSION, Presence, Sealed, ServerInfo, ServerMsg, Tag,
+    speaks_protocol,
 };
 use futures_util::{SinkExt, StreamExt};
 use handshake::handshake;
@@ -35,6 +36,7 @@ const SCREEN_EVERY_SECS: f64 = 30.0;
 const SEAL_ROOM: usize = 1024;
 
 mod account;
+mod archive;
 mod files;
 mod friends;
 mod handshake;
@@ -78,19 +80,9 @@ pub async fn upgrade(
     };
     ws.max_message_size(MAX_FRAME_BYTES + SEAL_ROOM)
         .max_frame_size(MAX_FRAME_BYTES + SEAL_ROOM)
-        .on_upgrade(move |socket| run(app, socket, ip, slot))
-}
-
-fn screen_size(png: &[u8]) -> bool {
-    let Some(header) = png.get(8..24) else {
-        return false;
-    };
-    if &header[4..8] != b"IHDR" {
-        return false;
-    }
-    let width = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
-    let height = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
-    (1..=4).any(|scale| width == 160 * scale && height == 144 * scale)
+        .on_upgrade(move |socket| async move {
+            app.clone().tasks.spawn(run(app, socket, ip, slot));
+        })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -184,7 +176,7 @@ struct Upload {
     received: u64,
     file: tokio::fs::File,
     path: PathBuf,
-    reserved: Reservation,
+    _reserved: Reservation,
 }
 
 struct SaveParts {
@@ -221,6 +213,7 @@ struct Client {
     uploads: HashMap<Tag, Upload>,
     save_parts: Option<SaveParts>,
     downloads: Vec<JoinHandle<()>>,
+    archive_download: Option<(citrine_gb_net::ArchiveId, JoinHandle<()>)>,
     download_slots: Arc<Semaphore>,
     screen: Option<String>,
     screen_limit: Bucket,
@@ -270,6 +263,7 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
         uploads: HashMap::new(),
         save_parts: None,
         downloads: Vec::new(),
+        archive_download: None,
         download_slots: Arc::new(Semaphore::new(app.config.limits.downloads_at_once)),
         screen: None,
         screen_limit: Bucket::new(1.0 / SCREEN_EVERY_SECS, 1.0),
@@ -278,6 +272,7 @@ async fn run(app: Arc<App>, socket: WebSocket, ip: IpAddr, slot: Slot) {
         pending_totp: None,
         net: crate::ds_net::Net::new(
             app.ds_ports.clone(),
+            app.tasks.clone(),
             app.config.limits.ds_net_bytes_per_second,
             app.config.limits.ds_net_packets_per_second,
         ),
@@ -411,6 +406,7 @@ impl Client {
             }
             ClientMsg::Upload { tag, .. } => ServerMsg::UploadFailed { tag, error },
             ClientMsg::Download(file) => ServerMsg::DownloadFailed { file, error },
+            ClientMsg::ArchiveGet { id, .. } => ServerMsg::ArchiveFailed { id, error },
             ClientMsg::PutSave { tag, .. } | ClientMsg::DeleteSave { tag, .. } => {
                 ServerMsg::SaveRefused {
                     tag,
@@ -421,6 +417,10 @@ impl Client {
             ClientMsg::Screen(_) => ServerMsg::ScreenRefused(error),
             ClientMsg::NetOpen { stream, .. } => ServerMsg::NetOpened { stream, ok: false },
             ClientMsg::NetLease { .. } => ServerMsg::NetLeased { ip: None },
+            ClientMsg::DsList { call, .. } => ServerMsg::DsList {
+                call,
+                hosts: Vec::new(),
+            },
             _ => return self.rate_limited().await,
         };
         self.send(refusal).await;
@@ -443,6 +443,13 @@ impl Client {
 
     fn me(&self) -> Result<&Me, ErrorCode> {
         self.me.as_ref().ok_or(ErrorCode::NotSignedIn)
+    }
+
+    fn fits(&self, sealed: &Sealed) -> Result<(), ErrorCode> {
+        if sealed.ciphertext.len() as u64 > self.app.settings.get().max_message_bytes {
+            return Err(ErrorCode::TooLarge);
+        }
+        Ok(())
     }
 
     async fn handle(&mut self, msg: ClientMsg) -> Result<(), ErrorCode> {
@@ -511,6 +518,9 @@ impl Client {
                 | ClientMsg::NetWrite { .. }
                 | ClientMsg::NetClose { .. }
                 | ClientMsg::NetTaken { .. }
+                | ClientMsg::DsProfile { .. }
+                | ClientMsg::DsMessage { .. }
+                | ClientMsg::DsNatneg { .. }
         );
         if !streamed && !self.app.rates.messages.take(me, 1.0) {
             self.refuse(msg).await;
@@ -562,10 +572,8 @@ impl Client {
                 db(self.app.db.ack_messages(device, &ids).await)
             }
             ClientMsg::Restate { id, sealed } => {
-                if let Some(sealed) = &sealed
-                    && sealed.ciphertext.len() as u64 > self.app.settings.get().max_message_bytes
-                {
-                    return Err(ErrorCode::TooLarge);
+                if let Some(sealed) = &sealed {
+                    self.fits(sealed)?;
                 }
                 let me = self.me()?.id;
                 db(self.app.db.restate_message(me, id, sealed.as_ref()).await)?;
@@ -677,6 +685,7 @@ impl Client {
                 Ok(())
             }
             ClientMsg::Playing { to, sealed } => {
+                self.fits(&sealed)?;
                 let me = self.me()?;
                 let from = me.online_id;
                 let me = me.id;
@@ -820,6 +829,21 @@ impl Client {
             ClientMsg::NetClose { stream } => self.net_close(stream),
             ClientMsg::NetTaken { stream, total } => self.net_taken(stream, total),
             ClientMsg::NetLease { want } => self.net_lease(want).await,
+            ClientMsg::DsProfile { call, profile } => self.ds_profile(call, profile).await,
+            ClientMsg::DsHost { game, port, keys } => self.ds_host(game, port, keys),
+            ClientMsg::DsUnhost => self.ds_unhost(),
+            ClientMsg::DsList { call, game } => self.ds_list(call, game).await,
+            ClientMsg::DsMessage { to, data } => self.ds_message(to, data),
+            ClientMsg::DsNatneg {
+                cookie,
+                index,
+                port,
+            } => self.ds_natneg(cookie, index, port),
+            ClientMsg::ArchiveGet { id, from_part } => self.archive_get(id, from_part).await,
+            ClientMsg::ArchiveCancel(id) => {
+                self.archive_cancel(id);
+                Ok(())
+            }
             ClientMsg::Hello { .. }
             | ClientMsg::Ping(_)
             | ClientMsg::SignUp { .. }
@@ -858,6 +882,23 @@ impl Client {
         Ok(())
     }
 
+    async fn ds_profile(&mut self, call: u64, profile: u32) -> Result<(), ErrorCode> {
+        let me = self.me()?.id;
+        let ours = db(self
+            .app
+            .db
+            .ds_profile_claim(i64::from(profile), me, now())
+            .await)?;
+        if !ours {
+            log::info!(
+                "relay connection {}: ds profile {profile} refused",
+                self.conn_id
+            );
+        }
+        self.send(ServerMsg::DsProfile { call, ours }).await;
+        Ok(())
+    }
+
     async fn tell_me(&self, msg: ServerMsg) {
         if let Some(me) = &self.me {
             self.app.hub.send_others(me.id, self.conn_id, msg.clone());
@@ -877,6 +918,9 @@ impl Client {
         }
         for download in self.downloads.drain(..) {
             download.abort();
+        }
+        if let Some((_, task)) = self.archive_download.take() {
+            task.abort();
         }
         for (_, upload) in self.uploads.drain() {
             drop(upload.file);

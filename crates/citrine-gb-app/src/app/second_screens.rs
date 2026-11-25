@@ -3,6 +3,7 @@ use super::mobile::{frame, sheet};
 use super::tabs::Tab;
 use super::ui_state::hotkeys::HotkeyAction;
 use super::widgets::confirm::{self, Answer, Ask};
+use super::widgets::security_code::{self, SecurityCode};
 use super::widgets::touch_controls::{TouchInput, TouchLayout};
 use crate::held::InputSource;
 use crate::icons;
@@ -12,6 +13,7 @@ use crate::second_screens::{
     SurfaceRow,
 };
 use citrine_gb::console::Keys;
+use citrine_gb_net::CheckCode;
 use citrine_gb_surface::link::Route;
 use citrine_gb_surface::mode::{Mode, Preset, ScreenShape, View};
 use citrine_gb_surface::pairing::Code;
@@ -28,7 +30,17 @@ const DEFAULT_RELAY: &str = "gb.lemon.industries";
 const CONTROLLER_MOST: f32 = 400.0;
 const INFO_HEIGHT: f32 = 250.0;
 const WINDOW_SIZE: [f32; 2] = [520.0, 640.0];
-const ASK_NOTE: &str = "It shows this game and can press its buttons.";
+const ASK_NOTE: &str = "It can see and play this game.";
+
+pub(crate) fn ask_code_hint(name: &str) -> String {
+    format!(
+        "If {name} shows other digits, someone else may be connecting to see and play this game. Choose Not now."
+    )
+}
+
+fn ask_compare(name: &str) -> String {
+    format!("Allow if {name} shows the same digits")
+}
 pub const PANES: [Tab; 5] = [
     Tab::Saves,
     Tab::Media,
@@ -60,9 +72,11 @@ pub struct Facts {
     pub display: Option<String>,
     pub join: Option<JoinState>,
     pub join_host: Option<String>,
+    pub join_code: Option<CheckCode>,
     pub suggestions: Vec<Suggestion>,
     pub has_game: bool,
     pub lan_blocked: bool,
+    pub code_spent: bool,
 }
 
 #[derive(Default)]
@@ -188,16 +202,25 @@ impl Citrine {
         };
         let message = format!("{} wants to be a second screen", asker.name);
         let notes = [ASK_NOTE.to_owned()];
+        let hint = ask_code_hint(&asker.name);
+        let compare = ask_compare(&asker.name);
         let answer = confirm::ask_as(
             ctx,
             &format!("second_screen_ask_{}", asker.id),
             Ask {
                 message: &message,
+                list: &[],
                 notes: &notes,
                 action: "Allow",
                 action_enabled: true,
                 extra: None,
                 load: None,
+                code: Some(SecurityCode {
+                    title: security_code::TITLE,
+                    hint: &hint,
+                    lines: &asker.code.lines(),
+                    compare: Some(&compare),
+                }),
             },
             "Not now",
         );
@@ -242,9 +265,11 @@ impl Citrine {
                 .second
                 .joining()
                 .and_then(|j| j.host_name().map(str::to_owned)),
+            join_code: self.second.joining().and_then(|j| j.check_code()),
             suggestions: self.second.suggestions(),
             has_game: self.emulator.has_game(),
             lan_blocked: self.second.lan_blocked(),
+            code_spent: self.second.code_spent(),
         };
     }
 
@@ -315,22 +340,49 @@ impl Citrine {
         }
     }
 
-    fn game_card(&mut self) -> Option<GameCard> {
-        if !self.emulator.has_game() {
+    pub(super) fn game_card(&mut self) -> Option<GameCard> {
+        if !self.emulator.shows_console() {
             self.surface.playing = None;
             return None;
         }
-        let key = self
-            .emulator
-            .rom_key()
-            .unwrap_or(self.emulator.game_name())
-            .to_owned();
+        let session = self
+            .play
+            .session()
+            .filter(|_| self.emulator.shows_session())
+            .and_then(|session| session.shown_game());
+        let (key, title, session_rom) = match session {
+            Some((card, rom)) => (
+                card.hash.iter().map(|b| format!("{b:02x}")).collect(),
+                crate::game_name::name_or(&card.hash, &card.title).to_owned(),
+                Some(rom),
+            ),
+            None => {
+                let key = self
+                    .emulator
+                    .rom_key()
+                    .unwrap_or(self.emulator.game_name())
+                    .to_owned();
+                let title = self
+                    .ui
+                    .settings
+                    .game_names
+                    .name_or(Some(&key), self.emulator.game_name())
+                    .to_owned();
+                (key, title, None)
+            }
+        };
         let now = web_time::Instant::now();
         if self.surface.playing.as_ref().is_none_or(|(k, _)| *k != key) {
             self.surface.playing = Some((key.clone(), now));
         }
         if self.surface.icon.as_ref().is_none_or(|(k, _)| *k != key) {
-            let icon = self.banner_icon();
+            let icon = match session_rom {
+                Some(rom) => rom.as_deref().and_then(banner_icon),
+                #[cfg(feature = "nds")]
+                None => banner_icon(&self.emulator.rom_bytes()),
+                #[cfg(not(feature = "nds"))]
+                None => None,
+            };
             self.surface.icon = Some((key.clone(), icon));
         }
         let video = self.emulator.video();
@@ -340,13 +392,9 @@ impl Citrine {
             .as_ref()
             .map_or(0, |(_, since)| now.duration_since(*since).as_secs());
         Some(GameCard {
-            title: self
-                .ui
-                .settings
-                .game_names
-                .name_or(Some(&key), self.emulator.game_name())
+            title,
+            system: crate::app::ui_state::settings::kind_name(self.emulator.played_kind())
                 .to_owned(),
-            system: crate::app::ui_state::settings::kind_name(self.emulator.kind()).to_owned(),
             icon: self
                 .surface
                 .icon
@@ -365,23 +413,6 @@ impl Citrine {
             paused: !self.emulator.is_running(),
             saved_secs_ago: None,
         })
-    }
-
-    #[cfg(feature = "nds")]
-    fn banner_icon(&self) -> Option<Icon> {
-        let rom = self.emulator.rom_bytes();
-        let banner = crate::ds_banner::banner(&rom)?;
-        let rgba = citrine_gb::rom::nds::icon_rgba(&banner.icon)?;
-        Some(Icon {
-            width: 32,
-            height: 32,
-            rgba,
-        })
-    }
-
-    #[cfg(not(feature = "nds"))]
-    fn banner_icon(&self) -> Option<Icon> {
-        None
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -737,9 +768,9 @@ impl Citrine {
                     let xy = game.as_ref().is_some_and(|g| g.system == "Nintendo DS");
                     let layout =
                         TouchLayout::bar(rect, &self.ui.settings.touch, shoulders).with_xy(xy);
-                    super::widgets::touch_controls::claim(ui, layout.reach());
+                    layout.claim(ui);
                     let held = view.touch.update(ui, &layout);
-                    layout.paint(ui, held, &self.ui.settings.touch);
+                    layout.paint(ui, held, &self.ui.settings.touch, &[]);
                     buttons = held;
                 }
                 View::GameInfo => {
@@ -771,23 +802,27 @@ impl Citrine {
         remote: &mut Remote,
         view: &mut ViewState,
     ) {
-        let icon = game.icon.as_ref().map(|icon| {
-            let fresh = view
-                .icon
-                .as_ref()
-                .is_none_or(|(title, _)| *title != game.title);
-            if fresh {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [usize::from(icon.width), usize::from(icon.height)],
-                    &icon.rgba,
-                );
-                let texture =
-                    ui.ctx()
-                        .load_texture("surface_icon", image, egui::TextureOptions::NEAREST);
-                view.icon = Some((game.title.clone(), texture));
-            }
-            view.icon.as_ref().map(|(_, t)| t.id())
-        });
+        let icon = game
+            .icon
+            .as_ref()
+            .filter(|icon| icon.is_whole())
+            .map(|icon| {
+                let fresh = view
+                    .icon
+                    .as_ref()
+                    .is_none_or(|(title, _)| *title != game.title);
+                if fresh {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [usize::from(icon.width), usize::from(icon.height)],
+                        &icon.rgba,
+                    );
+                    let texture =
+                        ui.ctx()
+                            .load_texture("surface_icon", image, egui::TextureOptions::NEAREST);
+                    view.icon = Some((game.title.clone(), texture));
+                }
+                view.icon.as_ref().map(|(_, t)| t.id())
+            });
         let card = rect.shrink(12.0);
         ui.scope_builder(UiBuilder::new().max_rect(card), |ui| {
             super::mobile::kit::card(ui, |ui| {
@@ -832,7 +867,7 @@ impl Citrine {
                     if columns[1]
                         .add_sized(
                             [columns[1].available_width(), 40.0],
-                            egui::Button::new(format!("{} Save state", icons::FLOPPY_DISK)),
+                            egui::Button::new(format!("{} Save state", icons::SAVE_STATE)),
                         )
                         .clicked()
                     {
@@ -1073,6 +1108,22 @@ fn split(area: Rect, views: &[View], screens: &[ScreenShape]) -> Vec<(View, Rect
             (v.clone(), rect)
         })
         .collect()
+}
+
+#[cfg(feature = "nds")]
+fn banner_icon(rom: &[u8]) -> Option<Icon> {
+    let banner = crate::ds_banner::banner(rom)?;
+    let rgba = citrine_gb::rom::nds::icon_rgba(&banner.icon)?;
+    Some(Icon {
+        width: 32,
+        height: 32,
+        rgba,
+    })
+}
+
+#[cfg(not(feature = "nds"))]
+fn banner_icon(_rom: &[u8]) -> Option<Icon> {
+    None
 }
 
 #[cfg(test)]
@@ -1523,6 +1574,49 @@ mod tests {
             assert_eq!(host.second.surfaces().len(), 1);
         }
 
+        fn ask_frame(
+            app: &mut Citrine,
+            ctx: &egui::Context,
+            events: Vec<egui::Event>,
+        ) -> egui::FullOutput {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| app.ask_second_screens(ctx))
+        }
+
+        #[test]
+        fn both_apps_show_one_security_code_and_allow_is_one_tap() {
+            use crate::app::tests::{tap, text_rect};
+            let (mut host, mut phone) = nearby_pair("second-screens-check-code");
+            let suggestion = first_suggestion(&mut host, &mut phone);
+            phone.second.join_suggestion(&suggestion);
+            until(&mut host, &mut phone, |host, phone| {
+                !host.second.askers().is_empty()
+                    && phone.second.joining().map(|j| j.state()) == Some(JoinState::Asking)
+            })
+            .expect("the host asks and the phone waits");
+            let asker = host.second.askers().remove(0);
+            assert_eq!(
+                phone.second.joining().and_then(|j| j.check_code()),
+                Some(asker.code)
+            );
+            let ctx = egui::Context::default();
+            ask_frame(&mut host, &ctx, Vec::new());
+            let shown = ask_frame(&mut host, &ctx, Vec::new());
+            assert!(text_rect(&shown, &asker.code.to_string()).is_some());
+            let compare = format!("Allow if {} shows the same digits", asker.name);
+            assert!(text_rect(&shown, &compare).is_some());
+            let allow = text_rect(&shown, "Allow").expect("an Allow button");
+            ask_frame(&mut host, &ctx, tap(allow.center()));
+            assert!(host.second.askers().is_empty());
+            until(&mut host, &mut phone, |_, phone| shown_seq(phone).is_some())
+                .expect("frames arrive after one tap");
+            assert_eq!(phone.second.joining().and_then(|j| j.check_code()), None);
+        }
+
         #[test]
         fn a_citrine_without_a_game_is_not_listed() {
             let (mut host, mut phone) = nearby_pair("second-screens-listed-host");
@@ -1595,8 +1689,8 @@ mod tests {
         }
 
         #[test]
-        fn a_stranger_with_a_wrong_proof_is_still_asked() {
-            let (mut host, mut phone) = nearby_pair("second-screens-wrong-proof-host");
+        fn a_stranger_with_a_wrong_key_is_refused_without_a_prompt() {
+            let (mut host, mut phone) = nearby_pair("second-screens-wrong-key-host");
             host.second.set_account(Some(account(1, &[])));
             phone
                 .second
@@ -1605,10 +1699,18 @@ mod tests {
             assert!(!suggestion.own);
             suggestion.keys = Some(keys_of(9, 1));
             phone.second.join_suggestion(&suggestion);
-            until(&mut host, &mut phone, |host, _| {
-                !host.second.askers().is_empty()
+            until(&mut host, &mut phone, |_, phone| {
+                matches!(
+                    phone.second.joining().map(|j| j.state()),
+                    Some(JoinState::Failed(_))
+                )
             })
-            .expect("the host asks");
+            .expect("the phone gives up");
+            assert_eq!(
+                phone.second.joining().map(|j| j.state()),
+                Some(JoinState::Failed("Couldn't reach the other device"))
+            );
+            assert!(host.second.askers().is_empty());
             assert!(host.second.surfaces().is_empty());
         }
 
@@ -1641,8 +1743,16 @@ mod tests {
             for seen in [&up, &down] {
                 assert!(!seen.windows(16).any(|w| w == keys.door.0));
                 assert!(!seen.windows(32).any(|w| w == keys.proof.0));
+                assert!(!seen.windows(32).any(|w| w == keys.proof.link()));
                 assert!(!seen.windows(32).any(|w| w == keys.tag.0));
             }
+            let host_name = crate::online::cloud::device_name();
+            assert!(host_name.len() >= 4);
+            assert!(
+                !down
+                    .windows(host_name.len())
+                    .any(|w| w == host_name.as_bytes())
+            );
         }
     }
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM devices WHERE account_id = ?1 AND id NOT IN\n               (SELECT id FROM devices WHERE account_id = ?1 ORDER BY last_seen DESC, id DESC LIMIT ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b4fab2414faf2cf7fbde9f93f7566f23e0178496ba70f65737c1b9ebf2234fe7"
+}

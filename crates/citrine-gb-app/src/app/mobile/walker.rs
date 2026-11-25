@@ -15,6 +15,6 @@ pub fn tile_fill(visuals: &egui::Visuals, hovered: bool) -> Color32 {
     }
 }
 
-pub fn use_here(ui: &mut Ui) -> bool {
-    kit::pill(ui, "Use here", true).clicked()
+pub fn action(ui: &mut Ui, label: &str, primary: bool) -> bool {
+    kit::pill(ui, label, primary).clicked()
 }

@@ -91,7 +91,10 @@ impl SharedWram {
     #[cfg(jit)]
     pub fn fast_window(&mut self, cpu: Cpu, base: u32, size: u64) -> Option<(jit::Window, u32)> {
         let window = self.window(cpu)?;
-        let fast = self.ram.window(base, size).skip(window.base as u32);
+        let fast = self
+            .ram
+            .window(base, size, SHARED_WRAM_SIZE)
+            .skip(window.base as u32);
         Some((fast, window.len as u32))
     }
 

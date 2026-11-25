@@ -41,6 +41,7 @@ pub mod saves;
 mod second_screens;
 pub(crate) mod settings;
 pub mod stats;
+mod this_game;
 mod threads;
 mod video;
 #[cfg(feature = "nds")]
@@ -66,6 +67,8 @@ pub struct TabViewer<'a> {
     pub stats: &'a crate::stats::Stats,
     pub threads: &'a citrine_gb_threads::Threads,
     pub ui: &'a mut UiState,
+    #[cfg(feature = "nds")]
+    pub mic_test: Option<crate::audio::mic::MicTest>,
 }
 
 impl TabViewer<'_> {
@@ -116,6 +119,16 @@ impl TabViewer<'_> {
     }
 
     fn content(&mut self, ui: &mut Ui, tab: Tab) {
+        let debugs = matches!(
+            tab,
+            Tab::Disassembly | Tab::TimeControl | Tab::DebugActions | Tab::Tool(Tool::Memory)
+        );
+        if debugs && self.emulator.hardcore() {
+            if crate::app::hardcore::off_note(ui, "Debug tools are off in hardcore") {
+                crate::app::hardcore::turn_off(&mut self.ui.settings);
+            }
+            return;
+        }
         match tab {
             Tab::GameBoy => game_boy::show(self, ui),
             Tab::Games => games::show(self, ui),
@@ -123,6 +136,7 @@ impl TabViewer<'_> {
             Tab::GameInfo => game_info::show(self, ui),
             Tab::Achievements => achievements::show(self, ui),
             Tab::Cheats => cheats::show(self, ui),
+            Tab::ThisGame => this_game::show(self, ui),
             Tab::Settings => settings::show(self, ui),
             Tab::Saves => saves::show(self, ui),
             Tab::SecondScreens => second_screens::show(self, ui),
@@ -174,9 +188,8 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
         } else {
             game_title(self.emulator)
         };
-        let recorder = &self.emulator.screen_recorder;
-        if *tab == Tab::GameBoy && recorder.is_recording() {
-            let time = recorder.elapsed_label();
+        if *tab == Tab::GameBoy && self.emulator.is_recording() {
+            let time = self.emulator.recording_label();
             return egui::RichText::new(format!("{}  {}  {time}", console, icons::RECORD))
                 .color(egui::Color32::RED)
                 .into();
@@ -370,6 +383,7 @@ pub enum Tab {
     Threads,
     Walker,
     Tool(Tool),
+    ThisGame,
 }
 
 #[derive(
@@ -430,6 +444,7 @@ impl Tab {
             Tab::DsFile(_) => "File",
             Tab::RomFolders => "ROM folders",
             Tab::Tool(tool) => tool.title(),
+            Tab::ThisGame => crate::app::widgets::settings::this_game::TITLE,
         }
     }
 
@@ -458,6 +473,7 @@ impl Tab {
                 | Tab::GameInfo
                 | Tab::Games
                 | Tab::Cheats
+                | Tab::ThisGame
                 | Tab::Achievements
                 | Tab::Media
                 | Tab::Stats
@@ -571,6 +587,10 @@ pub fn fit_titles(
         let control = match screens {
             Some(label) if holds_screen => measure(label) + TAB_PADDING,
             _ => 0.0,
+        } + if holds_screen {
+            measure(&crate::app::hud::chip::label()) + TAB_PADDING
+        } else {
+            0.0
         };
         let available = leaf.rect.width() - 1.0 - control;
         let text: Vec<f32> = leaf.tabs.iter().map(|tab| measure(&shown(tab))).collect();

@@ -1,4 +1,4 @@
-use super::facts::Facts;
+use super::facts::{Facts, genre_name};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -108,7 +108,7 @@ impl Claims {
         Facts {
             developer: label(&self.developer),
             publisher: label(&self.publisher),
-            genre: label(&self.genre).map(|genre| upper_first(&genre)),
+            genre: label(&self.genre).map(|genre| genre_name(&genre)),
             year: self.date.map(|date| date.0),
             month: self.date.and_then(|date| date.1),
             day: self.date.and_then(|date| date.2),
@@ -138,14 +138,6 @@ pub fn labels(body: &[u8]) -> BTreeMap<String, String> {
             ))
         })
         .collect()
-}
-
-fn upper_first(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -188,7 +180,7 @@ mod tests {
             Some("Konami Computer Entertainment Tokyo")
         );
         assert_eq!(facts.publisher.as_deref(), Some("Konami"));
-        assert_eq!(facts.genre.as_deref(), Some("Action role-playing game"));
+        assert_eq!(facts.genre.as_deref(), Some("Role-playing (RPG)"));
         assert_eq!(
             (facts.year, facts.month, facts.day),
             (Some(2003), Some(5), Some(6))

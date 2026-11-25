@@ -35,6 +35,10 @@ enum Chip {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Backup {
     chip: Chip,
+    #[cfg_attr(
+        feature = "serde",
+        serde(serialize_with = "crate::utils::unsaved::serialize")
+    )]
     dirty: bool,
 }
 

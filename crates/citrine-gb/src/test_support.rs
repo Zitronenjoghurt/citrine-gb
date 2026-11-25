@@ -85,6 +85,7 @@ pub(crate) fn cycles(gb: &mut GameBoy, count: u32) {
 
 #[path = "../tests/archives/mod.rs"]
 mod archives;
+pub mod state_fuzz;
 
 #[derive(Deserialize)]
 pub(crate) struct Sources {

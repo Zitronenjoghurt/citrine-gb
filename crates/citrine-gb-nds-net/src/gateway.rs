@@ -26,6 +26,8 @@ const MTU: usize = 1514;
 const TCP_BUFFER: usize = 64 * 1024;
 const UDP_PACKETS: usize = 32;
 const MAX_UDP_PEERS: usize = 32;
+const MAX_UDP_PORTS: usize = 64;
+const MAX_UDP_TARGETS: usize = 64;
 const UDP_BUFFER: usize = 64 * 1024;
 const DHCP_SERVER: u16 = 67;
 const DHCP_CLIENT: u16 = 68;
@@ -451,6 +453,10 @@ impl Gateway {
         self.tcp.len() + self.ports.len()
     }
 
+    pub fn udp_sockets(&self) -> usize {
+        self.udp.len()
+    }
+
     pub fn udp_peers(&self) -> Vec<UdpPeer> {
         self.ports
             .iter()
@@ -499,7 +505,7 @@ impl Gateway {
         self.now = Instant::from_micros(i64::try_from(us).unwrap_or(i64::MAX));
         self.iface.poll(self.now, &mut self.wire, &mut self.sockets);
         if let Some(services) = self.services.as_mut() {
-            services.poll();
+            services.poll(us);
         }
         self.serve_dhcp();
         self.serve_dns();
@@ -587,13 +593,14 @@ impl Gateway {
         let IpAddress::Ipv4(address) = to.addr;
         let mut far = SocketAddrV4::new(address, to.port);
         let upstream = if address == services::ADDRESS {
-            let Some(id) = self
-                .services
-                .as_mut()
-                .and_then(|services| services.open(to.port))
-            else {
+            let Some(services) = self.services.as_mut() else {
                 return;
             };
+            let Some(id) = services.open(to.port) else {
+                return;
+            };
+            let IpAddress::Ipv4(peer) = from.addr;
+            services.peer(id, SocketAddrV4::new(peer, from.port));
             Upstream::Local(id)
         } else {
             let Some(host) = self.config.upstream(address) else {
@@ -670,13 +677,26 @@ impl Gateway {
         let IpAddress::Ipv4(address) = to.addr;
         if address == services::ADDRESS {
             if self.services.is_some() {
-                udp_target(&mut self.udp, &mut self.sockets, to, self.now);
+                udp_target(
+                    &mut self.udp,
+                    &mut self.sockets,
+                    &self.lookups,
+                    to,
+                    self.now,
+                );
             }
             return;
         }
         let lan = lan_peer(&self.config, self.lan, address);
         if (self.config.upstream(address).is_none() && !lan)
-            || udp_target(&mut self.udp, &mut self.sockets, to, self.now).is_none()
+            || udp_target(
+                &mut self.udp,
+                &mut self.sockets,
+                &self.lookups,
+                to,
+                self.now,
+            )
+            .is_none()
             || self.ports.iter().any(|port| port.from == from)
         {
             return;
@@ -907,11 +927,24 @@ impl Gateway {
         while let Ok(heard) = relay.back.try_recv() {
             match heard {
                 NetIn::Heard { port, from, data } => {
-                    let found = self.ports.iter_mut().find(|udp| udp.from.port == port);
-                    if let Some(UdpPort {
-                        socket: PortSocket::Relay(queue),
-                        ..
-                    }) = found
+                    let found = self.ports.iter().position(|udp| udp.from.port == port);
+                    let at = match (found, self.lan) {
+                        (Some(at), _) => at,
+                        (None, Lan::Leased(own))
+                            if self.ports.len() < MAX_UDP_PORTS
+                                && self.leases.iter().any(|(_, held)| *held == own) =>
+                        {
+                            self.ports.push(UdpPort {
+                                from: IpEndpoint::new(IpAddress::Ipv4(own), port),
+                                socket: PortSocket::Relay(VecDeque::new()),
+                                peers: Vec::new(),
+                                used: self.now,
+                            });
+                            self.ports.len() - 1
+                        }
+                        (None, _) => continue,
+                    };
+                    if let PortSocket::Relay(queue) = &mut self.ports[at].socket
                         && queue.len() < UDP_PACKETS
                     {
                         queue.push_back((from, data));
@@ -1063,6 +1096,12 @@ impl Gateway {
                     }
                     target.used = now;
                 }
+                if let Some(services) = self.services.as_mut() {
+                    for (to, data) in services.take_datagrams(target.to.port) {
+                        let to = IpEndpoint::new(IpAddress::Ipv4(*to.ip()), to.port());
+                        replies.push((data, to));
+                    }
+                }
                 for (reply, to) in replies {
                     let mut meta = udp::UdpMetadata::from(to);
                     meta.local_address = Some(target.to.addr);
@@ -1145,7 +1184,9 @@ impl Gateway {
                     continue;
                 };
                 let to = IpEndpoint::new(IpAddress::Ipv4(seen), source.port());
-                let Some(handle) = udp_target(&mut self.udp, &mut self.sockets, to, now) else {
+                let Some(handle) =
+                    udp_target(&mut self.udp, &mut self.sockets, &self.lookups, to, now)
+                else {
                     continue;
                 };
                 let mut meta = udp::UdpMetadata::from(port.from);
@@ -1180,12 +1221,27 @@ impl Gateway {
 fn udp_target(
     targets: &mut Vec<UdpTarget>,
     sockets: &mut SocketSet<'static>,
+    lookups: &[Lookup],
     to: IpEndpoint,
     now: Instant,
 ) -> Option<SocketHandle> {
     if let Some(target) = targets.iter_mut().find(|target| target.to == to) {
         target.used = now;
         return Some(target.handle);
+    }
+    if targets.len() >= MAX_UDP_TARGETS {
+        let oldest = targets
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| {
+                target.to.addr != IpAddress::Ipv4(services::ADDRESS)
+                    && !lookups
+                        .iter()
+                        .any(|lookup| lookup.server == Some(target.to))
+            })
+            .min_by_key(|(_, target)| target.used)
+            .map(|(at, _)| at)?;
+        sockets.remove(targets.swap_remove(oldest).handle);
     }
     let mut socket = udp_socket();
     socket.bind(to).ok()?;

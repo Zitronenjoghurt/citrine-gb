@@ -79,6 +79,25 @@ class CrashReportTest {
     }
 
     @Test
+    fun summary_drops_frame_addresses() {
+        val full = listOf(
+            "device",
+            "",
+            "== crash-rust.txt",
+            "thread main: panicked at src/x.rs:1:1:",
+            "boom",
+            "",
+            "/data/app/base.apk!/lib/arm64-v8a/libcitrine_gb_app.so loaded at 0x7b28000000",
+            "   0:       0x7b29a1c3d4 - std::backtrace::Backtrace::force_capture",
+            "   1:       0x7b2980aa10 - citrine_gb_app::app::Citrine::new",
+            "   2:       0x7b2a000000 - <unknown>",
+        ).joinToString("\n")
+        val lines = CrashReport.summary(full).lines()
+        assertTrue(lines.contains("  citrine_gb_app::app::Citrine::new"))
+        assertFalse(lines.any { it.contains("loaded at") })
+    }
+
+    @Test
     fun summary_keeps_a_stop_message_without_a_trace() {
         val stopped = "device\n\n== crash-rust.txt\nCitrine stopped: EventLoop can't be recreated"
         assertTrue(CrashReport.summary(stopped).contains("Citrine stopped: EventLoop can't be recreated"))

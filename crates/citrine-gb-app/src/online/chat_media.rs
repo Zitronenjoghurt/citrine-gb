@@ -1,4 +1,4 @@
-use crate::media::{Frame, decode_png, thumbnail_of};
+use crate::media::{Frame, decode_png, decode_png_within, thumbnail_of};
 use std::collections::HashMap;
 
 const PNG_MAGIC: &[u8] = b"\x89PNG";
@@ -54,7 +54,7 @@ pub fn encode_lossless(frame: &Frame) -> Option<Vec<u8>> {
 
 pub fn decode_image(bytes: &[u8]) -> Option<Frame> {
     if bytes.starts_with(PNG_MAGIC) {
-        return decode_png(bytes);
+        return decode_png_within(bytes, MAX_PIXELS);
     }
     if !bytes.starts_with(WEBP_MAGIC) {
         return None;
@@ -375,6 +375,10 @@ mod tests {
     #[test]
     fn garbage_is_not_an_image() {
         assert!(decode_image(b"hello").is_none());
+        let huge = crate::media::tests::png_claiming(4_000_000, 0x7fff_ffff);
+        assert!(decode_image(&huge).is_none());
+        let wide = crate::media::tests::png_claiming(4097, 4096);
+        assert!(decode_image(&wide).is_none());
         assert!(decode_image(b"RIFF1234WEBP").is_none());
     }
 }

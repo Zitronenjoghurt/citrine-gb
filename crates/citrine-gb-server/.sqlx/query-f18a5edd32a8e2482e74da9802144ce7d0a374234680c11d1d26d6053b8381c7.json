@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ds_profiles (pid, account_id, created_at)\n             VALUES (?1, ?2, ?3) ON CONFLICT (pid) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f18a5edd32a8e2482e74da9802144ce7d0a374234680c11d1d26d6053b8381c7"
+}

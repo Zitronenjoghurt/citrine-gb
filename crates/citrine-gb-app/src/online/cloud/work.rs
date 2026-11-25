@@ -1,6 +1,8 @@
 use super::CloudState;
+use super::reconcile::keep_fetched;
 use super::server::save_frames;
-use crate::storage::cloud::LocalItem;
+use crate::storage::SaveStore;
+use crate::storage::cloud::{LocalItem, LocalSave};
 use citrine_gb_net::{GameKey, Keys, SaveInfo, SavePayload, Tag};
 use citrine_gb_threads::Spawner;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -43,13 +45,27 @@ pub(super) struct Opening {
     done: Receiver<Opened>,
 }
 
+pub(super) struct Fetched {
+    pub(super) game: GameKey,
+    pub(super) rom: String,
+    pub(super) slot: String,
+    pub(super) version: u64,
+}
+
+pub(super) type Kept = Option<(LocalSave, [u8; 32])>;
+
+pub(super) struct Writing {
+    fetched: Fetched,
+    done: Receiver<Kept>,
+}
+
 pub(super) enum Ready<T> {
     Waiting,
     Done(T),
     Lost,
 }
 
-fn run<T: Send + 'static>(
+pub(super) fn run<T: Send + 'static>(
     spawner: Option<&Spawner>,
     name: &'static str,
     task: impl FnOnce() -> T + Send + 'static,
@@ -65,7 +81,7 @@ fn run<T: Send + 'static>(
     result
 }
 
-fn ready<T>(done: &Receiver<T>) -> Ready<T> {
+pub(super) fn ready<T>(done: &Receiver<T>) -> Ready<T> {
     match done.try_recv() {
         Ok(value) => Ready::Done(value),
         Err(TryRecvError::Empty) => Ready::Waiting,
@@ -176,6 +192,36 @@ impl CloudState {
             Ready::Done(opened) => Some((opening.info, opened)),
             Ready::Lost => Some((opening.info, None)),
         }
+    }
+
+    pub(super) fn write(
+        &mut self,
+        store: SaveStore,
+        fetched: Fetched,
+        payload: SavePayload,
+        hash: [u8; 32],
+    ) {
+        let (rom, slot) = (fetched.rom.clone(), fetched.slot.clone());
+        let done = run(self.spawner.as_ref(), "cloud write", move || {
+            keep_fetched(&store, &rom, &slot, &payload, hash)
+        });
+        self.writing = Some(Writing { fetched, done });
+    }
+
+    pub(super) fn written(&mut self) -> Option<(Fetched, Kept)> {
+        let writing = self.writing.take()?;
+        match ready(&writing.done) {
+            Ready::Waiting => {
+                self.writing = Some(writing);
+                None
+            }
+            Ready::Done(kept) => Some((writing.fetched, kept)),
+            Ready::Lost => Some((writing.fetched, None)),
+        }
+    }
+
+    pub(super) fn writing(&self) -> bool {
+        self.writing.is_some()
     }
 
     pub(super) fn drop_work(&mut self) {

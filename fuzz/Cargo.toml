@@ -1,0 +1,94 @@
+[package]
+name = "citrine-gb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+citrine-gb-net = { path = "../crates/citrine-gb-net" }
+citrine-gb-surface = { path = "../crates/citrine-gb-surface" }
+citrine-gb-walker = { path = "../crates/citrine-gb-walker" }
+citrine-gb-nds-net = { path = "../crates/citrine-gb-nds-net" }
+citrine-gb-threads = { path = "../crates/citrine-gb-threads" }
+citrine-gb-pkm = { path = "../crates/citrine-gb-pkm" }
+citrine-gb-nds-files = { path = "../crates/citrine-gb-nds-files" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "net"
+path = "fuzz_targets/net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net_handshake"
+path = "fuzz_targets/net_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net_chat"
+path = "fuzz_targets/net_chat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "surface"
+path = "fuzz_targets/surface.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "walker"
+path = "fuzz_targets/walker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nds_wifi"
+path = "fuzz_targets/nds_wifi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pkm"
+path = "fuzz_targets/pkm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nds_rom"
+path = "fuzz_targets/nds_rom.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nds_graphics"
+path = "fuzz_targets/nds_graphics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nds_sound"
+path = "fuzz_targets/nds_sound.rs"
+test = false
+doc = false
+bench = false

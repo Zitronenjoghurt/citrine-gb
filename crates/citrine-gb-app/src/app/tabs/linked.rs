@@ -1,7 +1,7 @@
 use crate::app::big_screen::scroll::Following;
-use crate::app::events::AppEventQueue;
 use crate::app::tabs::TabViewer;
-use crate::app::ui_state::settings::{SettingsTab, kind_name};
+use crate::app::ui_state::settings::{kind_icon, kind_label, kind_short};
+use crate::app::ui_state::settings_tree::GroupId;
 use crate::app::widgets::action::wide_button;
 use crate::app::widgets::homebrew::{self, HomebrewList};
 use crate::emulator::Emulator;
@@ -16,7 +16,7 @@ use strum::IntoEnumIterator;
 
 pub mod partner;
 
-pub const LINK_ICON: &str = icons::PLUGS_CONNECTED;
+pub const LINK_ICON: &str = icons::LINK_CABLE;
 const MAX_SCREEN_SCALE: f32 = 3.0;
 const MIN_SCREEN_HEIGHT: f32 = 72.0;
 const ROW_HEIGHT: f32 = 36.0;
@@ -130,7 +130,11 @@ fn shelf(viewer: &mut TabViewer, ui: &mut Ui) {
     if ui
         .add_sized(
             size,
-            egui::Button::new(format!("{}  Open a ROM file", icons::FOLDER_OPEN)),
+            egui::Button::new(format!(
+                "{}  {}",
+                icons::FOLDER_OPEN,
+                crate::app::mobile::OPEN_ROM
+            )),
         )
         .clicked()
     {
@@ -173,7 +177,11 @@ fn shelf(viewer: &mut TabViewer, ui: &mut Ui) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn recent_rows(viewer: &mut TabViewer, ui: &mut Ui, button_width: f32) -> bool {
-    viewer.ui.recent.prune();
+    let library = &viewer.ui.library;
+    viewer
+        .ui
+        .recent
+        .prune_except(|path| library.is_archive_row(path));
     viewer.ui.recent.name_from_files();
     let gba = viewer.emulator.kind() == citrine_gb::console::ConsoleKind::Gba;
     let links: Vec<_> = viewer
@@ -189,12 +197,7 @@ fn recent_rows(viewer: &mut TabViewer, ui: &mut Ui, button_width: f32) -> bool {
     heading(ui, "Recent");
     let mut chosen = None;
     for entry in links {
-        let folder = entry
-            .path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let folder = entry.folder();
         if row(ui, &entry.display_name(), &folder, button_width) {
             chosen = Some(entry.path.clone());
         }
@@ -268,7 +271,7 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
     egui::Sides::new().shrink_left().truncate().show(
         ui,
         |ui| {
-            ui.label(RichText::new(kind_name(link.kind())).weak());
+            ui.label(RichText::new(kind_label(link.kind())).weak());
         },
         |ui| {
             ui.label(RichText::new(driver(link, Game::Second, touch)).weak());
@@ -346,7 +349,7 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
                     .button(format!("{}  Change keys", icons::KEYBOARD))
                     .clicked()
             {
-                settings_controls(viewer.events);
+                viewer.events.find_group(GroupId::Split);
             }
         });
     }
@@ -373,12 +376,12 @@ fn panel_body(viewer: &mut TabViewer, ui: &mut Ui, fit_height: bool) {
     }
 }
 
-fn settings_controls(events: &mut AppEventQueue) {
-    events.open_settings(SettingsTab::Controls);
+pub fn strip(ui: &mut Ui, link: &LocalLink) -> bool {
+    strip_row(ui, &strip_mark(link.kind()), link.title(), link.plugged())
 }
 
-pub fn strip(ui: &mut Ui, link: &LocalLink) -> bool {
-    strip_row(ui, icons::GAME_CONTROLLER, link.title(), link.plugged())
+fn strip_mark(kind: citrine_gb::console::ConsoleKind) -> String {
+    format!("{}  {}", kind_icon(kind), kind_short(kind))
 }
 
 pub fn partner_strip(ui: &mut Ui, partner: &crate::partner_link::PartnerLink) -> bool {
@@ -390,21 +393,21 @@ pub fn partner_strip(ui: &mut Ui, partner: &crate::partner_link::PartnerLink) ->
     )
 }
 
-fn strip_row(ui: &mut Ui, icon: &str, title: &str, plugged: bool) -> bool {
+fn strip_row(ui: &mut Ui, mark: &str, title: &str, plugged: bool) -> bool {
     let height = ui.spacing().interact_size.y;
     let response = ui
         .allocate_ui_with_layout(
             egui::vec2(ui.available_width(), height),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.label(RichText::new(icon).weak());
+                ui.label(RichText::new(mark).weak());
                 ui.add(Label::new(title).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(icons::CARET_DOWN).weak());
                     let (icon, word) = if plugged {
-                        (icons::PLUGS_CONNECTED, "Plugged in")
+                        (LINK_ICON, "Plugged in")
                     } else {
-                        (icons::PLUGS, "Unplugged")
+                        (icons::LINK_CABLE_UNPLUGGED, "Unplugged")
                     };
                     ui.label(format!("{icon} {word}"));
                 });
@@ -418,4 +421,121 @@ fn strip_row(ui: &mut Ui, icon: &str, title: &str, plugged: bool) -> bool {
     )
     .on_hover_cursor(egui::CursorIcon::PointingHand)
     .clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::Citrine;
+    use crate::app::mobile;
+    use crate::app::tabs::Tab;
+    use crate::app::tests::{
+        assert_in_front, load_game, phone_app, shown_whole, tap, text_containing,
+    };
+    use crate::app::ui_state::settings::LayoutMode;
+    use crate::app::ui_state::settings_tree::SettingsTab;
+    use crate::local_link::Controls;
+    use egui::Context;
+
+    fn frame(
+        app: &mut Citrine,
+        ctx: &Context,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            max_texture_side: Some(8192),
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| {
+            let touch = app.is_mobile(ctx);
+            mobile::touch_spacing(ctx, touch);
+            app.render(ctx);
+            app.handle_event_queue(touch);
+        })
+    }
+
+    fn split_link(name: &str, layout: LayoutMode) -> Citrine {
+        let mut app = phone_app(name);
+        app.ui.settings.layout = layout;
+        let rom = citrine_gb_gamedata::fixtures::crystal_cartridge();
+        load_game(&mut app, &rom, None);
+        app.ui.settings.local_link.controls = Controls::SplitKeyboard;
+        assert!(app.link_game(rom.into(), Some("Crystal.gbc".into())));
+        app
+    }
+
+    fn change_keys(app: &mut Citrine, size: egui::Vec2) -> egui::FullOutput {
+        let ctx = Context::default();
+        let mut output = frame(app, &ctx, size, Vec::new());
+        for _ in 0..10 {
+            output = frame(app, &ctx, size, Vec::new());
+        }
+        let button = text_containing(&output, "Change keys").expect("the Change keys button");
+        frame(app, &ctx, size, tap(button.center()));
+        for _ in 0..40 {
+            output = frame(app, &ctx, size, Vec::new());
+        }
+        output
+    }
+
+    #[test]
+    fn the_phone_link_strip_names_the_linked_console() {
+        let mut app = split_link("strip-names-console", LayoutMode::Mobile);
+        app.resume_game();
+        let ctx = Context::default();
+        let size = egui::vec2(412.0, 915.0);
+        let mut output = frame(&mut app, &ctx, size, Vec::new());
+        for _ in 0..10 {
+            output = frame(&mut app, &ctx, size, Vec::new());
+        }
+        let kind = citrine_gb::console::ConsoleKind::Gbc;
+        let mark = super::strip_mark(kind);
+        assert!(mark.ends_with(super::kind_short(kind)), "{mark}");
+        let shown = text_containing(&output, &mark)
+            .unwrap_or_else(|| panic!("the strip shows no {mark:?}"));
+        assert!(
+            shown.left() >= 8.0,
+            "the strip touches the screen edge: {shown:?}"
+        );
+        let plugged = format!("{} Plugged in", super::LINK_ICON);
+        assert!(
+            text_containing(&output, &plugged).is_some(),
+            "the strip shows no {plugged:?}"
+        );
+        app.emulator.link_mut().unwrap().set_plugged(false);
+        for _ in 0..3 {
+            output = frame(&mut app, &ctx, size, Vec::new());
+        }
+        let unplugged = format!("{} Unplugged", crate::icons::LINK_CABLE_UNPLUGGED);
+        assert!(
+            text_containing(&output, &unplugged).is_some(),
+            "the strip shows no {unplugged:?}"
+        );
+    }
+
+    #[test]
+    fn change_keys_opens_controls_at_the_split_keyboard_group() {
+        let mut app = split_link("change-keys-desktop", LayoutMode::Desktop);
+        let output = change_keys(&mut app, egui::vec2(1280.0, 480.0));
+        assert_eq!(app.ui.settings.current_tab, SettingsTab::Controls);
+        assert_in_front(&app, Tab::Settings);
+        assert!(
+            shown_whole(&output, "Two players, one keyboard"),
+            "the split keyboard heading is out of view"
+        );
+    }
+
+    #[test]
+    fn change_keys_on_a_phone_opens_controls_at_the_split_keyboard_group() {
+        let mut app = split_link("change-keys-phone", LayoutMode::Mobile);
+        app.mobile.nav.open(Tab::Playing);
+        let output = change_keys(&mut app, egui::vec2(412.0, 915.0));
+        assert_eq!(app.mobile.nav.settings_page(), Some(SettingsTab::Controls));
+        assert!(
+            shown_whole(&output, "Two players, one keyboard"),
+            "the split keyboard heading is out of view"
+        );
+    }
 }

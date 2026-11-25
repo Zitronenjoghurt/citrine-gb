@@ -63,6 +63,17 @@ impl Mbc6 {
         }
     }
 
+    #[cfg(feature = "persistence")]
+    pub(crate) fn keep_sizes_of(&mut self, like: &Self) {
+        self.rom_bank_count = like.rom_bank_count;
+        self.ram_bank_count = like.ram_bank_count;
+        self.flash.resize(FLASH_SIZE, 0xFF);
+        self.block_count = self.block_count.min(BLOCK);
+        if self.block.len() != BLOCK {
+            self.block_base = None;
+        }
+    }
+
     fn window(addr: u16) -> usize {
         usize::from(addr >= 0x6000)
     }
@@ -325,6 +336,23 @@ mod tests {
         mbc.on_write(0x4000, 0xF0);
         assert_eq!(mbc.on_read(0x4085), Some(5));
         assert_eq!(mbc.flash[16 * 0x2000 + 0x80 + 127], 127);
+    }
+
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn a_damaged_flash_block_starts_over_and_the_flash_keeps_its_size() {
+        let mut mbc = cart();
+        mbc.block_base = Some(16 * FLASH_BANK + 0x80);
+        mbc.block = Vec::new();
+        mbc.block_count = usize::MAX;
+        mbc.flash.truncate(0x10);
+        mbc.rom_bank_count = usize::MAX;
+        mbc.keep_sizes_of(&cart());
+        assert_eq!(mbc.rom_bank_count, 64);
+        assert_eq!(mbc.flash.len(), FLASH_SIZE);
+        program_block(&mut mbc, 16, 0x80, &[0x12; BLOCK]);
+        mbc.on_write(0x4000, 0xF0);
+        assert_eq!(mbc.flash[16 * FLASH_BANK + 0x80], 0x12);
     }
 
     #[test]

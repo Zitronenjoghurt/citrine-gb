@@ -14,6 +14,8 @@ use citrine_gb::{ReadMemory, WriteMemory};
 use citrine_gb_threads::{Mode, Threads};
 use std::path::Path;
 
+mod settings;
+
 const TOBU: &[u8] = include_bytes!("../homebrew/tobu.gb");
 const SNAPSHOT: &[u8] = include_bytes!("../fixtures/slot0.snap");
 const SNAPSHOT_META: &[u8] = include_bytes!("../fixtures/slot0.meta");

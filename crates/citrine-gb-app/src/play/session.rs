@@ -7,9 +7,12 @@ use super::{
 use citrine_gb::console::{Console, Keys};
 use citrine_gb::gb::GameBoy;
 use citrine_gb::persistence::sram_dump::SramDump;
-use citrine_gb_net::{CableByte, GameCard, Mode, OnlineId, Origin, Pieces, PlayMsg, SessionId};
+use citrine_gb_net::{
+    CableByte, GameCard, LinkPath, Mode, OnlineId, Origin, PeerLink, PlayMsg, SessionId,
+};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use web_time::Instant;
 
 impl PlaySession {
@@ -24,6 +27,9 @@ impl PlaySession {
             links_in: Vec::new(),
             sync: super::links::sync_for(None, 2, 1),
             lanes: 1,
+            ds_cost: None,
+            ds_measure: true,
+            measured_cost: None,
             input_delay: None,
             role,
             stage,
@@ -31,6 +37,7 @@ impl PlaySession {
             downloading: false,
             borrowed_save: None,
             lent: false,
+            from_peer: false,
             round: Round::new(1, None, None),
             roms: Vec::new(),
             wants_state: false,
@@ -38,6 +45,8 @@ impl PlaySession {
             pings: VecDeque::new(),
             next_ping: 0,
             round_trips: VecDeque::new(),
+            stale_trips: 0,
+            ping_path: LinkPath::Relay,
             #[cfg(test)]
             spread_for_test: None,
             pinged_at: None,
@@ -56,8 +65,8 @@ impl PlaySession {
             sealer: None,
             sealing: VecDeque::new(),
             sealed: Vec::new(),
-            pieces: Pieces::default(),
-            last_piece: 0,
+            link: None,
+            direct: super::direct::DirectLink::default(),
             sample_rate: 44_100,
             grouped: false,
             stashed: None,
@@ -108,7 +117,7 @@ impl PlaySession {
         if self.stage != Stage::Preparing {
             return None;
         }
-        let (got, total) = self.pieces.receiving()?;
+        let (got, total) = self.link.as_ref()?.receiving()?;
         Some((u64::from(got), u64::from(total)))
     }
 
@@ -132,6 +141,15 @@ impl PlaySession {
 
     pub fn friend_game(&self) -> Option<&GameCard> {
         self.round.theirs.as_ref().and_then(Option::as_ref)
+    }
+
+    pub fn shown_game(&self) -> Option<(&GameCard, Option<Arc<[u8]>>)> {
+        match &self.round.my_card {
+            Some(card) => Some((card, self.my_rom())),
+            None => self
+                .friend_game()
+                .map(|card| (card, self.round.their_rom.clone())),
+        }
     }
 
     pub fn friend_plays(&self) -> Option<bool> {
@@ -161,6 +179,10 @@ impl PlaySession {
     pub fn delay(&self) -> Option<u8> {
         let start = self.round.start.as_ref()?.delay;
         Some(self.round.rollback().map_or(start, |r| r.delay() as u8))
+    }
+
+    pub fn path(&self) -> LinkPath {
+        self.link.as_ref().map_or(LinkPath::Relay, PeerLink::path)
     }
 
     pub fn round_trip_ms(&self) -> Option<u32> {
@@ -216,6 +238,12 @@ impl PlaySession {
         self.round
             .shown()
             .is_some_and(|r| r.stalled_for(now) >= STALL_SHOWN)
+    }
+
+    pub fn stalled_for(&self, now: Instant) -> Duration {
+        self.round
+            .shown()
+            .map_or(Duration::ZERO, |r| r.stalled_for(now))
     }
 
     pub fn in_group(&self) -> bool {
@@ -328,6 +356,11 @@ impl PlaySession {
 
     pub fn set_touch(&mut self, touch: Option<citrine_gb::console::Touch>) {
         self.touch = touch;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resync_friend(&mut self, edit: impl FnOnce(&mut GameBoy)) -> Option<()> {
+        self.round.rollback_mut()?.send_resync_with(edit)
     }
 
     #[cfg(test)]
@@ -446,14 +479,36 @@ impl PlaySession {
         std::mem::take(&mut self.saves)
     }
 
+    pub fn from_peer(&self) -> bool {
+        self.from_peer || self.round.rollback().is_some_and(Rollback::local_from_peer)
+    }
+
+    pub fn mark_from_peer(&mut self) {
+        self.from_peer = true;
+    }
+
+    pub(super) fn note_peer_state(&mut self) {
+        if self.round.rollback().is_some_and(Rollback::local_from_peer) {
+            self.from_peer = true;
+        }
+    }
+
     fn save_key(&self) -> Option<SaveKey> {
         if self.borrowing
             && let Some(card) = &self.round.my_card
         {
             return Some(SaveKey::Borrowed(card.hash));
         }
-        self.console(true)
-            .map(|console| SaveKey::Rom(console.rom_id().sha256_hex_string()))
+        let console = self.console(true)?;
+        if self.from_peer() {
+            let hash = self
+                .round
+                .my_card
+                .as_ref()
+                .map_or_else(|| console.game_sha1(), |card| card.hash);
+            return Some(SaveKey::Borrowed(hash));
+        }
+        Some(SaveKey::Rom(console.rom_id().sha256_hex_string()))
     }
 
     pub(super) fn keep_saves(&mut self, dumps: impl IntoIterator<Item = SramDump>) {
@@ -488,6 +543,9 @@ impl PlaySession {
             cable: Some(self.my_cable && self.friend_cable),
             saves: true,
             round_trip_ms: self.round_trip_ms().unwrap_or(0),
+            spread_ms: self.round_trip_spread_ms().unwrap_or(0),
+            aim: self.aim(),
+            rise_aim: self.rise_aim(),
             now,
         };
         let Some(Engine::Rollback(r)) = &mut self.round.engine else {
@@ -515,6 +573,14 @@ impl PlaySession {
             return false;
         };
         let ticked = r.take_ticked();
+        let measured = r.measured_cost();
+        let budget = r.sync().budget();
+        self.round.budget_now = Some(budget);
+        if let Some(cost) = measured
+            && let Some(key) = self.cost_key()
+        {
+            self.measured_cost = Some((key, cost));
+        }
         let mark = mark.min(self.outbox.len());
         self.outbox.splice(mark..mark, ticked.outbox);
         self.keep_saves(ticked.saves);

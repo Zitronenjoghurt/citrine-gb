@@ -3,13 +3,13 @@ mod a64;
 #[cfg_attr(not(all(target_arch = "x86_64", unix)), allow(dead_code))]
 mod x64;
 
-use super::JitBus;
 use super::arena::{Arena, Code, Linked, Prelude};
 use super::emit::{Emitted, Emitter};
 use super::fast::{Fast, Spec};
 use super::helpers::Helpers;
-use super::lookup::{LINKS, Link, Lookup};
+use super::lookup::{LINKS, Link, Lookup, NO_REACH, no_slot};
 use super::scan::{Block, Jump, Multiply, Offset, Op, Plan, Target, Transfer, Width};
+use super::{JitBus, QuickFetch};
 use crate::gba::cpu::psr::{FLAG_I, FLAG_T};
 use crate::gba::cpu::registers::{
     BANKED_OFFSET, CPSR_OFFSET, Registers, SPSR_OFFSET, USER_HIGH_OFFSET,
@@ -25,6 +25,8 @@ pub trait Backend {
     const HOSTED: bool = true;
     const V4: bool = true;
     const TIMED: bool = true;
+    const PSR: bool = false;
+    const GBA_BY_DEFAULT: bool = true;
     fn block(lowered: &Lowered, plan: &Plan, offsets: &Offsets) -> Option<Linked>;
     fn runtime(setup: &Setup) -> Option<Runtime>;
     fn targets(_: &Runtime) -> Vec<usize> {
@@ -38,6 +40,9 @@ pub trait Backend {
     }
     fn hop(table: usize, entry: u32) -> u64 {
         (table + 4 * (entry & 0xFFFF) as usize) as u64 | u64::from((entry >> 16) & 0x7FF) << 48
+    }
+    fn inverted(_: u32) -> u32 {
+        0
     }
 }
 
@@ -99,7 +104,6 @@ const MAX_COST: u32 = 0xFF;
 const V4_BY_DEFAULT: bool = true;
 const TAKEN: usize = 0;
 const FALL_THROUGH: usize = 1;
-const GBA_BY_DEFAULT: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stub {
@@ -125,6 +129,11 @@ pub enum Stub {
 }
 
 pub const STUBS: usize = 19;
+pub const IWRAM_FETCH: u32 = 0xFFFF_FFFE;
+pub const BIOS_FETCH: u32 = 0xFFFF_FFFD;
+pub const ROM_LITERAL: u32 = 1 << 2;
+pub const IWRAM_RUN: u32 = 1 << 7;
+pub const IWRAM_IDLES: u32 = 1 << 7;
 pub const BLOCK_WORDS: usize = 16;
 
 #[repr(C)]
@@ -136,13 +145,14 @@ pub struct Ctx {
     block: [u32; BLOCK_WORDS],
     window: [u32; 2],
     pc: [u32; 2],
-    stubs: [usize; STUBS],
     last: u32,
     force: u32,
     acc: u32,
     stall: u32,
     chains: u32,
+    hop: [u32; 2],
     lookup: usize,
+    slots: usize,
     fast: usize,
     pages: usize,
     slot: usize,
@@ -163,7 +173,6 @@ pub struct Offsets {
     pub bus: u32,
     pub words: u32,
     pub debt: u32,
-    pub stubs: u32,
     pub budget: u32,
     pub base: u32,
     pub last: u32,
@@ -172,11 +181,13 @@ pub struct Offsets {
     pub fast: u32,
     pub pages: u32,
     pub slot: u32,
+    pub slots: u32,
     pub stall_flag: u32,
     pub attention: u32,
     pub pending: u32,
     pub dtcm: u32,
     pub chains: u32,
+    pub hop: u32,
     pub block: u32,
     pub regs: u32,
     pub cpsr: u32,
@@ -190,7 +201,11 @@ pub struct Offsets {
     pub irq_masked: u32,
     pub irq_held: u32,
     pub landed: u32,
+    pub fetched: u32,
+    pub data: u32,
+    pub refetched: u32,
     pub fast_debt: u32,
+    pub quick: Option<QuickFetch>,
 }
 
 impl Offsets {
@@ -202,7 +217,6 @@ impl Offsets {
             bus: at(offset_of!(Ctx, bus)),
             words: at(offset_of!(Ctx, words)),
             debt: at(offset_of!(Ctx, debt)),
-            stubs: at(offset_of!(Ctx, stubs)),
             budget: at(offset_of!(Ctx, window)),
             base: at(offset_of!(Ctx, pc)),
             last: at(offset_of!(Ctx, last)),
@@ -211,11 +225,13 @@ impl Offsets {
             fast: at(offset_of!(Ctx, fast)),
             pages: at(offset_of!(Ctx, pages)),
             slot: at(offset_of!(Ctx, slot)),
+            slots: at(offset_of!(Ctx, slots)),
             stall_flag: at(offset_of!(Ctx, stall_flag)),
             attention: at(offset_of!(Ctx, attention)),
             pending: at(offset_of!(Ctx, pending)),
             dtcm: at(offset_of!(Ctx, dtcm)),
             chains: at(offset_of!(Ctx, chains)),
+            hop: at(offset_of!(Ctx, hop)),
             block: at(offset_of!(Ctx, block)),
             regs: at(regs + offset_of!(Registers, r)),
             cpsr: at(regs + CPSR_OFFSET),
@@ -229,7 +245,18 @@ impl Offsets {
             irq_masked: at(offset_of!(Core<V5>, irq_masked)),
             irq_held: at(offset_of!(Core<V5>, irq_held)),
             landed: at(offset_of!(Core<V5>, landed)),
+            fetched: at(offset_of!(Core<V5>, fetched)),
+            data: at(offset_of!(Core<V5>, data)),
+            refetched: at(offset_of!(Core<V5>, refetched.0)),
             fast_debt: at(offset_of!(Fast, debt)),
+            quick: None,
+        }
+    }
+
+    pub fn of_bus<const V5: bool, B: JitBus>() -> Self {
+        Self {
+            quick: B::QUICK_FETCH.filter(|_| B::TIMED_FETCH),
+            ..Self::of::<V5>()
         }
     }
 }
@@ -306,7 +333,7 @@ pub fn restore_word(info: u32, offset: u32, cost: u32) -> Option<u32> {
 }
 
 pub fn block_word(count: u32, ahead: u32, cost: u32, pending: u32) -> Option<u32> {
-    if count as usize > BLOCK_WORDS {
+    if count == 0 || count as usize > BLOCK_WORDS {
         return None;
     }
     memory_word(0, ahead, cost, pending).map(|word| word | count << 26)
@@ -536,6 +563,7 @@ pub struct Lowered {
     pub timed: bool,
     pub code: u32,
     pub flat: bool,
+    pub pages: bool,
 }
 
 fn kind(op: Op, cp15: bool) -> Kind {
@@ -605,7 +633,7 @@ fn coprocessor(word: u32) -> Option<Kind> {
 fn load_pc(word: u32) -> Option<Transfer> {
     let rn = (word >> 16) & 0xF;
     let register = word & (1 << 25) != 0;
-    if word >> 28 != ALWAYS
+    if word >> 28 > ALWAYS
         || word & 0x0C50_F000 != 0x0410_F000
         || rn == PC
         || register && word & 0x10 != 0
@@ -700,6 +728,30 @@ fn user_block(word: u32) -> Option<Block> {
         })
 }
 
+fn block_return(word: u32, thumb: bool) -> Option<Block> {
+    if thumb {
+        return (word & 0xFFFF_FF00 == 0xBD00).then_some(Block {
+            condition: ALWAYS,
+            rn: 13,
+            list: (word & 0xFF) as u16 | 1 << PC,
+            load: true,
+            up: true,
+            pre: false,
+            writeback: true,
+        });
+    }
+    let rn = (word >> 16) & 0xF;
+    (word >> 28 <= ALWAYS && word & 0x0E50_8000 == 0x0810_8000 && rn != PC).then_some(Block {
+        condition: word >> 28,
+        rn,
+        list: word as u16,
+        load: true,
+        up: word & (1 << 23) != 0,
+        pre: word & (1 << 24) != 0,
+        writeback: word & (1 << 21) != 0,
+    })
+}
+
 fn condition_reads(condition: u32) -> u8 {
     match condition {
         0x0 | 0x1 => FLAG_Z,
@@ -719,7 +771,7 @@ fn bound(spend: u32, v5: bool) -> u32 {
 
 #[cfg(test)]
 pub fn lower(plan: &Plan, v5: bool, cp15: bool, timed: bool) -> Option<Lowered> {
-    lower_for(plan, v5, cp15, timed, |_| true)
+    lower_for(plan, v5, cp15, timed, false, |_| true)
 }
 
 fn lower_for(
@@ -727,15 +779,22 @@ fn lower_for(
     v5: bool,
     cp15: bool,
     timed: bool,
+    psr: bool,
     compiles: impl Fn(Kind) -> bool,
 ) -> Option<Lowered> {
     let count = plan.ops.len();
     let mut items = Vec::with_capacity(count);
     for (index, &op) in plan.ops.iter().enumerate() {
-        let kind = match kind(op, cp15) {
-            Kind::Mrs { .. } | Kind::Clz { .. } if !v5 => Kind::Step,
+        let decoded = match op {
+            Op::Exit(word) if timed && !v5 => block_return(word, plan.thumb).map(Kind::Block),
+            _ => None,
+        };
+        let kind = match decoded.unwrap_or_else(|| kind(op, cp15)) {
+            Kind::Mrs { .. } if !v5 && !psr => Kind::Step,
+            Kind::Clz { .. } if !v5 => Kind::Step,
             Kind::Multiply(multiply) if !v5 && multiply.set_flags => Kind::Step,
-            Kind::Msr { .. } | Kind::LoadPc(_) | Kind::Restore { .. } if !v5 => Kind::Exit,
+            Kind::Msr { .. } if !v5 && !psr => Kind::Exit,
+            Kind::LoadPc(_) | Kind::Restore { .. } if !v5 => Kind::Exit,
             kind if compiles(kind) => kind,
             Kind::UserBlock(_)
             | Kind::Cp15 { .. }
@@ -750,6 +809,8 @@ fn lower_for(
         }
         let condition = match kind {
             Kind::Step | Kind::Exit | Kind::UserBlock(_) => ALWAYS,
+            Kind::LoadPc(transfer) => transfer.op >> 28,
+            Kind::Block(block) => block.condition,
             _ => op.condition(),
         };
         let spend = match kind {
@@ -861,13 +922,16 @@ fn flags(mut items: Vec<Item>, v5: bool, timed: bool) -> Lowered {
         timed,
         code: 0,
         flat: false,
+        pages: false,
     }
 }
 
 pub fn emit<const V5: bool, B: JitBus>(emitter: &mut Emitter, plan: &Plan) -> Option<Emitted> {
-    let native = lower_for(plan, V5, B::CP15, B::TIMED_FETCH, Host::compiles)
+    let psr = B::PAGES && Host::PSR;
+    let native = lower_for(plan, V5, B::CP15, B::TIMED_FETCH, psr, Host::compiles)
         .map(|mut lowered| {
             lowered.flat = B::flat_code(plan.pc);
+            lowered.pages = B::PAGES;
             if !V5 {
                 let size = if plan.thumb { 2 } else { 4 };
                 let end = plan.pc.wrapping_add(size * (plan.words.len() as u32 + 1));
@@ -882,7 +946,7 @@ pub fn emit<const V5: bool, B: JitBus>(emitter: &mut Emitter, plan: &Plan) -> Op
             }
             lowered
         })
-        .and_then(|lowered| Host::block(&lowered, plan, &Offsets::of::<V5>()));
+        .and_then(|lowered| Host::block(&lowered, plan, &Offsets::of_bus::<V5, B>()));
     match native {
         Some(code) => Some(Emitted {
             code: code.bytes,
@@ -903,7 +967,6 @@ type Trampoline =
 struct Shared {
     _code: Code,
     trampoline: Trampoline,
-    stubs: [usize; STUBS],
     prelude: Option<Prelude>,
 }
 
@@ -934,7 +997,7 @@ fn v4_wanted() -> bool {
 fn gba_wanted() -> bool {
     static WANTED: OnceLock<bool> = OnceLock::new();
     *WANTED.get_or_init(|| {
-        std::env::var("CITRINE_JIT_GBA").map_or(GBA_BY_DEFAULT, |backend| backend == "native")
+        std::env::var("CITRINE_JIT_GBA").map_or(Host::GBA_BY_DEFAULT, |backend| backend == "native")
     })
 }
 
@@ -956,7 +1019,7 @@ impl Native {
     }
 
     pub(super) fn start<const V5: bool, B: JitBus>() -> Option<Self> {
-        let offsets = Offsets::of::<V5>();
+        let offsets = Offsets::of_bus::<V5, B>();
         let helpers = Helpers::of::<V5, B>();
         let chain = chains().then_some(chain::<V5, B> as *const () as usize);
         let specs: &[Spec] = if V5 { &B::SPECS } else { &[] };
@@ -972,10 +1035,6 @@ impl Native {
         })?;
         let code = Arena::default().place(Linked::plain(runtime.bytes.clone()), None)?;
         let entry = code.entry();
-        let mut stubs = [0; STUBS];
-        for (slot, offset) in stubs.iter_mut().zip(runtime.stubs) {
-            *slot = entry + offset;
-        }
         let trampoline = unsafe { std::mem::transmute::<usize, Trampoline>(entry) };
         let targets = Host::targets(&runtime);
         let prelude = if targets.is_empty() {
@@ -986,7 +1045,6 @@ impl Native {
         Some(Self::over(Arc::new(Shared {
             _code: code,
             trampoline,
-            stubs,
             prelude,
         })))
     }
@@ -1000,7 +1058,6 @@ impl Native {
     }
 
     fn over(shared: Arc<Shared>) -> Self {
-        let stubs = shared.stubs;
         Self {
             shared,
             ctx: Box::new(Ctx {
@@ -1008,7 +1065,6 @@ impl Native {
                 bus: 0,
                 words: 0,
                 debt: 0,
-                stubs,
                 window: [0; 2],
                 pc: [0; 2],
                 last: 0,
@@ -1016,10 +1072,12 @@ impl Native {
                 acc: 0,
                 stall: 0,
                 chains: 0,
+                hop: [u32::MAX; 2],
                 lookup: 0,
+                slots: 0,
                 fast: 0,
                 pages: 0,
-                slot: 0,
+                slot: no_slot(),
                 stall_flag: 0,
                 attention: 0,
                 pending: 0,
@@ -1049,15 +1107,24 @@ impl Native {
             self.ctx.pending = cells.pending as usize;
             self.ctx.dtcm = cells.dtcm as usize;
         }
-        self.ctx.slot = if self.ctx.stall_flag != 0 { slot } else { 0 };
+        self.ctx.slot = if self.ctx.stall_flag != 0 && slot != 0 {
+            slot
+        } else {
+            no_slot()
+        };
         let core = (core as *mut Core<V5>).cast();
         let bus = (bus as *mut B).cast();
+        self.ctx.slots = lookup.slots();
         self.ctx.lookup = lookup as *mut Lookup as usize;
         if B::PAGES {
             self.ctx.pages = unsafe { (*fast).pages }.addr();
         }
         let ctx: *mut Ctx = &mut *self.ctx;
         unsafe { (self.shared.trampoline)(core, bus, budget, start, fast, words, table & !1, ctx) }
+    }
+
+    pub fn forget_fetch_cost(&mut self) {
+        self.ctx.hop = [u32::MAX; 2];
     }
 
     pub fn settled(&mut self) -> (u32, u32) {
@@ -1113,7 +1180,7 @@ unsafe extern "C" fn chain<const V5: bool, B: JitBus>(
     cell: u32,
 ) -> u64 {
     let ctx = unsafe { &mut *ctx };
-    debug_assert!(cell.count_ones() <= 1 && cell >> LINKS == 0);
+    debug_assert!(cell as usize <= LINKS);
     let core = unsafe { &mut *(ctx.core as *mut Core<V5>) };
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     let lookup = unsafe { &mut *(ctx.lookup as *mut Lookup) };
@@ -1145,7 +1212,7 @@ unsafe extern "C" fn chain<const V5: bool, B: JitBus>(
     let shift = 2 - thumb;
     let base = [r15.wrapping_sub(start << shift), shift];
     let hop = Host::hop(table, entry);
-    if ctx.slot != 0 && cell != 0 {
+    if ctx.slot != no_slot() && cell != 0 {
         let link = Link {
             slot,
             jump: (hop & ((1 << 48) - 1)) as usize,
@@ -1154,8 +1221,17 @@ unsafe extern "C" fn chain<const V5: bool, B: JitBus>(
             generation: 0,
             start,
             entry,
+            cost: if ctx.hop[0] == pc | thumb {
+                ctx.hop[1]
+            } else {
+                u32::MAX
+            },
+            pending: (entry >> 16) & 0x7FF,
+            ahead: entry >> 27,
+            reach: NO_REACH,
+            inverted: Host::inverted(entry),
         };
-        lookup.link(ctx.slot, cell.trailing_zeros() as usize, link);
+        lookup.link(ctx.slot, cell as usize - 1, link);
     }
     if ctx.stall_flag != 0 {
         ctx.slot = slot;
@@ -1191,24 +1267,32 @@ mod tests {
                 words: &all,
                 ops: &ops,
                 fetch: &fetch,
+                literals: &[],
             };
             link_owners(
                 &lower(&plan, true, true, false).expect("lowers").items,
                 &plan,
             )
         };
-        assert_eq!(owners(&[0xE280_0001, 0xEAFF_FFFD]), [Some(1), None]);
+        assert_eq!(
+            owners(&[0xE280_0001, 0xEAFF_FFFD]),
+            [Some(1), None, None, None]
+        );
         assert_eq!(
             owners(&[0x0A00_0002, 0xE250_0001, 0x1AFF_FFFD]),
-            [Some(2), Some(3)]
+            [Some(2), Some(3), Some(0), None]
         );
         assert_eq!(
             owners(&[0x0A00_0002, 0x1AFF_FFFE, 0xE280_0001, 0xEAFF_FFFD]),
-            [Some(3), Some(1)]
+            [Some(3), Some(1), Some(0), None]
         );
         assert_eq!(
             owners(&[0x0A00_0002, 0x0A00_0001, 0xE280_0001, 0xE12F_FF1E]),
-            [Some(1), Some(0)]
+            [Some(1), Some(0), None, None]
+        );
+        assert_eq!(
+            owners(&[0x0A00_0002, 0x0A00_0001, 0xE250_0001, 0x1AFF_FFFC]),
+            [Some(3), Some(4), Some(1), Some(0)]
         );
     }
 
@@ -1229,6 +1313,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         let checks: Vec<bool> = lowered.items.iter().map(|item| item.check).collect();
@@ -1258,6 +1343,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, true).expect("lowers");
         assert!(matches!(lowered.items[1].kind, Kind::Branch(_)));
@@ -1282,6 +1368,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, false, false, false).expect("lowers");
         assert!(!lowered.v5);
@@ -1308,6 +1395,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert_eq!(lowered.items[0].live, 0);
@@ -1324,6 +1412,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert!(matches!(lowered.items[0].kind, Kind::Multiply(m) if m.set_flags));
@@ -1344,6 +1433,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         for timed in [false, true] {
             let lowered = lower(&plan, false, false, timed).expect("lowers");
@@ -1372,6 +1462,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert_eq!(lowered.items[1].kind, Kind::Restore { offset: 4 });
@@ -1390,6 +1481,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert!(matches!(lowered.items[0].kind, Kind::Block(_)));
@@ -1400,6 +1492,74 @@ mod tests {
             Some(2 << 3 | 3 << 8 | 4 << 16 | 16 << 26)
         );
         assert_eq!(block_word(17, 0, 0, 0), None);
+        assert_eq!(block_word(0, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn armv4_returns_lower_to_blocks_only_on_the_timed_bus() {
+        let items = |words: &[u32], thumb: bool, v5: bool, timed: bool| {
+            let ops: Vec<Op> = words
+                .iter()
+                .enumerate()
+                .map(|(at, &word)| match (thumb, v5) {
+                    (true, true) => classify_thumb::<true>(word, 0x0200_0000 + 2 * at as u32),
+                    (true, false) => classify_thumb::<false>(word, 0x0200_0000 + 2 * at as u32),
+                    (false, true) => classify::<true>(word),
+                    (false, false) => classify::<false>(word),
+                })
+                .collect();
+            let fetch = vec![[1, 1]; ops.len()];
+            let mut all = words.to_vec();
+            all.extend([0, 0]);
+            let plan = Plan {
+                pc: 0x0200_0000,
+                thumb,
+                words: &all,
+                ops: &ops,
+                fetch: &fetch,
+                literals: &[],
+            };
+            lower(&plan, v5, v5, timed).expect("lowers").items
+        };
+        let returns = [0xE92D_4070, 0xE8BD_8070];
+        let timed = items(&returns, false, false, true);
+        let Kind::Block(block) = timed[1].kind else {
+            panic!("a timed armv4 ldm with pc is not a block");
+        };
+        assert!(block.loads_pc());
+        assert_eq!(
+            (block.rn, block.list, block.condition),
+            (13, 0x8070, ALWAYS)
+        );
+        assert!(block.up && !block.pre && block.writeback);
+        assert_eq!(timed[1].condition, ALWAYS);
+        assert_eq!(items(&returns, false, false, false)[1].kind, Kind::Exit);
+        assert!(matches!(
+            items(&returns, false, true, false)[1].kind,
+            Kind::Block(block) if block.loads_pc()
+        ));
+        let maybe = items(&[0x18BD_8070], false, false, true);
+        assert!(matches!(maybe[0].kind, Kind::Block(block) if block.condition == 0x1));
+        assert_eq!(maybe[0].condition, 0x1);
+        for word in [0xE8FD_8010, 0xE89F_8000, 0xE8BD_0000, 0xF8BD_8010] {
+            assert_eq!(items(&[word], false, false, true)[0].kind, Kind::Exit);
+        }
+        let Kind::Block(table) = items(&[0xE8B0_8003], false, false, true)[0].kind else {
+            panic!("a timed armv4 ldm with its base and pc is not a block");
+        };
+        assert_eq!((table.rn, table.list), (0, 0x8003));
+        assert!(table.loads_pc() && table.writeback);
+        let Kind::Block(pop) = items(&[0xBD10], true, false, true)[0].kind else {
+            panic!("a timed armv4 pop with pc is not a block");
+        };
+        assert_eq!((pop.rn, pop.list, pop.condition), (13, 0x8010, ALWAYS));
+        assert!(pop.load && pop.up && !pop.pre && pop.writeback);
+        assert!(matches!(
+            items(&[0xBD00], true, false, true)[0].kind,
+            Kind::Block(block) if block.list == 0x8000
+        ));
+        assert_eq!(items(&[0xC800], true, false, true)[0].kind, Kind::Exit);
+        assert_eq!(items(&[0xBD10], true, false, false)[0].kind, Kind::Exit);
     }
 
     #[test]
@@ -1412,6 +1572,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert_eq!(lowered.items[0].kind, Kind::Mrs { rd: 0, spsr: false });
@@ -1484,6 +1645,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert!(matches!(
@@ -1509,6 +1671,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         for item in &lowered.items[..2] {
@@ -1532,6 +1695,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         for timed in [false, true] {
             let lowered = lower(&plan, false, false, timed).expect("lowers");
@@ -1555,6 +1719,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert_eq!(lowered.items[0].kind, Kind::Clz { rd: 2, rm: 1 });
@@ -1597,6 +1762,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let item = lower(&plan, true, true, false).expect("lowers").items[0];
         assert_eq!(item.kind, Kind::Cp15 { load: Some(3) });
@@ -1619,6 +1785,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert_eq!(
@@ -1672,7 +1839,15 @@ mod tests {
             (0xE793_F102, Kind::LoadPc(table)),
             (0xE59F_F018, Kind::Exit),
             (0xE5D3_F000, Kind::Exit),
-            (0x059D_F000, Kind::Exit),
+            (
+                0x059D_F000,
+                Kind::LoadPc(Transfer {
+                    op: 0x059D_F000,
+                    offset: Offset::Immediate(0),
+                    ..pop
+                }),
+            ),
+            (0xF59D_F000, Kind::Exit),
             (0xE793_F112, Kind::Exit),
             (0xE1D3_F0B0, Kind::Exit),
         ] {
@@ -1685,12 +1860,32 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let item = lower(&plan, true, true, false).expect("lowers").items[0];
         assert_eq!(item.kind, Kind::LoadPc(pop));
         assert_eq!(item.spend, None);
+        assert_eq!(item.condition, ALWAYS);
         let item = lower(&plan, false, true, false).expect("lowers").items[0];
         assert_eq!(item.kind, Kind::Exit);
+        let (ops, fetch, all) = plan_of(&[0x049D_F004], 1);
+        let plan = Plan {
+            pc: 0x0200_0000,
+            thumb: false,
+            words: &all,
+            ops: &ops,
+            fetch: &fetch,
+            literals: &[],
+        };
+        let item = lower(&plan, true, true, false).expect("lowers").items[0];
+        assert_eq!(
+            item.kind,
+            Kind::LoadPc(Transfer {
+                op: 0x049D_F004,
+                ..pop
+            })
+        );
+        assert_eq!(item.condition, 0);
     }
 
     #[test]

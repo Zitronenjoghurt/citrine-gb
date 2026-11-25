@@ -61,9 +61,7 @@ impl SramDump {
 
     #[cfg(feature = "brotli")]
     pub fn from_brotli(data: &[u8]) -> GbResult<Self> {
-        let mut decompressed = Vec::new();
-        let mut decompressor = brotli::Decompressor::new(data, 4096);
-        std::io::Read::read_to_end(&mut decompressor, &mut decompressed)?;
+        let decompressed = super::state::unbrotli(data, super::state::STATE_LIMIT)?;
         Ok(Self(decompressed))
     }
 
