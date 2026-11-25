@@ -1,4 +1,4 @@
-# 0.13.0
+# 0.13.0 - 2026-11-25
 
 ## Added
 
@@ -74,7 +74,7 @@
 - Security: a friend's game state in Play together saves apart from your own saves, and the JIT cache on disk is signed per install
 - Server: limits on connections, uploads, GTS tokens and login attempts, and sign-ups that no longer fail during the hourly backup
 
-# 0.12.0
+# 0.12.0 - 2026-11-14
 
 ## Added
 
