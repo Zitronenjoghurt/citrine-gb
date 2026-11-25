@@ -622,4 +622,26 @@ mod tests {
         );
         assert!(cp15.cached(0x0200_0000, Fetch::Data));
     }
+
+    #[test]
+    fn the_io_data_bit_follows_the_io_pages_of_the_cache_map() {
+        let mut cp15 = Cp15::default();
+        cp15.direct_boot();
+        cp15.write(
+            reg(1, 0, 0),
+            DIRECT_BOOT_CONTROL | PROTECTION_ON | DCACHE_ON,
+        );
+        let mut map = CacheMap::default();
+        map.refresh(&cp15);
+        assert!(map.cached(0x0200_0000, Fetch::Data));
+        assert!(!map.io_data());
+        cp15.write(reg(6, 7, 0), 0x0000_003F);
+        cp15.write(reg(2, 0, 0), 0x80);
+        map.refresh(&cp15);
+        assert!(map.cached(0x0400_0000, Fetch::Data));
+        assert!(map.io_data());
+        cp15.write(reg(1, 0, 0), DIRECT_BOOT_CONTROL | PROTECTION_ON);
+        map.refresh(&cp15);
+        assert!(!map.io_data());
+    }
 }

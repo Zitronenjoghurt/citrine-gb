@@ -13,6 +13,8 @@ use egui::{
 use load::{begin, chat_entry, keys, local_copy, media_item, pump, tick};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+pub const PLAY_IN_GAME: &str = "Play in the game";
+
 mod acts;
 mod bar;
 mod load;
@@ -83,6 +85,7 @@ pub struct ViewerState {
     picking: bool,
     muted: bool,
     volume: f32,
+    pad_step: isize,
 }
 
 impl Default for ViewerState {
@@ -99,6 +102,7 @@ impl Default for ViewerState {
             picking: false,
             muted: false,
             volume: 1.0,
+            pad_step: 0,
         }
     }
 }
@@ -111,6 +115,10 @@ impl ViewerState {
 
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    pub fn queue_step(&mut self, by: isize) {
+        self.pad_step += by;
     }
 
     pub fn close(&mut self) {
@@ -218,7 +226,7 @@ fn facts(
                 icon: match item.info.kind {
                     MediaKind::Screenshot => icons::CAMERA,
                     MediaKind::Print => icons::PRINTER,
-                    MediaKind::Recording => icons::VIDEO_CAMERA,
+                    MediaKind::Recording | MediaKind::Replay => icons::VIDEO_CAMERA,
                 },
                 title: game_name(&item.info.game).to_owned(),
                 line: join(vec![Some(detail_line(item))]),
@@ -229,11 +237,11 @@ fn facts(
                     )),
                     item.info.length_ms.map(crate::media::format_length),
                 ]),
-                clip: item.info.kind == MediaKind::Recording,
-                replay: false,
+                clip: item.info.kind == MediaKind::Recording || item.info.video,
+                replay: item.info.kind == MediaKind::Replay,
                 can_save: false,
                 saved: false,
-                can_send: friends,
+                can_send: friends && (item.info.kind != MediaKind::Replay || item.info.video),
                 deletable: true,
                 pass: crate::media::clipboard::way(item.info.kind),
                 replay_note: None,
@@ -266,7 +274,7 @@ fn facts(
                 icon: match share.kind {
                     ShareKind::Screenshot => icons::CAMERA,
                     ShareKind::Recording => icons::VIDEO_CAMERA,
-                    ShareKind::Replay => icons::GAME_CONTROLLER,
+                    ShareKind::Replay => icons::REPLAY,
                 },
                 title: game_name(&share.game).to_owned(),
                 line: join(vec![
@@ -310,8 +318,8 @@ pub fn show(viewer: &mut TabViewer, ctx: &Context) {
         && viewer.emulator.running
         && !viewer.emulator.linked()
         && !viewer.play.is_live()
+        && viewer.emulator.try_pause()
     {
-        viewer.emulator.running = false;
         viewer.ui.viewer.paused_game = true;
     }
     if viewer.ui.viewer.shown.as_ref().is_none_or(|s| s.key != key) {
@@ -327,21 +335,28 @@ pub fn show(viewer: &mut TabViewer, ctx: &Context) {
     };
 
     let dialog_open = viewer.ui.viewer.asking_delete.is_some() || viewer.ui.viewer.picking;
+    let pad_step = std::mem::take(&mut viewer.ui.viewer.pad_step);
     let mut acts = if dialog_open {
         Vec::new()
     } else {
         keys_pressed(ctx, facts.clip)
     };
+    if pad_step != 0 && !dialog_open {
+        acts.push(Act::Step(pad_step));
+    }
     let mobile = viewer.ui.settings.layout.is_touch(ctx);
-    let screen = ctx.content_rect();
+    let mut screen = ctx.content_rect();
+    if mobile && (viewer.ui.settings.big_screen.on || crate::platform::is_tv()) {
+        screen.max.y -= crate::app::big_screen::hint_room(ctx);
+    }
     let backdrop = ctx.style().visuals.extreme_bg_color.to_opaque();
     let modal = egui::Modal::new(Id::new("media_viewer"))
         .area(
             egui::Modal::default_area(Id::new("media_viewer"))
                 .anchor(Align2::LEFT_TOP, screen.min.to_vec2()),
         )
-        .frame(egui::Frame::NONE)
-        .backdrop_color(backdrop)
+        .frame(egui::Frame::NONE.fill(backdrop))
+        .backdrop_color(Color32::TRANSPARENT)
         .show(ctx, |ui| {
             ui.set_min_size(screen.size());
             ui.set_max_size(screen.size());
@@ -470,7 +485,7 @@ fn draw(
                     if facts.replay
                         && facts.replay_note.is_none()
                         && note.is_none()
-                        && ui.button(format!("{} Play in the Game Boy", icons::PLAY)).clicked()
+                        && ui.button(format!("{} {PLAY_IN_GAME}", icons::PLAY)).clicked()
                     {
                         acts.push(Act::PlayReplay);
                     }

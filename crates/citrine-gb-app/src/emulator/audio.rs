@@ -14,6 +14,22 @@ impl Emulator {
         core.audio_feed = Some(link.feed);
     }
 
+    #[cfg(feature = "nds")]
+    pub fn attach_mic(&mut self, line: &crate::audio::mic::MicLine) {
+        if self.seat.facts().mic_line {
+            return;
+        }
+        let core = self.seat.core_mut();
+        if core.mic.is_none() {
+            core.mic = Some(line.clone());
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    pub fn mic_in_use(&self) -> bool {
+        self.seat.facts().mic
+    }
+
     pub fn set_channel_enabled(&mut self, index: usize, enabled: bool) {
         self.seat
             .core_mut()
@@ -21,22 +37,16 @@ impl Emulator {
             .set_channel_enabled(index, enabled);
     }
 
-    pub fn channel_names(&self) -> &'static [&'static str] {
-        self.seat.facts().channels
-    }
-
-    pub fn channel_count(&self) -> usize {
-        self.seat.facts().channels.len()
-    }
-
     pub fn sample_rate(&self) -> u32 {
         self.seat.facts().sample_rate
     }
 
     pub(super) fn drain_audio(&mut self) {
-        let (sound, fast_forward) = (self.sound, self.fast_forward || self.rewinding);
+        let (sound, fast_forward, rewinding) = (self.sound, self.fast_forward, self.rewinding);
         let pace = self.clock.pace(self.seat.facts().timing);
-        self.seat.core_mut().drain_audio(sound, pace, fast_forward);
+        self.seat
+            .core_mut()
+            .drain_audio(sound, pace, fast_forward, rewinding);
     }
 
     pub fn audio_feed(&self) -> Option<&AudioFeed> {

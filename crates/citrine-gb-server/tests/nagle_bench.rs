@@ -28,6 +28,7 @@ fn config(dir: &Path) -> Config {
     let map: HashMap<String, String> = [
         ("CITRINE_BIND", "127.0.0.1".to_string()),
         ("CITRINE_PORT", "0".into()),
+        ("CITRINE_STUN_PORT", "0".into()),
         ("CITRINE_DISK_FLOOR_MB", "0".into()),
         ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
         ("CITRINE_IP_CONNECTIONS", "100000".into()),

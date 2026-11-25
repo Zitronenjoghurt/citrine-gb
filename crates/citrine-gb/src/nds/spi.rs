@@ -126,12 +126,12 @@ pub struct SpiDevices {
     pub touch: Touch,
 }
 
-impl SpiPort for SpiDevices {
-    fn transfer(&mut self, device: SpiDevice, byte: u8) -> u8 {
+impl SpiDevices {
+    fn transfer(&mut self, device: SpiDevice, byte: u8, now: u64) -> u8 {
         match device {
             SpiDevice::Power => self.power.transfer(byte),
             SpiDevice::Firmware => self.firmware.transfer(byte),
-            SpiDevice::Touch => self.touch.transfer(byte),
+            SpiDevice::Touch => self.touch.transfer(byte, now),
             SpiDevice::Reserved => 0,
         }
     }
@@ -278,7 +278,7 @@ struct LoggedSpi<'a> {
 
 impl SpiPort for LoggedSpi<'_> {
     fn transfer(&mut self, device: SpiDevice, byte: u8) -> u8 {
-        let got = self.devices.transfer(device, byte);
+        let got = self.devices.transfer(device, byte, self.now);
         self.traffic
             .byte(Kind::Spi, device as u8, self.now, byte, got);
         got

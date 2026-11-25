@@ -99,14 +99,16 @@ pub fn body(ui: &mut Ui, lines: &[ChatLine], draft: &mut String, touch: bool) ->
         ui.horizontal(|ui| {
             let send = egui::Button::new(icons::PAPER_PLANE_TILT).min_size(vec2(side, side));
             let room = ui.available_width() - side - ui.spacing().item_spacing.x;
-            let field = ui.add(
+            let field = crate::app::widgets::field::framed(
+                ui,
                 TextEdit::singleline(draft)
                     .hint_text("Message the room")
                     .desired_width(room)
                     .min_size(vec2(room, side))
                     .vertical_align(Align::Center)
                     .id_salt("room_chat_draft"),
-            );
+            )
+            .response;
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let clicked = ui
                 .add_enabled(!draft.trim().is_empty(), send)

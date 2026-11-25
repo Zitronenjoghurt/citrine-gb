@@ -43,7 +43,7 @@ data class Alert(
 
         fun from(data: Map<String, String>): Alert? {
             val kind = data["kind"]?.takeIf { it in setOf(FRIEND_REQUEST, INVITE, CHAT) } ?: return null
-            val from = data["from"]?.takeIf { it.isNotEmpty() } ?: return null
+            val from = data["sender"]?.takeIf { it.isNotEmpty() } ?: return null
             val session = data["session"].orEmpty()
             if (kind == INVITE && session.isEmpty()) return null
             return Alert(

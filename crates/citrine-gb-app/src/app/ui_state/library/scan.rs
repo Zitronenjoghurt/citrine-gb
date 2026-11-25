@@ -1,12 +1,52 @@
-use super::{FileFound, FileState, Identity, Library};
+use super::identify::Identifier;
+use super::{FileFound, FileState, Library};
 use crate::covers::Game;
 use crate::utils::file_loader::PickedFile;
 use citrine_gb_threads::Spawner;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
-const FOLDER_DEPTH: usize = 2;
-const IDENTIFY_MAX: usize = 64 << 20;
+const ALL_LEVELS: usize = 32;
+
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum_macros::EnumIter,
+)]
+pub enum LibraryDepth {
+    Off,
+    One,
+    #[default]
+    Two,
+    All,
+}
+
+impl LibraryDepth {
+    pub fn levels(self) -> usize {
+        match self {
+            Self::Off => 0,
+            Self::One => 1,
+            Self::Two => 2,
+            Self::All => ALL_LEVELS,
+        }
+    }
+}
+
+impl std::fmt::Display for LibraryDepth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Off => "Off",
+            Self::One => "1 level",
+            Self::Two => "2 levels",
+            Self::All => "All levels",
+        })
+    }
+}
 
 pub struct Listing {
     pub tree: String,
@@ -14,18 +54,18 @@ pub struct Listing {
     pub readable: bool,
 }
 
-type Identified = (String, Option<(Identity, Game)>);
 type Checked = Vec<(String, FileState)>;
 
 pub(super) struct Scan {
     picked: (Sender<String>, Receiver<String>),
     lists: (Sender<Listing>, Receiver<Listing>),
     checks: (Sender<Checked>, Receiver<Checked>),
-    ids: (Sender<Identified>, Receiver<Identified>),
-    identifying: bool,
+    pub(super) ids: Identifier,
     started: bool,
     waiting: usize,
-    skipped: std::collections::BTreeSet<String>,
+    skipped: std::collections::HashSet<String>,
+    wanted_at: Option<u64>,
+    depth: LibraryDepth,
 }
 
 impl Default for Scan {
@@ -34,11 +74,12 @@ impl Default for Scan {
             picked: channel(),
             lists: channel(),
             checks: channel(),
-            ids: channel(),
-            identifying: false,
+            ids: Identifier::default(),
             started: false,
             waiting: 0,
-            skipped: std::collections::BTreeSet::new(),
+            skipped: std::collections::HashSet::new(),
+            wanted_at: None,
+            depth: LibraryDepth::default(),
         }
     }
 }
@@ -61,11 +102,22 @@ impl Library {
         let _ = (spawner, trees);
     }
 
+    pub fn follow_depth(&mut self, spawner: &Spawner, depth: LibraryDepth) {
+        if std::mem::replace(&mut self.scan.depth, depth) != depth && self.scan.started {
+            self.rescan(spawner);
+        }
+    }
+
     pub fn rescan(&mut self, spawner: &Spawner) {
         self.scan.started = true;
         for folder in &self.folders {
             self.scan.waiting += 1;
-            list(spawner, &folder.tree, self.scan.lists.0.clone());
+            list(
+                spawner,
+                &folder.tree,
+                self.scan.depth,
+                self.scan.lists.0.clone(),
+            );
         }
         let loose = self.loose_files();
         if cfg!(not(target_arch = "wasm32")) && !loose.is_empty() {
@@ -75,7 +127,7 @@ impl Library {
     }
 
     pub fn busy(&self) -> bool {
-        self.scan.waiting > 0 || self.scan.identifying
+        self.scan.waiting > 0 || self.scan.ids.busy()
     }
 
     pub fn bring_back(
@@ -88,7 +140,7 @@ impl Library {
             && self.add_folder(&tree)
         {
             self.scan.waiting += 1;
-            list(spawner, &tree, self.scan.lists.0.clone());
+            list(spawner, &tree, self.scan.depth, self.scan.lists.0.clone());
         }
         self.restore(games);
     }
@@ -100,7 +152,7 @@ impl Library {
         while let Ok(tree) = self.scan.picked.1.try_recv() {
             if self.add_folder(&tree) {
                 self.scan.waiting += 1;
-                list(spawner, &tree, self.scan.lists.0.clone());
+                list(spawner, &tree, self.scan.depth, self.scan.lists.0.clone());
             }
         }
         while let Ok(listing) = self.scan.lists.1.try_recv() {
@@ -122,14 +174,14 @@ impl Library {
             self.apply_checks(checks);
         }
         let mut covers = Vec::new();
-        while let Ok((path, found)) = self.scan.ids.1.try_recv() {
-            self.scan.identifying = false;
+        let mut known = Vec::new();
+        for (path, found) in self.scan.ids.take_batch() {
             match found {
                 Some((identity, game)) => {
                     if identity.ra_hash.is_none() {
                         self.scan.skipped.insert(path.clone());
                     }
-                    self.identify(&path, identity);
+                    known.push((path, identity));
                     covers.push(game);
                 }
                 None => {
@@ -137,17 +189,21 @@ impl Library {
                 }
             }
         }
-        let next = if self.scan.identifying {
-            None
-        } else {
-            self.unidentified()
-                .find(|game| !self.scan.skipped.contains(&game.path))
-                .map(|game| game.path.clone())
-        };
-        if let Some(path) = next {
-            self.scan.identifying = true;
-            identify(spawner, path, self.scan.ids.0.clone());
+        if !known.is_empty() {
+            self.identify_all(known);
         }
+        if self.scan.wanted_at != Some(self.revision()) {
+            self.scan.wanted_at = Some(self.revision());
+            let Library { games, scan, .. } = self;
+            let skipped = &scan.skipped;
+            scan.ids.want(
+                games
+                    .iter()
+                    .filter(|game| super::waits(game) && !skipped.contains(&game.path))
+                    .map(|game| game.path.as_str()),
+            );
+        }
+        self.scan.ids.top_up(spawner);
         covers
     }
 
@@ -248,27 +304,27 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn list(spawner: &Spawner, tree: &str, tx: Sender<Listing>) {
+fn list(spawner: &Spawner, tree: &str, depth: LibraryDepth, tx: Sender<Listing>) {
     #[cfg(target_os = "android")]
     {
         let _ = spawner;
-        crate::platform::android::files::list_roms(tree, tx);
+        crate::platform::android::files::list_roms(tree, depth.levels(), tx);
     }
     #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
     {
         let tree = tree.to_owned();
         spawner.run("library folder scan", move || {
-            let _ = tx.send(list_dir(&tree));
+            let _ = tx.send(list_dir(&tree, depth.levels()));
         });
     }
     #[cfg(target_arch = "wasm32")]
-    let _ = (spawner, tree, tx);
+    let _ = (spawner, tree, depth.levels(), tx);
 }
 
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
-pub fn list_dir(tree: &str) -> Listing {
+pub fn list_dir(tree: &str, levels: usize) -> Listing {
     let mut games = Vec::new();
-    let readable = collect(std::path::Path::new(tree), FOLDER_DEPTH, &mut games).is_ok();
+    let readable = collect(std::path::Path::new(tree), levels, &mut games).is_ok();
     games.sort_by_key(|(name, _)| name.to_lowercase());
     Listing {
         tree: tree.to_owned(),
@@ -320,97 +376,14 @@ fn check(spawner: &Spawner, paths: Vec<String>, tx: Sender<Checked>) {
 pub fn file_state(path: &std::path::Path) -> FileState {
     if crate::utils::zip_games::on_disk(path) {
         FileState::Present
-    } else if path.parent().is_some_and(std::path::Path::is_dir) {
+    } else if crate::utils::zip_games::outside_zip(path)
+        .parent()
+        .is_some_and(std::path::Path::is_dir)
+    {
         FileState::Missing
     } else {
         FileState::Offline
     }
-}
-
-fn identify(spawner: &Spawner, path: String, tx: Sender<Identified>) {
-    let send = move |path: String, data: Option<&[u8]>, file_name: Option<&str>| {
-        let found = data
-            .filter(|data| data.len() <= IDENTIFY_MAX)
-            .map(|data| identity_of(data, file_name));
-        let _ = tx.send((path, found));
-    };
-    #[cfg(target_os = "android")]
-    if path.starts_with("content://") {
-        let (files, rx) = channel();
-        crate::platform::android::files::read_rom(&path, files);
-        spawner.run("library identify", move || {
-            let file = rx.recv().ok();
-            send(
-                path,
-                file.as_ref().map(|file| &*file.data),
-                file.as_ref().map(|file| file.name.as_str()),
-            );
-        });
-        return;
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    spawner.run("library identify", move || {
-        let file_path = std::path::Path::new(&path);
-        let small =
-            std::fs::metadata(file_path).is_ok_and(|meta| meta.len() <= IDENTIFY_MAX as u64);
-        let data = small
-            .then(|| crate::utils::zip_games::read_game(file_path).ok())
-            .flatten();
-        let file_name = file_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-        send(path.clone(), data.as_deref(), file_name.as_deref());
-    });
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = spawner;
-        send(path, None, None);
-    }
-}
-
-fn identity_of(data: &[u8], file_name: Option<&str>) -> (Identity, Game) {
-    let id = citrine_gb::rom::id::RomId::new(data);
-    let console = citrine_gb::console::detect(data, file_name);
-    let rom_key = id.sha256_hex_string();
-    let name = title(data, &id.sha1, file_name, console);
-    let game = Game::of(
-        &rom_key,
-        console.unwrap_or(citrine_gb::console::ConsoleKind::Gb),
-        id.sha1,
-        data,
-    );
-    let game = match file_name {
-        Some(file_name) => game.named(file_name),
-        None => game,
-    };
-    let identity = Identity {
-        rom_key,
-        sha1: id.sha1_hex_string(),
-        crc32: Some(id.crc32),
-        ra_hash: crate::achievements::progress::hash(console, data),
-        console,
-        name,
-    };
-    (identity, game)
-}
-
-fn title(
-    data: &[u8],
-    sha1: &[u8; 20],
-    file_name: Option<&str>,
-    console: Option<citrine_gb::console::ConsoleKind>,
-) -> Option<String> {
-    #[cfg(feature = "nds")]
-    if console == Some(citrine_gb::console::ConsoleKind::Nds) {
-        return crate::ds_banner::game_name(data, sha1, file_name);
-    }
-    let _ = (sha1, console);
-    let header = citrine_gb::rom::Rom::new(data).header().ok()?;
-    Some(crate::game_name::game_name(
-        &header.sha1,
-        file_name,
-        header.short_title(),
-    ))
 }
 
 #[cfg(test)]
@@ -449,7 +422,10 @@ mod tests {
         std::fs::write(nested.join("Adjustris.gb"), b"rom").unwrap();
         std::fs::write(too_deep.join("Hidden.gb"), b"rom").unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"text").unwrap();
-        let listing = list_dir(&dir.path().to_string_lossy());
+        let listing = list_dir(
+            &dir.path().to_string_lossy(),
+            LibraryDepth::default().levels(),
+        );
         assert!(listing.readable);
         let names: Vec<&str> = listing
             .games
@@ -458,7 +434,72 @@ mod tests {
             .collect();
         assert_eq!(names, ["Adjustris.gb", "Petris.gbc"]);
         assert_eq!(folder_label("/home/clara/roms"), "roms");
-        assert!(!list_dir("/no/such/folder").readable);
+        assert!(!list_dir("/no/such/folder", 2).readable);
+    }
+
+    #[test]
+    fn the_subfolder_depth_decides_how_deep_a_folder_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut folder = dir.path().to_path_buf();
+        for (deeper, name) in [
+            (0, "Top.gb"),
+            (1, "One.gb"),
+            (1, "Two.gb"),
+            (1, "Three.gb"),
+            (3, "Six.gb"),
+        ] {
+            for step in 0..deeper {
+                folder = folder.join(format!("{name}-{step}"));
+            }
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(name), b"rom").unwrap();
+        }
+        let tree = dir.path().to_string_lossy().into_owned();
+        let found = |depth: LibraryDepth| {
+            let mut names: Vec<String> = list_dir(&tree, depth.levels())
+                .games
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(found(LibraryDepth::Off), ["Top.gb"]);
+        assert_eq!(found(LibraryDepth::One), ["One.gb", "Top.gb"]);
+        assert_eq!(found(LibraryDepth::Two), ["One.gb", "Top.gb", "Two.gb"]);
+        assert_eq!(
+            found(LibraryDepth::All),
+            ["One.gb", "Six.gb", "Three.gb", "Top.gb", "Two.gb"]
+        );
+        assert_eq!(LibraryDepth::default(), LibraryDepth::Two);
+        assert_eq!(LibraryDepth::All.to_string(), "All levels");
+    }
+
+    #[test]
+    fn a_new_subfolder_depth_reads_the_folders_again() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(dir.path().join("Top.gb"), b"top rom").unwrap();
+        std::fs::write(deep.join("Deep.gb"), b"deep rom").unwrap();
+        let spawner = citrine_gb_threads::Threads::new(citrine_gb_threads::Mode::Threads).spawner();
+        let mut library = Library::default();
+        library.add_folder(&dir.path().to_string_lossy());
+        let settle = |library: &mut Library| {
+            library.poll(&spawner, 1);
+            let start = Instant::now();
+            while library.busy() && start.elapsed() < Duration::from_secs(20) {
+                std::thread::sleep(Duration::from_millis(5));
+                library.poll(&spawner, 1);
+            }
+            library.entries().len()
+        };
+        library.follow_depth(&spawner, LibraryDepth::Two);
+        assert_eq!(settle(&mut library), 1);
+        library.follow_depth(&spawner, LibraryDepth::All);
+        assert!(library.busy(), "a new depth starts a scan");
+        assert_eq!(settle(&mut library), 2);
     }
 
     #[test]
@@ -476,10 +517,106 @@ mod tests {
     }
 
     #[test]
+    fn a_game_gone_from_its_zip_or_with_its_zip_is_missing() {
+        use crate::utils::zip_games::tests::zip_of;
+        use zip::CompressionMethod;
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("pack.zip");
+        let both = zip_of(
+            &[("roms/Petris.gbc", b"p"), ("Snake.gb", b"s")],
+            CompressionMethod::Stored,
+        );
+        std::fs::write(&zip, both).unwrap();
+        let petris = zip.join("roms").join("Petris.gbc");
+        assert_eq!(file_state(&petris), FileState::Present);
+        std::fs::write(
+            &zip,
+            zip_of(&[("Snake.gb", b"s")], CompressionMethod::Stored),
+        )
+        .unwrap();
+        assert_eq!(file_state(&petris), FileState::Missing);
+        assert_eq!(file_state(&zip.join("Snake.gb")), FileState::Present);
+        std::fs::remove_file(&zip).unwrap();
+        assert_eq!(file_state(&zip.join("Snake.gb")), FileState::Missing);
+    }
+
+    #[test]
     fn a_tree_document_shows_as_a_phone_storage_path() {
         let uri = "content://com.android.externalstorage.documents/tree/primary%3AGames/document/primary%3AGames%2FGBA%2FAstro%20Boy.gba";
         assert_eq!(shown_path(uri), "Phone storage/Games/GBA/Astro Boy.gba");
         assert_eq!(shown_path("/roms/a.gb"), "/roms/a.gb");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn shelf_of(dir: &std::path::Path, count: usize) -> Library {
+        let tree = dir.to_string_lossy().into_owned();
+        let files = (0..count)
+            .map(|n| {
+                let path = dir.join(format!("Game {n}.gb"));
+                let mut rom = vec![0u8; 0x200];
+                rom[0x150..0x158].copy_from_slice(&(n as u64).to_le_bytes());
+                std::fs::write(&path, rom).unwrap();
+                FileFound {
+                    name: format!("Game {n}"),
+                    path: path.to_string_lossy().into_owned(),
+                }
+            })
+            .collect();
+        let mut library = Library::default();
+        library.add_folder(&tree);
+        library.apply_listing(&tree, Some(files), 1);
+        library
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn identify_all(library: &mut Library, workers: usize) -> usize {
+        let threads = citrine_gb_threads::Threads::new(citrine_gb_threads::Mode::Threads);
+        let spawner = threads.spawner();
+        library.scan.ids.workers = workers;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let unknown = |library: &Library| {
+            library
+                .entries()
+                .iter()
+                .filter(|game| game.rom_key.is_none())
+                .count()
+        };
+        let mut left = unknown(library);
+        let mut batches = 0;
+        while (library.busy() || left > 0) && std::time::Instant::now() < deadline {
+            library.poll(&spawner, 1);
+            let now_left = unknown(library);
+            if now_left < left {
+                batches += 1;
+            }
+            left = now_left;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        batches
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_folder_is_identified_by_no_more_than_the_given_workers() {
+        for workers in [1, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut library = shelf_of(dir.path(), 60);
+            identify_all(&mut library, workers);
+            assert!(!library.busy());
+            assert_eq!(library.unidentified().count(), 0);
+            assert!(library.entries().iter().all(|game| game.rom_key.is_some()));
+            assert_eq!(library.scan.ids.peak(), workers);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn identified_games_reach_the_library_in_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut library = shelf_of(dir.path(), 400);
+        let batches = identify_all(&mut library, 3);
+        assert_eq!(library.unidentified().count(), 0);
+        assert!(batches * 20 <= 400, "{batches} batches for 400 games");
     }
 
     #[test]

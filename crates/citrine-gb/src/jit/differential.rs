@@ -16,6 +16,16 @@ const PROGRAMS: usize = 600;
 const SHOWN: usize = 12;
 const MODES: [u32; 7] = [0x10, 0x11, 0x12, 0x13, 0x17, 0x1B, 0x1F];
 const EDGES: [u32; 5] = [0, 1, u32::MAX, 0x8000_0000, 0x7FFF_FFFF];
+const PSR_BITS: [(u32, &str); 8] = [
+    (31, "N"),
+    (30, "Z"),
+    (29, "C"),
+    (28, "V"),
+    (27, "Q"),
+    (7, "I"),
+    (6, "F"),
+    (5, "T"),
+];
 
 struct Rng(u64);
 
@@ -207,7 +217,7 @@ impl Program {
 
     fn random(rng: &mut Rng, thumb: bool, v5: bool) -> Self {
         let count = if rng.chance(40) { 1 } else { 2 + rng.below(5) };
-        let mut words: Vec<u32> = (0..count)
+        let words = (0..count)
             .map(|_| {
                 if thumb {
                     u32::from(thumb_op(rng))
@@ -216,7 +226,11 @@ impl Program {
                 }
             })
             .collect();
-        let at = count * if thumb { 2 } else { 4 };
+        Self::ending(words, thumb)
+    }
+
+    fn ending(mut words: Vec<u32>, thumb: bool) -> Self {
+        let at = words.len() as u32 * if thumb { 2 } else { 4 };
         words.push(if thumb {
             0xE000 | ((EXIT_AT - at - 4) / 2)
         } else {
@@ -325,10 +339,37 @@ fn differences<const V5: bool>(jit: &Core<V5>, stepped: &Core<V5>) -> String {
         }
     }
     if a.cpsr != b.cpsr {
-        out.push(format!("cpsr {:08X}/{:08X}", a.cpsr, b.cpsr));
+        out.push(format!(
+            "cpsr {:08X}/{:08X} ({})",
+            a.cpsr,
+            b.cpsr,
+            psr_bits(a.cpsr ^ b.cpsr)
+        ));
+    }
+    let banks: [(&str, &[u32], &[u32]); 5] = [
+        ("fiq", &a.fiq, &b.fiq),
+        ("svc", &a.svc, &b.svc),
+        ("abt", &a.abt, &b.abt),
+        ("irq", &a.irq, &b.irq),
+        ("und", &a.und, &b.und),
+    ];
+    for (name, ours, theirs) in banks {
+        for (at, (x, y)) in ours.iter().zip(theirs).enumerate() {
+            if x != y {
+                out.push(format!("{name} r{} {x:08X}/{y:08X}", 15 - ours.len() + at));
+            }
+        }
+    }
+    for (at, (x, y)) in a.spsr.iter().zip(&b.spsr).enumerate() {
+        if x != y {
+            out.push(format!("spsr{at} {x:08X}/{y:08X} ({})", psr_bits(x ^ y)));
+        }
     }
     if a != b && out.is_empty() {
-        out.push(format!("banked {a:?}/{b:?}"));
+        out.push(format!(
+            "pipeline {:08X?}/{:08X?}, next fetch {:?}/{:?}",
+            a.pipeline, b.pipeline, a.next_fetch, b.next_fetch
+        ));
     }
     if jit.cycles != stepped.cycles {
         out.push(format!("core cycles {}/{}", jit.cycles, stepped.cycles));
@@ -337,6 +378,15 @@ fn differences<const V5: bool>(jit: &Core<V5>, stepped: &Core<V5>) -> String {
         out.push(format!("core {jit:?}/{stepped:?}"));
     }
     out.join(", ")
+}
+
+fn psr_bits(changed: u32) -> String {
+    let named = PSR_BITS
+        .iter()
+        .filter(|&&(bit, _)| changed & 1 << bit != 0)
+        .map(|&(_, name)| name);
+    let mode = (changed & 0x1F != 0).then_some("mode");
+    named.chain(mode).collect::<Vec<_>>().join(" ")
 }
 
 fn record<const V5: bool>(
@@ -364,8 +414,8 @@ fn record<const V5: bool>(
         found.push_str(&format!(", clock {}/{cycles}", ran.cycles));
     }
     tally.failures.push(format!(
-        "{:08X?} after {} instructions: {found} (jit/interpreter); start cpsr {:08X} r {:08X?}",
-        program.words, ran.retired, state.cpsr, state.r
+        "{:08X?} after {} instructions: {found} (jit/interpreter); start {state:08X?}",
+        program.words, ran.retired
     ));
 }
 
@@ -387,36 +437,65 @@ fn check<const V5: bool, const TIMED: bool>(rng: &mut Rng, program: &Program, ta
     let pipeline = [bus.get(CODE, width), bus.get(CODE + program.size(), width)];
     for _ in 0..STATES {
         let state = random_state::<V5>(rng, program.thumb, pipeline);
-        let start = Core::<V5>::from_state(&state);
-        let (mut core, mut jitted) = (start.clone(), bus.clone());
-        let mut ran = None;
-        for _ in 0..4 {
-            (core, jitted) = (start.clone(), bus.clone());
-            ran = jit.run(&mut core, &mut jitted, BUDGET);
-            if ran.is_some() {
-                break;
-            }
-        }
-        let Some(ran) = ran else {
-            tally.refused += 1;
-            continue;
-        };
-        count(tally, &jit, program.thumb);
-        let (mut stepped, mut plain) = (start.clone(), bus.clone());
-        let mut cycles = 0;
-        for _ in 0..ran.retired {
-            cycles += stepped.step(&mut plain);
-        }
-        record(
-            tally,
-            program,
-            &state,
-            ran,
-            [&core, &stepped],
-            [&jitted.memory, &plain.memory],
-            cycles,
-        );
+        check_state::<V5, TIMED>(&mut jit, &bus, program, &state, tally);
     }
+}
+
+fn check_state<const V5: bool, const TIMED: bool>(
+    jit: &mut Jit,
+    bus: &Flat<TIMED>,
+    program: &Program,
+    state: &CpuState,
+    tally: &mut Tally,
+) {
+    let start = Core::<V5>::from_state(state);
+    let (mut core, mut jitted) = (start.clone(), bus.clone());
+    let mut ran = None;
+    for _ in 0..4 {
+        (core, jitted) = (start.clone(), bus.clone());
+        ran = jit.run(&mut core, &mut jitted, BUDGET);
+        if ran.is_some() {
+            break;
+        }
+    }
+    let Some(ran) = ran else {
+        tally.refused += 1;
+        return;
+    };
+    count(tally, jit, program.thumb);
+    let (mut stepped, mut plain) = (start.clone(), bus.clone());
+    let mut cycles = 0;
+    for _ in 0..ran.retired {
+        cycles += stepped.step(&mut plain);
+    }
+    record(
+        tally,
+        program,
+        state,
+        ran,
+        [&core, &stepped],
+        [&jitted.memory, &plain.memory],
+        cycles,
+    );
+}
+
+fn replay_arm<const V5: bool>(ops: &[u32], cpsr: u32, r: [u32; 16]) -> Tally {
+    let program = Program::ending(ops.to_vec(), false);
+    let bus = Flat::<false>::new(&mut Rng(1), &program);
+    let mut jit = Jit {
+        native: Native::start::<V5, Flat<false>>(),
+        asked: true,
+        ..Default::default()
+    };
+    let state = CpuState {
+        cpsr,
+        r,
+        pipeline: [bus.get(CODE, Width::Word), bus.get(CODE + 4, Width::Word)],
+        ..CpuState::default()
+    };
+    let mut tally = Tally::default();
+    check_state::<V5, false>(&mut jit, &bus, &program, &state, &mut tally);
+    tally
 }
 
 fn arm7_buses(rng: &mut Rng, program: &Program) -> Buses {
@@ -561,5 +640,17 @@ fn timed_armv4_arm_blocks_match_the_interpreter() {
 fn timed_armv4_thumb_blocks_match_the_interpreter() {
     if HOST_TIMED {
         differ(true, false, 0x0B4B_0006, check::<false, true>);
+    }
+}
+
+#[test]
+fn a_rotated_immediate_clears_the_carry_an_adcs_reads() {
+    let mut r = [0x0200_0100; 16];
+    r[0] = 5;
+    r[15] = CODE + 8;
+    for first in [0xE330_0304, 0xE3F0_2D6B, 0xE3D0_EDE2] {
+        let tally = replay_arm::<true>(&[first, 0xE2B0_0000], 0x2000_001F, r);
+        assert_eq!(tally.native, 1, "{first:08X} ran native");
+        assert!(tally.failures.is_empty(), "{}", tally.failures.join("\n"));
     }
 }

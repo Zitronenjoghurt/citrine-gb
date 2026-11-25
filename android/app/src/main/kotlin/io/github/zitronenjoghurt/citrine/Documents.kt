@@ -50,7 +50,7 @@ class Documents(private val activity: MainActivity) {
         tree.launch(null)
     }
 
-    fun listRoms(id: Int, tree: String) {
+    fun listRoms(id: Int, tree: String, depth: Int) {
         Thread {
             val root = runCatching { DocumentFile.fromTreeUri(activity, Uri.parse(tree)) }.getOrNull()
             if (root == null || !root.canRead()) {
@@ -58,7 +58,7 @@ class Documents(private val activity: MainActivity) {
                 return@Thread
             }
             val found = mutableListOf<Pair<String, String>>()
-            runCatching { collectRoms(root, ROM_FOLDER_DEPTH, found) }
+            runCatching { collectRoms(root, depth, found) }
             found.sortBy { it.first.lowercase() }
             activity.nativeRoms(
                 id,
@@ -169,8 +169,6 @@ class Documents(private val activity: MainActivity) {
     }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "file"
 
     companion object {
-        const val ROM_FOLDER_DEPTH = 2
-
         fun isRom(name: String): Boolean {
             val lower = name.lowercase()
             return lower.endsWith(".gb") || lower.endsWith(".gbc") || lower.endsWith(".gba") || lower.endsWith(".nds") || lower.endsWith(".zip")

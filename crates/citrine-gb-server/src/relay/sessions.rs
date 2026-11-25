@@ -1,11 +1,8 @@
-use super::{Client, db, screen_size};
+use super::{Client, db};
 use crate::hub::Side;
 use crate::push::Event;
-use crate::screens::PNG_SIGNATURE;
 use crate::stats::Refused;
-use citrine_gb_net::{
-    ErrorCode, MAX_SCREEN_BYTES, OnlineId, Refusal, Sealed, ServerMsg, SessionId,
-};
+use citrine_gb_net::{ErrorCode, OnlineId, Refusal, Sealed, ServerMsg, SessionId};
 use std::sync::Arc;
 
 impl Client {
@@ -27,6 +24,7 @@ impl Client {
     }
 
     pub(super) async fn invite(&mut self, to: OnlineId, sealed: Sealed) -> Result<(), ErrorCode> {
+        self.fits(&sealed)?;
         let me = self.me()?;
         let (me_id, me_online) = (me.id, me.online_id);
         let other = self.user(to).await?;
@@ -149,6 +147,7 @@ impl Client {
         to: OnlineId,
         sealed: Sealed,
     ) -> Result<(), ErrorCode> {
+        self.fits(&sealed)?;
         let me = self.me()?;
         let (me_id, me_online) = (me.id, me.online_id);
         let other = self.user(to).await?;
@@ -246,10 +245,8 @@ impl Client {
     pub(super) async fn screen(&mut self, png: Vec<u8>) {
         let refused = if !self.app.settings.get().pictures {
             Some(ErrorCode::PicturesOff)
-        } else if png.len() > MAX_SCREEN_BYTES {
-            Some(ErrorCode::TooLarge)
-        } else if !png.starts_with(PNG_SIGNATURE) || !screen_size(&png) {
-            Some(ErrorCode::BadMessage)
+        } else if let Err(error) = citrine_gb_net::check_screen(&png) {
+            Some(error)
         } else if !self.screen_limit.take(1.0) {
             Some(ErrorCode::RateLimited)
         } else {

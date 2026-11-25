@@ -1,7 +1,7 @@
-use super::device::device_name;
 use super::{Op, Remote};
 use crate::online::Online;
-use citrine_gb_net::{ClientMsg, GameKey, Keys, SaveInfo, SaveLabel, SavePayload};
+use citrine_gb_net::{GameKey, Keys, SaveInfo, SaveLabel, SavePayload};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 const GAME: &[u8] = b"pokewalker";
@@ -12,20 +12,26 @@ pub fn walker_key(keys: &Keys) -> GameKey {
     keys.game_key(GAME)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalkerRemote {
     pub version: u64,
     pub device: String,
     pub hash: [u8; 32],
+    pub saved_at: u64,
+    pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalkerRequest {
     Fetch,
-    Put { base: u64, data: Vec<u8> },
+    Put {
+        base: u64,
+        data: Vec<u8>,
+        name: String,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalkerReply {
     Listed(Option<WalkerRemote>),
     Fetched { remote: WalkerRemote, data: Vec<u8> },
@@ -75,6 +81,12 @@ fn remote_of(remote: &Remote) -> WalkerRemote {
             .map(|label| label.device.clone())
             .unwrap_or_default(),
         hash: remote.label.as_ref().map_or([0; 32], |label| label.hash),
+        saved_at: remote.label.as_ref().map_or(0, |label| label.saved_at),
+        name: remote
+            .label
+            .as_ref()
+            .map(|label| label.name.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -143,24 +155,16 @@ impl Online {
                         .push(WalkerReply::Unreadable(remote));
                     return false;
                 }
-                self.cloud.parts.clear();
-                self.send(ClientMsg::GetSave {
-                    game,
-                    slot: SLOT.to_string(),
-                });
-                self.cloud.start(Op::Get {
-                    game,
-                    slot: SLOT.to_string(),
-                });
+                self.cloud_get(game, SLOT.to_string());
             }
-            WalkerRequest::Put { base, data } => {
+            WalkerRequest::Put { base, data, name } => {
                 let payload = SavePayload {
                     files: vec![(DATA.to_string(), data)],
                 };
                 let label = SaveLabel {
                     game: String::new(),
-                    name: String::new(),
-                    device: device_name(),
+                    name,
+                    device: self.device_name(),
                     saved_at: crate::storage::now_unix(),
                     hash: payload.hash(),
                 };

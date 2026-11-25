@@ -34,6 +34,8 @@ const FRIENDS_STACK_SHARE: f32 = 0.6;
 const GAME_INFO_DOCK_SHARE: f32 = 0.42;
 
 const SETTINGS_WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+const AUTO_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,10 +43,14 @@ const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(not(target_arch = "wasm32"))]
 mod achievements;
+mod archive;
 mod audio;
+mod background;
 pub(crate) mod big_screen;
+pub mod boot_rom;
 mod canvas;
 mod capture;
+mod clip;
 mod cloud;
 mod console;
 mod covers;
@@ -58,27 +64,46 @@ pub mod focus;
 #[cfg(feature = "gba")]
 mod gba_bios;
 mod gimmicks;
+pub(crate) mod hardcore;
 mod hotkeys;
 pub mod hud;
 mod info_dock;
+#[cfg(not(target_arch = "wasm32"))]
+mod lan;
+pub(crate) mod layout_edit;
+mod layout_picks;
+pub(crate) mod layout_sheet;
 mod library;
 mod link;
+#[cfg(feature = "nds")]
+mod mic;
+#[cfg(feature = "nds")]
+pub(crate) mod mic_mark;
 mod mobile;
+pub(crate) mod monitor;
+#[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+mod nearby_walkers;
 mod online;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub mod pacing_log;
+mod peer_saves;
 mod push;
 pub(crate) mod recording;
 mod render;
 mod repaint;
+mod replay_show;
 mod report;
 mod reset;
+pub(crate) mod screen_extras;
 mod second_screens;
 mod shelf;
+mod storage_page;
+pub mod system_files;
 pub(crate) mod tabs;
 mod toasts;
 mod toolbar;
 pub mod ui_state;
+mod video_render;
 pub mod viewer;
 pub(crate) mod widgets;
 mod your_data;
@@ -118,6 +143,8 @@ pub struct Citrine {
     pub commonmark: CommonMarkCache,
     #[serde(skip, default)]
     quick_load_hold: Option<web_time::Instant>,
+    #[serde(skip, default)]
+    away: background::Away,
     rewind_pressed: bool,
     #[serde(skip, default)]
     fast_forward: fast_forward::FastForwardInput,
@@ -127,6 +154,18 @@ pub struct Citrine {
     audio_stalled: bool,
     #[serde(skip, default)]
     record_when_ready: bool,
+    #[serde(skip, default)]
+    tape_media: Option<crate::media::NewMedia>,
+    #[serde(skip, default)]
+    parked_replays: Vec<capture::ParkedReplay>,
+    #[serde(skip, default)]
+    video_replays: capture::VideoReplays,
+    #[serde(skip, default)]
+    video_renders: video_render::VideoRenders,
+    #[serde(skip, default)]
+    replay_show: replay_show::ReplayShow,
+    #[serde(skip, default)]
+    clip_work: clip::ClipWork,
     #[serde(skip, default)]
     codec_prompt: bool,
     #[serde(skip, default)]
@@ -146,9 +185,17 @@ pub struct Citrine {
     #[serde(skip, default)]
     pending_console: Option<PendingConsole>,
     #[serde(skip, default)]
+    pending_peer_discard: Option<crate::emulator::peer_saves::PeerNotice>,
+    #[serde(skip, default)]
     pub media: MediaStore,
     #[serde(skip, default)]
     pub(crate) senses: crate::senses::Senses,
+    #[cfg(feature = "nds")]
+    #[serde(skip, default)]
+    pub(crate) mic: crate::audio::mic::Mic,
+    #[cfg(feature = "nds")]
+    #[serde(skip, default)]
+    pub(crate) talk_pressed: bool,
     #[serde(skip, default)]
     pub online: Online,
     #[serde(skip, default)]
@@ -158,6 +205,8 @@ pub struct Citrine {
     #[serde(skip, default)]
     cloud_rom: Option<String>,
     #[serde(skip, default)]
+    cloud_keep: Option<(u64, crate::online::KeepSaves)>,
+    #[serde(skip, default)]
     pub game_info: crate::game_info::GameInfo,
     #[serde(skip, default)]
     cloud_hold: Option<CloudHold>,
@@ -165,6 +214,8 @@ pub struct Citrine {
     pub stats: crate::stats::Stats,
     #[serde(skip, default)]
     shelf: crate::homebrew::loader::ShelfLoader,
+    #[serde(skip, default)]
+    archive: archive::ArchiveShelf,
     #[serde(skip, default)]
     covers: crate::covers::Finder,
     #[serde(skip, default)]
@@ -175,6 +226,12 @@ pub struct Citrine {
     second: Box<crate::second_screens::SecondScreens>,
     #[serde(skip, default)]
     surface: second_screens::Surfaces,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(skip, default)]
+    lan: lan::LanPeers,
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    #[serde(skip, default)]
+    nearby_walkers: nearby_walkers::NearbyWalkers,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     #[serde(skip, default)]
     discord: crate::discord::Rpc,
@@ -186,6 +243,10 @@ pub struct Citrine {
     pacing_log: Option<pacing_log::PacingLog<std::io::BufWriter<std::fs::File>>>,
     #[serde(skip, default)]
     repaint: repaint::Repaint,
+    #[serde(skip, default)]
+    monitor: monitor::WindowMonitor,
+    #[serde(skip, default)]
+    present_pace: monitor::PresentPace,
 }
 
 struct CloudHold {
@@ -261,11 +322,18 @@ impl Default for Citrine {
             events: events::AppEventQueue::default(),
             commonmark: CommonMarkCache::default(),
             quick_load_hold: None,
+            away: background::Away::default(),
             rewind_pressed: false,
             fast_forward: Default::default(),
             mobile: mobile::MobileState::default(),
             audio_stalled: false,
             record_when_ready: false,
+            tape_media: None,
+            parked_replays: Vec::new(),
+            video_replays: capture::VideoReplays::default(),
+            video_renders: video_render::VideoRenders::default(),
+            replay_show: replay_show::ReplayShow::default(),
+            clip_work: clip::ClipWork::default(),
             codec_prompt: false,
             settings_store: SettingsStore::default(),
             settings_saved_at: None,
@@ -275,18 +343,29 @@ impl Default for Citrine {
             pending_reset: None,
             reset_without_asking: false,
             pending_console: None,
+            pending_peer_discard: None,
             media: MediaStore::default(),
             senses: crate::senses::Senses::default(),
+            #[cfg(feature = "nds")]
+            mic: crate::audio::mic::Mic::default(),
+            #[cfg(feature = "nds")]
+            talk_pressed: false,
             online: Online::default(),
             play: Box::default(),
             activity: Activity::default(),
             cloud_rom: None,
+            cloud_keep: None,
             cloud_hold: None,
             game_info: Default::default(),
             stats: crate::stats::Stats::default(),
             shelf: Default::default(),
+            archive: Default::default(),
             second: Box::default(),
             surface: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            lan: Default::default(),
+            #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+            nearby_walkers: Default::default(),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             discord: crate::discord::Rpc::default(),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -294,6 +373,8 @@ impl Default for Citrine {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             pacing_log: None,
             repaint: repaint::Repaint::default(),
+            monitor: monitor::WindowMonitor::default(),
+            present_pace: monitor::PresentPace::default(),
         };
         app.open_tab(Tab::Info);
         app.emulator.writes = crate::storage::Writes::start(&app.threads);
@@ -320,6 +401,7 @@ impl Citrine {
         }
 
         app.ui.settings.sanitize();
+        app.load_boot_roms();
         #[cfg(feature = "gba")]
         app.load_gba_bios();
         #[cfg(feature = "nds")]
@@ -327,8 +409,9 @@ impl Citrine {
         #[cfg(feature = "nds")]
         app.sync_ds_user();
         app.emulator.store.move_cache_out();
+        app.emulator.reopen_peer_notices();
         #[cfg(not(target_arch = "wasm32"))]
-        crate::storage::move_out_of_data(&crate::storage::data_dir(), &crate::storage::cache_dir());
+        crate::storage::tidy_folders();
         app.online.persist_chats();
         app.online.cloud_attach(app.emulator.store.clone());
         app.online.cloud_spawner(app.threads.spawner());
@@ -388,7 +471,7 @@ impl Citrine {
     }
 
     fn needs_every_frame(&self) -> bool {
-        self.emulator.is_running()
+        (self.emulator.has_game() && self.emulator.is_running())
             || self.play.session().is_some()
             || self.play.room().is_some()
             || !self.toasts.texts().is_empty()
@@ -404,16 +487,34 @@ impl Citrine {
         self.emulator.idle_refreshes()
     }
 
-    fn plan_repaint(&mut self, ctx: &Context) {
+    fn plan_repaint(&mut self, ctx: &Context, started: web_time::Instant) {
         let busy = self.needs_every_frame();
         let idle = self.idle_refreshes();
         let measured = self.emulator.refresh_period();
-        self.repaint.finish(ctx, busy, idle, measured, IDLE_TICK);
+        let hz = self.monitor.rate().map(|rate| rate.hz);
+        let not_before = self
+            .present_pace
+            .plan(started, hz, web_time::Instant::now());
+        self.repaint
+            .finish(ctx, busy, idle, measured, IDLE_TICK, not_before);
     }
 
-    fn setup_fonts(ctx: &Context) {
+    fn follow_monitor(&mut self, frame: &Frame, now: web_time::Instant) {
+        if let Some(mut screens) = crate::platform::monitor::OsScreens::of(frame) {
+            self.monitor.follow(&mut screens, now);
+        }
+        self.repaint
+            .follow_display(self.monitor.monitor().map(|monitor| monitor.id));
+        self.emulator.set_display(crate::emulator::Display {
+            monitor: self.monitor.rate(),
+            paced: self.present_pace.paced(),
+        });
+    }
+
+    pub(crate) fn setup_fonts(ctx: &Context) {
         let mut fonts = FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        crate::icons::add_font(&mut fonts);
         crate::app::widgets::emoji::add_font(&mut fonts);
         ctx.set_fonts(fonts);
     }
@@ -428,6 +529,7 @@ impl eframe::App for Citrine {
             self.emulator.set_gpu(ctx, state);
         }
         let frame_start = web_time::Instant::now();
+        self.follow_monitor(_frame, frame_start);
         #[cfg(not(target_arch = "wasm32"))]
         self.ui
             .record_watch
@@ -462,17 +564,27 @@ impl eframe::App for Citrine {
             crate::profile::scope!("online");
             self.update_online(ctx);
         }
+        self.emulator.set_hotkeys(&self.ui.settings.hotkeys);
         self.begin_console(ctx);
         self.run_side_jobs();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.media
+            .follow_folder(self.ui.settings.capture_folder.as_deref());
         self.find_covers();
         self.follow_library(ctx);
+        self.follow_archive(ctx);
         self.ui
             .update
             .tick(&self.files.spawner, self.ui.settings.check_updates);
         self.count_your_data();
+        self.count_storage();
         #[cfg(feature = "nds")]
         self.follow_walker(ctx);
         self.step_second_screens(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.follow_lan();
+        #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+        self.follow_nearby_walkers(ctx);
         {
             crate::profile::scope!("render");
             if self.joined_as_surface() {
@@ -484,7 +596,8 @@ impl eframe::App for Citrine {
         self.surface_windows(ctx);
         self.second_screens_input();
         self.ui.join.save_asked_codes(&self.files.spawner);
-        if self.ui.focus_mode
+        if !self.layout_edit_keys(ctx)
+            && self.ui.focus_mode
             && self.focus_exit_names().is_empty()
             && !self.ui.viewer.is_open()
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -493,7 +606,7 @@ impl eframe::App for Citrine {
         }
         self.media_viewer(ctx);
 
-        self.handle_snapshot_hotkeys(ctx);
+        self.follow_quick_load(ctx);
         self.follow_rewind(ctx);
         self.follow_fast_forward(ctx);
         self.quick_load_overlay(ctx);
@@ -503,10 +616,14 @@ impl eframe::App for Citrine {
         self.load_state_confirm(ctx);
         self.unlink_load_confirm(ctx);
         self.console_confirm(ctx);
+        self.peer_discard_confirm(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.unsent_confirm(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hardcore_confirm(ctx);
         self.cloud_conflict(ctx);
         self.handle_your_data(ctx);
+        self.handle_storage(ctx);
         tabs::playing::stop_confirm(ctx, &mut self.play, &mut self.online, &mut self.ui.playing);
         tabs::playing::relink_confirm(
             ctx,
@@ -557,6 +674,8 @@ impl eframe::App for Citrine {
         self.unlock_audio_on_interaction(ctx);
         self.watch_cloud_game();
         self.sense_gimmicks(ctx);
+        #[cfg(feature = "nds")]
+        self.follow_mic(ctx);
 
         let Self {
             emulator,
@@ -584,11 +703,11 @@ impl eframe::App for Citrine {
             let name = tabs::playing::member_name(&self.play, &self.online, friend);
             self.ui.playing.handed_back(friend, &name);
         }
+        self.tell_peer_saves();
         self.publish_second_screens();
         self.use_gimmicks();
-        let presses = self.emulator.take_loose_presses();
-        self.run_pad_shortcuts(presses);
-        self.play.flush(&mut self.online);
+        self.run_shortcuts();
+        self.play.flush(&mut self.online, web_time::Instant::now());
         self.record_stats();
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
@@ -606,7 +725,7 @@ impl eframe::App for Citrine {
         #[cfg(feature = "nds")]
         self.emulator.jit_cache_due();
         self.show_save_news();
-        self.finish_recordings();
+        self.finish_recordings(ctx);
         self.show_loads();
         self.watch_shelf();
         self.watch_game_info();
@@ -630,6 +749,8 @@ impl eframe::App for Citrine {
         if changed {
             synced::note(&mut self.ui.settings, crate::online::synced::now_millis());
         }
+        self.follow_background(ctx, visible);
+        self.emulator.rest_pointer(ctx);
 
         self.flush_settings(false);
         #[cfg(target_os = "android")]
@@ -675,7 +796,7 @@ impl eframe::App for Citrine {
         #[cfg(all(feature = "dev-route", target_arch = "wasm32"))]
         crate::dev_route::tock(self);
         if visible {
-            self.plan_repaint(ctx);
+            self.plan_repaint(ctx, frame_start);
         }
     }
 
@@ -704,6 +825,15 @@ impl eframe::App for Citrine {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    fn auto_save_interval(&self) -> std::time::Duration {
+        if self.needs_every_frame() && self.emulator.has_game() {
+            std::time::Duration::MAX
+        } else {
+            AUTO_SAVE_EVERY
+        }
+    }
+
     fn save(&mut self, storage: &mut dyn Storage) {
         #[cfg(target_os = "android")]
         if let Some(audio) = &mut self.audio {
@@ -712,6 +842,7 @@ impl eframe::App for Citrine {
         if let Err(err) = self.emulator.flush_save() {
             log::error!("failed to flush save: {err:?}");
         }
+        self.flush_parked_save();
         self.flush_settings(true);
         self.online.flush_chats();
         self.stats.flush();
@@ -721,6 +852,8 @@ impl eframe::App for Citrine {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn on_exit(&mut self) {
+        self.close_replay_show();
+        self.settle_pending_download();
         self.second.close();
         #[cfg(feature = "nds")]
         self.emulator.detach_ir();
@@ -732,18 +865,25 @@ impl eframe::App for Citrine {
         }
         #[cfg(feature = "nds")]
         self.emulator.save_jit_cache();
+        if self.emulator.is_taping() {
+            self.stop_tape_recording();
+        }
+        if let Some(replay) = self.emulator.take_cut_recording() {
+            self.keep_replay(replay);
+        }
+        self.store_parked_replays(None);
         self.emulator.screen_recorder.stop();
         for outcome in self.emulator.screen_recorder.wait() {
-            if let Outcome::Saved(done) = outcome
-                && let Err(err) = self.store_recording(*done)
-            {
-                log::error!("failed to save the recording: {err}");
+            if let Outcome::Saved(done) = outcome {
+                self.store_recording(*done, true);
             }
         }
+        self.store_video_replays();
         let threads = std::mem::take(&mut self.threads);
         for name in threads.shutdown(EXIT_WAIT).unfinished {
             log::warn!("the {name} thread did not stop in time");
         }
+        self.store_video_replays();
         if self.ui.update.take_restart() {
             crate::update::relaunch();
         }
@@ -819,12 +959,17 @@ impl Citrine {
         match (shot, &unit) {
             (crate::discord::Shot::Forget, _) => self.online.forget_screen(),
             (crate::discord::Shot::Take, Some(unit)) => {
-                let (width, height, rgba) =
-                    emulator.screenshot_of(unit.frame, crate::discord::SHOT_SCALE);
-                if let Some(png) = crate::utils::screenshot::encode_png(width, height, &rgba)
-                    .filter(|png| png.len() <= citrine_gb_net::MAX_SCREEN_BYTES)
-                {
-                    self.online.send_screen(png);
+                let only = settings.screens.only();
+                match crate::discord::screen_png(|scale| {
+                    emulator.screenshot_of_screen(unit.frame, scale, only)
+                }) {
+                    Ok(png) => {
+                        self.online.send_screen(png);
+                    }
+                    Err(bytes) => log::warn!(
+                        "the Discord screen stays unsent: its smallest picture is {bytes} bytes, over the relay's {}",
+                        citrine_gb_net::MAX_SCREEN_BYTES
+                    ),
                 }
             }
             _ => {}
@@ -969,6 +1114,9 @@ impl Citrine {
             events::AppEvent::PrefetchShelfGame { game } => self.shelf.prefetch(game),
             events::AppEvent::OpenTab { tab } => self.show_tab(tab, touch),
             events::AppEvent::MediaSaved { id } => self.media_saved(id, touch),
+            events::AppEvent::Record(action) => self.record_bar_action(action),
+            events::AppEvent::Replay(action) => self.replay_bar_action(action),
+            events::AppEvent::Clip(action) => self.clip_action(action),
             events::AppEvent::MediaAdded { id } => self.media_added(id),
             events::AppEvent::ShowMedia { id } => self.show_media(id, touch),
             events::AppEvent::PlayOn { model } => self.ask_play_on(model),
@@ -979,35 +1127,46 @@ impl Citrine {
             events::AppEvent::EndLink => self.end_link(),
             events::AppEvent::StartPartner { event } => self.start_partner(event),
             events::AppEvent::OpenSettings { tab } => self.open_settings(tab, touch),
+            events::AppEvent::FindSetting { row } => self.find_setting(row, touch),
             events::AppEvent::UndoSnapshot { rom_key, slot } => self.undo_snapshot(&rom_key, slot),
+            events::AppEvent::KeepPeerSaves(notice) => self.keep_peer_saves(&notice),
+            events::AppEvent::AskDiscardPeerSaves(notice) => {
+                self.pending_peer_discard = Some(notice)
+            }
+            events::AppEvent::SetPeerSavesAside(notice) => self.set_peer_saves_aside(&notice),
+            events::AppEvent::UndoKeptSaves(kept) => self.undo_kept_saves(&kept),
             events::AppEvent::PickCameraPicture => self.pick_camera_picture(),
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            events::AppEvent::PickCaptureFolder => {
+                crate::utils::file_loader::FolderPicker::new()
+                    .title("Choose where screenshots and recordings go")
+                    .dispatch(&self.files.spawner, self.files.capture_folder_tx.clone());
+            }
             #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
             events::AppEvent::DownloadCodec => {
                 crate::media::recording::download_codec(&self.files.spawner, true);
             }
             events::AppEvent::CentreTilt => self.centre_tilt(),
+            events::AppEvent::HardcoreOff => hardcore::turn_off(&mut self.ui.settings),
             events::AppEvent::SaveGameReport => self.save_game_report(),
             events::AppEvent::Screens(action) => self.screens_action(action),
+            events::AppEvent::EditLayout(start) => self.start_layout_edit_with(start),
+            events::AppEvent::ToggleLid => {
+                self.run_hotkey(crate::app::ui_state::hotkeys::HotkeyAction::ToggleLid);
+            }
             events::AppEvent::ScreenSettings { phone } => self.open_screen_settings(phone),
+            events::AppEvent::FindGroup { group } => self.find_group(group, touch),
             events::AppEvent::RemoveHud { id } => self.remove_hud(id),
             events::AppEvent::RestoreHud { index, hud } => {
                 self.ui.settings.hud.restore(index, hud);
                 self.ui.settings.dirty = true;
             }
-            #[cfg(feature = "gba")]
-            events::AppEvent::PickGbaBios => self.pick_gba_bios(),
-            #[cfg(feature = "gba")]
-            events::AppEvent::UseBuiltInBios => self.use_built_in_bios(),
-            #[cfg(feature = "nds")]
-            events::AppEvent::PickDsFile(file) => self.pick_ds_file(file),
-            #[cfg(feature = "nds")]
-            events::AppEvent::RemoveDsFile(file) => self.remove_ds_file(file),
+            events::AppEvent::PickFile(file) => self.pick_system_file(file),
+            events::AppEvent::RemoveFile(file) => self.remove_system_file(file),
             #[cfg(feature = "nds")]
             events::AppEvent::FindDsBios => self.find_ds_bios(touch),
             #[cfg(feature = "nds")]
             events::AppEvent::FindDsDirect => self.find_ds_direct(touch),
-            #[cfg(feature = "nds")]
-            events::AppEvent::ClearJitCache => self.clear_jit_cache(),
         }
     }
 }
@@ -1023,7 +1182,7 @@ mod tests {
     use crate::app::ui_state::hotkeys::HotkeyAction;
     use crate::app::ui_state::keybinds::PadButton;
     use crate::app::ui_state::settings::LayoutMode;
-    use crate::app::ui_state::settings::SettingsTab;
+    use crate::app::ui_state::settings_tree::SettingsTab;
     use citrine_gb::rom::Rom;
     use citrine_gb::rom::header::RomCgbMode;
     use mobile::TOUCH_TARGET_PX;
@@ -1067,17 +1226,7 @@ mod tests {
             ctx.run(input, |ctx| {
                 mobile::touch_spacing(ctx, false);
                 app.render(ctx);
-                app.handle_snapshot_hotkeys(ctx);
-                let Citrine {
-                    emulator, pads, ui, ..
-                } = app;
-                emulator.handle_input(
-                    ctx,
-                    pads.as_mut(),
-                    &ui.settings.bindings,
-                    &mut ui.capture,
-                    None,
-                );
+                app.take_input(ctx);
                 app.handle_event_queue(false);
             })
         }
@@ -1238,6 +1387,7 @@ mod tests {
         use super::*;
         use crate::app::tabs::playing::Ended;
         use crate::play::tests::{Pair, homebrew};
+        use citrine_gb::console::ConsoleKind;
 
         fn ended_frame(app: &mut Citrine, ctx: &Context) -> egui::FullOutput {
             let mut output = None;
@@ -1279,6 +1429,140 @@ mod tests {
                 );
                 assert!(text_rect(&output, "Play again").is_some(), "{layout:?}");
             }
+        }
+
+        fn gba_solo(name: &str, layout: LayoutMode, solo: bool) -> Citrine {
+            use crate::app::hud::{Hud, Value};
+            let mut app = phone_app(name);
+            app.ui.settings.layout = layout;
+            app.ui.settings.check_updates = false;
+            if solo {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("fixtures/gba/save-sram.gba");
+                app.handle_load_rom_data(std::fs::read(path).expect("the GBA fixture"));
+                app.emulator.running = true;
+                assert_eq!(app.emulator.kind(), ConsoleKind::Gba);
+            }
+            app.ui.settings.hud.shown = true;
+            app.ui.settings.hud.huds = vec![Hud {
+                values: vec![Value::Fps, Value::Jit],
+                ..Hud::default()
+            }];
+            app
+        }
+
+        fn full_frames(
+            app: &mut Citrine,
+            ctx: &Context,
+            size: egui::Vec2,
+            partner: &mut dyn FnMut(),
+        ) -> Vec<String> {
+            let mut frame = eframe::Frame::_new_kittest();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let mut output = None;
+            for _ in 0..6 {
+                partner();
+                output = Some(ctx.run(input.clone(), |ctx| {
+                    eframe::App::update(app, ctx, &mut frame);
+                }));
+            }
+            output
+                .expect("a frame")
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().trim().to_owned()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn walk(
+            app: &mut Citrine,
+            layout: LayoutMode,
+            partner: &mut dyn FnMut(),
+        ) -> Vec<(&'static str, Vec<String>)> {
+            let ctx = Context::default();
+            let mut pages = Vec::new();
+            if layout == LayoutMode::Desktop {
+                let size = egui::vec2(1280.0, 800.0);
+                pages.push(("game", full_frames(app, &ctx, size, partner)));
+                let card = app.game_card().map_or_else(Vec::new, |card| {
+                    let icon = card.icon.map(|_| "an icon".to_owned());
+                    [card.system, card.title].into_iter().chain(icon).collect()
+                });
+                pages.push(("second screen", card));
+                app.open_tab(Tab::ControllerDebug);
+                pages.push(("controller debug", full_frames(app, &ctx, size, partner)));
+            } else {
+                let size = egui::vec2(412.0, 915.0);
+                app.mobile.nav.show_game();
+                pages.push(("game", full_frames(app, &ctx, size, partner)));
+                let id = app.ui.settings.hud.huds[0].id;
+                app.mobile.hud_sheet = Some(crate::app::mobile::hud::HudSheet::Edit(id));
+                pages.push(("HUD sheet", full_frames(app, &ctx, size, partner)));
+                app.mobile.hud_sheet = None;
+                app.mobile.open(Tab::ControllerDebug);
+                pages.push(("controller debug", full_frames(app, &ctx, size, partner)));
+            }
+            pages
+        }
+
+        #[test]
+        fn a_ds_session_after_a_gba_game_shows_the_ds_everywhere() {
+            use crate::play::MyGame;
+            use crate::play::tests::{empty, nickname, one_ds_pair_at_a_time};
+            let _one = one_ds_pair_at_a_time();
+            let wants = [
+                ("game", "JIT"),
+                ("second screen", "Nintendo DS"),
+                ("second screen", "Nickname"),
+                ("second screen", "an icon"),
+                ("HUD sheet", "JIT"),
+                ("controller debug", "Nintendo DS buttons held"),
+            ];
+            let mut wrong = Vec::new();
+            for (host, solo) in [(true, true), (false, true), (false, false)] {
+                for layout in [LayoutMode::Desktop, LayoutMode::Mobile] {
+                    let who = match (host, solo) {
+                        (true, _) => "host",
+                        (false, true) => "guest",
+                        (false, false) => "guest with no game",
+                    };
+                    let seat = format!("{who} {layout:?}");
+                    let mut app = gba_solo(&format!("ds-after-gba-{seat}"), layout, solo);
+                    let mut pair = Pair::new(true, 0, 0, empty());
+                    let session = pair.invite(nickname());
+                    pair.accept(session, MyGame::Own(nickname()));
+                    pair.play_frames(60);
+                    pair.hand_over_at_real_time();
+                    pair.swap_seat(host, &mut app.play, &mut app.online);
+                    let pages = walk(&mut app, layout, &mut || pair.run_partner_alone(host));
+                    let shown = app.emulator.played_kind();
+                    let together = app.emulator.shows_session();
+                    pair.swap_seat(host, &mut app.play, &mut app.online);
+                    if !together {
+                        wrong.push(format!("{seat}: the game together ended"));
+                    }
+                    if shown != ConsoleKind::Nds {
+                        wrong.push(format!("{seat}: the console on screen is {shown:?}"));
+                    }
+                    for (page, texts) in pages {
+                        if let Some(gba) = texts.iter().find(|t| t.contains("Game Boy Advance")) {
+                            wrong.push(format!("{seat} {page}: shows {gba:?}"));
+                        }
+                        for (_, want) in wants.iter().filter(|(p, _)| *p == page) {
+                            if !texts.iter().any(|t| t.starts_with(want)) {
+                                wrong.push(format!("{seat} {page}: no {want:?}"));
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(wrong.is_empty(), "{wrong:#?}");
         }
     }
     #[cfg(feature = "gba")]
@@ -1328,23 +1612,26 @@ mod tests {
         }
 
         #[test]
-        fn a_gba_hides_the_palettes_in_settings() {
+        fn the_palettes_stay_in_settings_with_a_gba() {
             for gba in [false, true] {
                 let mut app = app_on(&format!("palettes-{gba}"), LayoutMode::Desktop, gba);
-                app.ui.settings.current_tab = SettingsTab::Style;
+                app.ui.settings.current_tab = SettingsTab::GameBoy;
                 app.open_tab(Tab::Settings);
                 let output = frames(&mut app, &Context::default(), 1280.0);
-                assert_eq!(
+                assert!(
                     text_rect(&output, "Palette").is_some(),
-                    !gba,
                     "desktop, gba {gba}"
                 );
+                app.ui.settings.current_tab = SettingsTab::Screen;
+                let output = frames(&mut app, &Context::default(), 1280.0);
                 assert!(shows(&output, "Scaling"), "desktop, gba {gba}");
 
                 let mut phone = app_on(&format!("phone-palettes-{gba}"), LayoutMode::Mobile, gba);
-                phone.mobile.nav.open_settings(SettingsTab::Style);
+                phone.mobile.nav.open_settings(SettingsTab::GameBoy);
                 let output = frames(&mut phone, &Context::default(), 412.0);
-                assert_eq!(shows(&output, "New palette"), !gba, "phone, gba {gba}");
+                assert!(shows(&output, "Own palettes"), "phone, gba {gba}");
+                phone.mobile.nav.open_settings(SettingsTab::Screen);
+                let output = frames(&mut phone, &Context::default(), 412.0);
                 assert!(shows(&output, "Scaling"), "phone, gba {gba}");
             }
         }
@@ -1362,18 +1649,13 @@ mod tests {
         fn a_gba_offers_no_other_console() {
             for gba in [false, true] {
                 let mut phone = app_on(&format!("play-on-{gba}"), LayoutMode::Mobile, gba);
-                phone.mobile.nav.show_game();
-                phone.mobile.nav.set_more(true);
+                phone.mobile.open(Tab::ThisGame);
                 let output = frames(&mut phone, &Context::default(), 412.0);
-                assert_eq!(shows(&output, "Play on"), !gba, "more, gba {gba}");
-
-                let mut phone = app_on(&format!("console-{gba}"), LayoutMode::Mobile, gba);
-                phone.mobile.nav.open_settings(SettingsTab::General);
-                let output = frames(&mut phone, &Context::default(), 412.0);
+                let play_on = crate::app::widgets::settings::this_game::PLAY_ON;
                 assert_eq!(
-                    shows(&output, "This game's console"),
+                    text_rect(&output, play_on).is_some(),
                     !gba,
-                    "general, gba {gba}"
+                    "this game, gba {gba}"
                 );
             }
         }
@@ -1460,7 +1742,7 @@ mod tests {
             ctx.run(input, |ctx| {
                 mobile::touch_spacing(ctx, false);
                 app.render(ctx);
-                app.handle_snapshot_hotkeys(ctx);
+                app.take_input(ctx);
             })
         }
 
@@ -1616,21 +1898,52 @@ mod tests {
             assert!(text_containing(&output, "New HUD").is_some());
         }
     }
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[test]
+    fn the_window_and_layout_are_kept_every_30_seconds_but_not_while_a_game_runs() {
+        use std::time::Duration;
+        let mut app = test_app();
+        let every = Duration::from_secs(30);
+        assert_eq!(eframe::App::auto_save_interval(&app), every);
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0147] = 0x03;
+        app.emulator
+            .load_rom(&Rom::new(&rom), GbModel::Dmg, None)
+            .unwrap();
+        app.emulator.running = true;
+        assert_eq!(eframe::App::auto_save_interval(&app), Duration::MAX);
+        app.emulator.running = false;
+        assert_eq!(eframe::App::auto_save_interval(&app), every);
+    }
+
     mod idle_repaint {
         use super::*;
         use std::time::Duration;
 
         const REFRESH_HZ: f64 = 180.0;
 
-        fn updates_in_a_second(app: &mut Citrine, ctx: &Context, frame: &mut eframe::Frame) -> u32 {
-            let input = egui::RawInput {
+        fn desktop_input() -> egui::RawInput {
+            egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(1280.0, 800.0),
                 )),
                 predicted_dt: (1.0 / REFRESH_HZ) as f32,
                 ..Default::default()
-            };
+            }
+        }
+
+        fn repaint_causes(app: &mut Citrine, ctx: &Context, frame: &mut eframe::Frame) -> String {
+            let mut causes = std::collections::BTreeSet::new();
+            for _ in 0..3 {
+                let _ = ctx.run(desktop_input(), |ctx| eframe::App::update(app, ctx, frame));
+                causes.extend(ctx.repaint_causes().iter().map(ToString::to_string));
+            }
+            causes.into_iter().collect::<Vec<_>>().join(", ")
+        }
+
+        fn updates_in_a_second(app: &mut Citrine, ctx: &Context, frame: &mut eframe::Frame) -> u32 {
+            let input = desktop_input();
             let refresh = Duration::from_secs_f64(1.0 / REFRESH_HZ);
             let mut at = Duration::ZERO;
             let mut updates = 0;
@@ -1668,6 +1981,645 @@ mod tests {
             app.emulator.running = true;
             let running = updates_in_a_second(&mut app, &ctx, &mut frame);
             assert!(running >= 175, "{running} updates a second after resume");
+        }
+
+        fn chat_app(name: &str, messages: u64) -> Citrine {
+            use crate::online::chat::{Change, ChatEntry, Delivery};
+            use citrine_gb_net::{Body, Friend, FriendState, OnlineId, Presence, PublicKey};
+            let ana = OnlineId::new(7).unwrap();
+            let mut app = phone_app(name);
+            app.ui.settings.layout = LayoutMode::Desktop;
+            app.ui.settings.check_updates = false;
+            remember_account(&mut app);
+            app.online.befriend_for_test(Friend {
+                online_id: ana,
+                display_name: "Ana".into(),
+                public_key: PublicKey([4; 32]),
+                state: FriendState::Friend,
+                presence: Some(Presence::Online { away: false }),
+            });
+            let words = [
+                "see you at the lemon tree",
+                "did you beat the second castle yet? I keep falling into the lava right before the boss door",
+                "😋",
+                "ok",
+                "my brother says the secret room behind the waterfall has an extra life but nobody ever found the switch for it, so I spent the whole evening jumping at walls",
+                "trade tomorrow? 🍋🍋",
+            ];
+            let entries = (0..messages)
+                .map(|id| ChatEntry {
+                    id: id + 1,
+                    mine: id % 3 == 0,
+                    at: 1_761_800_000 + id * 600,
+                    body: Body::Text(words[id as usize % words.len()].into()),
+                    delivery: if id % 3 == 0 {
+                        Delivery::Read(1_761_900_000)
+                    } else {
+                        Delivery::Received
+                    },
+                    change: Change::Kept,
+                    reply: None,
+                })
+                .collect();
+            app.online.add_chat_for_test(ana, entries);
+            app.ui.friends.chat.open(ana);
+            app.open_tab(Tab::Friends);
+            app
+        }
+
+        #[test]
+        fn an_idle_open_chat_sleeps_like_the_rest_of_the_idle_app() {
+            let mut app = chat_app("idle-chat", 2000);
+            let ctx = Context::default();
+            #[cfg(feature = "profile")]
+            crate::profile::set_open(&ctx, false);
+            let mut frame = eframe::Frame::_new_kittest();
+            let _ = updates_in_a_second(&mut app, &ctx, &mut frame);
+            app.toasts.dismiss_all_toasts();
+            let _ = updates_in_a_second(&mut app, &ctx, &mut frame);
+            let idle = updates_in_a_second(&mut app, &ctx, &mut frame);
+            let causes = repaint_causes(&mut app, &ctx, &mut frame);
+            assert!(
+                idle <= 24,
+                "{idle} updates a second with the chat open, asked by {causes}"
+            );
+        }
+
+        #[test]
+        fn a_long_open_chat_draws_only_the_messages_in_view() {
+            let mut app = chat_app("long-chat", 2000);
+            app.ui.friends.chat.show_older_for_test(9);
+            let ctx = Context::default();
+            #[cfg(feature = "profile")]
+            crate::profile::set_open(&ctx, false);
+            let mut frame = eframe::Frame::_new_kittest();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            fn lemon_trees(shape: &egui::Shape) -> usize {
+                match shape {
+                    egui::Shape::Text(text) => text.galley.text().contains("lemon tree") as usize,
+                    egui::Shape::Vec(shapes) => shapes.iter().map(lemon_trees).sum(),
+                    _ => 0,
+                }
+            }
+            let mut texts = 0;
+            for _ in 0..4 {
+                let output = ctx.run(input.clone(), |ctx| {
+                    eframe::App::update(&mut app, ctx, &mut frame)
+                });
+                texts = output
+                    .shapes
+                    .iter()
+                    .map(|clipped| lemon_trees(&clipped.shape))
+                    .sum();
+            }
+            assert!((1..40).contains(&texts), "{texts} messages drawn");
+        }
+
+        #[test]
+        #[ignore = "frame cost bench, run by hand"]
+        fn open_chat_frame_cost() {
+            let frames: u32 = std::env::var("CHAT_COST_FRAMES")
+                .ok()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(200);
+            let mut app = chat_app("chat-cost", 2000);
+            if std::env::var_os("CHAT_COST_ALL").is_some() {
+                app.ui.friends.chat.show_older_for_test(9);
+            }
+            let ctx = Context::default();
+            #[cfg(feature = "profile")]
+            crate::profile::set_open(&ctx, false);
+            let mut frame = eframe::Frame::_new_kittest();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            for _ in 0..10 {
+                let _ = ctx.run(input.clone(), |ctx| {
+                    eframe::App::update(&mut app, ctx, &mut frame)
+                });
+            }
+            app.toasts.dismiss_all_toasts();
+            let start = std::time::Instant::now();
+            for _ in 0..frames {
+                let _ = ctx.run(input.clone(), |ctx| {
+                    eframe::App::update(&mut app, ctx, &mut frame)
+                });
+            }
+            let per_frame = start.elapsed() / frames;
+            let open = updates_in_a_second(&mut app, &ctx, &mut frame);
+            app.ui.friends.chat.close();
+            let _ = updates_in_a_second(&mut app, &ctx, &mut frame);
+            let closed = updates_in_a_second(&mut app, &ctx, &mut frame);
+            let causes = repaint_causes(&mut app, &ctx, &mut frame);
+            println!("CHAT UPDATES {open} a second open, {closed} closed");
+            println!("CHAT CAUSES closed {causes}");
+            println!(
+                "CHAT FRAME {frames} frames, {} us a frame",
+                per_frame.as_micros()
+            );
+        }
+    }
+    mod saves_on_open {
+        use super::*;
+        use citrine_gb::console::{Console as _, ConsoleKind};
+
+        fn pattern(len: usize, seed: u8) -> Vec<u8> {
+            (0..len)
+                .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+                .collect()
+        }
+
+        fn gba_rom() -> Vec<u8> {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/gba/save-flash128.gba");
+            std::fs::read(path).expect("fixture")
+        }
+
+        fn app_with(name: &str, cloud: bool) -> (Citrine, std::path::PathBuf) {
+            let mut app = phone_app(name);
+            if cloud {
+                remember_account(&mut app);
+                app.ui.settings.online.cloud_saves = true;
+            }
+            let root = crate::storage::data_dir().join("phone-saves").join(name);
+            (app, root)
+        }
+
+        fn lay_out_v012(root: &std::path::Path, key: &str, save: &[u8]) {
+            let dir = root.join(key);
+            std::fs::create_dir_all(&dir).expect("game folder");
+            std::fs::write(dir.join("battery.sav"), save).expect("battery.sav");
+            std::fs::write(dir.join("battery.meta"), 1_700_000_000u64.to_le_bytes())
+                .expect("battery.meta");
+        }
+
+        fn open(app: &mut Citrine, rom: &[u8], kind: ConsoleKind, path: Option<&std::path::Path>) {
+            app.emulator
+                .load_game(&citrine_gb::rom::Rom::new(rom), kind, path)
+                .expect("load");
+            let ctx = Context::default();
+            for _ in 0..5 {
+                play_frame(app, &ctx, vec![]);
+            }
+            if let Some(hold) = &mut app.cloud_hold {
+                hold.since -= std::time::Duration::from_secs(10);
+            }
+            for _ in 0..5 {
+                play_frame(app, &ctx, vec![]);
+            }
+            assert!(app.cloud_hold.is_none(), "the cloud hold ends");
+        }
+
+        fn ram(app: &mut Citrine) -> Vec<u8> {
+            app.emulator
+                .debug_mut()
+                .battery(true, 0)
+                .expect("a battery")
+                .ram
+        }
+
+        #[test]
+        fn a_save_from_v012_loads_when_its_game_opens() {
+            let games = [
+                (
+                    "gb",
+                    citrine_gb_gamedata::fixtures::crystal_cartridge(),
+                    ConsoleKind::Gbc,
+                    0x8000,
+                ),
+                ("gba", gba_rom(), ConsoleKind::Gba, 0x20000),
+            ];
+            for (console, rom, kind, size) in games {
+                for cloud in [false, true] {
+                    let case = format!("v012-{console}-cloud-{cloud}");
+                    let (mut app, root) = app_with(&case, cloud);
+                    let key = citrine_gb::rom::id::RomId::new(&rom).sha256_hex_string();
+                    let save = pattern(size, 7);
+                    lay_out_v012(&root, &key, &save);
+                    open(&mut app, &rom, kind, None);
+                    assert_eq!(app.emulator.rom_key(), Some(key.as_str()), "{case}");
+                    assert!(app.emulator.save_loaded, "{case}: the save loaded");
+                    assert!(ram(&mut app) == save, "{case}: the game has the save");
+                    assert_eq!(
+                        std::fs::read(root.join(&key).join("battery.sav")).ok(),
+                        Some(save),
+                        "{case}: the file is untouched"
+                    );
+                    let _ = std::fs::remove_dir_all(&root);
+                }
+            }
+        }
+
+        #[test]
+        fn a_sav_beside_the_rom_loads_when_its_game_opens() {
+            for cloud in [false, true] {
+                let case = format!("beside-rom-cloud-{cloud}");
+                let (mut app, root) = app_with(&case, cloud);
+                let games = root.join("games");
+                std::fs::create_dir_all(&games).expect("games folder");
+                let rom = citrine_gb_gamedata::fixtures::crystal_cartridge();
+                let save = pattern(0x8000, 3);
+                std::fs::write(games.join("crystal.gbc"), &rom).expect("rom");
+                std::fs::write(games.join("crystal.sav"), &save).expect("sav");
+                open(
+                    &mut app,
+                    &rom,
+                    ConsoleKind::Gbc,
+                    Some(&games.join("crystal.gbc")),
+                );
+                assert!(app.emulator.save_loaded, "{case}: the save loaded");
+                assert!(ram(&mut app) == save, "{case}: the game has the save");
+                assert!(games.join("crystal.sav").exists(), "{case}: the .sav stays");
+                let _ = std::fs::remove_dir_all(&root);
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    mod saves_on_the_network {
+        use super::*;
+
+        const ROM: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+        fn device(name: &str) -> Citrine {
+            let mut app = phone_app(name);
+            app.online.cloud_attach(app.emulator.store.clone());
+            app.ui.settings.online.keep_saves = crate::online::KeepSaves::All;
+            remember_account(&mut app);
+            app.ui.settings.online.cloud_saves = false;
+            app
+        }
+
+        fn update(app: &mut Citrine, ctx: &Context, frame: &mut eframe::Frame) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(412.0, 915.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| eframe::App::update(app, ctx, frame));
+        }
+
+        fn trusted(app: &Citrine) -> usize {
+            app.lan
+                .lan
+                .as_ref()
+                .map_or(0, |lan| lan.trusted_peers().count())
+        }
+
+        #[test]
+        fn on_a_phone_a_device_row_is_one_line_under_a_head_on_the_rows_edges() {
+            let mut me = crate::lan::tests::lan("Pixel", 1);
+            let mut deck = crate::lan::tests::lan("Steam Deck", 2);
+            let mut laptop = crate::lan::tests::lan("Clara's laptop", 3);
+            crate::lan::tests::connect(&mut deck, &mut me, Some([9; 32]));
+            crate::lan::tests::connect(&mut laptop, &mut me, None);
+            for _ in 0..6 {
+                me.step(0.0);
+                deck.step(0.0);
+                laptop.step(0.0);
+            }
+            me.remember(laptop.key());
+            let mut app = device("network-rows");
+            app.ui.settings.online.network_saves = true;
+            app.lan.lan = Some(me);
+            app.open_settings(SettingsTab::Sync, true);
+            let ctx = Context::default();
+            app.follow_lan();
+            let mut output = play_frame(&mut app, &ctx, Vec::new());
+            for _ in 0..5 {
+                app.follow_lan();
+                output = play_frame(&mut app, &ctx, Vec::new());
+            }
+            assert_eq!(app.online.network_devices().len(), 2);
+            let texts: Vec<(String, egui::Rect)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some((
+                        text.galley.text().to_owned(),
+                        text.galley.rect.translate(text.pos.to_vec2()),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            let line = |wanted: &str| {
+                texts
+                    .iter()
+                    .find(|(text, _)| text == wanted)
+                    .map(|(_, rect)| *rect)
+                    .unwrap_or_else(|| panic!("no {wanted} in {texts:?}"))
+            };
+            for (name, on) in [("Steam Deck", true), ("Clara's laptop", false)] {
+                let row = line(name);
+                let status = texts.iter().find(|(text, rect)| {
+                    ["Syncing", "Not syncing"].contains(&text.as_str())
+                        && (rect.center().y - row.center().y).abs() < 2.0
+                });
+                assert_eq!(
+                    status.is_some(),
+                    on,
+                    "{name}: a status only beside an on switch, in {texts:?}"
+                );
+            }
+            let devices = line("Devices");
+            let head = line("Sync saves");
+            let name = line("Steam Deck");
+            assert!(
+                (devices.left() - name.left()).abs() < 0.5,
+                "{devices:?} {name:?}"
+            );
+            let switch = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect)
+                        if (rect.rect.width() - 44.0).abs() < 0.5
+                            && (rect.rect.height() - 26.0).abs() < 0.5 =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .find(|rect| rect.top() > name.top() - 20.0)
+                .expect("a switch");
+            assert!(
+                (head.right() - switch.right()).abs() < 0.5,
+                "{head:?} {switch:?}"
+            );
+        }
+
+        #[test]
+        fn signed_out_sync_settings_sits_under_this_network_and_signed_in_under_cloud() {
+            for joined in [false, true] {
+                let name = format!("sync-settings-place-{joined}");
+                let mut app = phone_app(&name);
+                if joined {
+                    remember_account(&mut app);
+                }
+                app.ui.settings.online.network_saves = true;
+                app.open_settings(SettingsTab::Sync, true);
+                let ctx = Context::default();
+                let mut output = play_frame(&mut app, &ctx, Vec::new());
+                for _ in 0..3 {
+                    output = play_frame(&mut app, &ctx, Vec::new());
+                }
+                let top = |wanted: &str| {
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|clipped| match &clipped.shape {
+                            egui::Shape::Text(text) if text.galley.text() == wanted => {
+                                Some(text.pos.y)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| panic!("{name}: no {wanted}"))
+                };
+                let sync = top("Sync settings");
+                let cloud = top("Cloud saves");
+                let network = top("This network");
+                let saves = top("Saves on this network");
+                if joined {
+                    assert!(cloud < sync && sync < network, "{name}: under Cloud");
+                } else {
+                    assert!(
+                        network < saves && saves < sync,
+                        "{name}: under This network"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn two_apps_on_one_network_share_a_battery_save_and_a_synced_setting_with_no_server() {
+            let mut deck_lan = crate::lan::tests::lan("Steam Deck", 1);
+            let mut pixel_lan = crate::lan::tests::lan("Pixel", 2);
+            crate::lan::tests::connect(&mut pixel_lan, &mut deck_lan, Some([9; 32]));
+            for _ in 0..6 {
+                deck_lan.step(0.0);
+                pixel_lan.step(0.0);
+            }
+            assert_eq!(deck_lan.trusted_peers().count(), 1);
+            assert_eq!(pixel_lan.trusted_peers().count(), 1);
+            let mut deck = device("network-deck");
+            let mut pixel = device("network-pixel");
+            deck.lan.lan = Some(deck_lan);
+            pixel.lan.lan = Some(pixel_lan);
+            deck.emulator
+                .store
+                .store_battery(ROM, b"battery from the deck")
+                .unwrap();
+            let ghosting = !pixel.ui.settings.ghosting;
+            let volume = pixel.ui.settings.volume;
+            deck.ui.settings.ghosting = ghosting;
+            deck.ui.settings.volume = volume / 2.0;
+            deck.ui.settings.dirty = true;
+            let deck_ctx = Context::default();
+            let pixel_ctx = Context::default();
+            let mut deck_frame = eframe::Frame::_new_kittest();
+            let mut pixel_frame = eframe::Frame::_new_kittest();
+            let mut copied = None;
+            for _ in 0..200 {
+                update(&mut deck, &deck_ctx, &mut deck_frame);
+                update(&mut pixel, &pixel_ctx, &mut pixel_frame);
+                copied = pixel.emulator.store.load_battery(ROM);
+                if copied.is_some() && pixel.ui.settings.ghosting == ghosting {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(
+                copied.as_deref(),
+                Some(&b"battery from the deck"[..]),
+                "deck trusts {} and sees {:?}, pixel trusts {} and sees {:?}, pixel elsewhere {:?}",
+                trusted(&deck),
+                deck.online.network_devices(),
+                trusted(&pixel),
+                pixel.online.network_devices(),
+                pixel.online.saves_elsewhere(),
+            );
+            let devices = pixel.online.network_devices();
+            assert_eq!(devices.len(), 1, "{devices:?}");
+            assert_eq!(devices[0].sync, crate::online::cloud::PeerSync::Syncing);
+            assert_eq!(pixel.ui.settings.ghosting, ghosting);
+            assert!((pixel.ui.settings.volume - volume).abs() < f32::EPSILON);
+            pixel.ui.settings.online.leave();
+            for _ in 0..20 {
+                update(&mut pixel, &pixel_ctx, &mut pixel_frame);
+                update(&mut deck, &deck_ctx, &mut deck_frame);
+            }
+            assert_eq!(pixel.online.network_devices(), []);
+            assert_eq!(deck.online.network_devices(), []);
+        }
+
+        #[test]
+        fn signed_out_saves_elsewhere_lists_only_paired_devices_saves() {
+            const PAIRED_ROM: &str =
+                "3333333333333333333333333333333333333333333333333333333333333333";
+            let mut pixel_lan = crate::lan::tests::lan("Pixel", 1);
+            let mut deck_lan = crate::lan::tests::lan("Steam Deck", 2);
+            let mut laptop_lan = crate::lan::tests::lan("Clara's laptop", 3);
+            crate::lan::tests::connect(&mut deck_lan, &mut pixel_lan, Some([9; 32]));
+            crate::lan::tests::connect(&mut laptop_lan, &mut pixel_lan, None);
+            for _ in 0..6 {
+                pixel_lan.step(0.0);
+                deck_lan.step(0.0);
+                laptop_lan.step(0.0);
+            }
+            pixel_lan.remember(laptop_lan.key());
+            laptop_lan.remember(pixel_lan.key());
+            let mut pixel = device("elsewhere-pixel");
+            let mut deck = device("elsewhere-deck");
+            let mut laptop = device("elsewhere-laptop");
+            laptop.ui.settings.online.leave();
+            pixel.ui.settings.online.keep_saves = crate::online::KeepSaves::Library;
+            pixel
+                .ui
+                .settings
+                .online
+                .network_allowed
+                .push(laptop_lan.key());
+            laptop
+                .ui
+                .settings
+                .online
+                .network_allowed
+                .push(pixel_lan.key());
+            pixel.lan.lan = Some(pixel_lan);
+            deck.lan.lan = Some(deck_lan);
+            laptop.lan.lan = Some(laptop_lan);
+            deck.emulator
+                .store
+                .store_battery(ROM, b"battery from the deck")
+                .unwrap();
+            laptop
+                .emulator
+                .store
+                .store_battery(PAIRED_ROM, b"battery from the laptop")
+                .unwrap();
+            let contexts = [Context::default(), Context::default(), Context::default()];
+            let mut frames = [
+                eframe::Frame::_new_kittest(),
+                eframe::Frame::_new_kittest(),
+                eframe::Frame::_new_kittest(),
+            ];
+            let mut step = |pixel: &mut Citrine, deck: &mut Citrine, laptop: &mut Citrine| {
+                for (at, app) in [pixel, deck, laptop].into_iter().enumerate() {
+                    update(app, &contexts[at], &mut frames[at]);
+                }
+            };
+            let sources = |app: &Citrine| {
+                let mut found: Vec<(Option<String>, Vec<String>)> = app
+                    .online
+                    .saves_elsewhere()
+                    .into_iter()
+                    .map(|game| (game.rom, game.devices))
+                    .collect();
+                found.sort();
+                found
+            };
+            let both = vec![
+                (Some(ROM.to_owned()), vec!["Steam Deck".to_owned()]),
+                (
+                    Some(PAIRED_ROM.to_owned()),
+                    vec!["Clara's laptop".to_owned()],
+                ),
+            ];
+            for _ in 0..200 {
+                step(&mut pixel, &mut deck, &mut laptop);
+                if sources(&pixel) == both {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(
+                sources(&pixel),
+                both,
+                "pixel sees {:?}",
+                pixel.online.network_devices()
+            );
+            pixel.ui.settings.online.leave();
+            for _ in 0..20 {
+                step(&mut pixel, &mut deck, &mut laptop);
+            }
+            assert_eq!(sources(&pixel), both[1..]);
+        }
+
+        #[test]
+        fn a_paired_device_that_leaves_the_network_takes_its_saves_along() {
+            const PAIRED_ROM: &str =
+                "3333333333333333333333333333333333333333333333333333333333333333";
+            let mut pixel_lan = crate::lan::tests::lan("Pixel", 1);
+            let mut laptop_lan = crate::lan::tests::lan("Clara's laptop", 3);
+            crate::lan::tests::connect(&mut laptop_lan, &mut pixel_lan, None);
+            for _ in 0..6 {
+                pixel_lan.step(0.0);
+                laptop_lan.step(0.0);
+            }
+            pixel_lan.remember(laptop_lan.key());
+            laptop_lan.remember(pixel_lan.key());
+            let mut pixel = device("leaving-pixel");
+            let mut laptop = device("leaving-laptop");
+            laptop.ui.settings.online.leave();
+            pixel.ui.settings.online.keep_saves = crate::online::KeepSaves::Library;
+            pixel
+                .ui
+                .settings
+                .online
+                .network_allowed
+                .push(laptop_lan.key());
+            laptop
+                .ui
+                .settings
+                .online
+                .network_allowed
+                .push(pixel_lan.key());
+            pixel.lan.lan = Some(pixel_lan);
+            laptop.lan.lan = Some(laptop_lan);
+            laptop
+                .emulator
+                .store
+                .store_battery(PAIRED_ROM, b"battery from the laptop")
+                .unwrap();
+            let contexts = [Context::default(), Context::default()];
+            let mut frames = [eframe::Frame::_new_kittest(), eframe::Frame::_new_kittest()];
+            let roms = |app: &Citrine| {
+                app.online
+                    .saves_elsewhere()
+                    .into_iter()
+                    .map(|game| game.rom)
+                    .collect::<Vec<_>>()
+            };
+            for _ in 0..200 {
+                update(&mut pixel, &contexts[0], &mut frames[0]);
+                update(&mut laptop, &contexts[1], &mut frames[1]);
+                if roms(&pixel) == [Some(PAIRED_ROM.to_owned())] {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(roms(&pixel), [Some(PAIRED_ROM.to_owned())]);
+            laptop.lan.lan = None;
+            for _ in 0..20 {
+                update(&mut pixel, &contexts[0], &mut frames[0]);
+            }
+            assert!(
+                pixel.online.network_devices().is_empty(),
+                "{:?}",
+                pixel.online.network_devices()
+            );
+            assert!(roms(&pixel).is_empty(), "{:?}", roms(&pixel));
         }
     }
     mod restart {
@@ -1859,14 +2811,115 @@ mod tests {
         }
     }
 
+    pub(crate) fn test_app() -> Citrine {
+        Citrine::default()
+    }
+
     pub(crate) fn phone_app(name: &str) -> Citrine {
-        let root =
-            std::env::temp_dir().join(format!("citrine-touch-test-{}-{name}", std::process::id()));
+        let root = crate::storage::data_dir().join("phone-saves").join(name);
         let _ = std::fs::remove_dir_all(&root);
-        let mut app = Citrine::default();
+        let mut app = test_app();
         app.emulator.store = crate::storage::SaveStore::at(root);
         app.ui.settings.layout = LayoutMode::Mobile;
         app
+    }
+
+    fn counted(app: &mut Citrine) -> Vec<(&'static str, usize)> {
+        app.data_parts()
+            .tallies(&crate::storage::kinds::Usage::new())
+            .into_iter()
+            .map(|(kind, tally)| (kind.name, tally.count))
+            .collect()
+    }
+
+    fn fill_every_part(app: &mut Citrine) {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0147] = 0x03;
+        app.emulator
+            .load_rom(&citrine_gb::rom::Rom::new(&rom), GbModel::Dmg, None)
+            .unwrap();
+        let key = app.emulator.rom_key().unwrap().to_owned();
+        app.emulator.store.store_battery(&key, b"battery").unwrap();
+        let png = crate::utils::screenshot::encode_png(160, 144, &vec![9; 160 * 144 * 4]).unwrap();
+        app.media
+            .add_screenshot(
+                crate::media::NewMedia::current(
+                    crate::media::MediaKind::Screenshot,
+                    &mut app.emulator,
+                ),
+                &png,
+            )
+            .unwrap();
+        for (file, size) in [
+            (crate::app::boot_rom::BootRom::Gb, 0x100),
+            (crate::app::boot_rom::BootRom::Gbc, 0x900),
+        ] {
+            app.handle_load_boot_rom(
+                file,
+                crate::utils::file_loader::PickedFile {
+                    name: "boot.bin".to_owned(),
+                    data: vec![1; size].into(),
+                    path: None,
+                    seen: None,
+                },
+            );
+        }
+        #[cfg(feature = "gba")]
+        app.handle_load_gba_bios(crate::utils::file_loader::PickedFile {
+            name: "gba_bios.bin".to_owned(),
+            data: vec![1; 0x4000].into(),
+            path: None,
+            seen: None,
+        });
+        #[cfg(feature = "nds")]
+        {
+            use crate::app::ds_firmware::DsFile;
+            for (file, size) in [
+                (DsFile::Arm9Bios, 0x1000),
+                (DsFile::Arm7Bios, 0x4000),
+                (DsFile::Firmware, 0x4_0000),
+            ] {
+                app.handle_load_ds_file(
+                    file,
+                    crate::utils::file_loader::PickedFile {
+                        name: format!("{}.bin", file.label()),
+                        data: vec![1; size].into(),
+                        path: None,
+                        seen: None,
+                    },
+                );
+            }
+            let walker = app.emulator.pokewalker.walker().unwrap().clone();
+            app.emulator.pokewalker.save(&walker);
+        }
+    }
+
+    #[test]
+    fn a_test_app_starts_with_no_data_even_after_another_test_filled_every_part() {
+        let filled = std::thread::spawn(|| {
+            let mut app = test_app();
+            fill_every_part(&mut app);
+            counted(&mut app)
+        })
+        .join()
+        .unwrap();
+        let mut wanted = vec!["Saves", "Screenshots", "GB boot ROM", "GBC boot ROM"];
+        if cfg!(feature = "gba") {
+            wanted.push("GBA BIOS");
+        }
+        if cfg!(feature = "nds") {
+            wanted.push("Pokéwalker");
+        }
+        for name in wanted {
+            assert!(
+                filled
+                    .iter()
+                    .any(|&(part, count)| part == name && count > 0),
+                "the other test filled {name}: {filled:?}"
+            );
+        }
+        let fresh = counted(&mut test_app());
+        assert!(fresh.iter().all(|&(_, count)| count == 0), "{fresh:?}");
     }
 
     fn small_targets(app: &mut Citrine, ctx: &Context) -> Vec<String> {
@@ -2079,7 +3132,10 @@ mod tests {
             GbModel::Cgb,
             "cancel keeps the console"
         );
-        assert!(app.ui.settings.game_consoles.is_empty(), "and the choice");
+        assert!(
+            app.ui.settings.own_value(&key, "console").is_none(),
+            "and the choice"
+        );
 
         app.events.play_on(GbModel::Dmg);
         app.handle_event_queue(true);
@@ -2098,7 +3154,8 @@ mod tests {
         app.events.play_on(GbModel::Cgb);
         app.handle_event_queue(true);
         assert_eq!(app.emulator.console(), GbModel::Dmg);
-        assert!(app.ui.settings.game_consoles.is_empty());
+        let key = app.emulator.rom_key().expect("key").to_owned();
+        assert_eq!(app.ui.settings.own_values(&key).count(), 0);
     }
 
     #[test]
@@ -2141,8 +3198,7 @@ mod tests {
     fn media_app(name: &str, layout: LayoutMode) -> Citrine {
         let mut app = phone_app(name);
         app.ui.settings.layout = layout;
-        let root =
-            std::env::temp_dir().join(format!("citrine-media-test-{}-{name}", std::process::id()));
+        let root = crate::storage::data_dir().join("media-app").join(name);
         let _ = std::fs::remove_dir_all(&root);
         app.media = MediaStore::at(root);
         let mut rom = vec![0u8; 0x8000];
@@ -2211,6 +3267,29 @@ mod tests {
                 }
                 _ => None,
             })
+    }
+
+    pub(crate) fn shown_whole(output: &egui::FullOutput, wanted: &str) -> bool {
+        output.shapes.iter().any(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text().trim() == wanted => clipped
+                .clip_rect
+                .expand(0.5)
+                .contains_rect(text.visual_bounding_rect()),
+            _ => false,
+        })
+    }
+
+    pub(crate) fn assert_in_front(app: &Citrine, tab: Tab) {
+        let (surface, node, index) = app.dock.find_tab(&tab).expect("the tab is open");
+        let egui_dock::Node::Leaf(leaf) = &app.dock[surface][node] else {
+            panic!("{tab:?} is not in a leaf");
+        };
+        assert_eq!(leaf.active, index, "{tab:?} shows in its pane");
+        assert_eq!(
+            app.dock.focused_leaf(),
+            Some((surface, node)),
+            "{tab:?} has the focus"
+        );
     }
 
     pub(crate) fn load_game(app: &mut Citrine, rom: &[u8], save: Option<&[u8]>) {
@@ -2677,7 +3756,7 @@ mod tests {
         play_frame(&mut app, &ctx, Vec::new());
         app.take_screenshot();
         let mut output = play_frame(&mut app, &ctx, Vec::new());
-        for _ in 0..10 {
+        for _ in 0..40 {
             output = play_frame(&mut app, &ctx, Vec::new());
         }
         assert!(!app.mobile.showing(Tab::Media));
@@ -2916,6 +3995,101 @@ mod tests {
     }
 
     #[test]
+    fn on_desktop_a_mouse_click_on_hide_closes_a_load_toast_over_the_game() {
+        let ctx = Context::default();
+        let mut app = media_app("hide-over-game", LayoutMode::Desktop);
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        let frame = |app: &mut Citrine, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| {
+                app.render(ctx);
+                app.show_toasts(ctx);
+                app.handle_event_queue(false);
+            })
+        };
+        let start = web_time::Instant::now();
+        let progress = crate::progress::Progress::unknown();
+        app.toasts
+            .load("hold", "Getting your save", progress, start);
+        app.toasts.load(
+            "hold",
+            "Getting your save",
+            progress,
+            start + std::time::Duration::from_secs(1),
+        );
+        app.toasts
+            .load_note("hold", "The game starts when it arrives");
+        let mut output = frame(&mut app, Vec::new());
+        for _ in 0..4 {
+            output = frame(&mut app, Vec::new());
+        }
+        let toast = app.toasts.rects(&ctx)[0];
+        let picture = picture_rect(&output).expect("the game is drawn");
+        let (_, games, _) = app.dock.find_tab(&Tab::GameBoy).expect("the game's pane");
+        let pane = app.dock.main_surface()[games]
+            .get_leaf()
+            .expect("a leaf")
+            .viewport;
+        let edge = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(border)
+                    if border.stroke.width > 0.0
+                        && border.rect.width() >= pane.width() - 4.0
+                        && (border.rect.bottom() - pane.bottom()).abs() <= 2.0 =>
+                {
+                    Some(border.rect.bottom() - border.stroke.width)
+                }
+                _ => None,
+            })
+            .expect("the pane's border");
+        let above = toast.top() - picture.bottom();
+        let below = edge - toast.bottom();
+        let centred = above > 2.0 && (above - below).abs() <= 1.0;
+        let roomy = above >= 8.0 && (below - 8.0).abs() <= 1.0;
+        assert!(
+            centred || roomy,
+            "{above} above the toast, {below} to the pane's edge"
+        );
+        let close = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape)
+                    if shape.galley.text() == crate::icons::X
+                        && toast.contains_rect(clipped.shape.visual_bounding_rect()) =>
+                {
+                    Some(clipped.shape.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .expect("the toast's close button");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: close,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(close)]);
+        assert_eq!(
+            ctx.layer_id_at(close).map(|layer| layer.order),
+            Some(egui::Order::Middle),
+            "nothing lies over the toast's close button"
+        );
+        frame(&mut app, vec![press(true)]);
+        frame(&mut app, vec![press(false)]);
+        assert!(app.toasts.dismissed("hold"), "{:?}", app.toasts.texts());
+    }
+
+    #[test]
     fn a_channel_muted_in_the_apu_tab_stays_muted_after_a_volume_change() {
         let ctx = Context::default();
         let mut app = media_app("apu-mute", LayoutMode::Desktop);
@@ -2956,18 +4130,27 @@ mod tests {
 
     #[test]
     fn a_controller_button_bound_to_focus_mode_turns_it_on_and_off() {
-        let mut app = Citrine::default();
+        let mut app = test_app();
         app.ui
             .settings
             .hotkeys
             .bind_pad(PadButton::Mode, HotkeyAction::ToggleFocusMode);
-        app.run_pad_shortcuts(vec![PadButton::Mode]);
+        app.emulator.set_hotkeys(&app.ui.settings.hotkeys);
+        let tap = |app: &mut Citrine| {
+            use crate::pad_input::{PadInput, PadKey, fake};
+            let mode = PadKey::Known(PadButton::Mode);
+            let mut pads = fake(&[(0, PadInput::Pressed(mode)), (0, PadInput::Released(mode))]);
+            let Citrine { emulator, ui, .. } = app;
+            emulator.handle_pads(&mut pads, &ui.settings.bindings, &mut ui.capture, None);
+            app.run_shortcuts();
+        };
+        tap(&mut app);
         assert!(app.ui.focus_mode);
         assert!(
             app.focus_exit_names()
                 .contains(&PadButton::Mode.to_string())
         );
-        app.run_pad_shortcuts(vec![PadButton::Mode]);
+        tap(&mut app);
         assert!(!app.ui.focus_mode);
     }
 
@@ -2990,17 +4173,17 @@ mod tests {
         app.ui.settings.volume = 0.2;
         app.ui.settings.matrix = true;
         app.ui.settings.online.joined = Some("relay.example".into());
-        app.ui.settings.current_tab = SettingsTab::YourData;
+        app.ui.settings.current_tab = SettingsTab::Storage;
         app.ui
             .recent
             .record(std::path::Path::new("/roms/game.gb"), "Game", None);
         app.open_tab(Tab::Settings);
-        app.mobile.nav.open_settings(SettingsTab::YourData);
+        app.mobile.nav.open_settings(SettingsTab::Storage);
         assert!(!app.emulator.store.files().is_empty());
 
         app.delete_everything();
 
-        let fresh = Citrine::default();
+        let fresh = test_app();
         let tabs = |app: &Citrine| {
             app.dock
                 .iter_all_tabs()
@@ -3397,6 +4580,40 @@ mod tests {
         assert!(dock.find_tab(&Tab::Settings).is_some());
     }
 
+    const APP_STATES: [(&str, &str); 2] = [
+        ("v0.12.0", include_str!("../fixtures/app-v0.12.0.ron")),
+        (
+            "v0.13.0-c12",
+            include_str!("../fixtures/app-v0.13.0-c12.ron"),
+        ),
+    ];
+
+    #[test]
+    fn app_state_from_each_release_keeps_its_recent_games() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                for (tag, text) in APP_STATES {
+                    let mut storage = MemoryStorage::default();
+                    eframe::Storage::set_string(&mut storage, eframe::APP_KEY, text.to_owned());
+                    let saved = eframe::get_value::<Saved>(&storage, eframe::APP_KEY)
+                        .unwrap_or_else(|| panic!("{tag} app state no longer loads"));
+                    assert!(
+                        saved
+                            .ui
+                            .recent
+                            .entries()
+                            .iter()
+                            .any(|rom| rom.title == "Pokémon Crystal"),
+                        "{tag} keeps its recent games"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     fn settings_page(name: &str, page: SettingsTab) -> (Citrine, Context) {
         let ctx = Context::default();
         let mut app = phone_app(name);
@@ -3438,13 +4655,17 @@ mod tests {
         }
     }
 
-    fn phone_general_page(app: &mut Citrine, ctx: &Context) -> egui::FullOutput {
+    pub(crate) fn phone_settings_output(
+        app: &mut Citrine,
+        ctx: &Context,
+        page: SettingsTab,
+    ) -> egui::FullOutput {
         app.mobile.nav.go(Place::Settings);
-        app.mobile.nav.open_settings(SettingsTab::General);
+        app.mobile.nav.open_settings(page);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(412.0, 3000.0),
+                egui::vec2(412.0, 5000.0),
             )),
             ..Default::default()
         };
@@ -3458,73 +4679,205 @@ mod tests {
         output.unwrap()
     }
 
+    fn phone_label(row: crate::app::ui_state::settings_tree::rows::RowId) -> &'static str {
+        row.label(crate::app::ui_state::settings_tree::Surface::Phone)
+    }
+
     #[test]
-    fn the_phone_general_page_shows_the_fast_forward_speed_above_rewind() {
+    fn the_phone_playing_page_shows_the_fast_forward_speed_above_rewind() {
+        use crate::app::ui_state::settings_tree::rows::RowId;
         let ctx = Context::default();
         let mut app = phone_app("fast-forward-row");
         app.ui.settings.fast_forward_speed = crate::emulator::fast_forward::FastForwardSpeed::Ten;
-        let output = phone_general_page(&mut app, &ctx);
-        let heading = text_rect(&output, "Fast forward").expect("fast forward heading");
+        let output = phone_settings_output(&mut app, &ctx, SettingsTab::Playing);
+        let speed_row = text_rect(&output, phone_label(RowId::FastForward)).expect("speed row");
         let speed = text_rect(&output, "10x").expect("speed value");
-        let autosave = text_rect(&output, "Autosave").expect("autosave heading");
-        let rewind = text_rect(&output, "Rewind").expect("rewind heading");
-        assert!(autosave.top() < heading.top());
-        assert!(heading.top() < speed.top());
+        let rewind = text_rect(&output, phone_label(RowId::Rewind)).expect("rewind row");
+        let autosave = text_rect(&output, phone_label(RowId::AutosaveEvery)).expect("autosave");
+        assert!((speed_row.center().y - speed.center().y).abs() < 2.0);
         assert!(speed.top() < rewind.top());
+        assert!(rewind.top() < autosave.top());
+    }
+
+    #[test]
+    fn the_phone_capture_page_shows_the_clip_length() {
+        use crate::app::ui_state::settings_tree::rows::RowId;
+        let ctx = Context::default();
+        let mut app = phone_app("clip-length-row");
+        app.ui.settings.clip_length = crate::emulator::rewind::ClipLength::TwoMinutes;
+        let output = phone_settings_output(&mut app, &ctx, SettingsTab::Capture);
+        let row = text_rect(&output, phone_label(RowId::ClipLength)).expect("clip length row");
+        let value = text_rect(&output, "2 min").expect("clip length value");
+        assert!((row.center().y - value.center().y).abs() < 2.0);
     }
 
     #[cfg(feature = "nds")]
     #[test]
-    fn the_phone_general_page_shows_clear_jit_cache_under_the_jit_switch_only() {
-        use crate::app::ui_state::settings::{CLEAR_JIT_LABEL, JIT_LABEL};
+    fn the_phone_console_pages_show_compiled_game_code_under_their_jit_switch() {
+        use crate::app::ui_state::settings_tree::rows::RowId;
         if !citrine_gb::nds::machine::JIT_AVAILABLE {
             return;
         }
         let ctx = Context::default();
         let mut app = phone_app("clear-jit-row");
-        let output = phone_general_page(&mut app, &ctx);
-        let clears = output
-        .shapes
-        .iter()
-        .filter(|clipped| {
-            matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text().trim() == CLEAR_JIT_LABEL)
-        })
-        .count();
-        assert_eq!(clears, 1);
-        let switch = text_rect(&output, JIT_LABEL).expect("jit switch");
-        let clear = text_rect(&output, CLEAR_JIT_LABEL).expect("clear row");
-        let dev = text_rect(&output, "Dev tools").expect("dev tools row");
-        let ds = text_rect(&output, "Nintendo DS").expect("ds heading");
-        assert!(switch.top() < clear.top());
-        assert!(clear.top() < dev.top());
-        assert!(clear.top() < ds.top());
+        let clear_label = phone_label(RowId::CompiledCode);
+        assert_eq!(phone_label(RowId::GbaCompiledCode), clear_label);
+        for page in SettingsTab::iter_with_dev_mode(true) {
+            let output = phone_settings_output(&mut app, &ctx, page);
+            let clears = output
+                .shapes
+                .iter()
+                .filter(|clipped| {
+                    matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text().trim() == clear_label)
+                })
+                .count();
+            if page == SettingsTab::Storage {
+                assert_eq!(clears, 1);
+                continue;
+            }
+            let (switch, next) = match page {
+                SettingsTab::Ds => (RowId::Jit, Some(RowId::Arm9Bios)),
+                SettingsTab::Gba => (RowId::GbaJit, None),
+                _ => {
+                    assert_eq!(clears, 0, "{page:?}");
+                    continue;
+                }
+            };
+            assert_eq!(clears, 1, "{page:?}");
+            let switch = text_rect(&output, phone_label(switch)).expect("jit switch");
+            let clear = text_rect(&output, clear_label).expect("clear row");
+            assert!(switch.top() < clear.top(), "{page:?}");
+            if let Some(next) = next {
+                let next = text_rect(&output, phone_label(next)).expect("next row");
+                assert!(clear.top() < next.top(), "{page:?}");
+            }
+        }
     }
 
     #[test]
-    fn the_phone_general_page_offers_the_game_report_once_a_game_runs() {
+    fn the_phone_settings_pages_leave_the_game_report_to_this_game() {
         let ctx = Context::default();
         let mut app = phone_app("report-row");
-        let output = phone_general_page(&mut app, &ctx);
-        assert!(text_rect(&output, "Capture").is_some());
-        assert!(text_rect(&output, super::report::SAVE_GAME_REPORT).is_none());
-
         load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
-        let output = phone_general_page(&mut app, &ctx);
-        assert!(text_rect(&output, super::report::SAVE_GAME_REPORT).is_some());
+        for page in [SettingsTab::App, SettingsTab::GameBoy, SettingsTab::Playing] {
+            let output = phone_settings_output(&mut app, &ctx, page);
+            assert!(
+                text_rect(&output, super::report::SAVE_GAME_REPORT).is_none(),
+                "{page:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "nds",
+        not(any(target_arch = "wasm32", target_os = "android"))
+    ))]
+    #[test]
+    fn the_phone_app_page_offers_the_ds_screen_choice_whatever_the_game() {
+        use crate::app::ui_state::settings_tree::rows::RowId;
+        use crate::discord::ShotScreens;
+        let ctx = Context::default();
+        let mut app = phone_app("discord-rows");
+        let output = phone_settings_output(&mut app, &ctx, SettingsTab::App);
+        assert!(text_rect(&output, phone_label(RowId::DiscordActivity)).is_some());
+        assert!(text_rect(&output, phone_label(RowId::DiscordShot)).is_none());
+
+        app.ui.settings.discord.enabled = true;
+        app.ui.settings.discord.screenshot = true;
+        for (screens, shown) in [
+            (ShotScreens::Both, "Both"),
+            (ShotScreens::Top, "Top"),
+            (ShotScreens::Bottom, "Bottom"),
+        ] {
+            app.ui.settings.discord.screens = screens;
+            let output = phone_settings_output(&mut app, &ctx, SettingsTab::App);
+            let shot = text_rect(&output, phone_label(RowId::DiscordShot)).expect("screenshot");
+            let row =
+                text_rect(&output, phone_label(RowId::DiscordDsScreens)).expect("screens row");
+            let value = text_rect(&output, shown).expect(shown);
+            assert!(shot.top() < row.top());
+            assert!((row.center().y - value.center().y).abs() < 4.0, "{shown}");
+        }
     }
 
     #[cfg(feature = "nds")]
     #[test]
-    fn the_phone_style_page_lists_the_ds_screen_rows_with_the_shared_widgets() {
+    fn every_phone_ds_3d_row_shows_its_label_and_value_whole_on_one_line() {
+        use crate::app::ui_state::ds_3d::{
+            DistantTextures, Resolution, SmoothEdges, TextureFilter,
+        };
+        use strum::IntoEnumIterator;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(412.0, 3000.0),
+            )),
+            ..Default::default()
+        };
+        for (step, distant) in DistantTextures::iter().enumerate() {
+            let filter = TextureFilter::iter().cycle().nth(step).unwrap();
+            let edges = SmoothEdges::iter().cycle().nth(step).unwrap();
+            let resolution = Resolution::iter().next_back().unwrap();
+            let ctx = Context::default();
+            let mut app = phone_app("ds-3d-one-line");
+            app.ui.settings.ds_3d.resolution = resolution;
+            app.ui.settings.ds_3d.smooth_edges = edges;
+            app.ui.settings.ds_3d.texture_filter = filter;
+            app.ui.settings.ds_3d.distant_textures = distant;
+            app.mobile.nav.go(Place::Settings);
+            app.mobile.nav.open_settings(SettingsTab::Ds);
+            let mut output = Default::default();
+            for _ in 0..3 {
+                output = ctx.run(input.clone(), |ctx| {
+                    mobile::touch_spacing(ctx, app.is_mobile(ctx));
+                    app.render(ctx);
+                });
+            }
+            let texts: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            let shown = [
+                "3D resolution".to_owned(),
+                "Anti-aliasing".to_owned(),
+                "Texture filter".to_owned(),
+                "Anisotropic filtering".to_owned(),
+                resolution.to_string(),
+                edges.to_string(),
+                filter.to_string(),
+                distant.to_string(),
+            ];
+            for wanted in shown {
+                let text = texts
+                    .iter()
+                    .find(|text| text.galley.text() == wanted)
+                    .unwrap_or_else(|| panic!("{wanted:?} shows with {distant:?}"));
+                assert!(!text.galley.elided, "{wanted:?} is cut with {distant:?}");
+                assert_eq!(text.galley.rows.len(), 1, "{wanted:?} takes one line");
+                assert!(
+                    text.visual_bounding_rect().max.x <= 412.0,
+                    "{wanted:?} runs off the screen"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn the_phone_ds_page_lists_the_screen_rows_with_the_shared_widgets() {
         use crate::app::ui_state::ds_screens::Arrangement;
+        use crate::app::ui_state::settings_tree::rows::RowId;
         use crate::app::widgets::settings::page::tests::{after_pass, assert_unified, quiet};
         let ctx = Context::default();
         quiet(&ctx);
-        let mut app = phone_app("ds-style");
-        app.emulator.load_nds(&[0; 0x1000]).expect("a ds loads");
+        let mut app = phone_app("ds-screens-page");
         app.ui.settings.ds_screens.portrait.arrangement = Arrangement::BigAndSmall;
         app.mobile.nav.go(Place::Settings);
-        app.mobile.nav.open_settings(SettingsTab::Style);
+        app.mobile.nav.open_settings(SettingsTab::Ds);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -3551,23 +4904,339 @@ mod tests {
         }
         let (marks, controls) = laid;
         assert_unified("phone DS screens", &marks, &controls);
-        for row in [
-            "DS screens",
-            "Layout",
-            "Big and small",
-            "Swap screens",
-            "Only the top screen",
-            "Small screen corner",
-            "Small screen size",
-            "Gap, in DS pixels",
-            "Rotation",
-        ] {
+        let mut wanted = vec!["Screens"];
+        wanted.extend(
+            [
+                RowId::SmallCorner,
+                RowId::SmallSize,
+                RowId::Gap,
+                RowId::Rotation,
+            ]
+            .map(phone_label),
+        );
+        for row in wanted {
             assert!(texts.iter().any(|text| text == row), "{row}: {texts:?}");
         }
-        assert!(
-            !texts.iter().any(|text| text == "Separate tabs"),
-            "{texts:?}"
+        let tabs = RowId::TwoTabs.label(crate::app::ui_state::settings_tree::Surface::Desktop);
+        assert!(!texts.iter().any(|text| text == tabs), "{texts:?}");
+    }
+
+    #[test]
+    fn every_tree_row_shows_on_its_phone_page() {
+        use crate::app::ui_state::settings_tree::rows::RowId;
+        use crate::app::ui_state::settings_tree::{SettingsTab, Surface};
+        let ctx = Context::default();
+        let mut app = phone_app("phone-tree-rows");
+        let s = &mut app.ui.settings;
+        s.dev_mode = true;
+        s.matrix = true;
+        s.ghosting = true;
+        s.gimmicks.camera = crate::emulator::gimmicks::settings::CameraSource::Picture;
+        s.touch.scaling = crate::app::ui_state::settings::ScalingMode::Fit;
+        s.discord.enabled = true;
+        s.discord.screenshot = true;
+        s.ds_3d.resolution = crate::app::ui_state::ds_3d::Resolution::Double;
+        s.ds_screens.portrait.arrangement =
+            crate::app::ui_state::ds_screens::Arrangement::BigAndSmall;
+        s.ds_screens.landscape.arrangement =
+            crate::app::ui_state::ds_screens::Arrangement::BigAndSmall;
+        s.ds_online.service = crate::app::ui_state::ds_online::OnlineService::Kaeru;
+        s.microphone = crate::audio::mic::Microphone::Default;
+        s.push_to_talk = true;
+        s.gimmicks.camera = crate::emulator::gimmicks::CameraSource::Picture;
+        let needs_a_device_or_file = [
+            RowId::CameraSees,
+            RowId::LightSensor,
+            RowId::KeepFirmware,
+            RowId::NetworkDevices,
+        ];
+        let whole_page_widgets = [SettingsTab::Online, SettingsTab::Storage];
+        for page in SettingsTab::iter_with_dev_mode(true) {
+            if whole_page_widgets.contains(&page) {
+                continue;
+            }
+            let output = phone_settings_output(&mut app, &ctx, page);
+            for row in page.rows() {
+                if !row.shown_on(Surface::Phone, true) || needs_a_device_or_file.contains(&row) {
+                    continue;
+                }
+                let label = phone_label(row);
+                assert!(
+                    text_rect(&output, label).is_some(),
+                    "{page:?} misses {row:?} ({label:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn picking_a_phone_search_hit_opens_the_page_and_scrolls_to_the_row() {
+        use crate::app::ui_state::settings_tree::rows::RowId;
+        let ctx = Context::default();
+        let mut app = phone_app("phone-search-pick");
+        app.mobile.nav.go(Place::Settings);
+        app.ui.settings.search = "updates".to_owned();
+        play_frame(&mut app, &ctx, vec![]);
+        let label = phone_label(RowId::CheckUpdates);
+        let output = play_frame(&mut app, &ctx, vec![]);
+        let hit = text_rect(&output, label).expect("the hit for the update row");
+        play_frame(&mut app, &ctx, tap(hit.center()));
+        assert_eq!(
+            app.mobile.nav.settings_page(),
+            Some(RowId::CheckUpdates.page())
         );
+        let mut output = play_frame(&mut app, &ctx, vec![]);
+        for _ in 0..30 {
+            output = play_frame(&mut app, &ctx, vec![]);
+        }
+        assert!(app.ui.settings.find.is_none());
+        let row = text_rect(&output, label).expect("the update row on its page");
+        assert!(row.min.y >= 0.0 && row.max.y <= 915.0, "{row:?}");
+    }
+
+    fn page_texts(output: &egui::FullOutput, anchor: &str) -> Option<Vec<String>> {
+        let clip = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().trim() == anchor => {
+                    Some(clipped.clip_rect)
+                }
+                _ => None,
+            })?;
+        Some(
+            output
+                .shapes
+                .iter()
+                .filter(|clipped| clipped.clip_rect == clip)
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().trim().to_owned()),
+                    _ => None,
+                })
+                .filter(|text| !text.is_empty())
+                .collect(),
+        )
+    }
+
+    fn settings_texts(app: &mut Citrine, ctx: &Context) -> Vec<(String, Vec<String>)> {
+        use crate::app::ui_state::settings_tree::{SettingsTab, Surface};
+        let whole_page_widgets = [SettingsTab::Online, SettingsTab::Storage];
+        let mut pages = Vec::new();
+        for surface in [Surface::Phone, Surface::Desktop] {
+            for page in SettingsTab::iter_with_dev_mode(true) {
+                if whole_page_widgets.contains(&page) {
+                    continue;
+                }
+                let Some(anchor) = page
+                    .groups_on(surface, true)
+                    .map(|group| group.title())
+                    .find(|title| !title.is_empty())
+                else {
+                    continue;
+                };
+                let output = match surface {
+                    Surface::Phone => {
+                        app.ui.settings.layout = LayoutMode::Mobile;
+                        phone_settings_output(app, ctx, page)
+                    }
+                    Surface::Desktop => {
+                        app.ui.settings.layout = LayoutMode::Desktop;
+                        app.ui.settings.current_tab = page;
+                        app.open_tab(crate::app::tabs::Tab::Settings);
+                        let mut output = info_frame_out(app, ctx, 1280.0, 5000.0);
+                        for _ in 0..2 {
+                            output = info_frame_out(app, ctx, 1280.0, 5000.0);
+                        }
+                        output
+                    }
+                };
+                let texts = page_texts(&output, anchor)
+                    .unwrap_or_else(|| panic!("{page:?} on {surface:?} misses {anchor:?}"));
+                pages.push((format!("{page:?} on {surface:?}"), without_previews(texts)));
+            }
+        }
+        pages
+    }
+
+    fn without_previews(texts: Vec<String>) -> Vec<String> {
+        let icon = |text: &str| text.starts_with(|c: char| ('\u{e000}'..='\u{f8ff}').contains(&c));
+        let mut kept = Vec::new();
+        let mut in_preview = false;
+        for text in texts {
+            if text == "Your Discord profile" {
+                in_preview = true;
+            } else if in_preview && icon(&text) {
+                in_preview = false;
+            }
+            if !in_preview {
+                kept.push(text);
+            }
+        }
+        kept
+    }
+
+    fn settings_app(name: &str) -> Citrine {
+        let mut app = phone_app(name);
+        let s = &mut app.ui.settings;
+        s.dev_mode = true;
+        s.check_updates = false;
+        s.discord.enabled = true;
+        s.discord.screenshot = true;
+        app
+    }
+
+    fn same_text(a: &str, b: &str) -> bool {
+        fn stem(text: &str) -> Option<&str> {
+            text.strip_suffix('\u{2026}').map(str::trim_end)
+        }
+        match (stem(a), stem(b)) {
+            (None, None) => a == b,
+            (Some(cut), None) => b.starts_with(cut),
+            (None, Some(cut)) => a.starts_with(cut),
+            (Some(x), Some(y)) => x.starts_with(y) || y.starts_with(x),
+        }
+    }
+
+    #[test]
+    fn a_value_cut_shorter_reads_as_the_same_text() {
+        assert!(same_text(
+            "Integer (sharpe\u{2026}",
+            "Integer (sharp\u{2026}"
+        ));
+        assert!(same_text("Beside the screen", "Beside the scre\u{2026}"));
+        assert!(!same_text(
+            "Integer (sharpe\u{2026}",
+            "Integer (smooth\u{2026}"
+        ));
+        assert!(!same_text("Beside the screen", "Below the scre\u{2026}"));
+        assert!(!same_text("Fit", "Fill"));
+    }
+
+    fn assert_same_pages(
+        seen: &[(String, Vec<String>)],
+        with: &[(String, Vec<String>)],
+        game: &str,
+    ) {
+        assert_eq!(seen.len(), with.len(), "{game}");
+        let mut changed = Vec::new();
+        for ((page, before), (_, after)) in seen.iter().zip(with) {
+            let differs = before.iter().zip(after).position(|(a, b)| !same_text(a, b));
+            if differs.is_none() && before.len() == after.len() {
+                continue;
+            }
+            let at = differs.unwrap_or(before.len().min(after.len()));
+            let near = |texts: &Vec<String>| {
+                texts
+                    .iter()
+                    .skip(at.saturating_sub(3))
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            changed.push(format!(
+                "{page}: {:?} became {:?}",
+                near(before),
+                near(after)
+            ));
+        }
+        assert!(changed.is_empty(), "with {game}: {changed:#?}");
+    }
+
+    #[test]
+    fn settings_pages_are_the_same_with_no_game_gb_gba_and_ds() {
+        let ctx = Context::default();
+        let mut none = settings_app("same-pages-none");
+        let base = settings_texts(&mut none, &ctx);
+        assert!(base.len() > 10, "{}", base.len());
+
+        let mut gb = settings_app("same-pages-gb");
+        load_game(
+            &mut gb,
+            &citrine_gb_gamedata::fixtures::crystal_cartridge(),
+            None,
+        );
+        let ctx = Context::default();
+        assert_same_pages(&base, &settings_texts(&mut gb, &ctx), "a GB game");
+
+        #[cfg(feature = "gba")]
+        {
+            let mut gba = settings_app("same-pages-gba");
+            gba.handle_load_rom_data(crate::app::files::tests::fixture());
+            assert_eq!(gba.emulator.kind(), citrine_gb::console::ConsoleKind::Gba);
+            let ctx = Context::default();
+            assert_same_pages(&base, &settings_texts(&mut gba, &ctx), "a GBA game");
+        }
+
+        #[cfg(feature = "nds")]
+        {
+            let mut ds = settings_app("same-pages-ds");
+            ds.handle_load_rom_data(crate::app::files::nds_tests::fixture());
+            assert_eq!(ds.emulator.kind(), citrine_gb::console::ConsoleKind::Nds);
+            let ctx = Context::default();
+            assert_same_pages(&base, &settings_texts(&mut ds, &ctx), "a DS game");
+        }
+    }
+
+    #[cfg(all(feature = "gba", feature = "nds"))]
+    #[test]
+    fn settings_pages_stay_the_same_in_a_ds_pair_after_a_gba_game_on_both_seats() {
+        use crate::play::MyGame;
+        use crate::play::tests::{Pair, empty, nickname, one_ds_pair_at_a_time};
+        let _one = one_ds_pair_at_a_time();
+        let ctx = Context::default();
+        let without_sync_pages = |pages: Vec<(String, Vec<String>)>| {
+            pages
+                .into_iter()
+                .filter(|(page, _)| !page.starts_with("Sync on "))
+                .collect::<Vec<_>>()
+        };
+        let mut none = settings_app("pair-pages-none");
+        let base = without_sync_pages(settings_texts(&mut none, &ctx));
+        for host in [true, false] {
+            let mut app = settings_app(&format!("pair-pages-{host}"));
+            app.handle_load_rom_data(crate::app::files::tests::fixture());
+            app.emulator.running = true;
+            let mut pair = Pair::new(true, 0, 0, empty());
+            let session = pair.invite(nickname());
+            pair.accept(session, MyGame::Own(nickname()));
+            pair.play_frames(60);
+            pair.hand_over_at_real_time();
+            pair.swap_seat(host, &mut app.play, &mut app.online);
+            let ctx = Context::default();
+            let mut frame = eframe::Frame::_new_kittest();
+            for _ in 0..6 {
+                pair.run_partner_alone(host);
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(412.0, 900.0),
+                    )),
+                    max_texture_side: Some(8192),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    eframe::App::update(&mut app, ctx, &mut frame);
+                });
+            }
+            let kind = app.emulator.played_kind();
+            let together = app.emulator.shows_session();
+            let key = app.ui.settings.playing_key().map(str::to_owned);
+            let pages = without_sync_pages(settings_texts(&mut app, &ctx));
+            pair.swap_seat(host, &mut app.play, &mut app.online);
+            let seat = if host {
+                "the host seat"
+            } else {
+                "the guest seat"
+            };
+            assert!(together, "the game together still shows on {seat}");
+            assert_eq!(kind, citrine_gb::console::ConsoleKind::Nds, "{seat}");
+            assert_eq!(key, None, "no game scope in a game together on {seat}");
+            assert_same_pages(
+                &base,
+                &pages,
+                &format!("a DS pair after a GBA game on {seat}"),
+            );
+        }
     }
 
     fn last_text_rect(output: &egui::FullOutput, wanted: &str) -> Option<egui::Rect> {
@@ -3599,7 +5268,7 @@ mod tests {
 
     #[test]
     fn a_picked_value_applies_and_closes_the_sheet() {
-        let (mut app, ctx) = settings_page("sheet-pick", SettingsTab::General);
+        let (mut app, ctx) = settings_page("sheet-pick", SettingsTab::App);
         app.ui.settings.ui_theme = crate::app::ui_state::ui_theme::UiTheme::Light;
         let output = play_frame(&mut app, &ctx, vec![]);
         let theme = text_rect(&output, "Theme").expect("a theme row");
@@ -3619,27 +5288,38 @@ mod tests {
     #[test]
     fn switch_labels_sit_mid_row_and_a_tap_on_them_flips_the_switch() {
         let (mut app, ctx) = settings_page("switch-row", SettingsTab::Controls);
-        let output = play_frame(&mut app, &ctx, vec![]);
+        let size = egui::vec2(412.0, 3000.0);
+        let mut output = sized_frame(&mut app, &ctx, size, Vec::new());
+        for _ in 0..2 {
+            output = sized_frame(&mut app, &ctx, size, Vec::new());
+        }
         let show = text_rect(&output, "Show").expect("a show row").center().y;
-        let vibrate = text_rect(&output, "Vibrate on press")
-            .expect("a vibrate row")
+        let size_row = text_rect(&output, "Size").expect("a size row").center().y;
+        let opacity = text_rect(&output, "Opacity")
+            .expect("an opacity row")
             .center()
             .y;
-        let size = text_rect(&output, "Size").expect("a size row").center().y;
         assert!(
-            ((size - vibrate) - (vibrate - show)).abs() < 3.0,
-            "switch labels at {show} and {vibrate}, the next plain row at {size}"
+            ((opacity - size_row) - (size_row - show)).abs() < 3.0,
+            "switch label at {show}, plain rows at {size_row} and {opacity}"
         );
         let before = app.ui.settings.touch.show_controls;
         let label = text_rect(&output, "Show").unwrap();
-        play_frame(&mut app, &ctx, tap(label.center()));
-        play_frame(&mut app, &ctx, vec![]);
+        sized_frame(&mut app, &ctx, size, tap(label.center()));
+        sized_frame(&mut app, &ctx, size, Vec::new());
         assert_ne!(app.ui.settings.touch.show_controls, before);
     }
 
     fn signed_in_you(name: &str) -> (Citrine, Context) {
         let ctx = Context::default();
         let mut app = phone_app(name);
+        remember_account(&mut app);
+        app.mobile.nav.go(Place::You);
+        play_frame(&mut app, &ctx, vec![]);
+        (app, ctx)
+    }
+
+    pub(crate) fn remember_account(app: &mut Citrine) {
         let account = citrine_gb_net::Account {
             online_id: citrine_gb_net::OnlineId::new(0x1234_5678).unwrap(),
             display_name: "Clara".into(),
@@ -3655,9 +5335,6 @@ mod tests {
             &account,
             &Default::default(),
         );
-        app.mobile.nav.go(Place::You);
-        play_frame(&mut app, &ctx, vec![]);
-        (app, ctx)
     }
 
     #[test]
@@ -3784,7 +5461,8 @@ mod tests {
         );
         assert!(copied, "the online id goes to the clipboard");
         let output = play_frame(&mut app, &ctx, vec![]);
-        assert!(text_rect(&output, "Copied").is_some());
+        assert!(text_rect(&output, crate::icons::CHECK_FAT).is_some());
+        assert!(text_rect(&output, crate::icons::COPY).is_none());
     }
 
     #[test]
@@ -3906,6 +5584,88 @@ mod tests {
                 "{gone} shows signed out"
             );
         }
+    }
+
+    #[test]
+    fn signed_out_the_phone_cloud_card_signs_in_right_there() {
+        let (mut app, ctx) = signed_out_you("sync-sign-in", true);
+        app.open_settings(SettingsTab::Sync, true);
+        play_frame(&mut app, &ctx, vec![]);
+        let output = play_frame(&mut app, &ctx, vec![]);
+        let row = text_rect(&output, "Sign in").expect("a sign in row in the Cloud card");
+        let cloud = text_rect(&output, "Cloud saves").expect("the cloud saves row");
+        assert!(
+            (row.left() - cloud.left()).abs() <= 1.0,
+            "sign in starts at {}, cloud saves at {}",
+            row.left(),
+            cloud.left()
+        );
+        assert!(text_containing(&output, "Sign in under").is_none());
+        play_frame(&mut app, &ctx, tap(row.center()));
+        play_frame(&mut app, &ctx, vec![]);
+        play_frame(&mut app, &ctx, vec![]);
+        assert!(app.mobile.sheet_open(), "the sign in sheet opens");
+        assert_eq!(app.ui.settings.current_tab, SettingsTab::Sync);
+    }
+
+    #[test]
+    fn signed_out_the_desktop_cloud_group_opens_the_sign_in_on_online() {
+        let ctx = Context::default();
+        let mut app = media_app("sync-sign-in-desk", LayoutMode::Desktop);
+        app.ui.settings.online.leave();
+        app.open_settings(SettingsTab::Sync, false);
+        let mut output = desk_frame(&mut app, &ctx, Vec::new());
+        for _ in 0..3 {
+            output = desk_frame(&mut app, &ctx, Vec::new());
+        }
+        let button = text_rect(&output, &format!("{} Sign in", crate::icons::SIGN_IN))
+            .expect("a sign in button");
+        assert!(text_containing(&output, "Sign in under").is_none());
+        let cloud = text_rect(&output, "Cloud saves").expect("the cloud saves row");
+        let account = text_rect(&output, "Account").expect("an account row label");
+        let rects: Vec<egui::Rect> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(shape) => Some(shape.rect),
+                _ => None,
+            })
+            .collect();
+        let check = rects
+            .iter()
+            .filter(|rect| {
+                (rect.width() - rect.height()).abs() < 0.5
+                    && (8.0..24.0).contains(&rect.width())
+                    && (rect.center().y - cloud.center().y).abs() < 8.0
+                    && rect.right() <= cloud.left()
+                    && rect.left() > cloud.left() - 40.0
+            })
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .expect("the cloud saves check box");
+        assert!(
+            (account.left() - check.left()).abs() <= 1.0,
+            "account starts at {}, the cloud saves box at {}",
+            account.left(),
+            check.left()
+        );
+        let frame = rects
+            .iter()
+            .filter(|rect| rect.contains_rect(button) && rect.height() < 40.0)
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .expect("the sign in button's frame");
+        assert!(
+            frame.left() > account.right(),
+            "the button starts at {}, inside the account label ending at {}",
+            frame.left(),
+            account.right()
+        );
+        assert!(
+            frame.top() > check.bottom(),
+            "the button sits under the checks"
+        );
+        click_at(&mut app, &ctx, button.center());
+        desk_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.ui.settings.current_tab, SettingsTab::Online);
     }
 
     #[test]
@@ -4076,6 +5836,34 @@ mod tests {
             marks = after_pass(&ctx).0;
         }
         marks
+    }
+
+    #[test]
+    fn the_phone_online_page_shows_the_typing_text_under_typing_indicators() {
+        let (mut app, ctx) = signed_in_you("typing-text-row");
+        app.ui.settings.online.typing_text = "is meowing".into();
+        app.mobile.nav.go(Place::Settings);
+        app.mobile.nav.open_settings(SettingsTab::Online);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(412.0, 3000.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = None;
+        for _ in 0..3 {
+            output = Some(ctx.run(input.clone(), |ctx| {
+                mobile::touch_spacing(ctx, app.is_mobile(ctx));
+                app.render(ctx);
+            }));
+        }
+        let output = output.unwrap();
+        let switch = text_rect(&output, "Typing indicators").expect("typing switch");
+        let row = text_rect(&output, "Typing text").expect("typing text row");
+        let value = text_rect(&output, "is meowing").expect("typing text value");
+        assert!(switch.top() < row.top());
+        assert!((row.center().y - value.center().y).abs() < 2.0);
     }
 
     #[test]
@@ -4534,12 +6322,18 @@ mod tests {
             ..Default::default()
         };
         let mut output = None;
-        for _ in 0..4 {
+        let mut room = None;
+        for step in 0..80 {
             output = Some(ctx.run(input(), |ctx| {
                 mobile::touch_spacing(ctx, false);
                 app.render(ctx);
                 app.show_toasts(ctx);
             }));
+            let now = crate::app::toasts::strip_room(ctx);
+            if step >= 3 && room == Some(now) {
+                break;
+            }
+            room = Some(now);
         }
         output.unwrap()
     }
@@ -4614,6 +6408,7 @@ mod tests {
             egui::vec2(412.0, 915.0),
             egui::vec2(360.0, 800.0),
             egui::vec2(915.0, 412.0),
+            egui::vec2(1280.0, 800.0),
         ];
         for (console, rom) in games {
             for size in sizes {
@@ -4667,6 +6462,21 @@ mod tests {
                             !toast.shrink(1.0).intersects(buttons),
                             "{name}: {toast:?} covers the buttons {buttons:?}"
                         );
+                    }
+                    if let Some(eye) = app.mobile.hidden.eye {
+                        assert!(
+                            !toast.shrink(1.0).intersects(eye),
+                            "{name}: {toast:?} covers the eye {eye:?}"
+                        );
+                    }
+                    #[cfg(feature = "nds")]
+                    if !portrait {
+                        for target in &app.ui.touch_targets {
+                            assert!(
+                                !toast.shrink(1.0).intersects(*target),
+                                "{name}: {toast:?} covers the button {target:?}"
+                            );
+                        }
                     }
                 }
                 app.toasts = Toasts::default();
@@ -4767,6 +6577,177 @@ mod tests {
                     ctx.content_rect().contains_rect(banner),
                     "{name} at {height}: {banner:?} leaves the window"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn on_desktop_a_notice_waiting_for_an_answer_never_moves_the_game_picture() {
+        for zoom in [1.0, 2.2] {
+            let name = format!("waiting-notice-{zoom}");
+            let mut app = crystal_app(&name, LayoutMode::Desktop, None);
+            app.emulator.running = true;
+            let ctx = Context::default();
+            app.emulator.clear_frame(&ctx);
+            for step in 0..24 {
+                let height = (560.0 + step as f32 * 24.0) / zoom;
+                let size = egui::vec2(1280.0 / zoom, height);
+                let bare = picture_rect(&toast_frames(&mut app, &ctx, size)).expect("drawn");
+                app.toasts
+                    .info("Mika's saves didn't replace yours.")
+                    .button(
+                        "Use Mika's, keep mine in Saves",
+                        events::AppEvent::OpenTab { tab: Tab::Media },
+                    )
+                    .or(
+                        "Delete Mika's saves",
+                        events::AppEvent::OpenTab { tab: Tab::Media },
+                    )
+                    .needs_action();
+                let picture = picture_rect(&toast_frames(&mut app, &ctx, size)).expect("drawn");
+                assert_eq!(picture, bare, "{name} at {height}: the picture moved");
+                let toasts = app.toasts.rects(&ctx);
+                assert_eq!(toasts.len(), 1, "{name} at {height}");
+                for toast in toasts {
+                    assert!(
+                        !toast.contains(picture.center()),
+                        "{name} at {height}: {toast:?} covers the middle of {picture:?}"
+                    );
+                    assert!(
+                        ctx.content_rect().contains_rect(toast),
+                        "{name} at {height}: {toast:?} leaves the window"
+                    );
+                    let pane = app.toasts.shown_in().expect("placed in the game pane");
+                    let room = pane.bottom() - picture.bottom();
+                    assert!(
+                        room < toast.height() || !toast.intersects(picture),
+                        "{name} at {height}: {toast:?} covers {picture:?} with {room} free below it"
+                    );
+                }
+                app.toasts = Toasts::default();
+                let after = picture_rect(&toast_frames(&mut app, &ctx, size)).expect("drawn");
+                assert_eq!(after, bare, "{name} at {height}: the picture moved back");
+            }
+        }
+    }
+
+    #[test]
+    fn on_desktop_the_notice_and_the_toast_after_use_sit_the_same_gap_above_the_pane_foot() {
+        let mut app = crystal_app("same-gap", LayoutMode::Desktop, None);
+        app.emulator.running = true;
+        let ctx = Context::default();
+        app.emulator.clear_frame(&ctx);
+        let tab = || events::AppEvent::OpenTab { tab: Tab::Media };
+        let mut checked = 0;
+        for step in 0..24 {
+            let size = egui::vec2(1280.0, 560.0 + step as f32 * 24.0);
+            let mut gaps = Vec::new();
+            for waiting in [true, false] {
+                if waiting {
+                    app.toasts
+                        .info("Mika's saves didn't replace yours.")
+                        .button("Use Mika's, keep mine in Saves", tab())
+                        .or("Delete Mika's saves", tab())
+                        .needs_action();
+                } else {
+                    app.toasts
+                        .success("You're playing Mika's save. Yours is kept in Saves.")
+                        .button("Undo", tab());
+                }
+                let picture = picture_rect(&toast_frames(&mut app, &ctx, size)).expect("drawn");
+                let toast = app.toasts.rects(&ctx)[0];
+                let pane = app.toasts.shown_in().expect("placed in the game pane");
+                let above = toast.top() - picture.bottom();
+                let below = pane.bottom() - toast.bottom();
+                if above >= 0.0 && pane.bottom() - picture.bottom() >= toast.height() + 16.0 {
+                    gaps.push(below);
+                } else if above > 0.0 {
+                    assert!((above - below).abs() <= 1.0, "{above} {below} at {size:?}");
+                }
+                app.toasts = Toasts::default();
+            }
+            if let [notice, after_use] = gaps[..] {
+                checked += 1;
+                assert_eq!(notice, after_use, "at {size:?}");
+                assert!((notice - 8.0).abs() < 0.5, "{notice} at {size:?}");
+            }
+        }
+        assert!(checked > 0, "no window had room for both under the picture");
+    }
+
+    #[test]
+    fn on_desktop_the_picture_stays_put_through_the_notice_delete_and_cancel() {
+        let frames = |app: &mut Citrine, ctx: &Context, size: egui::Vec2| {
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let mut output = None;
+            for _ in 0..4 {
+                output = Some(ctx.run(input(), |ctx| {
+                    mobile::touch_spacing(ctx, false);
+                    app.render(ctx);
+                    app.peer_discard_confirm(ctx);
+                    app.show_toasts(ctx);
+                }));
+            }
+            picture_rect(&output.expect("ran")).expect("the game is drawn")
+        };
+        for zoom in [1.0, 2.2] {
+            let name = format!("notice-size-{zoom}");
+            let mut app = crystal_app(&name, LayoutMode::Desktop, None);
+            app.emulator.running = true;
+            let ctx = Context::default();
+            app.emulator.clear_frame(&ctx);
+            for step in 0..6 {
+                let height = (560.0 + step as f32 * 96.0) / zoom;
+                let size = egui::vec2(1280.0 / zoom, height);
+                let bare = frames(&mut app, &ctx, size);
+                app.show_peer_notice(crate::emulator::peer_saves::PeerNotice {
+                    friend: citrine_gb_net::OnlineId::new(7).expect("id"),
+                    divert: crate::emulator::peer_saves::Divert {
+                        own: "own".to_owned(),
+                        borrowed: "borrowed-mika".to_owned(),
+                    },
+                    name: Some("Mika".to_owned()),
+                });
+                let notice = frames(&mut app, &ctx, size);
+                assert_eq!(
+                    notice, bare,
+                    "{name} at {height}: the notice moved the picture"
+                );
+                let delete = app
+                    .toasts
+                    .press("Delete Mika's saves")
+                    .expect("a delete button");
+                app.handle_event(delete, false);
+                assert!(app.pending_peer_discard.is_some());
+                let asking = frames(&mut app, &ctx, size);
+                assert_eq!(
+                    asking, notice,
+                    "{name} at {height}: the picture moved while asking"
+                );
+                app.finish_peer_discard(false);
+                let back = frames(&mut app, &ctx, size);
+                assert_eq!(
+                    back, notice,
+                    "{name} at {height}: the picture moved after cancel"
+                );
+                let toasts = app.toasts.rects(&ctx);
+                assert_eq!(toasts.len(), 1, "{name} at {height}");
+                assert!(
+                    !toasts[0].contains(back.center()),
+                    "{name} at {height}: {:?} covers the middle of {back:?}",
+                    toasts[0]
+                );
+                let pane = app.toasts.shown_in().expect("placed in the game pane");
+                let room = pane.bottom() - back.bottom();
+                assert!(
+                    room < toasts[0].height() || !toasts[0].intersects(back),
+                    "{name} at {height}: {:?} covers {back:?} with {room} free below it",
+                    toasts[0]
+                );
+                app.toasts = Toasts::default();
             }
         }
     }
@@ -5176,7 +7157,7 @@ mod tests {
     fn settings_scroll_app(name: &str) -> (Citrine, Context) {
         let mut app = media_app(name, LayoutMode::Desktop);
         app.dock = DockState::new(vec![Tab::Settings]);
-        app.ui.settings.current_tab = SettingsTab::General;
+        app.ui.settings.current_tab = SettingsTab::App;
         (app, Context::default())
     }
 
@@ -5186,11 +7167,7 @@ mod tests {
         size: egui::Vec2,
         over: Option<egui::Pos2>,
     ) -> (Option<egui::Rect>, Option<egui::Rect>) {
-        let general = format!(
-            "{} {}",
-            SettingsTab::General.icon(),
-            SettingsTab::General.title()
-        );
+        let general = crate::app::widgets::settings::page_list::text(SettingsTab::Screen);
         let output = match over {
             Some(at) => wheel_over(app, ctx, size, at),
             None => {
@@ -5201,7 +7178,7 @@ mod tests {
                 output
             }
         };
-        (text_rect(&output, &general), text_rect(&output, "Console"))
+        (text_rect(&output, &general), text_rect(&output, "Theme"))
     }
 
     #[test]
@@ -5230,7 +7207,7 @@ mod tests {
     fn the_jit_switch_reaches_a_ds_game_on_the_console_thread() {
         use citrine_gb::nds::machine::JIT_AVAILABLE;
 
-        let mut app = Citrine::default();
+        let mut app = test_app();
         app.ui.settings.check_updates = false;
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/nds/blocksds-console-both-screens.nds");
@@ -5287,7 +7264,7 @@ mod tests {
         }
 
         fn from_rom(rom: Vec<u8>) -> Self {
-            let mut app = Citrine::default();
+            let mut app = test_app();
             app.ui.settings.check_updates = false;
             app.handle_load_rom_data(rom);
             app.emulator.running = true;
@@ -5406,29 +7383,1048 @@ mod tests {
 
     #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
     #[test]
-    fn rewind_keeps_small_steps_of_a_ds_game_on_the_console_thread() {
-        use crate::emulator::rewind::RewindLength;
+    fn rewind_keeps_a_tape_of_a_ds_game_on_the_console_thread() {
+        use crate::emulator::rewind::{ClipLength, RewindLength};
 
         let mut run = DsRun::new("blocksds-lighting_cube.nds");
         run.app.ui.settings.rewind = RewindLength::Off;
+        run.app.ui.settings.clip_length = ClipLength::Off;
         run.app.ui.settings.dirty = true;
         run.play(20);
-        assert_eq!(
-            run.app.emulator.rewind_kept(),
-            (0, 0, 0),
-            "off keeps nothing"
-        );
+        assert_eq!(run.app.emulator.rewind_kept(), (0, 0), "off keeps nothing");
 
         run.app.ui.settings.rewind = RewindLength::default();
         run.app.ui.settings.dirty = true;
         run.play(60);
-        let (state, steps, packed) = run.app.emulator.rewind_kept();
-        assert!(steps > 5, "{steps} rewind steps");
+        let (frames, bytes) = run.app.emulator.rewind_kept();
+        assert!(frames > 30, "{frames} frames kept");
+        assert!(bytes < 8 << 20, "{bytes} bytes for {frames} frames");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn record_keeps_a_replay_in_media_and_start_over_goes_back_to_the_mark() {
+        use crate::app::widgets::record_bar::{RecordBarAction, RecordBarFacts};
+
+        let mut app = media_app("tape-record", LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        app.emulator.running = true;
+        let ctx = Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut play =
+            |app: &mut Citrine, updates: usize| run_updates(app, &ctx, &mut frame, updates);
+        play(&mut app, 5);
+        assert!(app.emulator.can_tape());
+        app.emulator.fast_forward = true;
+        app.toggle_recording();
+        assert!(app.emulator.is_taping());
         assert!(
-            packed / steps < state / 20,
-            "a step packs to {} bytes of a {state} byte state",
-            packed / steps
+            !app.emulator.fast_forward,
+            "recording turns fast forward off"
         );
+        assert!(
+            !app.emulator.screen_recorder.is_recording(),
+            "no live video"
+        );
+        let facts = RecordBarFacts::of(&app.emulator, &app.ui, false).expect("the bar shows");
+        assert!(facts.start_over);
+        assert_eq!(facts.frame_times, None, "the setting is off");
+        assert!(!app.ui.frame_log.is_recording());
+
+        play(&mut app, 40);
+        let before = app.emulator.tape_recording_secs().unwrap();
+        assert!(before > 0.1, "{before} s recorded");
+        app.record_bar_action(RecordBarAction::StartOver);
+        let after = app.emulator.tape_recording_secs().unwrap();
+        assert!(
+            after < before,
+            "start over clears the timer: {after} s after {before} s"
+        );
+        assert!(app.emulator.is_taping());
+
+        play(&mut app, 20);
+        app.record_bar_action(RecordBarAction::Stop);
+        app.handle_event_queue(false);
+        assert!(!app.emulator.is_recording());
+        assert!(RecordBarFacts::of(&app.emulator, &app.ui, false).is_none());
+        let item = app
+            .media
+            .items()
+            .iter()
+            .find(|item| item.info.kind == crate::media::MediaKind::Replay)
+            .expect("the recording is in Media")
+            .clone();
+        assert!(item.info.length_ms.is_some_and(|ms| ms > 0));
+        assert!(item.thumbnail.is_some(), "the row has a picture");
+        assert!(!item.info.frame_times);
+        let bytes = std::fs::read(app.media.path(&item.id)).unwrap();
+        let replay = citrine_gb_replay::Replay::read(&bytes).unwrap();
+        assert!(replay.perf.is_none(), "no frame times without the setting");
+        assert!(replay.header.frames > 5, "{} frames", replay.header.frames);
+        let length = (replay.header.frames as f64 * 1000.0 / replay.header.frame_rate) as u64;
+        assert_eq!(item.info.length_ms, Some(length));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tape_recording(
+        name: &str,
+        render: crate::media::render::RenderVideo,
+    ) -> (Citrine, Context, eframe::Frame, crate::media::MediaId) {
+        tape_recording_with(name, include_bytes!("../homebrew/tobu.gb"), |app| {
+            app.ui.settings.render_video = render;
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tape_recording_with(
+        name: &str,
+        rom: &[u8],
+        set: impl FnOnce(&mut Citrine),
+    ) -> (Citrine, Context, eframe::Frame, crate::media::MediaId) {
+        let mut app = media_app(name, LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        set(&mut app);
+        load_game(&mut app, rom, None);
+        app.emulator.running = true;
+        let ctx = Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        run_updates(&mut app, &ctx, &mut frame, 5);
+        app.toggle_recording();
+        assert!(app.emulator.is_taping());
+        run_updates(&mut app, &ctx, &mut frame, 30);
+        app.toggle_recording();
+        if app.ui.settings.record_frame_times {
+            app.finish_recordings(&ctx);
+        }
+        app.handle_event_queue(false);
+        let id = app
+            .media
+            .items()
+            .iter()
+            .find(|item| item.info.kind == crate::media::MediaKind::Replay)
+            .expect("the recording is in Media")
+            .id
+            .clone();
+        (app, ctx, frame, id)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn media_item(app: &Citrine, id: &crate::media::MediaId) -> crate::media::MediaItem {
+        app.media
+            .items()
+            .iter()
+            .find(|item| &item.id == id)
+            .expect("the recording stays in Media")
+            .clone()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn until_rendered(
+        app: &mut Citrine,
+        ctx: &Context,
+        frame: &mut eframe::Frame,
+        id: &crate::media::MediaId,
+    ) -> crate::media::MediaItem {
+        for _ in 0..250 {
+            run_updates(app, ctx, frame, 2);
+            let item = media_item(app, id);
+            if item.info.video {
+                return item;
+            }
+        }
+        panic!("the video was not rendered");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_stopped_recording_renders_its_video_into_the_same_replay() {
+        use crate::media::render::RenderVideo;
+        use citrine_gb_replay::Replay;
+
+        let (mut app, ctx, mut frame, id) = tape_recording("render-now", RenderVideo::RightAway);
+        let before = std::fs::read(app.media.path(&id)).unwrap();
+        let replay = Replay::read(&before).unwrap();
+        assert!(replay.video.is_none(), "the tape keeps inputs only");
+        let item = until_rendered(&mut app, &ctx, &mut frame, &id);
+        let replays = app
+            .media
+            .items()
+            .iter()
+            .filter(|item| item.info.kind == crate::media::MediaKind::Replay)
+            .count();
+        assert_eq!(replays, 1, "the video goes into the same recording");
+        let bytes = std::fs::read(app.media.path(&id)).unwrap();
+        assert_eq!(item.info.bytes, bytes.len() as u64);
+        let rendered = Replay::read(&bytes).unwrap();
+        assert_eq!(rendered.header.frames, replay.header.frames);
+        assert_eq!(rendered.events, replay.events, "the inputs stay");
+        assert!(rendered.thumb.is_some());
+        assert!(rendered.video.is_some_and(|video| video.len() > 1000));
+        assert!(item.thumbnail.is_some());
+        run_updates(&mut app, &ctx, &mut frame, 2);
+        assert!(app.ui.media.rendering.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn when_i_ask_the_video_renders_from_its_button_and_stop_cancels_it() {
+        use crate::media::render::RenderVideo;
+
+        let (mut app, ctx, mut frame, id) = tape_recording("render-ask", RenderVideo::WhenIAsk);
+        run_updates(&mut app, &ctx, &mut frame, 5);
+        assert!(
+            app.ui.media.rendering.is_none(),
+            "nothing renders by itself"
+        );
+        assert!(!media_item(&app, &id).info.video);
+
+        app.ui.media.render = Some(id.clone());
+        app.ui.media.stop_render = Some(id.clone());
+        run_updates(&mut app, &ctx, &mut frame, 10);
+        assert!(app.ui.media.rendering.is_none(), "stop drops the render");
+        assert!(!media_item(&app, &id).info.video);
+
+        app.ui.media.render = Some(id.clone());
+        let item = until_rendered(&mut app, &ctx, &mut frame, &id);
+        assert!(item.info.length_ms.is_some_and(|ms| ms > 0));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[track_caller]
+    fn update_until(
+        app: &mut Citrine,
+        ctx: &Context,
+        frame: &mut eframe::Frame,
+        mut done: impl FnMut(&Citrine) -> bool,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(60) {
+            if done(app) {
+                return;
+            }
+            let _ = ctx.run(input.clone(), |ctx| {
+                eframe::App::update(app, ctx, frame);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the app never got there");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn playing_replay(name: &str) -> (Citrine, Context, eframe::Frame, crate::media::MediaId) {
+        use crate::media::render::RenderVideo;
+        let (mut app, ctx, mut frame, id) = tape_recording(name, RenderVideo::WhenIAsk);
+        app.ui.media.play = Some(id.clone());
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.emulator.is_playing_tape()
+        });
+        (app, ctx, frame, id)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tape_at(app: &Citrine) -> crate::emulator::tape_play::TapeFacts {
+        app.emulator.tape_facts().expect("a replay plays")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn play_opens_the_replay_and_close_leaves_the_live_game_as_it_was() {
+        use crate::app::widgets::replay_bar::{ReplayBarAction, ReplayBarFacts};
+        use crate::media::render::RenderVideo;
+
+        let (mut app, ctx, mut frame, id) = tape_recording("replay-play", RenderVideo::WhenIAsk);
+        app.ui.media.play = Some(id);
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.emulator.is_playing_tape()
+        });
+        assert!(app.replay_show.is_open());
+        let live = app.replay_show.live_mut().expect("the live game waits");
+        let live_key = live.rom_key().map(str::to_owned);
+        let live_hash = live.core_mut().machine.state_hash();
+        let live_frames = live.total_frames;
+        assert_eq!(app.emulator.rom_key(), None, "the replay saves nothing");
+        assert!(!app.ui.viewer.is_open());
+        update_until(&mut app, &ctx, &mut frame, |app| tape_at(app).played > 10);
+        let facts = ReplayBarFacts::of(&app.emulator, false).expect("the bar shows");
+        assert!(facts.tape.running);
+        assert!(facts.tape.frames > facts.tape.played);
+        assert!(!facts.tape.diverged);
+
+        app.replay_bar_action(ReplayBarAction::Close);
+        assert!(!app.replay_show.is_open());
+        assert!(!app.emulator.is_playing_tape());
+        assert_eq!(app.emulator.rom_key().map(str::to_owned), live_key);
+        assert_eq!(app.emulator.total_frames, live_frames);
+        assert_eq!(
+            app.emulator.core_mut().machine.state_hash(),
+            live_hash,
+            "the live game did not move"
+        );
+        run_updates(&mut app, &ctx, &mut frame, 3);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_replay_pauses_at_its_end_and_seeks_back_and_forth_to_the_frame() {
+        use crate::app::widgets::replay_bar::ReplayBarAction;
+
+        let (mut app, ctx, mut frame, _) = playing_replay("replay-seek");
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            let tape = tape_at(app);
+            tape.played >= tape.frames
+        });
+        run_updates_quiet(&mut app, &ctx, &mut frame, 3);
+        let end = tape_at(&app);
+        assert!(!end.running, "the end pauses");
+        assert!(!app.emulator.running);
+        assert_eq!(end.played, end.frames);
+
+        app.replay_bar_action(ReplayBarAction::Seek(10));
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            tape_at(app).seeking.is_none()
+        });
+        let back = tape_at(&app);
+        assert_eq!(back.played, 10);
+        assert!(!back.running, "a seek keeps the pause");
+
+        let ahead = end.frames - 5;
+        app.replay_bar_action(ReplayBarAction::Seek(ahead));
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            tape_at(app).seeking.is_none()
+        });
+        assert_eq!(tape_at(&app).played, ahead);
+        assert!(!tape_at(&app).running);
+
+        app.replay_bar_action(ReplayBarAction::Toggle);
+        assert!(tape_at(&app).running);
+        update_until(&mut app, &ctx, &mut frame, |app| !tape_at(app).running);
+        assert_eq!(tape_at(&app).played, end.frames);
+
+        app.replay_bar_action(ReplayBarAction::Toggle);
+        let again = tape_at(&app);
+        assert!(again.running, "play at the end starts over");
+        assert!(again.played < 10 || again.seeking.is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_replay_whose_game_is_gone_opens_its_video() {
+        use crate::media::render::RenderVideo;
+
+        let mut gone = include_bytes!("../homebrew/tobu.gb").to_vec();
+        let last = gone.len() - 1;
+        gone[last] ^= 0xff;
+        let (mut app, ctx, mut frame, id) = tape_recording_with("replay-no-game", &gone, |app| {
+            app.ui.settings.render_video = RenderVideo::WhenIAsk;
+        });
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0147] = 0x03;
+        load_game(&mut app, &rom, None);
+        app.video_renders.forget_tape_rom();
+        app.ui.media.play = Some(id);
+        update_until(&mut app, &ctx, &mut frame, |app| app.ui.viewer.is_open());
+        assert!(!app.emulator.is_playing_tape());
+        assert!(!app.replay_show.is_open());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_replay_with_frame_times_shows_them_over_its_seek_bar() {
+        use crate::app::widgets::replay_graph::seek_span_id;
+        use crate::media::render::RenderVideo;
+
+        let tobu = include_bytes!("../homebrew/tobu.gb");
+        let (mut app, ctx, mut frame, id) = tape_recording_with("replay-graph", tobu, |app| {
+            app.ui.settings.render_video = RenderVideo::WhenIAsk;
+            app.ui.settings.record_frame_times = true;
+        });
+        app.ui.media.play = Some(id);
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.emulator.is_playing_tape()
+        });
+        run_updates_quiet(&mut app, &ctx, &mut frame, 3);
+        let tape = tape_at(&app);
+        let times = app
+            .emulator
+            .tape_times()
+            .expect("the replay has frame times");
+        assert!(times.game.len() >= 10, "{}", times.game.len());
+        assert!(
+            times
+                .game
+                .iter()
+                .all(|(x, _)| (1..=tape.frames).contains(x))
+        );
+        assert!(times.game.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(times.budget_ms > 0.0);
+        let span = ctx
+            .data(|d| d.get_temp::<egui::Rangef>(seek_span_id()))
+            .expect("the seek bar is drawn");
+        assert!(span.min > 0.0 && span.max < 1280.0, "{span:?}");
+
+        app.replay_bar_action(crate::app::widgets::replay_bar::ReplayBarAction::Close);
+        assert!(app.emulator.tape_times().is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_replay_leaves_pause_rewind_and_saves_out_of_the_toolbar() {
+        use crate::app::toolbar::Item;
+        use crate::app::widgets::replay_bar::ReplayBarAction;
+
+        let (mut app, _ctx, _frame, _) = playing_replay("replay-toolbar");
+        let items = app.items();
+        for gone in [Item::Pause, Item::Rewind, Item::Saves] {
+            assert!(!items.contains(&gone), "{gone:?}");
+        }
+        assert!(items.contains(&Item::FastForward));
+        app.replay_bar_action(ReplayBarAction::Close);
+        let items = app.items();
+        assert!(items.contains(&Item::Pause));
+        assert!(items.contains(&Item::Saves));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_replay_without_frame_times_has_no_graph() {
+        let (mut app, ctx, mut frame, _) = playing_replay("replay-no-graph");
+        run_updates_quiet(&mut app, &ctx, &mut frame, 2);
+        assert!(app.emulator.tape_times().is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_phone_replay_draws_the_game_below_its_bar() {
+        let (mut app, ctx, mut frame, _) = playing_replay("replay-phone-game");
+        app.ui.settings.layout = LayoutMode::Mobile;
+        app.mobile.nav.show_game();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(412.0, 915.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let _ = ctx.run(input.clone(), |ctx| {
+                eframe::App::update(&mut app, ctx, &mut frame);
+            });
+        }
+        assert!(app.emulator.is_playing_tape());
+        let picture = app
+            .emulator
+            .placed_screens()
+            .iter()
+            .copied()
+            .reduce(egui::Rect::union)
+            .expect("the game shows");
+        assert!(picture.right() <= 412.0, "{picture:?}");
+        assert!(picture.height() > 300.0, "{picture:?}");
+        let (bar, room) = app.ui.replay_room.expect("the replay bar shows");
+        let above = picture.top() - bar;
+        let below = room.bottom() - picture.bottom();
+        assert!(above > 0.0 && below > 0.0, "{above} {below}");
+        assert!((above - below).abs() <= 0.5, "{above} {below}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn live_game(name: &str) -> (Citrine, Context, eframe::Frame) {
+        let mut app = media_app(name, LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        app.emulator.running = true;
+        let ctx = Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.emulator.rewind_kept().0 > 150
+        });
+        (app, ctx, frame)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_clip(app: &mut Citrine, ctx: &Context, frame: &mut eframe::Frame) {
+        app.save_a_clip();
+        update_until(app, ctx, frame, |app| {
+            app.ui
+                .clip
+                .as_ref()
+                .is_some_and(|view| !view.pictures.is_empty())
+                && app
+                    .emulator
+                    .tape_facts()
+                    .is_some_and(|tape| tape.seeking.is_none())
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn replays_in_media(app: &Citrine) -> Vec<crate::media::MediaItem> {
+        app.media
+            .items()
+            .iter()
+            .filter(|item| item.info.kind == crate::media::MediaKind::Replay)
+            .cloned()
+            .collect()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn save_a_clip_opens_the_last_seconds_paused_at_the_end_and_cancel_goes_back() {
+        use crate::app::widgets::clip_panel::ClipAction;
+
+        let (mut app, ctx, mut frame) = live_game("clip-open");
+        assert_eq!(app.clip_blocked(), None);
+        open_clip(&mut app, &ctx, &mut frame);
+        assert!(app.replay_show.is_open());
+        let live = app.replay_show.live_mut().expect("the live game waits");
+        let live_hash = live.core_mut().machine.state_hash();
+        let live_frames = live.total_frames;
+        let tape = tape_at(&app);
+        assert!(tape.frames >= 60, "{} frames", tape.frames);
+        assert_eq!(tape.played, tape.frames, "the clip opens at its end");
+        assert!(!tape.running, "the clip opens paused");
+        let view = app.ui.clip.as_ref().unwrap();
+        assert!(view.live);
+        assert_eq!((view.from, view.to), (0, tape.frames));
+        let facts = view.facts(&app.emulator, false).expect("the panel shows");
+        assert_eq!(facts.at, tape.frames);
+        run_updates_quiet(&mut app, &ctx, &mut frame, 3);
+        assert!(replays_in_media(&app).is_empty(), "nothing saved yet");
+
+        app.clip_action(ClipAction::Cancel);
+        assert!(app.ui.clip.is_none());
+        assert!(!app.replay_show.is_open());
+        assert!(!app.emulator.is_playing_tape());
+        assert!(app.emulator.running, "the live game runs again");
+        assert_eq!(app.emulator.total_frames, live_frames);
+        assert_eq!(app.emulator.core_mut().machine.state_hash(), live_hash);
+        assert!(replays_in_media(&app).is_empty(), "cancel keeps nothing");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_clip_saves_its_picked_range_as_a_replay_that_plays() {
+        use crate::app::widgets::clip_panel::ClipAction;
+        use citrine_gb_replay::Replay;
+
+        let (mut app, ctx, mut frame) = live_game("clip-save");
+        app.emulator.running = false;
+        run_updates_quiet(&mut app, &ctx, &mut frame, 2);
+        open_clip(&mut app, &ctx, &mut frame);
+        let frames = tape_at(&app).frames;
+        let (from, to) = (12, frames - 8);
+        app.clip_action(ClipAction::Range(from, frames));
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            tape_at(app).seeking.is_none()
+        });
+        assert_eq!(tape_at(&app).played, from, "a moved start shows its frame");
+        app.clip_action(ClipAction::Range(from, to));
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            tape_at(app).seeking.is_none()
+        });
+        assert_eq!(tape_at(&app).played, to, "a moved end shows its frame");
+
+        app.clip_action(ClipAction::Save);
+        assert!(
+            app.ui.clip.as_ref().is_some_and(|view| view.saving),
+            "the save starts: {:?}",
+            app.toasts.texts()
+        );
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.ui.clip.as_ref().is_none_or(|view| !view.saving)
+        });
+        assert!(app.ui.clip.is_none(), "{:?}", app.toasts.texts());
+        app.handle_event_queue(false);
+        assert!(!app.replay_show.is_open());
+        assert!(!app.emulator.running, "a paused game stays paused");
+        let saved = replays_in_media(&app);
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].thumbnail.is_some(), "the row has a picture");
+        let replay = Replay::read(&std::fs::read(app.media.path(&saved[0].id)).unwrap()).unwrap();
+        assert_eq!(replay.header.frames, to - from);
+
+        app.ui.media.play = Some(saved[0].id.clone());
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.emulator.is_playing_tape()
+        });
+        for _ in 0..2000 {
+            let tape = tape_at(&app);
+            if tape.played >= tape.frames {
+                break;
+            }
+            run_updates_quiet(&mut app, &ctx, &mut frame, 1);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let tape = tape_at(&app);
+        assert!(tape.played >= tape.frames, "{tape:?}");
+        assert!(!tape.diverged, "the clip plays as it was played");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_media_replay_crops_into_a_new_replay_and_keeps_the_original() {
+        use crate::app::widgets::clip_panel::ClipAction;
+        use citrine_gb_replay::Replay;
+
+        let (mut app, ctx, mut frame, id) = playing_replay("clip-crop");
+        let frames = tape_at(&app).frames;
+        app.replay_bar_action(crate::app::widgets::replay_bar::ReplayBarAction::Clip);
+        let view = app.ui.clip.as_ref().expect("the crop panel opens");
+        assert!(!view.live);
+        assert_eq!((view.from, view.to), (0, frames));
+        app.clip_action(ClipAction::Range(5, frames - 5));
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            tape_at(app).seeking.is_none()
+        });
+        app.clip_action(ClipAction::Save);
+        update_until(&mut app, &ctx, &mut frame, |app| app.ui.clip.is_none());
+        app.handle_event_queue(false);
+        assert!(app.replay_show.is_open(), "the replay stays open");
+        let saved = replays_in_media(&app);
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().any(|item| item.id == id), "the original stays");
+        let crop = saved.iter().find(|item| item.id != id).unwrap();
+        let replay = Replay::read(&std::fs::read(app.media.path(&crop.id)).unwrap()).unwrap();
+        assert_eq!(replay.header.frames, frames - 10);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_crop_keeps_the_frame_times_of_its_range() {
+        use crate::app::widgets::clip_panel::ClipAction;
+        use crate::frame_log::TapeTimes;
+        use crate::media::render::RenderVideo;
+        use citrine_gb_replay::Replay;
+
+        let rom = include_bytes!("../homebrew/tobu.gb");
+        let (mut app, ctx, mut frame, id) = tape_recording_with("clip-crop-times", rom, |app| {
+            app.ui.settings.render_video = RenderVideo::WhenIAsk;
+            app.ui.settings.record_frame_times = true;
+        });
+        let rows = |replay: &Replay| {
+            let perf = replay.perf.as_ref().expect("frame times");
+            let info: serde_json::Value = serde_json::from_slice(&perf.info).unwrap();
+            info["recording"]["rows"].as_u64().unwrap()
+        };
+        let original = Replay::read(&std::fs::read(app.media.path(&id)).unwrap()).unwrap();
+        app.ui.media.play = Some(id.clone());
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.emulator.is_playing_tape()
+        });
+        let frames = tape_at(&app).frames;
+        app.replay_bar_action(crate::app::widgets::replay_bar::ReplayBarAction::Clip);
+        app.clip_action(ClipAction::Range(5, frames - 5));
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            tape_at(app).seeking.is_none()
+        });
+        app.clip_action(ClipAction::Save);
+        update_until(&mut app, &ctx, &mut frame, |app| app.ui.clip.is_none());
+        app.handle_event_queue(false);
+        let saved = replays_in_media(&app);
+        let crop = saved.iter().find(|item| item.id != id).expect("the crop");
+        assert!(crop.info.frame_times, "the crop's row has frame times");
+        let replay = Replay::read(&std::fs::read(app.media.path(&crop.id)).unwrap()).unwrap();
+        let csv = std::str::from_utf8(&replay.perf.as_ref().expect("frame times").frames).unwrap();
+        let times = TapeTimes::read(csv).expect("the crop's frame times follow its tape");
+        assert!(
+            times.game.len() > 5,
+            "{} frames with times",
+            times.game.len()
+        );
+        assert!(
+            times.game.iter().all(|(at, _)| *at <= frames - 10),
+            "{times:?}"
+        );
+        assert!(rows(&replay) < rows(&original));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clip_length_off_turns_clips_off_and_says_where_to_turn_them_on() {
+        use crate::emulator::rewind::ClipLength;
+
+        let (mut app, ctx, mut frame) = live_game("clip-off");
+        app.ui.settings.clip_length = ClipLength::Off;
+        app.ui.settings.dirty = true;
+        run_updates(&mut app, &ctx, &mut frame, 3);
+        assert_eq!(app.clip_blocked().as_deref(), Some(super::clip::CLIPS_OFF));
+        assert!(super::clip::CLIPS_OFF.contains("Settings, Capture, Clip length"));
+        app.save_a_clip();
+        run_updates(&mut app, &ctx, &mut frame, 3);
+        assert!(app.ui.clip.is_none());
+        assert!(!app.replay_show.is_open());
+        assert!(app.emulator.running);
+        assert!(
+            app.toasts.texts().contains(&super::clip::CLIPS_OFF),
+            "{:?}",
+            app.toasts.texts()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn rewind_off_still_saves_a_clip_of_the_last_seconds() {
+        use crate::emulator::rewind::RewindLength;
+
+        let mut app = media_app("clip-no-rewind", LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        app.ui.settings.rewind = RewindLength::Off;
+        app.ui.settings.dirty = true;
+        app.emulator.running = true;
+        let ctx = Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        update_until(&mut app, &ctx, &mut frame, |app| {
+            app.emulator.rewind_kept().0 > 150
+        });
+        assert!(!app.emulator.can_rewind());
+        assert_eq!(app.clip_blocked(), None);
+        open_clip(&mut app, &ctx, &mut frame);
+        assert!(app.replay_show.is_open());
+        let tape = tape_at(&app);
+        assert!(tape.frames > 150, "{} frames", tape.frames);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn play_together_shows_the_replays_video() {
+        use crate::media::render::RenderVideo;
+
+        let (mut app, _ctx, _frame, id) = tape_recording("replay-together", RenderVideo::WhenIAsk);
+        app.emulator.together = true;
+        app.ui.media.play = Some(id);
+        app.tick_replay_show();
+        assert!(app.ui.viewer.is_open());
+        assert!(!app.emulator.is_playing_tape());
+        assert!(!app.replay_show.is_open());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hardcore_does_not_play_replays() {
+        use crate::media::render::RenderVideo;
+
+        let (mut app, _ctx, _frame, id) = tape_recording("replay-hardcore", RenderVideo::WhenIAsk);
+        app.emulator.follow_hardcore(true);
+        app.ui.media.play = Some(id);
+        for _ in 0..20 {
+            app.tick_replay_show();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!app.emulator.is_playing_tape());
+        assert!(!app.replay_show.is_open());
+        assert!(app.ui.media.play.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_updates_quiet(
+        app: &mut Citrine,
+        ctx: &Context,
+        frame: &mut eframe::Frame,
+        updates: usize,
+    ) {
+        let mut left = updates;
+        update_until(app, ctx, frame, move |_| {
+            let done = left == 0;
+            left = left.saturating_sub(1);
+            done
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_updates(app: &mut Citrine, ctx: &Context, frame: &mut eframe::Frame, updates: usize) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let shown = app.emulator.total_frames;
+        for _ in 0..updates {
+            let _ = ctx.run(input.clone(), |ctx| {
+                eframe::App::update(app, ctx, frame);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(app.emulator.total_frames > shown, "the console ran");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn putting_in_another_game_saves_the_recording_so_far() {
+        use citrine_gb::console::Console as _;
+        let mut app = media_app("tape-swap", LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        app.ui.settings.record_frame_times = true;
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        app.emulator.running = true;
+        let game = app.emulator.game_name().to_string();
+        let ctx = Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        run_updates(&mut app, &ctx, &mut frame, 3);
+        app.toggle_recording();
+        assert!(app.emulator.is_taping());
+        run_updates(&mut app, &ctx, &mut frame, 20);
+        let crc = format!("{:08x}", app.emulator.core_mut().machine.rom_id().crc32);
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0147] = 0x03;
+        load_game(&mut app, &rom, None);
+        app.finish_recordings(&ctx);
+        app.handle_event_queue(false);
+        let item = app
+            .media
+            .items()
+            .iter()
+            .find(|item| item.info.kind == crate::media::MediaKind::Replay)
+            .expect("the cut recording is in Media")
+            .clone();
+        assert_eq!(item.info.game, game);
+        assert!(!app.emulator.is_taping());
+        assert!(!app.ui.frame_log.is_recording());
+        let bytes = std::fs::read(app.media.path(&item.id)).unwrap();
+        let replay = citrine_gb_replay::Replay::read(&bytes).unwrap();
+        let perf = replay
+            .perf
+            .expect("the cut recording keeps its frame times");
+        let info: serde_json::Value = serde_json::from_slice(&perf.info).unwrap();
+        assert_eq!(info["game"]["crc32"], crc.as_str(), "{info}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn frame_times_go_in_the_recording_and_export_as_a_csv() {
+        use crate::app::recording::{FRAMES, INFO, frame_times_name, frame_times_zip};
+        use crate::app::widgets::record_bar::{RecordBarAction, RecordBarFacts};
+        use std::io::Read;
+
+        let mut app = media_app("tape-frame-times", LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        app.ui.settings.record_frame_times = true;
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        app.emulator.running = true;
+        let ctx = Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        run_updates(&mut app, &ctx, &mut frame, 3);
+        assert!(!app.ui.frame_log.is_recording());
+        app.toggle_recording();
+        assert!(app.ui.frame_log.is_recording());
+        let facts = RecordBarFacts::of(&app.emulator, &app.ui, false).expect("the bar shows");
+        assert_eq!(facts.frame_times, Some(true));
+        run_updates(&mut app, &ctx, &mut frame, 30);
+        app.record_bar_action(RecordBarAction::Stop);
+        assert!(!app.ui.frame_log.is_recording());
+        run_updates(&mut app, &ctx, &mut frame, 3);
+        app.handle_event_queue(false);
+        let item = app
+            .media
+            .items()
+            .iter()
+            .find(|item| item.info.kind == crate::media::MediaKind::Replay)
+            .expect("the recording is in Media")
+            .clone();
+        assert!(item.info.frame_times);
+        let bytes = std::fs::read(app.media.path(&item.id)).unwrap();
+        let replay = citrine_gb_replay::Replay::read(&bytes).unwrap();
+        let perf = replay
+            .perf
+            .as_ref()
+            .expect("the frame times are in the recording");
+        let info: serde_json::Value = serde_json::from_slice(&perf.info).unwrap();
+        assert!(info["recording"]["started_unix"].is_u64(), "{info}");
+        let csv = std::str::from_utf8(&perf.frames).unwrap();
+        let mut lines = csv.lines();
+        assert!(lines.next().unwrap().ends_with(",tape_frame"));
+        let frames: Vec<u64> = lines
+            .filter_map(|line| line.rsplit(',').next()?.parse().ok())
+            .collect();
+        assert!(frames.len() > 10, "{} rows", frames.len());
+        assert!(
+            frames.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{frames:?}"
+        );
+        let last = *frames.last().unwrap();
+        assert!(
+            last > 0 && last <= replay.header.frames,
+            "{last} of {}",
+            replay.header.frames
+        );
+
+        let zipped = frame_times_zip(&bytes).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zipped)).unwrap();
+        let mut exported = String::new();
+        zip.by_name(FRAMES)
+            .unwrap()
+            .read_to_string(&mut exported)
+            .unwrap();
+        assert_eq!(exported, csv);
+        assert!(zip.by_name(INFO).is_ok());
+        let name = frame_times_name(&item.id);
+        assert!(
+            name.ends_with(" performance.zip") && !name.contains(".replay"),
+            "{name}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_play_together_recording_is_a_replay_with_its_video_and_reason() {
+        use crate::media::MediaKind;
+        use crate::media::recording::headless;
+
+        let mut app = media_app("video-replay", LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        assert_eq!(app.emulator.tape_blocker(), None);
+        app.emulator.together = true;
+        assert!(!app.emulator.can_tape());
+        assert_eq!(app.emulator.tape_blocker(), Some("Play together"));
+        let header = app.emulator.video_header().expect("a game is in");
+        assert_eq!(header.no_inputs.as_deref(), Some("Play together"));
+        assert!(!header.sha1.is_empty());
+
+        let mut recorded =
+            headless::record(include_bytes!("../homebrew/tobu.gb"), "together.mp4", 60);
+        let temp = recorded.done.output.path.clone();
+        let mp4 = std::fs::read(&temp).unwrap();
+        let frames = recorded.done.frames;
+        recorded.done.info.kind = MediaKind::Replay;
+        recorded.done.info.video = true;
+        recorded.done.info.replay = Some(Box::new(citrine_gb_replay::Replay {
+            header,
+            perf: Some(citrine_gb_replay::Perf {
+                frames: b"tape_frame\n\n".to_vec(),
+                info: b"{}".to_vec(),
+                gpu: None,
+            }),
+            ..citrine_gb_replay::Replay::default()
+        }));
+        app.store_recording(recorded.done, true);
+        app.store_video_replays();
+        app.handle_event_queue(false);
+        assert!(!temp.exists(), "the loose video is gone");
+
+        let item = app
+            .media
+            .items()
+            .iter()
+            .find(|item| item.info.kind == MediaKind::Replay)
+            .expect("the recording is in Media")
+            .clone();
+        assert!(item.info.video && item.info.frame_times);
+        assert!(item.thumbnail.is_some());
+        let length = item.info.length_ms.unwrap();
+        assert!((900..1100).contains(&length), "{length} ms");
+        assert!(item.id.file_name().ends_with(".replay"), "{:?}", item.id);
+        let bytes = std::fs::read(app.media.path(&item.id)).unwrap();
+        let replay = citrine_gb_replay::Replay::read(&bytes).unwrap();
+        assert_eq!(replay.video.as_deref(), Some(&mp4[..]));
+        assert!(replay.thumb.is_some());
+        assert_eq!(replay.header.frames, frames);
+        assert_eq!(replay.header.no_inputs.as_deref(), Some("Play together"));
+        assert!(replay.events.is_empty() && replay.start.is_empty());
+        assert!(replay.perf.is_some());
+        assert_eq!(
+            citrine_gb_replay::Replay::video(&bytes).unwrap().as_deref(),
+            Some(&mp4[..])
+        );
+        let name = crate::app::recording::video_name(&item.id);
+        assert!(
+            name.ends_with(".mp4") && !name.contains(".replay"),
+            "{name}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn frame_times_turned_off_while_recording_leave_none() {
+        use crate::app::widgets::record_bar::{RecordBarAction, RecordBarFacts};
+
+        let mut app = media_app("tape-frame-times-off", LayoutMode::Desktop);
+        app.ui.settings.check_updates = false;
+        app.ui.settings.record_frame_times = true;
+        load_game(&mut app, include_bytes!("../homebrew/tobu.gb"), None);
+        app.emulator.running = true;
+        let ctx = Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        run_updates(&mut app, &ctx, &mut frame, 3);
+        app.toggle_recording();
+        run_updates(&mut app, &ctx, &mut frame, 10);
+        app.record_bar_action(RecordBarAction::FrameTimes(false));
+        assert!(!app.ui.frame_log.is_recording());
+        let facts = RecordBarFacts::of(&app.emulator, &app.ui, false).expect("the bar shows");
+        assert_eq!(facts.frame_times, Some(false));
+        run_updates(&mut app, &ctx, &mut frame, 10);
+        app.record_bar_action(RecordBarAction::Stop);
+        app.handle_event_queue(false);
+        let item = app
+            .media
+            .items()
+            .iter()
+            .find(|item| item.info.kind == crate::media::MediaKind::Replay)
+            .expect("the recording is in Media")
+            .clone();
+        assert!(!item.info.frame_times);
+        let bytes = std::fs::read(app.media.path(&item.id)).unwrap();
+        let replay = citrine_gb_replay::Replay::read(&bytes).unwrap();
+        assert!(replay.perf.is_none());
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    #[test]
+    fn recording_a_ds_game_with_rewind_off_keeps_a_replay() {
+        use crate::emulator::rewind::{ClipLength, RewindLength};
+
+        let mut run = DsRun::new("blocksds-lighting_cube.nds");
+        run.app.ui.settings.rewind = RewindLength::Off;
+        run.app.ui.settings.clip_length = ClipLength::Off;
+        run.app.ui.settings.dirty = true;
+        run.play(10);
+        assert!(run.app.emulator.start_tape_recording());
+        run.play(60);
+        let secs = run.app.emulator.tape_recording_secs().unwrap();
+        assert!(secs > 0.5, "{secs} s recorded");
+        let replay = run.app.emulator.stop_tape_recording().unwrap();
+        assert!(replay.header.frames > 30, "{} frames", replay.header.frames);
+        assert_eq!(run.app.emulator.tape_recording_secs(), None);
+        run.play(10);
+        assert_eq!(
+            run.app.emulator.rewind_kept(),
+            (0, 0),
+            "off keeps nothing again"
+        );
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    #[test]
+    fn a_recording_ds_game_draws_on_the_pool_from_the_console_thread() {
+        let mut run = DsRun::new("blocksds-lighting_cube.nds").on_pool_threads();
+        run.play(10);
+        assert!(run.app.emulator.start_tape_recording());
+        let before = run.nds().side_work();
+        run.play(60);
+        let mut side = run.nds().side_work();
+        for _ in 0..20 {
+            if side.lines_3d > before.lines_3d {
+                break;
+            }
+            run.play(30);
+            side = run.nds().side_work();
+        }
+        assert!(
+            side.lines_3d > before.lines_3d,
+            "pool work while recording {side:?}, before {before:?}"
+        );
+        assert!(run.app.emulator.tape_recording_secs().unwrap() > 0.5);
+        let replay = run.app.emulator.stop_tape_recording().unwrap();
+        assert!(replay.header.frames > 30, "{} frames", replay.header.frames);
     }
 
     #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
@@ -5444,6 +8440,7 @@ mod tests {
         run.app.ui.settings.ds_3d = Ds3d {
             resolution: Resolution::Native,
             smooth_edges: SmoothEdges::Off,
+            ..Ds3d::default()
         };
         run.play(20);
         assert!(!run.app.emulator.is_upscaled(), "native draws no upscale");
@@ -5451,6 +8448,7 @@ mod tests {
         run.app.ui.settings.ds_3d = Ds3d {
             resolution: Resolution::Quadruple,
             smooth_edges: SmoothEdges::On,
+            ..Ds3d::default()
         };
         run.play(30);
         assert!(run.app.emulator.is_upscaled(), "4x draws on the GPU");
@@ -5475,6 +8473,7 @@ mod tests {
         run.app.ui.settings.ds_3d = Ds3d {
             resolution: Resolution::Quadruple,
             smooth_edges: SmoothEdges::On,
+            ..Ds3d::default()
         };
         let id = run.app.ui.settings.hud.add();
         run.app.ui.settings.hud.get_mut(id).unwrap().values = vec![Value::Gpu];
@@ -5500,8 +8499,10 @@ mod tests {
 
     #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
     #[test]
-    fn a_gba_game_stays_on_the_interpreter_with_the_jit_switch_on() {
-        let mut app = Citrine::default();
+    fn a_gba_game_follows_the_gba_jit_switch_only() {
+        use citrine_gb::nds::machine::JIT_AVAILABLE;
+
+        let mut app = test_app();
         app.ui.settings.check_updates = false;
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/gba/save-sram.gba");
@@ -5528,72 +8529,70 @@ mod tests {
             assert!(app.emulator.total_frames > shown, "the console ran");
         };
 
-        app.ui.settings.ds_jit = true;
+        app.ui.settings.ds_jit = false;
+        app.ui.settings.gba_jit = Some(true);
         play(&mut app);
-        assert!(
-            !app.emulator.gba_jit_on(),
-            "the GBA runs the interpreter with the switch on"
+        assert_eq!(
+            app.emulator.gba_jit_on(),
+            JIT_AVAILABLE,
+            "the GBA switch alone runs the GBA JIT"
         );
 
-        app.ui.settings.ds_jit = false;
+        app.ui.settings.ds_jit = true;
+        app.ui.settings.gba_jit = Some(false);
         play(&mut app);
-        assert!(!app.emulator.gba_jit_on());
+        assert!(!app.emulator.gba_jit_on(), "the DS switch leaves it off");
+
+        app.ui.settings.gba_jit = Some(true);
+        play(&mut app);
+        assert_eq!(app.emulator.gba_jit_on(), JIT_AVAILABLE);
         eframe::App::on_exit(&mut app);
     }
 
     #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
-    fn jit_row_sits_under_game_covers(output: &egui::FullOutput) {
-        use crate::app::ui_state::settings::JIT_LABEL;
-
-        let rows: Vec<egui::Rect> = output
-            .shapes
-            .iter()
-            .filter_map(|clipped| match &clipped.shape {
-                egui::Shape::Text(text) if text.galley.text().trim() == JIT_LABEL => {
-                    Some(text.visual_bounding_rect())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(rows.len(), 1, "one JIT row on the page");
-        let jit = rows[0].center().y;
-        let covers = text_rect(output, "Game covers").expect("a covers row");
-        let dev = text_rect(output, "Dev tools").expect("a dev tools row");
-        assert!(covers.center().y < jit && jit < dev.center().y);
-        if let Some(ds) = text_rect(output, "Nintendo DS") {
-            assert!(jit < ds.top(), "the JIT row is above the DS section");
-        }
-    }
-
-    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
     #[test]
-    fn the_jit_switch_sits_in_general_and_not_in_the_ds_section() {
+    fn the_jit_switch_sits_on_each_console_page_on_both_surfaces() {
+        use crate::app::ui_state::settings_tree::Surface;
+        use crate::app::ui_state::settings_tree::rows::RowId;
         if !citrine_gb::nds::machine::JIT_AVAILABLE {
             return;
         }
-        let (mut app, ctx) = settings_page("jit-row-phone", SettingsTab::General);
-        let size = egui::vec2(412.0, 3000.0);
-        let mut output = sized_frame(&mut app, &ctx, size, Vec::new());
-        for _ in 0..3 {
-            output = sized_frame(&mut app, &ctx, size, Vec::new());
+        assert_eq!(phone_label(RowId::Jit), phone_label(RowId::GbaJit));
+        assert_eq!(
+            RowId::Jit.label(Surface::Desktop),
+            RowId::GbaJit.label(Surface::Desktop)
+        );
+        assert_eq!(RowId::Jit.page(), SettingsTab::Ds);
+        assert_eq!(RowId::GbaJit.page(), SettingsTab::Gba);
+        let home = |page: SettingsTab| page != SettingsTab::App;
+        for page in [SettingsTab::Ds, SettingsTab::Gba, SettingsTab::App] {
+            let (mut app, ctx) = settings_page(&format!("jit-row-phone-{page:?}"), page);
+            let size = egui::vec2(412.0, 3000.0);
+            let mut output = sized_frame(&mut app, &ctx, size, Vec::new());
+            for _ in 0..3 {
+                output = sized_frame(&mut app, &ctx, size, Vec::new());
+            }
+            let shown = text_rect(&output, phone_label(RowId::Jit)).is_some();
+            assert_eq!(shown, home(page), "phone {page:?}");
         }
-        jit_row_sits_under_game_covers(&output);
-
-        let mut app = media_app("jit-row-desktop", LayoutMode::Desktop);
-        app.dock = DockState::new(vec![Tab::Settings]);
-        app.ui.settings.current_tab = SettingsTab::General;
-        let ctx = Context::default();
-        let size = egui::vec2(1280.0, 3000.0);
-        let mut output = sized_frame(&mut app, &ctx, size, Vec::new());
-        for _ in 0..3 {
-            output = sized_frame(&mut app, &ctx, size, Vec::new());
+        for page in [SettingsTab::Ds, SettingsTab::Gba, SettingsTab::App] {
+            let mut app = media_app(&format!("jit-row-desktop-{page:?}"), LayoutMode::Desktop);
+            app.dock = DockState::new(vec![Tab::Settings]);
+            app.ui.settings.current_tab = page;
+            let ctx = Context::default();
+            let size = egui::vec2(1280.0, 3000.0);
+            let mut output = sized_frame(&mut app, &ctx, size, Vec::new());
+            for _ in 0..3 {
+                output = sized_frame(&mut app, &ctx, size, Vec::new());
+            }
+            let shown = text_rect(&output, RowId::Jit.label(Surface::Desktop)).is_some();
+            assert_eq!(shown, home(page), "{page:?}");
         }
-        jit_row_sits_under_game_covers(&output);
     }
 
     #[test]
     fn a_hidden_app_stops_its_console_worker_and_starts_one_when_shown() {
-        let mut app = Citrine::default();
+        let mut app = test_app();
         assert!(app.emulator.has_worker());
         app.follow_visibility(false);
         assert!(!app.emulator.has_worker());
@@ -5685,7 +8684,8 @@ mod tests {
     #[test]
     fn the_pokewalker_page_keeps_heartgold_running_on_a_phone() {
         let mut app = phone_app("walker-page");
-        let root = std::env::temp_dir().join(format!("citrine-walker-page-{}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-walker-page-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         app.emulator.pokewalker =
             crate::walker::Pokewalker::new(Box::new(crate::walker::FileStore::at(root)));

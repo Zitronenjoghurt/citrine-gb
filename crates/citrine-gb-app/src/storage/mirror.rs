@@ -2,7 +2,7 @@ use base64::Engine;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const LOCAL_PREFIX: &str = "citrine/";
-const SETTINGS_NAMESPACE: &str = "settings";
+const DEV_NAMESPACE: &str = "dev";
 pub const LOCAL_MAX_CHARS: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,13 @@ pub fn local_key(namespace: &str, name: &str) -> String {
     format!("{LOCAL_PREFIX}{namespace}/{name}")
 }
 
+fn stays_local(namespace: &str) -> bool {
+    use super::kinds::{Folder, Root};
+    use strum::IntoEnumIterator;
+    namespace == DEV_NAMESPACE
+        || Folder::iter().any(|folder| folder.root() == Root::Data && folder.name() == namespace)
+}
+
 pub fn fits_local(encoded: &str) -> bool {
     encoded.len() <= LOCAL_MAX_CHARS
 }
@@ -51,7 +58,7 @@ impl Mirror {
             let Some((namespace, _)) = path.split_once('/') else {
                 continue;
             };
-            if namespace == SETTINGS_NAMESPACE {
+            if stays_local(namespace) {
                 continue;
             }
             let Ok(data) = base64::engine::general_purpose::STANDARD.decode(raw) else {
@@ -70,6 +77,26 @@ impl Mirror {
                 self.files.insert(key, data);
             }
         }
+    }
+
+    pub fn fill_and_recover(
+        &mut self,
+        stored: impl IntoIterator<Item = (String, Vec<u8>)>,
+        mut back_to_local: impl FnMut(&str, &str) -> bool,
+    ) {
+        let mut saves = Vec::new();
+        for (key, data) in stored {
+            let namespace = key.split_once('/').map_or("", |(namespace, _)| namespace);
+            if !stays_local(namespace) {
+                saves.push((key, data));
+                continue;
+            }
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+            if back_to_local(&format!("{LOCAL_PREFIX}{key}"), &encoded) {
+                self.pending.ops.push(Op::Delete(key));
+            }
+        }
+        self.fill(saves);
     }
 
     pub fn read(&self, key: &str) -> Option<&[u8]> {
@@ -294,6 +321,73 @@ mod tests {
         assert!(written.moved.is_empty());
         assert!(after.ops.is_empty());
         assert_eq!(after.moved, ["citrine-crash"]);
+    }
+
+    #[test]
+    fn stats_walker_chats_and_dev_keys_stay_in_local_storage() {
+        let mut mirror = Mirror::default();
+        let kept = [
+            "citrine/stats/stats.json",
+            "citrine/walker/walker.bin",
+            "citrine/chats/1234.bin",
+            "citrine/retroachievements-token/token",
+            "citrine/dev/route",
+            "citrine/settings/settings.json",
+        ];
+        mirror.adopt_local(kept.map(|local| (local.to_string(), encoded(&[1]))));
+        let batch = mirror.take_pending();
+        assert!(batch.is_empty(), "{batch:?}");
+        assert_eq!(mirror.namespaces(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn values_0_12_moved_into_the_database_go_back_once_and_never_over_newer_ones() {
+        let mut local = BTreeMap::from([(
+            "citrine/walker/walker.bin".to_string(),
+            encoded(b"this session"),
+        )]);
+        let stored = vec![
+            ("stats/stats.json".to_string(), b"old stats".to_vec()),
+            ("walker/walker.bin".to_string(), b"older steps".to_vec()),
+            ("chats/1234.bin".to_string(), b"chat".to_vec()),
+            (
+                "retroachievements-token/token".to_string(),
+                b"token".to_vec(),
+            ),
+            (format!("{GAME}/battery.sav"), b"sram".to_vec()),
+        ];
+        let mut full = false;
+        let mut mirror = Mirror::default();
+        mirror.fill_and_recover(stored, |key, value| {
+            if local.contains_key(key) {
+                return true;
+            }
+            if full {
+                return false;
+            }
+            local.insert(key.to_string(), value.to_string());
+            full = key.starts_with("citrine/chats/");
+            true
+        });
+        assert_eq!(local["citrine/stats/stats.json"], encoded(b"old stats"));
+        assert_eq!(local["citrine/walker/walker.bin"], encoded(b"this session"));
+        assert_eq!(local["citrine/chats/1234.bin"], encoded(b"chat"));
+        assert!(!local.contains_key("citrine/retroachievements-token/token"));
+        assert_eq!(
+            mirror.read(&format!("{GAME}/battery.sav")),
+            Some(&b"sram"[..])
+        );
+        assert_eq!(mirror.namespaces(), [GAME]);
+        let batch = mirror.take_pending();
+        assert_eq!(
+            batch.ops,
+            [
+                Op::Delete("stats/stats.json".to_string()),
+                Op::Delete("walker/walker.bin".to_string()),
+                Op::Delete("chats/1234.bin".to_string()),
+            ],
+            "the token stays in the database until local storage has room"
+        );
     }
 
     #[test]

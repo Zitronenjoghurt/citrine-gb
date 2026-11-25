@@ -60,6 +60,9 @@ pub fn icon(name: &str) -> String {
         "copy" => {
             r#"<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>"#
         }
+        "archive" => {
+            r#"<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>"#
+        }
         "search" => r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>"#,
         "info" => r#"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>"#,
         "reset" => {
@@ -78,9 +81,17 @@ pub fn icon(name: &str) -> String {
             r#"<path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 17v2"/><path d="M13 11v2"/>"#
         }
         "plus" => r#"<path d="M5 12h14"/><path d="M12 5v14"/>"#,
+        "x" => r#"<path d="M18 6 6 18"/><path d="m6 6 12 12"/>"#,
         "left" => r#"<path d="m15 18-6-6 6-6"/>"#,
         "right" => r#"<path d="m9 18 6-6-6-6"/>"#,
         "check" => r#"<path d="M20 6 9 17l-5-5"/>"#,
+        "down" => r#"<path d="m6 9 6 6 6-6"/>"#,
+        "gamepad" => {
+            r#"<line x1="6" x2="10" y1="12" y2="12"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="15" x2="15.01" y1="13" y2="13"/><line x1="18" x2="18.01" y1="11" y2="11"/><rect width="20" height="12" x="2" y="6" rx="2"/>"#
+        }
+        "sliders" => {
+            r#"<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>"#
+        }
         "shield" => {
             r#"<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>"#
         }
@@ -165,12 +176,13 @@ pub enum Tab {
     Dashboard,
     Users,
     Invites,
+    Archive,
     Settings,
 }
 
 pub struct Flash {
     pub ok: bool,
-    pub text: &'static str,
+    pub text: std::borrow::Cow<'static, str>,
 }
 
 fn head(title: &str) -> String {
@@ -182,28 +194,58 @@ fn head(title: &str) -> String {
 
 pub fn page(server: &str, tab: Tab, flash: Option<Flash>, body: &str) -> String {
     let tabs = [
-        (Tab::Dashboard, "/admin", "dashboard", "Dashboard"),
-        (Tab::Users, "/admin/users", "users", "Users"),
-        (Tab::Invites, "/admin/invites", "ticket", "Invites"),
-        (Tab::Settings, "/admin/settings", "settings", "Settings"),
+        (
+            Tab::Dashboard,
+            "/admin",
+            "dashboard",
+            "Dashboard",
+            "Dashboard",
+        ),
+        (Tab::Users, "/admin/users", "users", "Users", "Users"),
+        (
+            Tab::Invites,
+            "/admin/invites",
+            "ticket",
+            "Invites",
+            "Invites",
+        ),
+        (
+            Tab::Archive,
+            "/admin/archive",
+            "archive",
+            "Archive",
+            "Archive",
+        ),
+        (
+            Tab::Settings,
+            "/admin/settings",
+            "settings",
+            "Settings",
+            "Settings",
+        ),
     ];
-    let mut nav = String::new();
-    for (t, href, ic, label) in tabs {
-        let current = if t == tab {
-            r#" aria-current="page""#
-        } else {
-            ""
-        };
-        let _ = write!(
-            nav,
-            r#"<a href="{href}"{current}>{}<span>{label}</span></a>"#,
-            icon(ic)
-        );
-    }
+    let links = |short: bool| {
+        let mut nav = String::new();
+        for (t, href, ic, label, short_label) in tabs {
+            let current = if t == tab {
+                r#" aria-current="page""#
+            } else {
+                ""
+            };
+            let label = if short { short_label } else { label };
+            let _ = write!(
+                nav,
+                r#"<a href="{href}"{current}>{}<span>{label}</span></a>"#,
+                icon(ic)
+            );
+        }
+        nav
+    };
+    let (nav, bottom) = (links(false), links(true));
     let title = tabs
         .iter()
         .find(|(t, ..)| *t == tab)
-        .map(|(.., label)| *label)
+        .map(|(_, _, _, label, _)| *label)
         .unwrap_or("Admin");
     let flash = flash
         .map(|f| {
@@ -216,7 +258,7 @@ pub fn page(server: &str, tab: Tab, flash: Option<Flash>, body: &str) -> String 
         })
         .unwrap_or_default();
     format!(
-        r#"{}<body><header class="top"><div class="top-inner"><a class="brand" href="/admin"><img src="/admin/icon.png" alt=""><span>{}</span></a><nav class="nav" aria-label="Admin">{nav}</nav><form method="post" action="/admin/logout"><button class="btn ghost" type="submit">{}<span>Sign out</span></button></form></div></header><main>{flash}{body}</main><nav class="bottom-nav" aria-label="Admin">{nav}</nav><script>{SCRIPT}</script></body></html>"#,
+        r#"{}<body><header class="top"><div class="top-inner"><a class="brand" href="/admin"><img src="/admin/icon.png" alt=""><span>{}</span></a><nav class="nav" aria-label="Admin">{nav}</nav><form method="post" action="/admin/logout"><button class="btn ghost" type="submit">{}<span>Sign out</span></button></form></div></header><main>{flash}{body}</main><nav class="bottom-nav" aria-label="Admin">{bottom}</nav><script>{SCRIPT}</script></body></html>"#,
         head(&format!("{title} · {server}")),
         esc(server),
         icon("log-out"),

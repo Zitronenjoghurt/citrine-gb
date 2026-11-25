@@ -23,9 +23,10 @@ impl Emulator {
         log: Option<&mut PadLog>,
         mut session: Option<&mut PlaySession>,
     ) -> GbResult<()> {
-        self.clock.set_matching(
-            self.match_screen && session.is_none() && !self.linked() && !self.partnered(),
-        );
+        let solo = session.is_none() && !self.linked() && !self.partnered();
+        self.clock.set_matching(self.match_screen && solo);
+        self.clock
+            .set_screen_hz(self.display.monitor.filter(|_| solo).map(|rate| rate.hz));
         if self.lent.is_some() {
             return self.finish_lent(ctx);
         }
@@ -51,6 +52,9 @@ impl Emulator {
                 self.adopt(back);
             }
             if session.wants_state() {
+                if self.divert.is_some() {
+                    session.mark_from_peer();
+                }
                 session.give_state(self.encoded_state()?, self.drop_history.take());
             }
             if session.runs_engine() {
@@ -176,6 +180,7 @@ impl Emulator {
             .or_else(|| session.console(false))
             .map_or_else(|| self.timing(), Console::timing);
         self.clock.set_matching(false);
+        self.clock.set_screen_hz(None);
         let due = self.clock.advance(dt, timing);
         let mut frames = Vec::with_capacity(due);
         for _ in 0..due {
@@ -273,6 +278,11 @@ impl Emulator {
             Some(hash) => borrowed_key(hash),
             None => back.console.rom_id().sha256_hex_string(),
         });
+        let divert =
+            (back.peer_touched && back.borrowed.is_none()).then(|| super::peer_saves::Divert {
+                own: back.console.rom_id().sha256_hex_string(),
+                borrowed: borrowed_key(&back.console.game_sha1()),
+            });
         self.screen_recorder.stop();
         let same_game = key == self.rom_key;
         self.replace_machine(back.console);
@@ -287,6 +297,13 @@ impl Emulator {
         self.texture = None;
         self.download_key = key.clone().filter(|_| back.downloaded);
         self.rom_key = key;
+        if let Some(divert) = divert {
+            self.start_divert(back.friend, divert);
+        }
+        #[cfg(ds_wifi)]
+        {
+            self.ds_wifi.peer_console = back.peer_touched;
+        }
         if !same_game {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -301,9 +318,11 @@ impl Emulator {
         self.started_at = Some(web_time::Instant::now());
         self.play = PlayClock::default();
         self.last_good.clear();
+        self.achievements_restore(None);
     }
 
     pub fn start_partner(&mut self, partner: PartnerLink) -> GbResult<()> {
+        self.refuse_in_hardcore()?;
         self.end_link()?;
         self.seat.core_mut().partner = Some(partner);
         self.attach_printer();
@@ -316,6 +335,7 @@ impl Emulator {
         kind: ConsoleKind,
         file_name: Option<&str>,
     ) -> GbResult<()> {
+        self.refuse_in_hardcore()?;
         self.end_link()?;
         let rate = self.sample_rate();
         let link = Some(LocalLink::start(

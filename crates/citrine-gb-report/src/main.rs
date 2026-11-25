@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage:
   citrine-gb-report show <report.zip>
-  citrine-gb-report replay <report.zip> --rom <game> [--gb-boot-rom F] [--gba-bios F]
-                          [--nds-bios9 F] [--nds-bios7 F] [--nds-firmware F] [--png OUT]";
+  citrine-gb-report replay <report.zip> --rom <game> [--gb-boot-rom F] [--gbc-boot-rom F]
+                          [--gba-bios F] [--nds-bios9 F] [--nds-bios7 F] [--nds-firmware F] [--png OUT]";
 
 const LOG_TAIL: usize = 60;
 
@@ -71,6 +71,7 @@ fn show(path: &str) -> Result<ExitCode, String> {
 struct Options {
     rom: Option<PathBuf>,
     gb_boot_rom: Option<PathBuf>,
+    gbc_boot_rom: Option<PathBuf>,
     gba_bios: Option<PathBuf>,
     nds_bios9: Option<PathBuf>,
     nds_bios7: Option<PathBuf>,
@@ -87,6 +88,7 @@ impl Options {
             match flag.as_str() {
                 "--rom" => options.rom = value,
                 "--gb-boot-rom" => options.gb_boot_rom = value,
+                "--gbc-boot-rom" => options.gbc_boot_rom = value,
                 "--gba-bios" => options.gba_bios = value,
                 "--nds-bios9" => options.nds_bios9 = value,
                 "--nds-bios7" => options.nds_bios7 = value,
@@ -103,6 +105,7 @@ impl Options {
         #[cfg_attr(not(feature = "gba"), expect(unused_mut))]
         let mut firmware = Firmware {
             gb_boot_rom: read_optional(&self.gb_boot_rom)?,
+            gbc_boot_rom: read_optional(&self.gbc_boot_rom)?,
             ..Firmware::default()
         };
         #[cfg(feature = "gba")]

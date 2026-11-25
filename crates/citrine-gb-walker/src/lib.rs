@@ -6,7 +6,7 @@ mod home;
 mod info;
 mod lcd;
 mod lz;
-mod packet;
+pub mod packet;
 mod radar;
 mod ram;
 mod rng;

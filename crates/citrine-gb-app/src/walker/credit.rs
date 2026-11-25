@@ -26,15 +26,22 @@ impl Counter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Taken {
+    pub at: u64,
+    pub steps: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credit {
     pub from: u64,
     pub to: u64,
     pub steps: u32,
+    pub taken: Vec<Taken>,
 }
 
 pub trait StepSource {
     fn counter(&self) -> Counter;
-    fn steps(&mut self, from: u64, to: u64) -> Option<u32>;
+    fn steps(&mut self, from: u64, to: u64) -> Option<Vec<Taken>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,13 +78,18 @@ impl Credited {
         if now <= from {
             return None;
         }
-        let steps = source.steps(from, now)?;
+        let mut taken = source.steps(from, now)?;
+        taken.retain(|taken| taken.steps > 0);
+        taken.sort_by_key(|taken| taken.at);
         self.until = Some(now);
         self.counter = source.counter();
         Some(Credit {
             from,
             to: now,
-            steps,
+            steps: taken
+                .iter()
+                .fold(0u32, |sum, taken| sum.saturating_add(taken.steps)),
+            taken,
         })
     }
 }
@@ -98,7 +110,7 @@ pub(crate) mod tests {
             Counter::HealthConnect
         }
 
-        fn steps(&mut self, from: u64, to: u64) -> Option<u32> {
+        fn steps(&mut self, from: u64, to: u64) -> Option<Vec<Taken>> {
             self.asked.push((from, to));
             if self.offline {
                 return None;
@@ -107,8 +119,8 @@ pub(crate) mod tests {
                 self.taken
                     .iter()
                     .filter(|(at, _)| *at >= from && *at < to)
-                    .map(|(_, steps)| steps)
-                    .sum(),
+                    .map(|&(at, steps)| Taken { at, steps })
+                    .collect(),
             )
         }
     }
@@ -144,12 +156,20 @@ pub(crate) mod tests {
                 Credit {
                     from: 100,
                     to: 200,
-                    steps: 320
+                    steps: 320,
+                    taken: vec![
+                        Taken {
+                            at: 150,
+                            steps: 300
+                        },
+                        Taken { at: 199, steps: 20 },
+                    ],
                 },
                 Credit {
                     from: 200,
                     to: 300,
-                    steps: 47
+                    steps: 47,
+                    taken: vec![Taken { at: 200, steps: 7 }, Taken { at: 260, steps: 40 }],
                 }
             )
         );

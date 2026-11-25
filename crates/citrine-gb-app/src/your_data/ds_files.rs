@@ -1,9 +1,7 @@
-use super::{Change, Files, Kind, Part, Tally};
+use super::kept_file::{FilePart, KeptFile};
 use crate::app::ds_firmware::DsFile;
-use crate::icons;
 use crate::storage::SettingsStore;
 use citrine_gb::nds::machine::NdsFirmware;
-use std::io;
 
 pub struct DsFiles<'a> {
     pub store: &'a SettingsStore,
@@ -12,13 +10,13 @@ pub struct DsFiles<'a> {
 }
 
 impl DsFiles<'_> {
-    pub fn part(&mut self, file: DsFile) -> DsFilePart<'_> {
+    pub fn part(&mut self, file: DsFile) -> FilePart<'_, DsFile> {
         let slot = match file {
             DsFile::Arm9Bios => &mut self.slots.arm9_bios,
             DsFile::Arm7Bios => &mut self.slots.arm7_bios,
             DsFile::Firmware => &mut self.slots.firmware,
         };
-        DsFilePart {
+        FilePart {
             file,
             store: self.store,
             image: slot,
@@ -27,95 +25,40 @@ impl DsFiles<'_> {
     }
 }
 
-pub struct DsFilePart<'a> {
-    file: DsFile,
-    store: &'a SettingsStore,
-    image: &'a mut Option<Vec<u8>>,
-    name: &'a mut String,
-}
-
-impl DsFilePart<'_> {
-    fn dir(&self) -> &'static str {
-        match self.file {
+impl KeptFile for DsFile {
+    fn dir(self) -> &'static str {
+        match self {
             DsFile::Arm9Bios => "ds-arm9-bios/",
             DsFile::Arm7Bios => "ds-arm7-bios/",
             DsFile::Firmware => "ds-firmware/",
         }
     }
 
-    fn theirs<'f>(&self, files: &'f Files) -> Option<(&'f str, &'f [u8])> {
-        files.iter().find_map(|(path, bytes)| {
-            let name = path.strip_prefix(self.dir())?;
-            (!name.is_empty() && !name.contains('/') && self.file.accepts(bytes))
-                .then_some((name, bytes.as_slice()))
-        })
-    }
-}
-
-impl Part for DsFilePart<'_> {
-    fn kind(&self) -> Kind {
-        let nouns = match self.file {
+    fn nouns(self) -> (&'static str, &'static str) {
+        match self {
             DsFile::Arm9Bios => ("DS ARM9 BIOS", "DS ARM9 BIOS files"),
             DsFile::Arm7Bios => ("DS ARM7 BIOS", "DS ARM7 BIOS files"),
             DsFile::Firmware => ("DS firmware", "DS firmware files"),
-        };
-        Kind {
-            name: nouns.0,
-            icon: icons::CPU,
-            units: ("", ""),
-            nouns,
         }
     }
 
-    fn tally(&mut self) -> Tally {
-        self.image
-            .as_ref()
-            .map_or_else(Tally::default, |image| Tally {
-                count: 1,
-                bytes: image.len() as u64,
-            })
+    fn fits(self, data: &[u8]) -> bool {
+        self.accepts(data)
     }
 
-    fn export(&mut self, out: &mut Files) {
-        if let Some(image) = self.image.as_ref() {
-            out.insert(format!("{}{}", self.dir(), self.name), image.clone());
-        }
+    fn keys(self) -> (&'static str, &'static str) {
+        self.store_keys()
     }
 
-    fn plan(&mut self, files: &Files) -> Change {
-        match (self.theirs(files), self.image.as_ref()) {
-            (None, _) => Change::default(),
-            (Some(_), None) => Change {
-                added: 1,
-                replaced: 0,
-            },
-            (Some((name, theirs)), Some(mine)) => Change {
-                added: 0,
-                replaced: usize::from(theirs != mine.as_slice() || name != self.name.as_str()),
-            },
-        }
-    }
-
-    fn import(&mut self, files: &Files) -> io::Result<()> {
-        let Some((name, image)) = self.theirs(files) else {
-            return Ok(());
-        };
-        self.store.store_ds_file(self.file, Some((image, name)))?;
-        *self.name = name.to_owned();
-        *self.image = Some(image.to_vec());
-        Ok(())
-    }
-
-    fn delete_all(&mut self) -> io::Result<()> {
-        *self.image = None;
-        self.name.clear();
-        self.store.store_ds_file(self.file, None)
+    fn system_file(self) -> crate::app::system_files::SystemFile {
+        crate::app::system_files::SystemFile::Ds(self)
     }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use crate::your_data::{Files, Part};
     use strum::IntoEnumIterator;
 
     struct Home {
@@ -169,7 +112,7 @@ mod tests {
         assert_eq!(other.slots.arm7_bios, Some(vec![7; 0x4000]));
         assert_eq!(other.slots.arm9_bios, None);
         assert_eq!(
-            other.store.ds_file(DsFile::Arm7Bios),
+            other.store.kept_file(DsFile::Arm7Bios.store_keys()),
             Some((vec![7; 0x4000], "biosnds7.rom".to_owned()))
         );
     }

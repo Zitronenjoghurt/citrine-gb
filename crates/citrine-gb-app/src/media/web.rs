@@ -92,6 +92,29 @@ impl MediaStore {
         });
     }
 
+    pub fn replace(&mut self, id: &MediaId, bytes: &[u8], new: NewMedia) -> io::Result<MediaItem> {
+        if id.kind() != Some(new.kind) || !self.items.iter().any(|i| &i.id == id) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the recording is gone",
+            ));
+        }
+        let info = new.info(bytes.len() as u64);
+        let thumb_png = encode_thumbnail(&new.frame).unwrap_or_default();
+        let record = record(&info, &thumb_png).ok_or_else(|| io::Error::other("bad record"))?;
+        let item = MediaItem {
+            id: id.clone(),
+            info,
+            thumbnail: decode_png(&thumb_png),
+        };
+        let file = js_sys::Uint8Array::from(bytes);
+        queue_put(id.as_str().to_owned(), record, file.into());
+        self.items.retain(|i| &i.id != id);
+        self.items.push(item.clone());
+        sort_newest_first(&mut self.items);
+        Ok(item)
+    }
+
     fn add_bytes(&mut self, new: NewMedia, bytes: Vec<u8>) -> io::Result<MediaItem> {
         let size = bytes.len() as u64;
         let file = js_sys::Uint8Array::from(bytes.as_slice());

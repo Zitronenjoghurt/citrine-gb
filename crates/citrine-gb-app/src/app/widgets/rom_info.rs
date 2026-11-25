@@ -1,5 +1,5 @@
 use crate::app::events::AppEventQueue;
-use crate::app::ui_state::settings::{console_name, other_console, plays_on_both};
+use crate::app::ui_state::settings::{console_icon, console_name, other_console, plays_on_both};
 use citrine_gb::gb::GbModel;
 use citrine_gb::rom::header::RomHeader;
 use egui::{Grid, Response, Ui, Widget};
@@ -36,11 +36,15 @@ impl Widget for RomInfo<'_> {
                     {
                         ui.label("Playing on");
                         ui.vertical(|ui| {
-                            ui.label(console_name(model));
+                            ui.label(format!("{}  {}", console_icon(model), console_name(model)));
                             let other = other_console(model);
                             if plays_on_both(self.header.cgb_mode)
                                 && ui
-                                    .button(format!("Play on {}", console_name(other)))
+                                    .button(format!(
+                                        "{}  Play on {}",
+                                        console_icon(other),
+                                        console_name(other)
+                                    ))
                                     .clicked()
                             {
                                 events.play_on(other);

@@ -78,7 +78,7 @@ fn source(state: &mut DsFilesUi, ui: &mut Ui, spawner: &citrine_gb_threads::Spaw
     let mut chosen = None;
     let mut pick = false;
     ui.horizontal(|ui| {
-        let label = format!("{}  {name}  {}", icons::GAME_CONTROLLER, icons::CARET_DOWN);
+        let label = format!("{}  {name}  {}", icons::CARTRIDGE, icons::CARET_DOWN);
         ui.menu_button(label, |ui| {
             for (index, cart) in state.carts.iter().enumerate() {
                 let text = if cart.from_game {

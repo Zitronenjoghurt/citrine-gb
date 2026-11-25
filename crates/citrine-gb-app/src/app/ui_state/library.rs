@@ -1,7 +1,9 @@
 use citrine_gb::console::ConsoleKind;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+mod identify;
 pub mod scan;
+mod view;
 
 const SUGGESTIONS: usize = 6;
 
@@ -24,6 +26,29 @@ pub struct LibraryGame {
     pub genre: Option<String>,
     #[serde(skip)]
     pub file: FileState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive: Option<ArchiveCopy>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ArchiveCopy {
+    pub id: String,
+    pub download: u64,
+    pub size: u64,
+    #[serde(skip)]
+    pub downloaded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchiveListing {
+    pub path: String,
+    pub name: String,
+    pub console: Option<ConsoleKind>,
+    pub rom_key: String,
+    pub sha1: String,
+    pub crc32: u32,
+    pub copy: ArchiveCopy,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -97,6 +122,7 @@ pub enum Place {
     All,
     Folder(String),
     Opened,
+    Archive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -139,6 +165,7 @@ impl Filter {
             Place::All => true,
             Place::Folder(tree) => game.folders.contains(tree),
             Place::Opened => game.opened,
+            Place::Archive => game.archive.is_some(),
         };
         let tag = match &self.tag {
             None => true,
@@ -158,12 +185,18 @@ pub struct Library {
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     removed: BTreeSet<String>,
     seeded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive_owner: Option<String>,
     #[serde(skip)]
     listed: BTreeMap<String, Option<BTreeSet<String>>>,
     #[serde(skip)]
     checked: BTreeMap<String, FileState>,
     #[serde(skip)]
     scan: scan::Scan,
+    #[serde(skip)]
+    view: view::View,
+    #[serde(skip)]
+    genres_from: Option<(u64, u64)>,
 }
 
 impl Library {
@@ -172,10 +205,7 @@ impl Library {
     }
 
     pub fn folder_games(&self, tree: &str) -> usize {
-        self.entries()
-            .iter()
-            .filter(|game| game.folders.contains(tree))
-            .count()
+        self.sums().folders.get(tree).copied().unwrap_or(0)
     }
 
     pub fn needs_access(&self) -> bool {
@@ -247,7 +277,21 @@ impl Library {
     }
 
     pub fn identify(&mut self, path: &str, identity: Identity) {
-        if let Some(game) = self.games.iter_mut().find(|game| game.path == path) {
+        self.identify_all(vec![(path.to_owned(), identity)]);
+    }
+
+    pub fn identify_all(&mut self, found: Vec<(String, Identity)>) {
+        let mut index: HashMap<&str, usize> = HashMap::with_capacity(self.games.len());
+        for (at, game) in self.games.iter().enumerate() {
+            index.entry(game.path.as_str()).or_insert(at);
+        }
+        let found: Vec<(usize, Identity)> = found
+            .into_iter()
+            .filter_map(|(path, identity)| Some((*index.get(path.as_str())?, identity)))
+            .collect();
+        let mut copies: HashSet<String> = HashSet::new();
+        for (at, identity) in found {
+            let game = &mut self.games[at];
             game.rom_key = Some(identity.rom_key);
             game.sha1 = Some(identity.sha1);
             game.crc32 = identity.crc32.or(game.crc32);
@@ -258,19 +302,30 @@ impl Library {
             if let Some(name) = identity.name.filter(|name| !name.trim().is_empty()) {
                 game.name = name;
             }
+            copies.extend(game.sha1.clone());
         }
-        self.share_tags(path);
+        let mut tags: HashMap<String, Vec<String>> = HashMap::new();
+        for game in &self.games {
+            let Some(sha1) = game.sha1.as_ref().filter(|sha1| copies.contains(*sha1)) else {
+                continue;
+            };
+            let shared = tags.entry(sha1.clone()).or_default();
+            for tag in &game.tags {
+                if !shared.iter().any(|kept| kept.eq_ignore_ascii_case(tag)) {
+                    shared.push(tag.clone());
+                }
+            }
+        }
+        for game in &mut self.games {
+            if let Some(shared) = game.sha1.as_ref().and_then(|sha1| tags.get(sha1)) {
+                game.tags.clone_from(shared);
+            }
+        }
+        self.view.forget();
     }
 
     pub fn unidentified(&self) -> impl Iterator<Item = &LibraryGame> {
-        self.games
-            .iter()
-            .filter(|game| game.file == FileState::Present)
-            .filter(|game| {
-                game.rom_key.is_none()
-                    || (game.ra_hash.is_none()
-                        && crate::achievements::progress::wants_hash(game.console))
-            })
+        self.games.iter().filter(|game| waits(game))
     }
 
     pub fn apply_listing(&mut self, tree: &str, files: Option<Vec<FileFound>>, now: u64) {
@@ -284,12 +339,26 @@ impl Library {
         };
         let paths = files.map(|files| {
             let mut paths = BTreeSet::new();
+            let mut known: std::collections::HashMap<String, usize> = self
+                .games
+                .iter()
+                .enumerate()
+                .map(|(index, game)| (game.path.clone(), index))
+                .collect();
             for file in files {
                 paths.insert(file.path.clone());
                 if self.removed.contains(&file.path) {
                     continue;
                 }
-                let game = self.game_mut(&file.path, &file.name, now);
+                let index = match known.get(&file.path) {
+                    Some(&index) => index,
+                    None => {
+                        let index = self.add_game(&file.path, &file.name, now);
+                        known.insert(file.path.clone(), index);
+                        index
+                    }
+                };
+                let game = &mut self.games[index];
                 game.folders.insert(tree.to_owned());
                 if game.console.is_none() {
                     game.console = scan::console_of(&file.path);
@@ -304,7 +373,7 @@ impl Library {
     pub fn loose_files(&self) -> Vec<String> {
         self.games
             .iter()
-            .filter(|game| game.folders.is_empty())
+            .filter(|game| game.folders.is_empty() && game.archive.is_none())
             .map(|game| game.path.clone())
             .collect()
     }
@@ -328,7 +397,7 @@ impl Library {
     }
 
     pub fn len(&self) -> usize {
-        self.entries().len()
+        self.sums().entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -336,48 +405,32 @@ impl Library {
     }
 
     pub fn entries(&self) -> Vec<&LibraryGame> {
-        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
-        let mut entries: Vec<&LibraryGame> = Vec::new();
-        for game in &self.games {
-            let Some(sha1) = game.sha1.as_deref() else {
-                entries.push(game);
-                continue;
-            };
-            match seen.get(sha1) {
-                Some(&index) if rank(game.file) > rank(entries[index].file) => {
-                    entries[index] = game;
-                }
-                Some(_) => {}
-                None => {
-                    seen.insert(sha1, entries.len());
-                    entries.push(game);
-                }
-            }
-        }
-        entries
+        self.sums()
+            .entries
+            .iter()
+            .map(|&index| &self.games[index])
+            .collect()
     }
 
-    pub fn shown(&self, filter: &Filter, search: &str) -> Vec<&LibraryGame> {
-        let search = search.trim().to_lowercase();
-        let mut shown: Vec<&LibraryGame> = self
-            .entries()
-            .into_iter()
-            .filter(|game| filter.keeps(game))
-            .filter(|game| search.is_empty() || game.name.to_lowercase().contains(&search))
-            .collect();
-        match filter.sort {
-            Sort::Name => shown.sort_by_cached_key(|game| game.name.to_lowercase()),
-            Sort::Played => shown.sort_by_key(|game| std::cmp::Reverse(game.played)),
-            Sort::Added => shown.sort_by_key(|game| std::cmp::Reverse(game.added)),
-        }
-        shown
+    pub fn shown(&self, filter: &Filter, search: &str) -> view::Shown<'_> {
+        self.view.shown(&self.games, filter, search)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.view.revision()
+    }
+
+    #[cfg(test)]
+    pub fn shown_builds(&self) -> usize {
+        self.view.builds()
+    }
+
+    fn sums(&self) -> &view::Sums {
+        self.view.sums(&self.games)
     }
 
     pub fn missing_count(&self) -> usize {
-        self.entries()
-            .iter()
-            .filter(|game| game.file == FileState::Missing)
-            .count()
+        self.sums().missing
     }
 
     pub fn remove_game(&mut self, path: &str) -> Vec<LibraryGame> {
@@ -415,6 +468,7 @@ impl Library {
     fn take(&mut self, gone: impl Fn(&LibraryGame) -> bool) -> Vec<LibraryGame> {
         let (taken, kept) = std::mem::take(&mut self.games).into_iter().partition(gone);
         self.games = kept;
+        self.view.forget();
         for game in &taken {
             self.removed.insert(game.path.clone());
         }
@@ -428,9 +482,10 @@ impl Library {
         }
         let tag = self
             .tags()
-            .into_iter()
+            .iter()
             .map(|(known, _)| known)
             .find(|known| known.eq_ignore_ascii_case(tag))
+            .cloned()
             .unwrap_or_else(|| tag.to_owned());
         let mut added = false;
         for game in self.copies_mut(path) {
@@ -439,6 +494,9 @@ impl Library {
                 added = true;
             }
         }
+        if added {
+            self.view.forget();
+        }
         added
     }
 
@@ -446,18 +504,15 @@ impl Library {
         for game in self.copies_mut(path) {
             game.tags.retain(|kept| !kept.eq_ignore_ascii_case(tag));
         }
+        self.view.forget();
     }
 
-    pub fn tags(&self) -> Vec<(String, usize)> {
-        count(self.entries().into_iter().flat_map(|game| game.tags.iter()))
+    pub fn tags(&self) -> &[(String, usize)] {
+        &self.sums().tags
     }
 
-    pub fn genres(&self) -> Vec<(String, usize)> {
-        count(
-            self.entries()
-                .into_iter()
-                .filter_map(|game| game.genre.as_ref()),
-        )
+    pub fn genres(&self) -> &[(String, usize)] {
+        &self.sums().genres
     }
 
     pub fn suggest_tags(&self, path: &str, typed: &str) -> Vec<(String, usize)> {
@@ -467,10 +522,11 @@ impl Library {
             .map(|game| game.tags.clone())
             .unwrap_or_default();
         self.tags()
-            .into_iter()
+            .iter()
             .filter(|(tag, _)| tag.to_lowercase().contains(&typed))
             .filter(|(tag, _)| !has.iter().any(|kept| kept.eq_ignore_ascii_case(tag)))
             .take(SUGGESTIONS)
+            .cloned()
             .collect()
     }
 
@@ -483,17 +539,26 @@ impl Library {
                 changed = true;
             }
         }
+        if changed {
+            self.view.forget();
+        }
         changed
     }
 
-    pub fn consoles(&self) -> Vec<ConsoleKind> {
-        let mut consoles = Vec::new();
-        for console in self.games.iter().filter_map(|game| game.console) {
-            if !consoles.contains(&console) {
-                consoles.push(console);
-            }
+    pub fn follow_genres<'a>(
+        &mut self,
+        facts: u64,
+        genre_of: impl Fn(&LibraryGame) -> Option<&'a str>,
+    ) {
+        if self.genres_from == Some((self.revision(), facts)) {
+            return;
         }
-        consoles
+        self.set_genres(genre_of);
+        self.genres_from = Some((self.revision(), facts));
+    }
+
+    pub fn consoles(&self) -> &[ConsoleKind] {
+        &self.sums().consoles
     }
 
     fn copies_mut(&mut self, path: &str) -> impl Iterator<Item = &mut LibraryGame> {
@@ -524,24 +589,153 @@ impl Library {
     fn game_mut(&mut self, path: &str, name: &str, now: u64) -> &mut LibraryGame {
         let index = match self.games.iter().position(|game| game.path == path) {
             Some(index) => index,
-            None => {
-                self.games.push(LibraryGame {
-                    path: path.to_owned(),
-                    name: name.trim().to_owned(),
-                    added: now,
-                    ..LibraryGame::default()
-                });
-                self.games.len() - 1
-            }
+            None => self.add_game(path, name, now),
         };
         &mut self.games[index]
+    }
+
+    fn add_game(&mut self, path: &str, name: &str, now: u64) -> usize {
+        self.games.push(LibraryGame {
+            path: path.to_owned(),
+            name: name.trim().to_owned(),
+            added: now,
+            ..LibraryGame::default()
+        });
+        self.games.len() - 1
+    }
+
+    pub fn archive_owner(&self) -> Option<&str> {
+        self.archive_owner.as_deref()
+    }
+
+    pub fn archive_path(&self, rom_key: &str) -> Option<&str> {
+        self.games
+            .iter()
+            .find(|game| game.archive.is_some() && game.rom_key.as_deref() == Some(rom_key))
+            .map(|game| game.path.as_str())
+    }
+
+    pub fn archive_games(&self) -> impl Iterator<Item = &LibraryGame> {
+        self.games.iter().filter(|game| game.archive.is_some())
+    }
+
+    pub fn is_archive_row(&self, path: &std::path::Path) -> bool {
+        self.find(&path.to_string_lossy())
+            .is_some_and(|game| game.archive.is_some())
+    }
+
+    pub fn is_offline_archive(&self, path: &std::path::Path) -> bool {
+        self.find(&path.to_string_lossy())
+            .is_some_and(|game| game.archive.is_some() && game.file == FileState::Offline)
+    }
+
+    pub fn recent_gone(
+        &self,
+        copies: &crate::app::ui_state::recent::copies::RomCopies,
+        path: &std::path::Path,
+    ) -> bool {
+        !self.is_archive_row(path) && copies.is_gone(path)
+    }
+
+    pub fn apply_archive(
+        &mut self,
+        owner: &str,
+        listings: Vec<ArchiveListing>,
+        now: u64,
+    ) -> Vec<LibraryGame> {
+        self.archive_owner = Some(owner.to_owned());
+        let kept: HashSet<&str> = listings.iter().map(|l| l.path.as_str()).collect();
+        let (gone, games) = std::mem::take(&mut self.games)
+            .into_iter()
+            .partition(|game| game.archive.is_some() && !kept.contains(game.path.as_str()));
+        self.games = games;
+        for listing in listings {
+            let game = self.game_mut(&listing.path, &listing.name, now);
+            game.name = listing.name;
+            game.console = listing.console;
+            game.rom_key = Some(listing.rom_key);
+            game.sha1 = Some(listing.sha1);
+            game.crc32 = Some(listing.crc32);
+            game.archive = Some(listing.copy);
+        }
+        let sha1s: Vec<String> = self
+            .archive_games()
+            .filter_map(|g| g.sha1.clone())
+            .collect();
+        for sha1 in sha1s {
+            let Some(path) = self
+                .games
+                .iter()
+                .find(|game| game.sha1.as_deref() == Some(sha1.as_str()))
+                .map(|game| game.path.clone())
+            else {
+                continue;
+            };
+            self.share_tags(&path);
+        }
+        self.settle();
+        gone
+    }
+
+    pub fn mark_archive(&mut self, online: bool) {
+        let checks: Vec<(String, FileState)> = self
+            .archive_games()
+            .map(|game| {
+                let downloaded = game.archive.as_ref().is_some_and(|a| a.downloaded);
+                let file = if downloaded || online {
+                    FileState::Present
+                } else {
+                    FileState::Offline
+                };
+                (game.path.clone(), file)
+            })
+            .collect();
+        self.apply_checks(checks);
+    }
+
+    pub fn set_downloaded(&mut self, path: &str, downloaded: bool) -> bool {
+        let Some(copy) = self
+            .games
+            .iter_mut()
+            .find(|game| game.path == path)
+            .and_then(|game| game.archive.as_mut())
+        else {
+            return false;
+        };
+        let changed = copy.downloaded != downloaded;
+        copy.downloaded = downloaded;
+        if changed {
+            self.view.forget();
+        }
+        changed
+    }
+
+    pub fn drop_archive(&mut self) -> Vec<LibraryGame> {
+        self.archive_owner = None;
+        let (taken, kept) = std::mem::take(&mut self.games)
+            .into_iter()
+            .partition(|game| game.archive.is_some());
+        self.games = kept;
+        for game in &taken {
+            self.checked.remove(&game.path);
+        }
+        self.settle();
+        taken
     }
 
     fn settle(&mut self) {
         for game in &mut self.games {
             game.file = file_state(game, &self.listed, &self.checked);
         }
+        self.view.forget();
     }
+}
+
+fn waits(game: &LibraryGame) -> bool {
+    game.file == FileState::Present
+        && game.archive.is_none()
+        && (game.rom_key.is_none()
+            || (game.ra_hash.is_none() && crate::achievements::progress::wants_hash(game.console)))
 }
 
 fn file_state(
@@ -572,16 +766,6 @@ fn file_state(
     } else {
         FileState::Offline
     }
-}
-
-fn count<'a>(names: impl Iterator<Item = &'a String>) -> Vec<(String, usize)> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for name in names {
-        *counts.entry(name.clone()).or_default() += 1;
-    }
-    let mut counted: Vec<(String, usize)> = counts.into_iter().collect();
-    counted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    counted
 }
 
 fn rank(file: FileState) -> u8 {
@@ -1020,7 +1204,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_game_boy_game_is_read_again_once_for_its_achievements_hash() {
+    fn each_game_is_read_again_once_for_its_achievements_hash() {
         let mut library = Library::default();
         for (path, console) in [
             ("/roms/red.gb", ConsoleKind::Gb),
@@ -1040,6 +1224,15 @@ mod tests {
                 .map(|game| game.path.clone())
                 .collect()
         };
+        assert_eq!(waiting(&library), ["/roms/red.gb", "/roms/zelda.gba"]);
+        library.identify(
+            "/roms/zelda.gba",
+            Identity {
+                ra_hash: Some("8f0e8ad3b4f8a1a4c9cbbb1b0f9e2d77".to_owned()),
+                console: Some(ConsoleKind::Gba),
+                ..identity("cd34")
+            },
+        );
         assert_eq!(waiting(&library), ["/roms/red.gb"]);
         library.identify(
             "/roms/red.gb",

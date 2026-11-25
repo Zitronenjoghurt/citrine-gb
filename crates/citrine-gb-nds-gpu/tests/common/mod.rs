@@ -11,7 +11,7 @@ use citrine_gb::nds::render::{
     FOG_TABLE, Pixel, Registers, Renderer as CpuRenderer,
 };
 use citrine_gb::nds::video::{HEIGHT, Line3d, WIDTH};
-use citrine_gb_nds_gpu::{Antialiasing, Picture, Renderer, Upscale};
+use citrine_gb_nds_gpu::{Antialiasing, Picture, Renderer, Route, Upscale};
 
 pub struct Gpu {
     device: wgpu::Device,
@@ -44,6 +44,20 @@ impl Gpu {
                 None
             }
         }
+    }
+
+    pub fn on_route(mut self, route: Route) -> Self {
+        self.renderer = Renderer::with_route(&self.device, route);
+        self
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn zeroing_workgroups(mut self) -> Self {
+        self.renderer = Renderer::zeroing_workgroups(&self.device, true);
+        self
     }
 
     pub fn render(&mut self, scene: &Scene, scale: u32) -> Picture {

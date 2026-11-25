@@ -14,6 +14,8 @@ use citrine_gb_threads::{Lent, Pending, Threads};
 use std::sync::Arc;
 use web_time::Instant;
 
+const FRESH_PONGS: usize = 2;
+
 type Build = Box<dyn FnOnce() -> GbResult<Rollback> + Send>;
 
 pub(super) enum Building {
@@ -48,6 +50,7 @@ impl PlaySession {
 
     pub(super) fn retire_round(&mut self) {
         self.settle_frames();
+        self.note_peer_state();
         if self.round.rollback().is_some_and(Rollback::is_group)
             && let Some(Engine::Rollback(r)) = self.round.engine.take()
         {
@@ -81,6 +84,7 @@ impl PlaySession {
                 friend: self.friend,
                 history,
                 downloaded: self.downloading,
+                peer_touched: self.from_peer,
             });
         }
     }
@@ -166,13 +170,70 @@ impl PlaySession {
             return;
         };
         self.round.set_up = true;
+        let budget = u8::try_from(self.my_budget()).unwrap_or(u8::MAX);
         self.outbox.push(PlayMsg::Setup {
             round: self.round.number,
             from: packed(origin),
+            budget,
         });
     }
 
+    fn picked_delay(&self, round_trip_ms: Option<u32>, spread_ms: Option<u32>) -> u32 {
+        links::delay_for(
+            self.round_console(),
+            self.input_delay,
+            round_trip_ms,
+            self.shared_budget(),
+        ) + links::jitter_margin(self.round_console(), self.input_delay, spread_ms)
+    }
+
+    fn fresh_round_trip_ms(&self) -> Option<(u32, Option<u32>, bool)> {
+        let median = self.round_trip_ms()?;
+        let newest = self
+            .round_trips
+            .iter()
+            .rev()
+            .take(FRESH_PONGS)
+            .copied()
+            .min()?;
+        let old = self.round_trips.len() / 2;
+        let low = self.round_trips.iter().take(old).copied().min();
+        let high = self.round_trips.iter().take(old).copied().max();
+        let jumped = old >= FRESH_PONGS
+            && low
+                .zip(high)
+                .is_some_and(|(low, high)| newest > high + (high - low).max(high / 2));
+        if !jumped {
+            return Some((median, self.round_trip_spread_ms(), false));
+        }
+        let most = self.round_trips.iter().copied().max()?;
+        Some((newest, Some(most - newest + 1), true))
+    }
+
+    pub(super) fn aim(&self) -> Option<u32> {
+        self.aim_and_jump().map(|(aim, _)| aim)
+    }
+
+    pub(super) fn rise_aim(&self) -> Option<u32> {
+        self.aim_and_jump()
+            .and_then(|(aim, jumped)| jumped.then_some(aim))
+    }
+
+    fn aim_and_jump(&self) -> Option<(u32, bool)> {
+        let ds = matches!(self.round_console(), Some(Console::Nds { .. }));
+        (ds && self.stale_trips == 0 && self.round_trips.len() >= SETUP_PINGS)
+            .then(|| self.fresh_round_trip_ms())
+            .flatten()
+            .map(|(ms, spread, jumped)| (self.picked_delay(Some(ms), spread), jumped))
+    }
+
     pub(super) fn ping(&mut self, now: Instant) {
+        let path = self.path();
+        if path != self.ping_path {
+            self.ping_path = path;
+            self.pings.clear();
+            self.stale_trips = self.round_trips.len();
+        }
         let n = self.next_ping;
         self.next_ping = self.next_ping.wrapping_add(1);
         self.pings.push_back((n, now));
@@ -283,16 +344,7 @@ impl PlaySession {
             seed: random_seed(),
             start_time: unix_now(),
             delay: if both {
-                (links::delay_for(
-                    self.round_console(),
-                    self.input_delay,
-                    self.round_trip_ms(),
-                    self.round_sync().budget(),
-                ) + links::jitter_margin(
-                    self.round_console(),
-                    self.input_delay,
-                    self.round_trip_spread_ms(),
-                )) as u8
+                self.picked_delay(self.round_trip_ms(), self.round_trip_spread_ms()) as u8
             } else {
                 0
             },
@@ -354,6 +406,7 @@ impl PlaySession {
                             links::delay_room(self.round_console(), self.input_delay, None)
                         }
                     };
+                    let cap = links::delay_cap(self.round_console(), self.input_delay);
                     let built = match built {
                         Ok(Ok(rollback)) => Some(rollback),
                         Ok(Err(err)) => {
@@ -364,6 +417,7 @@ impl PlaySession {
                     };
                     let engine = built.map(|mut r| {
                         r.set_delay_room(room);
+                        r.set_delay_cap(cap);
                         for msg in early {
                             r.receive(msg);
                         }
@@ -404,13 +458,44 @@ impl PlaySession {
         })
     }
 
+    pub(super) fn cost_key(&self) -> Option<links::CostKey> {
+        let mine = self.round.my_card.as_ref()?.hash;
+        let theirs = self
+            .round
+            .theirs
+            .as_ref()?
+            .as_ref()
+            .map_or(mine, |card| card.hash);
+        Some(links::CostKey {
+            games: [mine, theirs],
+            players: 2,
+        })
+    }
+
     fn round_sync(&self) -> Sync {
         match self.round_console() {
-            Some(console @ (Console::Gba | Console::Nds { .. })) => {
-                links::sync_for(Some(console), 2, self.lanes)
+            Some(Console::Nds { .. }) => {
+                let cost = self
+                    .ds_cost
+                    .unwrap_or_else(|| links::DsCost::one_ds().pair_on(self.lanes));
+                Sync::new(cost.budget(), 0)
             }
+            Some(console @ Console::Gba) => links::sync_for(Some(console), 2, self.lanes),
             _ => self.sync,
         }
+    }
+
+    fn my_budget(&self) -> u32 {
+        self.round
+            .budget_now
+            .unwrap_or_else(|| self.round_sync().budget())
+    }
+
+    fn shared_budget(&self) -> u32 {
+        let mine = self.my_budget();
+        self.round
+            .their_budget
+            .map_or(mine, |theirs| mine.min(theirs))
     }
 
     pub(super) fn my_rom(&self) -> Option<Arc<[u8]>> {
@@ -455,8 +540,13 @@ impl PlaySession {
         }
         let sample_rate = self.sample_rate;
         let sync = self.round_sync();
+        let measure = self.ds_measure && matches!(self.round_console(), Some(Console::Nds { .. }));
         Some(Box::new(move || {
-            Rollback::new(local, start, games, users, sample_rate, sync, now)
+            let mut rollback = Rollback::new(local, start, games, users, sample_rate, sync, now)?;
+            if measure {
+                rollback.measure_cost();
+            }
+            Ok(rollback)
         }))
     }
 }

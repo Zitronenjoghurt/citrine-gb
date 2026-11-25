@@ -7,10 +7,6 @@ use egui::{
 pub const WAITING: &str = "Waiting for the camera";
 pub const CENTRE: &str = "Centre the frame";
 pub const PHONE_HINT: &str = "Pinch to zoom.";
-#[cfg(target_os = "macos")]
-pub const DESKTOP_HINT: &str = "Pinch, or hold Cmd and scroll, to zoom.";
-#[cfg(not(target_os = "macos"))]
-pub const DESKTOP_HINT: &str = "Pinch, or hold Ctrl and scroll, to zoom.";
 
 const DIM: Color32 = Color32::from_black_alpha(140);
 const HANDLE: f32 = 10.0;

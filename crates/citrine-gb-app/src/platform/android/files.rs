@@ -30,15 +30,16 @@ pub fn pick_rom_folder(tx: Sender<String>) {
     }
 }
 
-pub fn list_roms(tree: &str, tx: Sender<Listing>) {
+pub fn list_roms(tree: &str, levels: usize, tx: Sender<Listing>) {
     let id = wait(Waiting::Roms(tree.to_owned(), tx));
+    let levels = i32::try_from(levels).unwrap_or(i32::MAX);
     let called = super::java(|env, activity| {
         let tree = env.new_string(tree)?;
         env.call_method(
             activity,
             "listRoms",
-            "(ILjava/lang/String;)V",
-            &[JValue::Int(id), JValue::Object(&tree)],
+            "(ILjava/lang/String;I)V",
+            &[JValue::Int(id), JValue::Object(&tree), JValue::Int(levels)],
         )
         .map(drop)
     });
@@ -356,9 +357,7 @@ extern "system" fn Java_io_github_zitronenjoghurt_citrine_MainActivity_nativeTre
         }
         _ => return,
     };
-    let dir = crate::storage::cache_dir()
-        .join(crate::storage::EXPORT)
-        .join(id.to_string());
+    let dir = crate::storage::folder(crate::storage::kinds::Folder::Export).join(id.to_string());
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(err) = std::fs::create_dir_all(&dir) {
         log::error!("could not make the export folder: {err}");

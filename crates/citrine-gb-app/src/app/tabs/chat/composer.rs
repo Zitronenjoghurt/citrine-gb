@@ -1,8 +1,10 @@
 use super::share::replay_share;
-use super::{COMPOSER_ROWS, FIELD_MARGIN, PICKER_EMOJI, PICKER_HEIGHT};
+use super::{
+    COMPOSER_ROWS, Closing, FIELD_MARGIN, FOOT_GAP, GESTURE_HANDLE, PICKER_EMOJI, PICKER_MARGIN,
+};
 use crate::app::events::AppEvent;
 use crate::app::tabs::TabViewer;
-use crate::app::widgets::emoji;
+use crate::app::widgets::{emoji, soft_keyboard};
 use crate::icons;
 use crate::media::{self};
 use citrine_gb_net::{MAX_TEXT_CHARS, OnlineId};
@@ -20,7 +22,7 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
         .max(side);
     let mut send = false;
     let editing = viewer.ui.friends.chat.editing(friend);
-    if editing.is_some() && edit_bar(ui) {
+    if editing.is_some() && edit_bar(ui, side) {
         viewer.ui.friends.chat.end_edit();
         return;
     }
@@ -30,6 +32,9 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
     {
         viewer.ui.friends.chat.end_edit();
         return;
+    }
+    if editing.is_none() {
+        reply_line(ui, viewer, friend, id, side);
     }
     let focused = ui.memory(|m| m.has_focus(id));
     let leave = std::mem::take(&mut viewer.ui.friends.chat.leave_draft);
@@ -65,19 +70,38 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
             })
             .on_hover_text(tip);
             send |= send_button.clicked();
-            let picker = state.picker;
-            let label = if picker { "Hide emoji" } else { "Emoji" };
+            let picker = state.picker && state.closing == Closing::No;
+            let touch = state.touch;
+            let (icon, label) = match (picker, touch) {
+                (true, true) => (icons::KEYBOARD, "Keyboard"),
+                (true, false) => (icons::SMILEY, "Hide emoji"),
+                (false, _) => (icons::SMILEY, "Emoji"),
+            };
             if at_foot(ui, side, tall, |ui| {
-                icon_button(ui, egui::Button::new(icons::SMILEY).selected(picker), side)
+                icon_button(ui, egui::Button::new(icon).selected(picker && !touch), side)
             })
             .on_hover_text(label)
             .clicked()
             {
-                state.picker = !picker;
+                match (picker, touch) {
+                    (true, true) => {
+                        state.closing = Closing::Asked;
+                        state.focus_draft = true;
+                    }
+                    (false, true) => {
+                        state.picker = true;
+                        state.closing = Closing::No;
+                        ui.memory_mut(|m| m.surrender_focus(id));
+                    }
+                    (_, false) => state.picker = !picker,
+                }
             }
             let bar = ui.spacing().scroll.allocated_width();
             let width = (ui.available_width() - bar).max(side);
             let (field, shown) = draft_field(ui, draft, id, width, side, "Message");
+            if touch && state.picker && state.closing == Closing::No && field.has_focus() {
+                state.closing = Closing::Asked;
+            }
             if (shown - tall).abs() >= 0.5 {
                 ui.data_mut(|d| d.insert_temp(height_id, shown));
                 ui.ctx().request_discard("chat field height");
@@ -99,8 +123,10 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
             }
         }
         None => {
-            if viewer.online.send_text(friend, draft) {
+            let to = state.replying.get(&friend).copied();
+            if viewer.online.send_reply(friend, draft, to) {
                 draft.clear();
+                state.replying.remove(&friend);
                 state.jump = true;
             }
         }
@@ -112,7 +138,34 @@ pub(super) fn composer(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
     }
 }
 
-fn edit_bar(ui: &mut Ui) -> bool {
+fn reply_line(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId, field: egui::Id, side: f32) {
+    let state = &mut viewer.ui.friends.chat;
+    let Some(to) = state.replying.get(&friend).copied() else {
+        return;
+    };
+    let shown = viewer
+        .online
+        .conversation(friend)
+        .and_then(|c| c.entries.iter().rev().find(|e| e.id == to))
+        .filter(|e| !e.is_deleted())
+        .map(|e| {
+            (
+                super::reply::author(viewer.online, friend, e.mine),
+                e.quote().line,
+            )
+        });
+    let Some((author, line)) = shown else {
+        state.replying.remove(&friend);
+        return;
+    };
+    let escape = ui.memory(|m| m.has_focus(field))
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    if super::reply::reply_bar(ui, &author, &line, side) || escape {
+        state.replying.remove(&friend);
+    }
+}
+
+fn edit_bar(ui: &mut Ui, side: f32) -> bool {
     let mut cancel = false;
     ui.add_space(2.0);
     ui.horizontal(|ui| {
@@ -122,10 +175,7 @@ fn edit_bar(ui: &mut Ui) -> bool {
                 .color(ui.visuals().weak_text_color()),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            cancel = ui
-                .small_button(icons::X)
-                .on_hover_text("Cancel editing")
-                .clicked();
+            cancel = cancel_button(ui, side, "Cancel editing").clicked();
         });
     });
     cancel
@@ -148,7 +198,7 @@ pub(super) fn draft_field(
         .max_height(row * COMPOSER_ROWS + 8.0)
         .stick_to_bottom(true)
         .show(ui, |ui| {
-            let output = egui::TextEdit::multiline(draft)
+            let edit = egui::TextEdit::multiline(draft)
                 .id(id)
                 .hint_text(hint)
                 .desired_rows(1)
@@ -157,8 +207,8 @@ pub(super) fn draft_field(
                 .desired_width(width - FIELD_MARGIN.sum().x)
                 .min_size(vec2(width, side))
                 .vertical_align(Align::Center)
-                .layouter(&mut layouter)
-                .show(ui);
+                .layouter(&mut layouter);
+            let output = crate::app::widgets::field::framed(ui, edit);
             emoji::paint_field(ui, &output, draft);
             output.response
         });
@@ -173,6 +223,10 @@ pub(super) fn enter_sends(input: &mut egui::InputState) -> bool {
 pub(super) fn at_foot<R>(ui: &mut Ui, side: f32, tall: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
     ui.allocate_ui_with_layout(vec2(side, tall), Layout::bottom_up(Align::Center), add)
         .inner
+}
+
+pub(super) fn cancel_button(ui: &mut Ui, side: f32, tip: &str) -> egui::Response {
+    icon_button(ui, egui::Button::new(icons::X), side).on_hover_text(tip)
 }
 
 pub(super) fn icon_button(ui: &mut Ui, button: egui::Button, side: f32) -> egui::Response {
@@ -245,7 +299,7 @@ pub(super) fn attach_menu(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId,
             && ui
                 .add_enabled(
                     blocked.is_none(),
-                    egui::Button::new(format!("{}  Input replay", icons::GAME_CONTROLLER)),
+                    egui::Button::new(format!("{}  Input replay", icons::REPLAY)),
                 )
                 .on_disabled_hover_text(blocked.unwrap_or_default())
                 .clicked()
@@ -261,20 +315,75 @@ pub(super) fn attach_menu(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId,
     });
 }
 
-pub(super) fn picker(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
-    ui.add_space(4.0);
+pub(super) fn picker(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId, height: f32) {
+    let touch = viewer.ui.friends.chat.touch;
+    ui.add_space(FOOT_GAP);
     let mut picked = None;
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .corner_radius(8.0)
-        .inner_margin(6.0)
+    let fill = ui.visuals().faint_bg_color;
+    let corner = if touch {
+        egui::CornerRadius {
+            nw: 8,
+            ne: 8,
+            sw: 0,
+            se: 0,
+        }
+    } else {
+        egui::CornerRadius::same(8)
+    };
+    let card = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(corner)
+        .inner_margin(PICKER_MARGIN)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            if touch {
+                ui.set_min_height(height);
+                return;
+            }
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let width = ui.available_width() - ui.spacing().scroll.allocated_width();
+            let rows = emoji::picker_rows_height(width, PICKER_EMOJI, height);
             egui::ScrollArea::vertical()
                 .id_salt("chat_emoji_scroll")
-                .max_height(PICKER_HEIGHT)
+                .max_height(rows)
                 .show(ui, |ui| picked = emoji::picker(ui, PICKER_EMOJI));
-        });
+        })
+        .response
+        .rect;
+    if touch {
+        let screen = ui.ctx().viewport_rect();
+        let run = egui::Rect::from_x_y_ranges(card.x_range(), card.bottom()..=screen.bottom());
+        if run.height() > 0.0 {
+            let mut painter = ui.painter().clone();
+            painter.set_clip_rect(screen);
+            painter.rect_filled(run, 0.0, fill);
+        }
+        let inner = card.shrink2(vec2(PICKER_MARGIN, 0.0));
+        let width = inner.width() - ui.spacing().scroll.allocated_width();
+        let span = card.height() + gesture_lift(ui.ctx());
+        if let Some(layout) = emoji::picker_layout(width, PICKER_EMOJI, span) {
+            let rows = egui::Rect::from_min_size(
+                egui::pos2(inner.left(), card.top() + layout.edge),
+                vec2(inner.width(), layout.rows_height),
+            );
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt("chat_emoji_rows")
+                    .max_rect(rows)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            child.set_clip_rect(rows.expand2(vec2(PICKER_MARGIN, 0.0)).intersect(screen));
+            child.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical()
+                .id_salt("chat_emoji_scroll")
+                .max_height(layout.rows_height)
+                .min_scrolled_height(layout.rows_height)
+                .auto_shrink([false, false])
+                .show(&mut child, |ui| {
+                    picked = emoji::picker_spaced(ui, PICKER_EMOJI, layout.row_spacing);
+                });
+        }
+    }
     if let Some(glyph) = picked {
         let state = &mut viewer.ui.friends.chat;
         let draft = state.drafts.entry(friend).or_default();
@@ -282,6 +391,13 @@ pub(super) fn picker(ui: &mut Ui, viewer: &mut TabViewer, friend: OnlineId) {
             draft.push_str(glyph);
         }
     }
+}
+
+fn gesture_lift(ctx: &egui::Context) -> f32 {
+    let inset =
+        ctx.viewport_rect().bottom() - ctx.content_rect().bottom() - soft_keyboard::shown(ctx);
+    let handle = ((inset - GESTURE_HANDLE) / 2.0).max(0.0);
+    f32::from(crate::app::tabs::CONTENT_MARGIN.bottom) + handle
 }
 
 #[cfg(test)]

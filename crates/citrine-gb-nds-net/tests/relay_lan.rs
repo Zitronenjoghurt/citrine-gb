@@ -191,17 +191,46 @@ fn a_relay_with_no_lease_leaves_the_ds_on_its_own_address_with_no_lan() {
 }
 
 #[test]
-fn a_lan_datagram_to_a_port_the_ds_never_sent_from_is_dropped() {
+fn a_lan_datagram_reaches_a_port_the_ds_never_sent_from() {
     let mut lan = Lan::new(&[Some(A), Some(B)]);
     assert_eq!(lan.addresses(), Some(vec![A, B]));
-    lan.dses[0].send(SocketAddrV4::new(B, 2000), b"lost");
-    assert_eq!(lan.until(|lan| lan.dses[1].heard()), None);
-    lan.dses[1].send(FAR, b"beat");
-    lan.until(|lan| (!lan.dses[1].gateway.udp_peers().is_empty()).then_some(()))
-        .expect("b's port goes out");
-    lan.dses[0].send(SocketAddrV4::new(B, 2000), b"hi b");
+    lan.dses[0].send(SocketAddrV4::new(B, 2000), b"first");
     assert_eq!(
         lan.until(|lan| lan.dses[1].heard()),
-        Some((b"hi b".to_vec(), SocketAddrV4::new(A, 1000)))
+        Some((b"first".to_vec(), SocketAddrV4::new(A, 1000)))
+    );
+    lan.dses[1].send(SocketAddrV4::new(A, 1000), b"back");
+    assert_eq!(
+        lan.until(|lan| lan.dses[0].heard()),
+        Some((b"back".to_vec(), SocketAddrV4::new(B, 2000)))
+    );
+}
+
+#[test]
+fn lan_datagrams_to_many_ports_open_a_bounded_number() {
+    let mut lan = Lan::new(&[Some(A), Some(B)]);
+    assert_eq!(lan.addresses(), Some(vec![A, B]));
+    for port in 3000..3200 {
+        let heard = NetIn::Heard {
+            port,
+            from: SocketAddrV4::new(A, 1000),
+            data: b"knock".to_vec(),
+        };
+        lan.dses[1].end.back.send(heard).unwrap();
+    }
+    for _ in 0..50 {
+        lan.dses[1].step();
+    }
+    let mut ports: Vec<u16> = lan.dses[1]
+        .gateway
+        .udp_peers()
+        .iter()
+        .map(|peer| peer.ds_port)
+        .collect();
+    ports.dedup();
+    assert!(
+        !ports.is_empty() && ports.len() <= 64,
+        "{} ports",
+        ports.len()
     );
 }

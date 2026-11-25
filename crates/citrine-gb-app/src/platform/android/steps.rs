@@ -6,7 +6,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 
 #[derive(Default)]
 struct Counter {
-    wanted: Option<(bool, bool)>,
+    wanted: Option<(bool, bool, bool)>,
     reading: Option<Reading>,
     denied: bool,
 }
@@ -19,13 +19,13 @@ fn counter() -> MutexGuard<'static, Counter> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-pub fn follow(on: bool, ask: bool) {
+pub fn follow(on: bool, ask: bool, keep: bool) {
     {
         let mut counter = counter();
-        if counter.wanted == Some((on, ask)) {
+        if counter.wanted == Some((on, ask, keep)) {
             return;
         }
-        counter.wanted = Some((on, ask));
+        counter.wanted = Some((on, ask, keep));
         if !on {
             counter.reading = None;
         }
@@ -37,8 +37,12 @@ pub fn follow(on: bool, ask: bool) {
         env.call_method(
             activity,
             "steps",
-            "(ZZ)V",
-            &[JValue::Bool(on.into()), JValue::Bool(ask.into())],
+            "(ZZZ)V",
+            &[
+                JValue::Bool(on.into()),
+                JValue::Bool(ask.into()),
+                JValue::Bool(keep.into()),
+            ],
         )
         .map(drop)
     });

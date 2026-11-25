@@ -26,6 +26,14 @@ size_t rcheevos_sys_layout(int which) {
     case 9: return sizeof(rc_client_all_user_progress_entry_t);
     case 10: return sizeof(rc_client_hash_library_entry_t);
     case 11: return sizeof(rc_client_game_list_entry_t);
+    case 12: return sizeof(rc_client_leaderboard_t);
+    case 13: return sizeof(rc_client_leaderboard_tracker_t);
+    case 14: return sizeof(rc_client_leaderboard_bucket_t);
+    case 15: return sizeof(rc_client_leaderboard_list_t);
+    case 16: return sizeof(rc_client_leaderboard_entry_t);
+    case 17: return sizeof(rc_client_leaderboard_entry_list_t);
+    case 18: return sizeof(rc_client_leaderboard_scoreboard_entry_t);
+    case 19: return sizeof(rc_client_leaderboard_scoreboard_t);
     case 100: return offsetof(rc_api_request_t, content_type);
     case 101: return offsetof(rc_client_user_t, avatar_url);
     case 102: return offsetof(rc_client_achievement_t, unlock_time);
@@ -37,6 +45,12 @@ size_t rcheevos_sys_layout(int which) {
     case 108: return offsetof(rc_client_hash_library_entry_t, game_id);
     case 109: return offsetof(rc_api_server_response_t, http_status_code);
     case 110: return offsetof(rc_client_game_list_entry_t, num_unsupported_hashes);
+    case 111: return offsetof(rc_client_leaderboard_t, lower_is_better);
+    case 112: return offsetof(rc_client_leaderboard_entry_t, rank);
+    case 113: return offsetof(rc_client_leaderboard_entry_list_t, user_index);
+    case 114: return offsetof(rc_client_leaderboard_scoreboard_t, num_top_entries);
+    case 115: return offsetof(rc_client_leaderboard_scoreboard_t, top_entries);
+    case 116: return offsetof(rc_client_event_t, leaderboard_scoreboard);
     default: return (size_t)-1;
   }
 }

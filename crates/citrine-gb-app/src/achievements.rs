@@ -1,13 +1,16 @@
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 mod badges;
+pub mod boards;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod net;
 pub mod progress;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod secrets;
 
 use crate::app::widgets::game_tile::Progress;
 pub use badges::Badges;
-use citrine_gb_achievements::{Achievement, GameState, User};
+use citrine_gb_achievements::{Achievement, GameState, Load, User};
 use progress::LibraryProgress;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +19,7 @@ use serde::{Deserialize, Serialize};
 pub struct AchievementSettings {
     pub account: Option<Account>,
     pub in_library: bool,
+    pub hardcore: bool,
 }
 
 impl Default for AchievementSettings {
@@ -23,6 +27,7 @@ impl Default for AchievementSettings {
         Self {
             account: None,
             in_library: true,
+            hardcore: false,
         }
     }
 }
@@ -31,6 +36,7 @@ impl Default for AchievementSettings {
 #[serde(default)]
 pub struct Account {
     pub username: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub token: String,
 }
 
@@ -54,6 +60,11 @@ pub enum Notice {
         title: String,
         badge_url: Option<String>,
     },
+    Hardcore,
+    Board {
+        title: String,
+        notice: boards::BoardNotice,
+    },
 }
 
 impl Notice {
@@ -61,6 +72,7 @@ impl Notice {
         match self {
             Notice::Unlocked(achievement) => achievement.badge_url.as_deref(),
             Notice::Completed { badge_url, .. } => badge_url.as_deref(),
+            Notice::Hardcore | Notice::Board { .. } => None,
         }
     }
 }
@@ -69,6 +81,7 @@ impl Notice {
 enum Want {
     SignIn { username: String, password: String },
     SignOut,
+    TryAgain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,15 +95,17 @@ pub const SIGN_UP_URL: &str = "https://retroachievements.org/createaccount.php";
 pub struct Achievements {
     pub status: Status,
     pub game: Option<GameState>,
-    pub no_set: bool,
+    pub load: Load,
     pub problem: Option<String>,
     pub form: SignInForm,
     pub show_all: bool,
+    pub asking_hardcore: bool,
     pub badges: Badges,
+    pub boards: boards::Boards,
     pub library: LibraryProgress,
     wants: Vec<Want>,
     #[cfg(not(target_arch = "wasm32"))]
-    cache: crate::storage::Backend,
+    cache: crate::storage::Folders,
     #[cfg(not(target_arch = "wasm32"))]
     link: Link,
     #[cfg(not(target_arch = "wasm32"))]
@@ -114,6 +129,7 @@ struct Held {
 #[cfg(not(target_arch = "wasm32"))]
 struct Link {
     net: Box<dyn net::Net>,
+    secrets: Box<dyn secrets::Secrets>,
     waiting: Vec<(
         citrine_gb_achievements::RequestId,
         std::sync::mpsc::Receiver<citrine_gb_achievements::Response>,
@@ -123,6 +139,7 @@ struct Link {
     by_token: bool,
     retry_at: Option<web_time::Instant>,
     last_idle: Option<web_time::Instant>,
+    last_presence: Option<web_time::Instant>,
     library_retry_at: Option<web_time::Instant>,
 }
 
@@ -133,7 +150,9 @@ impl Default for Achievements {
             #[cfg(not(target_arch = "wasm32"))]
             Box::new(net::Offline),
             #[cfg(not(target_arch = "wasm32"))]
-            crate::storage::Backend::cache(),
+            Box::new(secrets::InFile),
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::storage::Folders::default(),
         )
     }
 }
@@ -145,23 +164,28 @@ impl Achievements {
             #[cfg(not(target_arch = "wasm32"))]
             net::platform(spawner),
             #[cfg(not(target_arch = "wasm32"))]
-            crate::storage::Backend::cache(),
+            secrets::platform(),
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::storage::Folders::default(),
         )
     }
 
     fn with(
         badges: Box<dyn crate::covers::net::Net>,
         #[cfg(not(target_arch = "wasm32"))] net: Box<dyn net::Net>,
-        #[cfg(not(target_arch = "wasm32"))] cache: crate::storage::Backend,
+        #[cfg(not(target_arch = "wasm32"))] secrets: Box<dyn secrets::Secrets>,
+        #[cfg(not(target_arch = "wasm32"))] cache: crate::storage::Folders,
     ) -> Self {
         Self {
             status: Status::SignedOut,
             game: None,
-            no_set: false,
+            load: Load::Idle,
             problem: None,
             form: SignInForm::default(),
             show_all: false,
-            badges: Badges::new(badges, crate::storage::Backend::cache()),
+            asking_hardcore: false,
+            badges: Badges::new(badges, crate::storage::Folders::default()),
+            boards: boards::Boards::default(),
             library: LibraryProgress::default(),
             wants: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -169,12 +193,14 @@ impl Achievements {
             #[cfg(not(target_arch = "wasm32"))]
             link: Link {
                 net,
+                secrets,
                 waiting: Vec::new(),
                 user_agent: None,
                 started: false,
                 by_token: false,
                 retry_at: None,
                 last_idle: None,
+                last_presence: None,
                 library_retry_at: None,
             },
             #[cfg(not(target_arch = "wasm32"))]
@@ -210,6 +236,14 @@ impl Achievements {
         self.wants.push(Want::SignOut);
     }
 
+    pub fn try_again(&mut self) {
+        self.wants.push(Want::TryAgain);
+    }
+
+    pub fn hardcore_wanted(settings: &crate::app::ui_state::settings::Settings) -> bool {
+        settings.dev_mode && settings.achievements.hardcore
+    }
+
     pub fn progress(&self, settings: &AchievementSettings, hash: Option<&str>) -> Option<Progress> {
         if !settings.in_library || self.user().is_none() {
             return None;
@@ -228,6 +262,7 @@ mod pump {
     use web_time::{Duration, Instant};
 
     const IDLE_EVERY: Duration = Duration::from_secs(1);
+    const PRESENCE_EVERY: Duration = Duration::from_secs(1);
     const RETRY_AFTER: Duration = Duration::from_secs(30);
     const BADGE_WAIT: Duration = Duration::from_secs(2);
 
@@ -237,8 +272,18 @@ mod pump {
         }
 
         #[cfg(test)]
-        pub(crate) fn on_net(net: Box<dyn net::Net>, cache: crate::storage::Backend) -> Self {
-            Self::with(Box::new(crate::covers::net::Offline), net, cache)
+        pub(crate) fn on_net(net: Box<dyn net::Net>, cache: crate::storage::Folders) -> Self {
+            Self::with(
+                Box::new(crate::covers::net::Offline),
+                net,
+                Box::new(secrets::InFile),
+                cache,
+            )
+        }
+
+        #[cfg(test)]
+        pub(crate) fn keep_tokens_in(&mut self, secrets: Box<dyn secrets::Secrets>) {
+            self.link.secrets = secrets;
         }
 
         pub fn pump(
@@ -247,6 +292,27 @@ mod pump {
             settings: &mut Settings,
             paused: bool,
         ) -> Vec<Notice> {
+            let wanted = Self::hardcore_wanted(settings);
+            let (notices, reset) = self.pump_client(emulator, settings, paused, wanted);
+            if reset {
+                emulator.restart();
+            }
+            let set = !matches!(
+                self.load,
+                Load::UnknownGame | Load::NoSet | Load::Unreachable | Load::Failed(_)
+            );
+            emulator.follow_hardcore(wanted && self.status != Status::SignedOut && set);
+            emulator.follow_pause_due();
+            notices
+        }
+
+        fn pump_client(
+            &mut self,
+            emulator: &mut Emulator,
+            settings: &mut Settings,
+            paused: bool,
+            hardcore: bool,
+        ) -> (Vec<Notice>, bool) {
             let now = Instant::now();
             let quiet = settings.achievements.account.is_none()
                 && self.status == Status::SignedOut
@@ -254,7 +320,7 @@ mod pump {
                 && self.link.waiting.is_empty()
                 && !emulator.has_achievements();
             if quiet {
-                return Vec::new();
+                return (Vec::new(), false);
             }
             emulator
                 .with_achievements(|seat| {
@@ -268,17 +334,29 @@ mod pump {
                         ))
                     });
                     let ua = ua.clone();
+                    client.set_hardcore(hardcore);
                     let retry = link.retry_at.is_some_and(|at| now >= at);
                     if (!link.started || retry)
                         && let Some(account) = &settings.achievements.account
                     {
                         link.started = true;
                         link.retry_at = None;
-                        link.by_token = true;
-                        self.status = Status::SigningIn;
-                        client.sign_in_with_token(&account.username, &account.token);
+                        let token = if account.token.is_empty() {
+                            link.secrets.get(&account.username)
+                        } else {
+                            Some(account.token.clone())
+                        };
+                        if let Some(token) = token {
+                            link.by_token = true;
+                            self.status = Status::SigningIn;
+                            client.sign_in_with_token(&account.username, &token);
+                        } else {
+                            settings.achievements.account = None;
+                            settings.dirty = true;
+                        }
                     }
                     link.started = true;
+                    let mut try_again = false;
                     for want in std::mem::take(&mut self.wants) {
                         match want {
                             Want::SignIn { username, password } => {
@@ -286,17 +364,22 @@ mod pump {
                                 link.retry_at = None;
                                 client.sign_in_with_password(&username, &password);
                             }
+                            Want::TryAgain => try_again = true,
                             Want::SignOut => {
                                 client.sign_out();
+                                if let Some(account) = &settings.achievements.account {
+                                    link.secrets.remove(&account.username);
+                                }
                                 link.retry_at = None;
                                 settings.achievements.account = None;
                                 settings.dirty = true;
                                 self.status = Status::SignedOut;
                                 self.game = None;
-                                self.no_set = false;
+                                self.load = Load::Idle;
                                 self.problem = None;
                                 self.form = SignInForm::default();
                                 self.library = LibraryProgress::default();
+                                self.boards.follow_game(None);
                                 link.library_retry_at = None;
                             }
                         }
@@ -318,14 +401,26 @@ mod pump {
                         client.complete(id, response, &mut memory);
                     }
                     let mut notices = Vec::new();
+                    let mut reset = false;
+                    let mut boards_changed = false;
                     let events = client.take_events();
                     let changed = !events.is_empty();
                     for event in events {
                         match event {
                             Event::SignedIn(user) => {
+                                if let Some(old) = &settings.achievements.account
+                                    && old.username != user.username
+                                {
+                                    link.secrets.remove(&old.username);
+                                }
+                                let token = if link.secrets.set(&user.username, &user.token) {
+                                    String::new()
+                                } else {
+                                    user.token.clone()
+                                };
                                 let account = Some(Account {
                                     username: user.username.clone(),
-                                    token: user.token.clone(),
+                                    token,
                                 });
                                 if settings.achievements.account != account {
                                     settings.achievements.account = account;
@@ -342,16 +437,17 @@ mod pump {
                                 if by_token && error == SignInError::Network {
                                     link.retry_at = Some(now + RETRY_AFTER);
                                 } else if by_token {
+                                    if let Some(account) = &settings.achievements.account {
+                                        link.secrets.remove(&account.username);
+                                    }
                                     settings.achievements.account = None;
                                     settings.dirty = true;
                                 }
                                 self.problem = Some(sign_in_problem(error, &message, by_token));
                             }
-                            Event::GameLoaded => self.no_set = false,
-                            Event::NoSet => self.no_set = true,
-                            Event::GameLoadFailed(message) => {
-                                log::warn!("achievements: the game's set didn't load: {message}");
-                            }
+                            Event::GameLoaded if hardcore => notices.push(Notice::Hardcore),
+                            Event::GameLoaded => {}
+                            Event::ResetNeeded => reset = true,
                             Event::Unlocked(achievement) => {
                                 notices.push(Notice::Unlocked(achievement))
                             }
@@ -376,8 +472,56 @@ mod pump {
                                 self.library.asked = false;
                                 link.library_retry_at = Some(now + RETRY_AFTER);
                             }
-                            Event::Disconnected | Event::Reconnected | Event::ResetNeeded => {}
+                            Event::BoardStarted(board) => {
+                                boards_changed = true;
+                                notices.push(Notice::Board {
+                                    title: board.title,
+                                    notice: boards::BoardNotice::Started,
+                                });
+                            }
+                            Event::BoardFailed(board) => {
+                                boards_changed = true;
+                                notices.push(Notice::Board {
+                                    title: board.title,
+                                    notice: boards::BoardNotice::Failed,
+                                });
+                            }
+                            Event::BoardSubmitted { .. } | Event::TrackersChanged => {
+                                boards_changed = true;
+                            }
+                            Event::Scoreboard(scoreboard) => {
+                                boards_changed = true;
+                                let me = match &self.status {
+                                    Status::SignedIn(user) => boards::me(user),
+                                    _ => "",
+                                };
+                                self.boards.take_scoreboard(&scoreboard, me);
+                                let title = self
+                                    .boards
+                                    .board(scoreboard.board)
+                                    .map(|board| board.title.clone())
+                                    .unwrap_or_default();
+                                notices.push(Notice::Board {
+                                    title,
+                                    notice: boards::BoardNotice::Submitted {
+                                        score: scoreboard.submitted,
+                                        rank: scoreboard.rank,
+                                        entries: scoreboard.entries,
+                                    },
+                                });
+                            }
+                            Event::Entries(entries) => self.boards.take_entries(entries),
+                            Event::EntriesFailed { board, message, .. } => {
+                                log::warn!("achievements: rankings didn't load: {message}");
+                                self.boards.fetch_failed(board);
+                            }
+                            Event::Disconnected | Event::Reconnected => {}
                         }
+                    }
+                    let signed_in = matches!(self.status, Status::SignedIn(_));
+                    let idle = *seat.client.load() == Load::Idle && seat.console().is_some();
+                    if signed_in && (try_again || idle) {
+                        seat.load_running_game();
                     }
                     if replied
                         && let Status::SignedIn(user) = &mut self.status
@@ -407,18 +551,40 @@ mod pump {
                         link.last_idle = Some(now);
                         client.idle(&mut memory);
                     }
-                    for request in client.take_requests() {
-                        let id = request.id;
-                        link.waiting.push((id, link.net.send(request, &ua)));
-                    }
                     self.unsent = client.unsent_unlocks();
+                    if self.load != *client.load() {
+                        self.load = client.load().clone();
+                    }
                     if changed || self.game.is_some() != client.has_game() {
                         self.game = client.game();
                         if let Some(game) = &self.game {
                             self.library.saw(game);
                         }
                     }
-                    notices
+                    self.boards.follow_game(self.game.as_ref());
+                    self.boards.hardcore = client.hardcore();
+                    if boards_changed {
+                        self.boards.attempts = client.attempts();
+                    }
+                    if signed_in && self.game.is_some() {
+                        for (board, fetch, count) in self.boards.take_wants() {
+                            client.fetch_entries(board, fetch, count);
+                        }
+                    }
+                    let presence_due = link
+                        .last_presence
+                        .is_none_or(|at| now - at >= PRESENCE_EVERY);
+                    if self.game.is_some() && presence_due {
+                        link.last_presence = Some(now);
+                        if let Some(presence) = client.rich_presence() {
+                            self.boards.presence = Some(presence);
+                        }
+                    }
+                    for request in client.take_requests() {
+                        let id = request.id;
+                        link.waiting.push((id, link.net.send(request, &ua)));
+                    }
+                    (notices, reset)
                 })
                 .unwrap_or_default()
         }

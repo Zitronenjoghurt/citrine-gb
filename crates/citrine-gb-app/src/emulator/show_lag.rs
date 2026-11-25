@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use web_time::Instant;
 
-const KEPT: usize = 60;
+const KEPT: usize = 600;
 const FITS_SLACK: f64 = 0.1;
 
 #[derive(Debug, Default)]
@@ -22,9 +22,31 @@ impl ShowLag {
     }
 
     pub(crate) fn lag(&self, refresh: Duration, frame: Duration) -> u32 {
-        let fits = (frame.as_secs_f64() / refresh.as_secs_f64().max(1e-9) + FITS_SLACK).floor();
-        let most = (fits as u32).saturating_sub(1);
-        self.needs.iter().copied().max().unwrap_or(0).min(most)
+        self.needs
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .min(most_lag(refresh, frame))
+    }
+}
+
+fn most_lag(refresh: Duration, frame: Duration) -> u32 {
+    let fits = (frame.as_secs_f64() / refresh.as_secs_f64().max(1e-9) + FITS_SLACK).floor();
+    (fits as u32).saturating_sub(1)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Basis {
+    pub(crate) refresh: Duration,
+    pub(crate) frame: Duration,
+    pub(crate) least: u32,
+}
+
+impl Basis {
+    pub(crate) fn lag(self, lag: &ShowLag) -> u32 {
+        lag.lag(self.refresh, self.frame)
+            .max(self.least.min(most_lag(self.refresh, self.frame)))
     }
 }
 
@@ -42,9 +64,9 @@ impl ShowPace {
         self.update += refreshes.unwrap_or(1);
     }
 
-    pub(crate) fn lent(&mut self, now: Instant, frames: usize, lag: Option<(Duration, Duration)>) {
-        let wait = match lag {
-            Some((refresh, frame)) if frames > 0 => self.lag.lag(refresh, frame),
+    pub(crate) fn lent(&mut self, now: Instant, frames: usize, basis: Option<Basis>) {
+        let wait = match basis {
+            Some(basis) if frames > 0 => basis.lag(&self.lag),
             _ => 0,
         };
         self.slot = Some(self.update + u64::from(wait));
@@ -116,6 +138,23 @@ mod tests {
     }
 
     #[test]
+    fn a_least_lag_holds_a_quick_frame_one_refresh_where_two_fit() {
+        let mut lag = ShowLag::default();
+        lag.finished(ms(1.0), REFRESH_180 - TAIL, REFRESH_180);
+        let basis = |refresh, least| Basis {
+            refresh,
+            frame: FRAME,
+            least,
+        };
+        assert_eq!(basis(REFRESH_180, 1).lag(&lag), 1);
+        assert_eq!(basis(ms(8.33), 1).lag(&lag), 1);
+        assert_eq!(basis(REFRESH_60, 1).lag(&lag), 0);
+        assert_eq!(basis(REFRESH_180, 0).lag(&lag), 0);
+        lag.finished(ms(30.0), REFRESH_180 - TAIL, REFRESH_180);
+        assert_eq!(basis(REFRESH_180, 1).lag(&lag), 2);
+    }
+
+    #[test]
     fn a_refresh_measured_a_little_long_still_fits_three_in_a_ds_frame() {
         let ds_frame = Duration::from_nanos(16_715_000);
         let mut lag = ShowLag::default();
@@ -125,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn one_slow_frame_holds_the_lag_for_a_second() {
+    fn one_slow_frame_holds_the_lag_for_ten_seconds() {
         let mut lag = ShowLag::default();
         lag.finished(ms(10.0), REFRESH_180 - TAIL, REFRESH_180);
         for _ in 0..KEPT - 1 {
@@ -183,7 +222,15 @@ mod tests {
             if update % every != 0 {
                 continue;
             }
-            pace.lent(begin, 1, Some((refresh, FRAME)));
+            pace.lent(
+                begin,
+                1,
+                Some(Basis {
+                    refresh,
+                    frame: FRAME,
+                    least: 0,
+                }),
+            );
             away = Some(begin + cost(update));
             if pace.due() && away.is_some_and(|done| done <= deadline) {
                 show(&mut pace, &mut away, update);
@@ -228,6 +275,18 @@ mod tests {
         let mut rng = Rng(3);
         let shown = run(REFRESH_60, 1, |_| rng.ms(4.0, 9.0));
         assert!(gaps(&shown).iter().all(|&gap| gap == 1));
+    }
+
+    #[test]
+    fn slow_frames_a_second_apart_hold_one_refresh_once() {
+        let shown = run(REFRESH_180, 3, |update| {
+            if update == 240 || update == 480 {
+                ms(9.0)
+            } else {
+                ms(2.0)
+            }
+        });
+        assert_eq!(held_after_warmup(&shown), 1);
     }
 
     #[test]

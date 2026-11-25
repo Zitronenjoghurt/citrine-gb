@@ -17,6 +17,7 @@ unsafe extern "C" {
     fn CVDisplayLinkStop(link: *mut c_void) -> i32;
     fn CVDisplayLinkRelease(link: *mut c_void);
     fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(link: *mut c_void) -> f64;
+    fn CVDisplayLinkSetCurrentCGDisplay(link: *mut c_void, display: u32) -> i32;
 }
 
 struct Shared {
@@ -64,6 +65,10 @@ impl VsyncLink {
 
     pub fn wake_at(&self, count: u64) {
         self.shared().wake_at.store(count, Ordering::Release);
+    }
+
+    pub fn show_on(&self, display: u32) {
+        unsafe { CVDisplayLinkSetCurrentCGDisplay(self.link, display) };
     }
 
     pub fn period(&self) -> Option<f64> {

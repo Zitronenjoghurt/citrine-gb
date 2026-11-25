@@ -69,18 +69,26 @@ pub fn menu_row_with(
         return response;
     }
     let visuals = ui.style().interact(&response);
-    if crate::app::big_screen::ring::fill(&response) {
-        ui.painter()
-            .rect_filled(rect, visuals.corner_radius, focus_fill(ui.visuals()));
-    } else if response.hovered() || response.has_focus() || response.is_pointer_button_down_on() {
+    let ringed = crate::app::big_screen::ring::row(
+        &response,
+        rect,
+        visuals.corner_radius.average(),
+        ui.clip_rect(),
+    );
+    if response.hovered()
+        || (response.has_focus() && !ringed)
+        || response.is_pointer_button_down_on()
+    {
         ui.painter()
             .rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
     }
     let text_pos = egui::pos2(rect.left() + padding.x, rect.center().y - text_height / 2.0);
-    ui.painter().galley(text_pos, galley, visuals.text_color());
-    if let Some(end) = end {
+    let end_at = end.as_ref().map(|end| {
         let right = rect.right() - padding.x - switch_size.map_or(0.0, |size| size.x + SWITCH_GAP);
-        let at = egui::pos2(right - end.size().x, rect.center().y - end.size().y / 2.0);
+        egui::pos2(right - end.size().x, rect.center().y - end.size().y / 2.0)
+    });
+    ui.painter().galley(text_pos, galley, visuals.text_color());
+    if let (Some(end), Some(at)) = (end, end_at) {
         ui.painter().galley(at, end, visuals.text_color());
     }
     if let (Some(on), Some(size)) = (switch, switch_size) {
@@ -95,10 +103,6 @@ pub fn menu_row_with(
         }
     }
     response
-}
-
-fn focus_fill(visuals: &egui::Visuals) -> egui::Color32 {
-    crate::app::big_screen::ring::fill_color(visuals, visuals.window_fill)
 }
 
 #[cfg(test)]

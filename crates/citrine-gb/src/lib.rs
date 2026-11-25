@@ -1,3 +1,5 @@
+#[cfg(feature = "gba")]
+mod achievement_map;
 pub mod cheats;
 pub mod console;
 #[cfg(feature = "debug")]

@@ -26,13 +26,20 @@ class StepCounter(
         if (granted()) return start()
         if (ask && !asked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             asked = true
-            activity.requestPermissions(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION), PERMISSION_REQUEST)
+            val wanted = listOfNotNull(
+                Manifest.permission.ACTIVITY_RECOGNITION,
+                Manifest.permission.POST_NOTIFICATIONS.takeIf {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !Notifications.permitted(activity)
+                },
+            )
+            activity.requestPermissions(wanted.toTypedArray(), PERMISSION_REQUEST)
         }
     }
 
     fun permissionAnswered(granted: Boolean) {
         if (!granted) return onDenied()
         if (wanted) start()
+        StepService.resume(activity)
     }
 
     private fun granted(): Boolean =

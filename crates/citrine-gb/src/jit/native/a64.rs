@@ -3,19 +3,23 @@ mod runtime;
 
 use std::cmp::Ordering;
 
-use runtime::runtime;
+use runtime::{DATA_OVERLAP, runtime};
 
-use super::super::helpers::{EXIT, IDLES_SHIFT, THUMB};
+use super::super::fast::{HALF_CYCLES, LONG_HALF, LONG_WORD, PAGE_SHIFT, WORD_CYCLES};
+use super::super::helpers::{
+    EXIT, IDLES_SHIFT, RUN_COUNT_MASK, RUN_CYCLES_SHIFT, RUN_FIRST_SHIFT, THUMB,
+};
 use super::super::lookup::LINKS;
 use super::super::scan::{Block, Jump, Multiply, Offset, Plan, Target, Transfer, Width};
 use super::{
-    ALL_FLAGS, ALWAYS, Alu, BLOCK_WORDS, Backend, CODE_CLASS, FLAG_C, FLAG_N, FLAG_V, FLAG_Z,
-    Fetch, Info, Item, Kind, Last, Linked, Lowered, MARK, Offsets, Operand, PENDING_LIMIT,
-    PSR_CPSR, PSR_READ_SPSR, PSR_SPSR, Runtime, SHIFT_IDLES, STUBS, Setup, Stub, Swap, block_word,
-    entry_word, link_owners, load_pc_word, memory_word, restore_word, step_word,
+    ALL_FLAGS, ALWAYS, Alu, BIOS_FETCH, BLOCK_WORDS, Backend, CODE_CLASS, FLAG_C, FLAG_N, FLAG_V,
+    FLAG_Z, Fetch, IWRAM_FETCH, IWRAM_IDLES, IWRAM_RUN, Info, Item, Kind, Last, Linked, Lowered,
+    MARK, Offsets, Operand, PENDING_LIMIT, PSR_CPSR, PSR_READ_SPSR, PSR_SPSR, ROM_LITERAL, Runtime,
+    SHIFT_IDLES, STUBS, Setup, Stub, Swap, block_word, entry_word, link_owners, load_pc_word,
+    memory_word, restore_word, step_word,
 };
 use crate::jit_cache::{LINK, Reloc};
-use asm::{Asm, Label, Logic, R, Shift, ZR, invert, logical_immediate};
+use asm::{Asm, Indexed, Label, Logic, R, Shift, ZR, invert, logical_immediate};
 
 const GUEST: [R; 15] = [19, 20, 21, 22, 23, 24, 25, 26, 9, 10, 11, 12, 13, 27, 14];
 const S: R = 15;
@@ -63,6 +67,19 @@ struct Skip {
     nf: bool,
 }
 
+struct Slow {
+    label: Label,
+    back: Label,
+    stub: Stub,
+    word: u32,
+}
+
+struct ColdFetch {
+    label: Label,
+    back: Label,
+    marker: u32,
+}
+
 struct Lower<'a> {
     a: Asm,
     plan: &'a Plan<'a>,
@@ -73,9 +90,12 @@ struct Lower<'a> {
     entries: Vec<u32>,
     sites: Vec<(Label, u32)>,
     skips: Vec<Skip>,
+    slows: Vec<Slow>,
+    fetches: Vec<ColdFetch>,
     links: Vec<Reloc>,
     owners: [Option<usize>; LINKS],
     v5: bool,
+    pages: bool,
     code: u32,
     timed: bool,
     runs: Vec<Option<usize>>,
@@ -168,9 +188,12 @@ fn assemble(lowered: &Lowered, plan: &Plan, o: &Offsets, copy: bool) -> Option<L
         entries: Vec::new(),
         sites: Vec::new(),
         skips: Vec::new(),
+        slows: Vec::new(),
+        fetches: Vec::new(),
         links: Vec::new(),
         owners: link_owners(&lowered.items, plan),
         v5: lowered.v5,
+        pages: lowered.pages,
         code: if lowered.v5 { 0 } else { lowered.code },
         timed: lowered.timed,
         runs: if lowered.timed && lowered.flat {
@@ -216,14 +239,16 @@ fn assemble(lowered: &Lowered, plan: &Plan, o: &Offsets, copy: bool) -> Option<L
 }
 
 fn flat_runs(items: &[Item], plan: &Plan) -> Vec<Option<usize>> {
-    let fits = |index: usize| {
+    let straight = |index: usize| plan.ops.get(index).is_some_and(|op| op.straight());
+    let fits = |index: usize, written: u32| {
         let item = items[index];
-        plan.ops.get(index).is_some_and(|op| op.straight())
-            && item.condition == ALWAYS
-            && item.ahead == 0
+        item.condition == ALWAYS
             && match item.kind {
-                Kind::Alu(alu) => !alu.shifted(),
-                Kind::Constant { .. } => true,
+                Kind::Alu(alu) => !alu.shifted() && straight(index),
+                Kind::Constant { .. } => straight(index),
+                Kind::Multiply(multiply) => {
+                    run_multiply(multiply) && written & 1 << multiply.rs == 0
+                }
                 _ => false,
             }
     };
@@ -232,15 +257,43 @@ fn flat_runs(items: &[Item], plan: &Plan) -> Vec<Option<usize>> {
     let mut first = 0;
     while first < usable {
         let mut end = first;
-        while end < usable && fits(end) {
+        let mut written = 0;
+        while end < usable && end - first <= RUN_COUNT_MASK as usize && fits(end, written) {
+            written |= run_writes(items[end]);
             end += 1;
+            if items[end - 1].ahead > 0 {
+                break;
+            }
         }
-        if end - first >= 2 {
-            runs[first] = Some(end - 1);
+        let mut last = end;
+        while last > first && matches!(items[last - 1].kind, Kind::Multiply(_)) {
+            last -= 1;
+        }
+        if last - first >= 2 {
+            runs[first] = Some(last - 1);
         }
         first = end.max(first + 1);
     }
     runs
+}
+
+fn run_multiply(multiply: Multiply) -> bool {
+    multiply.condition == ALWAYS
+        && multiply.long.is_none()
+        && !multiply.set_flags
+        && [multiply.rd, multiply.rm, multiply.rs]
+            .iter()
+            .all(|&reg| reg != PC)
+        && multiply.accumulate.is_none_or(|rn| rn != PC)
+}
+
+fn run_writes(item: Item) -> u32 {
+    match item.kind {
+        Kind::Alu(alu) if alu.writes_rd() => 1 << alu.rd,
+        Kind::Constant { rd, .. } => 1 << rd,
+        Kind::Multiply(multiply) => 1 << multiply.rd,
+        _ => 0,
+    }
 }
 
 impl<'a> Lower<'a> {
@@ -357,7 +410,7 @@ impl Lower<'_> {
     fn leave_cell(&mut self, stub: Stub, info: Info, cell: Option<usize>) -> Option<()> {
         self.a.mov_imm(INFO, info.word()?);
         if let Some(cell) = cell {
-            self.a.movk(true, INFO, 1 << cell, 2);
+            self.a.movk(true, INFO, cell as u32 + 1, 2);
         }
         self.reach(stub as u32, false);
         Some(())
@@ -421,13 +474,25 @@ impl Lower<'_> {
     }
 
     fn fetch(&mut self, index: usize, idles: Option<R>) {
+        if let (None, Some((marker, latch))) = (idles, self.quick_word(index)) {
+            self.fetch_word(index, marker, latch);
+            return;
+        }
         let thumb = if self.plan.thumb { THUMB } else { 0 };
         if let Some(idles) = idles {
-            self.a.mov_imm(2, thumb);
+            let word = self.iwram_word(index);
+            let flag = if word.is_some() { IWRAM_IDLES } else { 0 };
+            self.a.mov_imm(2, thumb | flag);
             self.a
                 .logical(Logic::Orr, false, 2, 2, idles, Shift::Lsl, IDLES_SHIFT);
+            if let Some(word) = word {
+                self.a.mov_imm(3, word);
+            }
         }
         self.a.mov_imm(1, self.pc_read(index));
+        if idles.is_none() {
+            self.quick_args(index);
+        }
         let stub = match idles {
             Some(_) => Stub::Fetch,
             None if self.plan.thumb => Stub::FetchThumb,
@@ -436,9 +501,127 @@ impl Lower<'_> {
         self.reach(stub as u32, true);
     }
 
+    fn quick_args(&mut self, index: usize) {
+        let Some(quick) = self.o.quick else {
+            return;
+        };
+        let addr = self.pc_read(index);
+        let word = self.plan.words.get(index + 2).copied();
+        match (quick.rom_offset(addr), word) {
+            (Some(from), Some(word)) => {
+                let last = if self.plan.thumb {
+                    (word & 0xFFFF) * 0x0001_0001
+                } else {
+                    word
+                };
+                self.a.mov_imm(2, from as u32);
+                self.a.mov_imm(3, last);
+            }
+            (None, Some(word)) if !self.plan.thumb && addr >> 24 == quick.iwram_page => {
+                self.a.mov_imm(2, IWRAM_FETCH);
+                self.a.mov_imm(3, word);
+            }
+            (None, Some(word)) if !self.plan.thumb && addr < quick.bios_end => {
+                self.a.mov_imm(2, BIOS_FETCH);
+                self.a.mov_imm(3, word);
+            }
+            _ => self.a.mov_imm(2, u32::MAX),
+        }
+    }
+
+    fn quick_word(&self, index: usize) -> Option<(u32, u32)> {
+        let quick = self.o.quick?;
+        let addr = self.pc_read(index);
+        let word = *self.plan.words.get(index + 2)?;
+        if self.plan.thumb || quick.rom_offset(addr).is_some() {
+            None
+        } else if addr >> 24 == quick.iwram_page {
+            Some((IWRAM_FETCH, word))
+        } else if addr < quick.bios_end {
+            Some((BIOS_FETCH, word))
+        } else {
+            None
+        }
+    }
+
+    fn fetch_word(&mut self, index: usize, marker: u32, latch: u32) {
+        let Some(q) = self.o.quick else {
+            return;
+        };
+        let (label, back) = (self.a.label(), self.a.label());
+        let open = if marker == IWRAM_FETCH {
+            q.open_iwram
+        } else {
+            q.open_bios
+        };
+        let bit = q.prefetch_bit.trailing_zeros();
+        self.a.mov_imm(1, self.pc_read(index));
+        self.a.mov_imm(3, latch);
+        self.a.ldr(true, 4, CTX, self.o.bus);
+        self.bus_field(4, false, 5, q.now);
+        self.bus_field(4, false, 6, q.dma_check);
+        self.a.arith(true, true, false, 6, 5, 6, Shift::Lsl, 0);
+        self.a.tbz(false, 6, 63, label);
+        self.bus_field(1, false, 6, q.wait_bits + (bit / 8) as i32);
+        self.a.tbz(false, 6, bit % 8, label);
+        self.bus_field(8, false, 6, q.clock);
+        self.a.add_imm(true, false, 6, 6, 1);
+        self.bus_field(8, true, 6, q.clock);
+        self.bus_field(1, true, ZR, q.branched);
+        self.bus_field(4, true, 3, open);
+        self.a.add_imm(false, false, 5, 5, 1);
+        self.bus_field(4, true, 5, q.sample);
+        self.bus_field(4, true, 5, q.now);
+        self.bus_field(4, true, 1, q.open_addr);
+        self.bus_field(4, true, 3, q.open_last);
+        self.a.sub_imm(false, false, S, S, 1);
+        self.a.mov_imm(2, 1);
+        self.a.str(false, 2, CTX, self.o.last);
+        self.a.bind(back);
+        self.fetches.push(ColdFetch {
+            label,
+            back,
+            marker,
+        });
+    }
+
+    fn bus_field(&mut self, scale: u32, store: bool, rt: R, offset: i32) {
+        let offset = offset as u32;
+        let (base, offset) = if offset.is_multiple_of(scale) && offset / scale < 0x1000 {
+            (4, offset)
+        } else {
+            self.a.mov_imm(17, offset);
+            self.a.arith(true, false, false, 17, 4, 17, Shift::Lsl, 0);
+            (17, 0)
+        };
+        match (scale, store) {
+            (1, false) => self.a.ldrb(rt, base, offset),
+            (1, true) => self.a.strb(rt, base, offset),
+            (8, false) => self.a.ldr(true, rt, base, offset),
+            (8, true) => self.a.str(true, rt, base, offset),
+            (_, false) => self.a.ldr(false, rt, base, offset),
+            (_, true) => self.a.str(false, rt, base, offset),
+        }
+    }
+
+    fn iwram_word(&self, index: usize) -> Option<u32> {
+        let quick = self.o.quick?;
+        if self.plan.thumb || self.pc_read(index) >> 24 != quick.iwram_page {
+            return None;
+        }
+        self.plan.words.get(index + 2).copied()
+    }
+
     fn fetch_idles(&mut self, index: usize, idles: u32) {
         let thumb = if self.plan.thumb { THUMB } else { 0 };
-        self.a.mov_imm(2, thumb | idles << IDLES_SHIFT);
+        let packed = thumb | idles << IDLES_SHIFT;
+        match self.iwram_word(index) {
+            Some(word) => {
+                self.a.mov_imm(2, packed | IWRAM_IDLES);
+                self.a.mov_imm(3, word);
+            }
+            None => self.a.mov_imm(2, packed),
+        }
         self.a.mov_imm(1, self.pc_read(index));
         self.reach(Stub::Fetch as u32, true);
     }
@@ -447,14 +630,51 @@ impl Lower<'_> {
         let slow = self.a.label();
         let thumb = if self.plan.thumb { THUMB } else { 0 };
         let count = (end - first + 1) as u32;
-        self.a.mov_imm(1, self.pc_read(first));
-        self.a.mov_imm(2, thumb | count << IDLES_SHIFT);
+        let latch = self.flat_latch(first, end);
+        let flag = if latch.is_some() { IWRAM_RUN } else { 0 };
+        let reserve = self.pending + self.items[end].ahead;
+        if !Asm::fits_arith(reserve) {
+            return None;
+        }
+        let packed = thumb | flag | (count - 1) << IDLES_SHIFT | count << RUN_CYCLES_SHIFT;
+        let multiplies: Vec<(usize, Multiply)> = (first..=end)
+            .filter_map(|index| match self.items[index].kind {
+                Kind::Multiply(multiply) => Some((index, multiply)),
+                _ => None,
+            })
+            .collect();
+        if multiplies.is_empty() {
+            self.a.mov_imm(1, self.pc_read(first));
+            self.a.mov_imm(2, packed);
+        } else {
+            self.a.mov_imm(2, packed);
+            for (index, multiply) in multiplies {
+                self.multiply_cycles(index, multiply)?;
+                self.a
+                    .arith(false, false, false, 2, 2, 3, Shift::Lsl, RUN_CYCLES_SHIFT);
+                if index == first {
+                    self.a
+                        .arith(false, false, false, 2, 2, 3, Shift::Lsl, RUN_FIRST_SHIFT);
+                }
+            }
+            self.a.mov_imm(1, self.pc_read(first));
+        }
+        if let Some(latch) = latch {
+            self.a.mov_imm(3, latch);
+        }
+        if reserve > 0 {
+            self.a.sub_imm(false, false, S, S, reserve);
+        }
         self.reach(Stub::FetchFlat as u32, true);
+        if reserve > 0 {
+            self.a.add_imm(false, false, S, S, reserve);
+        }
         self.a.cbz(false, 1, slow);
         for index in first..=end {
             match self.items[index].kind {
                 Kind::Alu(alu) => self.alu(index, alu),
                 Kind::Constant { rd, value } => self.a.mov_imm(GUEST[rd as usize], value),
+                Kind::Multiply(multiply) => self.multiply(multiply),
                 _ => return None,
             }
         }
@@ -462,6 +682,19 @@ impl Lower<'_> {
         self.a.b(*self.heads.get(end + 1)?);
         self.a.bind(slow);
         Some(())
+    }
+
+    fn flat_latch(&self, first: usize, end: usize) -> Option<u32> {
+        let words = [
+            *self.plan.words.get(end + 1)?,
+            *self.plan.words.get(end + 2)?,
+        ];
+        self.o.quick?.iwram_latch(
+            self.pc_read(first),
+            self.pc_read(end),
+            self.plan.thumb,
+            words,
+        )
     }
 
     fn spend_counted(&mut self, cycles: R) -> Last {
@@ -577,8 +810,10 @@ impl Lower<'_> {
                         self.spend(spend, item.check)
                     }
                     None if self.timed => {
-                        self.multiply_cycles(index, multiply)?;
-                        self.fetch(index, Some(3));
+                        if run.is_none() {
+                            self.multiply_cycles(index, multiply)?;
+                            self.fetch(index, Some(3));
+                        }
                         self.multiply(multiply);
                         Last::Ctx
                     }
@@ -835,7 +1070,7 @@ impl Lower<'_> {
         let needs_v = alu.set_flags && live & FLAG_V != 0;
         let cheap_c = !needs_c || carry == Some(Carry::Fixed(false));
         let merge = alu.set_flags && !(cheap_c && !needs_v);
-        let flags = alu.set_flags && (needs_nz || merge);
+        let flags = alu.set_flags && (needs_nz || needs_c || merge);
         let dest = match (alu.writes_rd(), flags) {
             (true, _) => GUEST[alu.rd as usize],
             (false, true) => 0,
@@ -1053,7 +1288,17 @@ impl Lower<'_> {
         }
     }
 
+    fn literal(&self, index: usize, transfer: Transfer) -> Option<u32> {
+        if self.o.quick.is_none() || !self.timed || self.v5 || self.pages || !self.plan.thumb {
+            return None;
+        }
+        let addr = transfer.pc_literal(self.pc_read(index))?;
+        let literal = self.plan.literal(index)?;
+        (literal.addr == addr).then_some(literal.word)
+    }
+
     fn transfer(&mut self, index: usize, transfer: Transfer) -> Option<()> {
+        debug_assert!(transfer.width != Width::Word || !transfer.signed);
         let item = self.items[index];
         let pending = self.pending;
         let conditional = item.condition != ALWAYS;
@@ -1094,7 +1339,18 @@ impl Lower<'_> {
             (false, true) => self.moved(0, base, offset, transfer.up()),
             (false, false) => self.a.mov(0, base),
         }
-        let (kind, ahead, cost) = (transfer.kind(), item.ahead, self.charged(index));
+        let paged = transfer.load()
+            && self.v5
+            && self.pages
+            && !self.timed
+            && (self.tag(index).is_some() || self.last(index));
+        if paged {
+            self.flush();
+        }
+        let literal = self.literal(index, transfer);
+        debug_assert!(!paged || literal.is_none());
+        let kind = transfer.kind() | literal.map_or(0, |_| ROM_LITERAL);
+        let (ahead, cost) = (item.ahead, self.charged(index));
         let leave = self.tag(index).and_then(|tag| match transfer.load() {
             true => leave_word(kind, ahead, cost, self.pending, transfer.rd).map(|word| word | tag),
             false => memory_word(kind, ahead, cost, self.pending).map(|word| word | tag),
@@ -1105,12 +1361,96 @@ impl Lower<'_> {
             (true, None) => (Stub::Load, memory_word(kind, ahead, cost, self.pending)?),
             (false, None) => (Stub::Store, memory_word(kind, ahead, cost, self.pending)?),
         };
-        self.call(stub, packed | self.code << CODE_CLASS);
+        let packed = packed | self.code << CODE_CLASS;
+        if paged {
+            self.paged_load(transfer, cost, stub, packed)?;
+        } else if let Some(word) = literal {
+            self.a
+                .mov_imm64(2, u64::from(packed) | u64::from(word) << 32);
+            self.reach(stub as u32, true);
+        } else {
+            self.call(stub, packed);
+        }
         self.pending = 0;
         if transfer.load() {
             self.a.mov(GUEST[transfer.rd as usize], 0);
         }
         self.after_memory(index, skip, pending, leave.is_none())
+    }
+
+    fn paged_load(&mut self, transfer: Transfer, cost: u32, stub: Stub, word: u32) -> Option<()> {
+        let (slow, back, long, timed) = (
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+            self.a.label(),
+        );
+        self.a.ldr(true, 4, CTX, self.o.pages);
+        self.a.lsr(5, 0, PAGE_SHIFT);
+        self.a.arith(true, false, false, 5, 4, 5, Shift::Lsl, 5);
+        self.a.pair(true, true, 6, 7, 5, 0);
+        self.a.cbz(false, 7, slow);
+        match transfer.width {
+            Width::Word => {
+                let (immr, imms) = logical_immediate(!3)?;
+                self.a.logical_imm(Logic::And, 5, 0, immr, imms);
+                self.a.indexed(Indexed::LoadWord, 4, 6, 5);
+                self.a.lsl(5, 0, 3);
+                self.a.rorv(0, 4, 5);
+            }
+            Width::Half => {
+                let (immr, imms) = logical_immediate(!1)?;
+                self.a.logical_imm(Logic::And, 5, 0, immr, imms);
+                let op = if transfer.signed {
+                    Indexed::LoadSignedHalf
+                } else {
+                    Indexed::LoadHalf
+                };
+                self.a.indexed(op, 0, 6, 5);
+            }
+            Width::Byte => {
+                let op = if transfer.signed {
+                    Indexed::LoadSignedByte
+                } else {
+                    Indexed::LoadByte
+                };
+                self.a.indexed(op, 0, 6, 0);
+            }
+        }
+        let (cycles, flag) = match transfer.width {
+            Width::Word => (WORD_CYCLES, LONG_WORD),
+            Width::Byte | Width::Half => (HALF_CYCLES, LONG_HALF),
+        };
+        self.a.mrs_nzcv(3);
+        self.a.tbz(true, 7, flag, long);
+        self.a.ubfx(7, 7, cycles, 8);
+        self.a.mov_imm(4, cost);
+        self.a.cmp(4, 7);
+        self.a.csel(6, 4, 7, 0x8);
+        self.a.b(timed);
+        self.a.bind(long);
+        self.a.ubfx(7, 7, cycles, 8);
+        self.a
+            .add_imm(false, false, 6, 7, cost.saturating_sub(DATA_OVERLAP));
+        self.a.bind(timed);
+        self.a.arith(false, true, false, S, S, 6, Shift::Lsl, 0);
+        self.a.sub_imm(false, false, 7, 6, 1);
+        self.a.cmp(DEBT, 7);
+        self.a.csel(7, DEBT, 7, 0x3);
+        self.a
+            .arith(false, true, false, DEBT, DEBT, 7, Shift::Lsl, 0);
+        self.a.arith(false, true, false, 7, 6, 7, Shift::Lsl, 0);
+        self.a.str(false, 7, CTX, self.o.last);
+        self.a.str(false, ZR, CTX, self.o.force);
+        self.a.msr_nzcv(3);
+        self.a.bind(back);
+        self.slows.push(Slow {
+            label: slow,
+            back,
+            stub,
+            word,
+        });
+        Some(())
     }
 
     fn tag(&self, index: usize) -> Option<u32> {
@@ -1140,6 +1480,12 @@ impl Lower<'_> {
     }
 
     fn load_pc(&mut self, index: usize, transfer: Transfer) -> Option<()> {
+        let condition = self.items[index].condition;
+        let skip = (condition != ALWAYS).then(|| self.a.label());
+        if let Some(skip) = skip {
+            self.a.b_cond(invert(condition), skip);
+        }
+        let pending = self.pending;
         let pc = self.pc_read(index);
         let base = self.reg(transfer.rn, pc, 3);
         let offset = self.offset(transfer.offset, pc);
@@ -1164,7 +1510,7 @@ impl Lower<'_> {
         self.pending = 0;
         self.a.mov_imm(2, word);
         self.reach(Stub::LoadPc as u32, false);
-        Some(())
+        self.skipped(index, skip, pending)
     }
 
     fn user_block(&mut self, index: usize, block: Block) -> Option<()> {
@@ -1252,14 +1598,19 @@ impl Lower<'_> {
         };
         let replaced = block.writeback && !(block.load && keeps);
         let returns = block.loads_pc();
-        if returns && !self.v5 {
+        if returns && !self.v5 && !self.timed {
             return None;
         }
+        let collects = returns && self.v5;
         let stub = if block.load {
             if replaced {
                 self.add_value(base, base, moved);
             }
-            if returns { Stub::Collect } else { Stub::Gather }
+            if collects {
+                Stub::Collect
+            } else {
+                Stub::Gather
+            }
         } else {
             let early = !self.v5 && replaced && registers.first() != Some(&block.rn);
             if early {
@@ -1278,7 +1629,7 @@ impl Lower<'_> {
             }
             Stub::Scatter
         };
-        let packed = if returns {
+        let packed = if collects {
             block_word(count, 0, 0, self.pending)?
         } else {
             block_word(count, item.ahead, self.charged(index), self.pending)? | self.code
@@ -1286,7 +1637,7 @@ impl Lower<'_> {
         self.call(stub, packed);
         self.pending = 0;
         if block.load {
-            if returns {
+            if collects {
                 let (immr, imms) = logical_immediate(EXIT as u32 - 1)?;
                 self.a.logical_imm(Logic::And, 1, 0, immr, imms);
             }
@@ -1305,7 +1656,7 @@ impl Lower<'_> {
         if returns {
             self.a.ldr(false, 0, CTX, self.o.block + 4 * (count - 1));
             self.leave(
-                Stub::Return,
+                if self.v5 { Stub::Return } else { Stub::Branch },
                 Info {
                     at: index as u32 + 1,
                     fetch: Fetch::Core,
@@ -1735,6 +2086,11 @@ impl Lower<'_> {
     }
 
     fn cold(&mut self) -> Option<()> {
+        for slow in std::mem::take(&mut self.slows) {
+            self.a.bind(slow.label);
+            self.call(slow.stub, slow.word);
+            self.a.b(slow.back);
+        }
         for skip in std::mem::take(&mut self.skips) {
             let item = skip.item;
             self.a.bind(skip.label);
@@ -1772,6 +2128,11 @@ impl Lower<'_> {
             self.a.mov_imm(INFO, word);
             self.reach(Stub::Exit as u32, false);
         }
+        for fetch in std::mem::take(&mut self.fetches) {
+            self.a.bind(fetch.label);
+            self.call(Stub::FetchArm, fetch.marker);
+            self.a.b(fetch.back);
+        }
         Some(())
     }
 }
@@ -1785,7 +2146,8 @@ enum Carry {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::scan::{Op, classify, classify_thumb};
+    use super::super::super::helpers::Helpers;
+    use super::super::super::scan::{Literal, Op, classify, classify_thumb};
     use super::super::{Offsets, lower};
     use super::*;
 
@@ -1806,6 +2168,15 @@ mod tests {
     }
 
     fn linked_timed<const V5: bool>(words: &[u32], thumb: bool, timed: bool) -> Option<Linked> {
+        linked_with::<V5>(words, thumb, timed, false)
+    }
+
+    fn linked_with<const V5: bool>(
+        words: &[u32],
+        thumb: bool,
+        timed: bool,
+        pages: bool,
+    ) -> Option<Linked> {
         let size = if thumb { 2 } else { 4 };
         let ops: Vec<Op> = words
             .iter()
@@ -1827,8 +2198,10 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
-        let lowered = lower(&plan, V5, V5, timed).expect("lowers");
+        let mut lowered = lower(&plan, V5, V5, timed).expect("lowers");
+        lowered.pages = pages;
         block(&lowered, &plan, &Offsets::of::<V5>())
     }
 
@@ -1857,6 +2230,7 @@ mod tests {
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
         let mut lowered = lower(&plan, false, false, true).expect("lowers");
         lowered.flat = true;
@@ -1878,28 +2252,86 @@ mod tests {
     }
 
     #[test]
-    fn a_run_never_ends_on_an_op_that_checks_ahead() {
-        let words = [
+    fn a_run_ends_on_the_first_op_that_checks_ahead() {
+        let runs = |words: &[u32]| {
+            let ops: Vec<Op> = words.iter().map(|&word| classify::<false>(word)).collect();
+            let fetch = vec![[2, 1]; ops.len()];
+            let mut all = words.to_vec();
+            all.extend([0, 0]);
+            let plan = Plan {
+                pc: 0x0300_0000,
+                thumb: false,
+                words: &all,
+                ops: &ops,
+                fetch: &fetch,
+                literals: &[],
+            };
+            let lowered = lower(&plan, false, false, true).expect("lowers");
+            assert!(lowered.items[1].ahead > 0);
+            flat_runs(&lowered.items, &plan)
+        };
+        let compare = [
             0xE3A0_0001,
             0xE350_0000,
             0x0A00_0000,
             0xE3A0_3002,
             0xE12F_FF1E,
         ];
+        assert_eq!(runs(&compare), [Some(1), None, None, None, None]);
+        let multiply = [
+            0xE3A0_0001,
+            0xE003_0291,
+            0x0A00_0000,
+            0xE3A0_3002,
+            0xE12F_FF1E,
+        ];
+        assert_eq!(runs(&multiply), [None; 5]);
+    }
+
+    #[test]
+    fn runs_take_multiplies_whose_rs_no_earlier_op_writes() {
+        let words = [
+            0xE3A0_0001,
+            0xE003_0291,
+            0xE080_2003,
+            0xE004_0291,
+            0xE284_5001,
+            0xE006_0195,
+            0xE12F_FF1E,
+        ];
         let ops: Vec<Op> = words.iter().map(|&word| classify::<false>(word)).collect();
         let fetch = vec![[2, 1]; ops.len()];
         let mut all = words.to_vec();
-        all.extend([0, 0]);
+        all.extend([0xE1A0_0000, 0xE1A0_0000]);
         let plan = Plan {
             pc: 0x0300_0000,
             thumb: false,
             words: &all,
             ops: &ops,
             fetch: &fetch,
+            literals: &[],
         };
-        let lowered = lower(&plan, false, false, true).expect("lowers");
-        assert!(lowered.items[1].ahead > 0);
-        assert_eq!(flat_runs(&lowered.items, &plan), [None; 5]);
+        let mut lowered = lower(&plan, false, false, true).expect("lowers");
+        assert!(matches!(lowered.items[1].kind, Kind::Multiply(_)));
+        lowered.flat = true;
+        assert_eq!(
+            flat_runs(&lowered.items, &plan),
+            [Some(2), None, None, Some(4), None, None, None]
+        );
+        let offsets = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let calls = |code: &Linked, stub: Stub| {
+            code.links
+                .iter()
+                .filter(|link| link.helper & !LINK == stub as u32)
+                .count()
+        };
+        let flat = block(&lowered, &plan, &offsets).expect("emits");
+        assert_eq!(calls(&flat, Stub::FetchFlat), 2);
+        assert_eq!(calls(&flat, Stub::Fetch), 2);
+        lowered.flat = false;
+        let plain = block(&lowered, &plan, &offsets).expect("emits");
+        assert_eq!(calls(&plain, Stub::FetchFlat), 0);
+        assert_eq!(calls(&plain, Stub::Fetch), 3);
     }
 
     #[test]
@@ -1951,7 +2383,7 @@ mod tests {
 
     #[test]
     fn each_known_exit_of_a_block_marks_its_own_link_cell() {
-        let mark = |cell: u32| 0xF280_0000 | 2 << 21 | (1 << cell) << 5 | INFO;
+        let mark = |cell: u32| 0xF280_0000 | 2 << 21 | (cell + 1) << 5 | INFO;
         let cells = |words: &[u32]| {
             let bytes = build(words, false);
             let tails = (word(&bytes, 0) >> 16) as usize;
@@ -1965,12 +2397,12 @@ mod tests {
                     .filter(|&at| word(&bytes, at) == mark(cell))
                     .count()
             };
-            (count(0), count(1))
+            (count(0), count(1), count(2))
         };
-        assert_eq!(cells(&[0xE280_0001, 0xEAFF_FFFD]), (1, 0));
-        assert_eq!(cells(&[0x0A00_0002, 0xE280_0001, 0xEAFF_FFFD]), (1, 1));
-        assert_eq!(cells(&[0x0A00_0002, 0xE250_0001, 0x1AFF_FFFD]), (1, 1));
-        assert_eq!(cells(&[0x0A00_0002, 0x0A00_0001, 0xE12F_FF1E]), (1, 1));
+        assert_eq!(cells(&[0xE280_0001, 0xEAFF_FFFD]), (1, 0, 0));
+        assert_eq!(cells(&[0x0A00_0002, 0xE280_0001, 0xEAFF_FFFD]), (1, 1, 0));
+        assert_eq!(cells(&[0x0A00_0002, 0xE250_0001, 0x1AFF_FFFD]), (1, 1, 1));
+        assert_eq!(cells(&[0x0A00_0002, 0x0A00_0001, 0xE12F_FF1E]), (1, 1, 0));
     }
 
     #[test]
@@ -2015,6 +2447,7 @@ mod tests {
                 words: &all,
                 ops: &ops,
                 fetch: &fetch,
+                literals: &[],
             };
             let lowered = lower(&plan, false, false, true).expect("lowers");
             let code = block(&lowered, &plan, &Offsets::of::<false>()).expect("emits");
@@ -2022,6 +2455,246 @@ mod tests {
             assert!(calls.contains(&(stub as u32)));
             assert!(!calls.contains(&(Stub::Fetch as u32)));
         }
+    }
+
+    fn marked_fetches(marker: u32, pc: u32, thumb: bool, words: &[u32]) -> (usize, usize) {
+        let offsets = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let mut mark = Asm::new();
+        mark.mov_imm(2, marker);
+        let mark = mark.finish().expect("assembles");
+        let size = if thumb { 2 } else { 4 };
+        let ops: Vec<Op> = words
+            .iter()
+            .enumerate()
+            .map(|(at, &word)| {
+                if thumb {
+                    classify_thumb::<false>(word, pc + size * at as u32)
+                } else {
+                    classify::<false>(word)
+                }
+            })
+            .collect();
+        let fetch = vec![[2, 1]; ops.len()];
+        let mut all = words.to_vec();
+        all.extend([0, 0]);
+        let plan = Plan {
+            pc,
+            thumb,
+            words: &all,
+            ops: &ops,
+            fetch: &fetch,
+            literals: &[],
+        };
+        let lowered = lower(&plan, false, false, true).expect("lowers");
+        let code = block(&lowered, &plan, &offsets).expect("emits");
+        let calls = code
+            .links
+            .iter()
+            .filter(|link| link.helper & !LINK == Stub::FetchArm as u32)
+            .count();
+        let marks = code
+            .bytes
+            .chunks(4)
+            .filter(|w| *w == mark.as_slice())
+            .count();
+        (marks, calls)
+    }
+
+    #[test]
+    fn arm_fetches_from_iwram_hand_the_stub_their_word() {
+        let marked =
+            |pc: u32, thumb: bool, words: &[u32]| marked_fetches(IWRAM_FETCH, pc, thumb, words);
+        let words = [0xE3A0_0001, 0xE280_0001, 0xE280_0002, 0xE12F_FF1E];
+        let (marks, calls) = marked(0x0300_0000, false, &words);
+        assert!(calls > 0);
+        assert_eq!(marks, calls);
+        assert_eq!(marked(0x0800_0000, false, &words).0, 0);
+        assert_eq!(marked(0x0000_0100, false, &words).0, 0);
+        let thumb = [0x2001, 0x3001, 0x3002, 0x4770];
+        assert_eq!(marked(0x0300_0000, true, &thumb).0, 0);
+    }
+
+    #[test]
+    fn arm_fetches_from_bios_hand_the_stub_their_word() {
+        let marked =
+            |pc: u32, thumb: bool, words: &[u32]| marked_fetches(BIOS_FETCH, pc, thumb, words);
+        let words = [0xE3A0_0001, 0xE280_0001, 0xE280_0002, 0xE12F_FF1E];
+        let (marks, calls) = marked(0x0000_0100, false, &words);
+        assert!(calls > 0);
+        assert_eq!(marks, calls);
+        for pc in [0x0300_0000, 0x0000_4000, 0x0800_0000] {
+            assert_eq!(marked(pc, false, &words).0, 0);
+        }
+        let thumb = [0x2001, 0x3001, 0x3002, 0x4770];
+        assert_eq!(marked(0x0000_0100, true, &thumb).0, 0);
+    }
+
+    #[test]
+    fn iwram_and_bios_arm_fetches_hit_inline_and_call_the_stub_from_cold_code() {
+        let offsets = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let words = [0xE3A0_0001, 0xE280_0001, 0xE280_0002, 0xE12F_FF1E];
+        let mut bus = Asm::new();
+        bus.ldr(true, 4, CTX, offsets.bus);
+        let bus = bus.finish().expect("assembles");
+        for (pc, inline) in [
+            (0x0300_0000, true),
+            (0x0000_0100, true),
+            (0x0800_0000, false),
+        ] {
+            let ops: Vec<Op> = words.iter().map(|&word| classify::<false>(word)).collect();
+            let fetch = vec![[2, 1]; ops.len()];
+            let mut all = words.to_vec();
+            all.extend([0xE1A0_0000, 0xE1A0_0000]);
+            let plan = Plan {
+                pc,
+                thumb: false,
+                words: &all,
+                ops: &ops,
+                fetch: &fetch,
+                literals: &[],
+            };
+            let lowered = lower(&plan, false, false, true).expect("lowers");
+            let code = block(&lowered, &plan, &offsets).expect("emits");
+            let calls: Vec<usize> = code
+                .links
+                .iter()
+                .filter(|link| link.helper & !LINK == Stub::FetchArm as u32)
+                .map(|link| link.offset as usize)
+                .collect();
+            assert_eq!(calls.len(), words.len());
+            let loads = code
+                .bytes
+                .chunks(4)
+                .filter(|w| *w == bus.as_slice())
+                .count();
+            assert_eq!(loads, if inline { words.len() } else { 0 });
+            let back = |at: usize| {
+                code.bytes.get(at + 4..at + 8).is_some_and(|w| {
+                    let w = u32::from_le_bytes(w.try_into().unwrap());
+                    w & 0xFC00_0000 == 0x1400_0000 && w & 1 << 25 != 0
+                })
+            };
+            assert_eq!(calls.iter().all(|&at| back(at)), inline);
+        }
+    }
+
+    #[test]
+    fn iwram_fetches_with_idles_hand_the_stub_their_word() {
+        let offsets = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let markers: Vec<Vec<u8>> = [IWRAM_IDLES, IWRAM_IDLES | SHIFT_IDLES << IDLES_SHIFT]
+            .into_iter()
+            .map(|packed| {
+                let mut marker = Asm::new();
+                marker.mov_imm(2, packed);
+                marker.finish().expect("assembles")
+            })
+            .collect();
+        let marked = |pc: u32, thumb: bool, words: &[u32]| {
+            let size = if thumb { 2 } else { 4 };
+            let ops: Vec<Op> = words
+                .iter()
+                .enumerate()
+                .map(|(at, &word)| {
+                    if thumb {
+                        classify_thumb::<false>(word, pc + size * at as u32)
+                    } else {
+                        classify::<false>(word)
+                    }
+                })
+                .collect();
+            let fetch = vec![[2, 1]; ops.len()];
+            let mut all = words.to_vec();
+            all.extend([0, 0]);
+            let plan = Plan {
+                pc,
+                thumb,
+                words: &all,
+                ops: &ops,
+                fetch: &fetch,
+                literals: &[],
+            };
+            let lowered = lower(&plan, false, false, true).expect("lowers");
+            let code = block(&lowered, &plan, &offsets).expect("emits");
+            let calls = code
+                .links
+                .iter()
+                .filter(|link| link.helper & !LINK == Stub::Fetch as u32)
+                .count();
+            let marks = code
+                .bytes
+                .chunks(4)
+                .filter(|w| markers.iter().any(|marker| *w == marker.as_slice()))
+                .count();
+            (marks, calls)
+        };
+        let words = [
+            0xE3A0_0001,
+            0xE080_0110,
+            0xE000_0291,
+            0xE3A0_1002,
+            0xE12F_FF1E,
+        ];
+        let (marks, calls) = marked(0x0300_0000, false, &words);
+        assert!(calls > 0);
+        assert_eq!(marks, calls);
+        let (marks, calls) = marked(0x0800_0000, false, &words);
+        assert!(calls > 0);
+        assert_eq!(marks, 0);
+        let thumb = [0x2001, 0x4088, 0x4348, 0x4770];
+        assert_eq!(marked(0x0300_0000, true, &thumb).0, 0);
+    }
+
+    #[test]
+    fn iwram_flat_runs_hand_the_stub_their_latch() {
+        let words = [
+            0xE3A0_0001,
+            0xE280_1001,
+            0xE081_2000,
+            0xE591_0004,
+            0xE3A0_3002,
+            0xE283_3001,
+            0xE12F_FF1E,
+        ];
+        let offsets = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let args = |count: u32, latch: u32| {
+            let mut asm = Asm::new();
+            asm.mov_imm(
+                2,
+                count << RUN_CYCLES_SHIFT | (count - 1) << IDLES_SHIFT | IWRAM_RUN,
+            );
+            asm.mov_imm(3, latch);
+            asm.finish().expect("assembles")
+        };
+        let has = |bytes: &[u8], wanted: &[u8]| {
+            bytes
+                .chunks(4)
+                .collect::<Vec<_>>()
+                .windows(wanted.len() / 4)
+                .any(|w| w.concat() == wanted)
+        };
+        let code = |pc: u32| {
+            let ops: Vec<Op> = words.iter().map(|&word| classify::<false>(word)).collect();
+            let fetch = vec![[2, 1]; ops.len()];
+            let mut all = words.to_vec();
+            all.extend([0xE1A0_0000, 0xE1A0_0000]);
+            let plan = Plan {
+                pc,
+                thumb: false,
+                words: &all,
+                ops: &ops,
+                fetch: &fetch,
+                literals: &[],
+            };
+            let mut lowered = lower(&plan, false, false, true).expect("lowers");
+            lowered.flat = true;
+            block(&lowered, &plan, &offsets).expect("emits").bytes
+        };
+        let iwram = code(0x0300_0000);
+        assert!(has(&iwram, &args(3, 0xE3A0_3002)));
+        assert!(has(&iwram, &args(2, 0xE1A0_0000)));
+        let rom = code(0x0800_0000);
+        assert!(!has(&rom, &args(3, 0xE3A0_3002)[..4]));
+        assert!(!has(&rom, &args(2, 0xE1A0_0000)[..4]));
     }
 
     #[test]
@@ -2035,6 +2708,499 @@ mod tests {
             assert!(word == 0x9400_0000 || word == 0x1400_0000);
             assert!((link.helper & !LINK) as usize <= STUBS);
         }
+    }
+
+    #[test]
+    fn paged_loads_read_the_page_table_and_call_the_stub_only_from_cold_code() {
+        let words = [
+            0xE591_0000,
+            0xE1D1_20B4,
+            0xE5D1_3006,
+            0xE583_0000,
+            0xEAFF_FFFE,
+        ];
+        let calls = |code: &Linked, stub: Stub| -> Vec<u32> {
+            code.links
+                .iter()
+                .filter(|link| link.helper & !LINK == stub as u32)
+                .map(|link| link.offset)
+                .collect()
+        };
+        let mut a = Asm::new();
+        a.ldr(true, 4, CTX, Offsets::of::<true>().pages);
+        let page = a.finish().expect("assembles");
+        let reads = |code: &Linked| code.bytes.windows(4).filter(|w| *w == page).count();
+        let code = linked_with::<true>(&words, false, false, true).expect("emits");
+        let (loads, stores) = (
+            calls(&code, Stub::LoadLeave),
+            calls(&code, Stub::StoreLeave),
+        );
+        assert_eq!((loads.len(), stores.len(), reads(&code)), (3, 1, 3));
+        assert!(loads.iter().all(|&at| at > stores[0]));
+        let plain = linked_with::<true>(&words, false, false, false).expect("emits");
+        let loads = calls(&plain, Stub::LoadLeave);
+        assert_eq!(loads.len(), 3);
+        assert!(
+            loads
+                .iter()
+                .all(|&at| at < calls(&plain, Stub::StoreLeave)[0])
+        );
+        assert_eq!(reads(&plain), 0);
+        let v4 = linked_with::<false>(&words, false, false, true).expect("emits");
+        assert_eq!(reads(&v4), 0);
+    }
+
+    #[test]
+    fn only_timed_gba_branch_and_exchange_leaves_land_inline() {
+        let clears =
+            |offsets: &Offsets, chain: Option<usize>, timed: bool, v5: bool, pages: bool| {
+                let mut a = Asm::new();
+                a.str(false, ZR, 1, offsets.refetched);
+                let cleared = a.finish().expect("assembles");
+                let helpers = if v5 {
+                    Helpers::of::<true, crate::gba::bus::Bus>()
+                } else {
+                    Helpers::of::<false, crate::gba::bus::Bus>()
+                };
+                runtime(&Setup {
+                    offsets,
+                    helpers: &helpers,
+                    chain,
+                    psr: 0,
+                    specs: &[],
+                    pages,
+                    v5,
+                    timed,
+                })
+                .expect("assembles")
+                .bytes
+                .chunks(4)
+                .filter(|word| *word == cleared)
+                .count()
+            };
+        let quick = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        for chain in [None, Some(0x1234_5678)] {
+            assert_eq!(clears(&quick, chain, true, false, false), 4);
+            assert_eq!(clears(&quick, chain, false, false, false), 0);
+            assert_eq!(clears(&quick, chain, true, false, true), 0);
+            assert_eq!(
+                clears(&Offsets::of::<false>(), chain, true, false, false),
+                0
+            );
+            let ds = Offsets::of_bus::<true, crate::gba::bus::Bus>();
+            assert_eq!(clears(&ds, chain, true, true, false), 0);
+        }
+    }
+
+    #[test]
+    fn only_timed_gba_leaves_read_bios_targets_inline() {
+        let mut a = Asm::new();
+        a.ldr(
+            true,
+            7,
+            7,
+            std::mem::offset_of!(crate::jit::Fast, bios) as u32,
+        );
+        let read = a.finish().expect("assembles");
+        let reads =
+            |offsets: &Offsets, chain: Option<usize>, timed: bool, v5: bool, pages: bool| {
+                let helpers = if v5 {
+                    Helpers::of::<true, crate::gba::bus::Bus>()
+                } else {
+                    Helpers::of::<false, crate::gba::bus::Bus>()
+                };
+                runtime(&Setup {
+                    offsets,
+                    helpers: &helpers,
+                    chain,
+                    psr: 0,
+                    specs: &[],
+                    pages,
+                    v5,
+                    timed,
+                })
+                .expect("assembles")
+                .bytes
+                .chunks(4)
+                .filter(|word| *word == read)
+                .count()
+            };
+        let quick = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        for chain in [None, Some(0x1234_5678)] {
+            assert_eq!(reads(&quick, chain, true, false, false), 2);
+            assert_eq!(reads(&quick, chain, false, false, false), 0);
+            assert_eq!(reads(&quick, chain, true, false, true), 0);
+            assert_eq!(reads(&Offsets::of::<false>(), chain, true, false, false), 0);
+            let ds = Offsets::of_bus::<true, crate::gba::bus::Bus>();
+            assert_eq!(reads(&ds, chain, true, true, false), 0);
+        }
+    }
+
+    #[test]
+    fn untimed_branch_and_exchange_hops_keep_their_fetch_cost_and_exchange_checks_the_key() {
+        use super::super::super::fast::Spec;
+        const SPEC: Spec = Spec {
+            len: 0x8000,
+            code: true,
+            cache: None,
+            half: [1; 2],
+            word: [1; 2],
+        };
+        let counts = |v5: bool, timed: bool, specs: &[Spec], offsets: &Offsets| {
+            let helpers = if v5 {
+                Helpers::of::<true, crate::gba::bus::Bus>()
+            } else {
+                Helpers::of::<false, crate::gba::bus::Bus>()
+            };
+            let bytes = runtime(&Setup {
+                offsets,
+                helpers: &helpers,
+                chain: Some(0x1234_5678),
+                psr: 0,
+                specs,
+                pages: !v5,
+                v5,
+                timed,
+            })
+            .expect("assembles")
+            .bytes;
+            let mut keyed = Asm::new();
+            keyed.logical(Logic::Eor, false, 2, 2, 0, Shift::Lsl, 0);
+            keyed.cmp_imm(2, super::super::super::lookup::NO_KEY);
+            let mut kept = Asm::new();
+            kept.str(false, 0, CTX, offsets.hop + 4);
+            [keyed, kept].map(|a| {
+                let check = a.finish().expect("assembles");
+                bytes
+                    .windows(check.len())
+                    .step_by(4)
+                    .filter(|window| *window == check)
+                    .count()
+            })
+        };
+        assert_eq!(counts(true, false, &[SPEC], &Offsets::of::<true>()), [1, 2]);
+        assert_eq!(counts(false, false, &[], &Offsets::of::<false>()), [1, 2]);
+        assert_eq!(counts(false, true, &[], &Offsets::of::<false>()), [0, 0]);
+    }
+
+    #[test]
+    fn only_timed_gba_thumb_fetches_settle_inline() {
+        let gba = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let q = gba.quick.expect("the GBA bus has quick fetches");
+        let set = |field: i32| {
+            let mut a = Asm::new();
+            if field == q.active {
+                a.mov_imm(7, 0x0101);
+                bus_store(&mut a, 8, 7, field);
+            } else {
+                bus_store(&mut a, 1, 7, field);
+            }
+            a.finish().expect("assembles")
+        };
+        let sets = |offsets: &Offsets, timed: bool| {
+            let helpers = Helpers::of::<false, crate::gba::bus::Bus>();
+            let bytes = runtime(&Setup {
+                offsets,
+                helpers: &helpers,
+                chain: None,
+                psr: 0,
+                specs: &[],
+                pages: false,
+                v5: false,
+                timed,
+            })
+            .expect("assembles")
+            .bytes;
+            let words: Vec<&[u8]> = bytes.chunks(4).collect();
+            [q.paused, q.active, q.force_n].map(|field| {
+                let store = set(field);
+                let store: Vec<&[u8]> = store.chunks(4).collect();
+                words
+                    .windows(store.len())
+                    .filter(|w| *w == store.as_slice())
+                    .count()
+            })
+        };
+        assert_eq!(sets(&gba, true), [1, 1, 1]);
+        assert_eq!(sets(&gba, false), [0, 0, 0]);
+        assert_eq!(sets(&Offsets::of::<false>(), true), [0, 0, 0]);
+    }
+
+    fn bus_store(a: &mut Asm, scale: u32, rt: R, field: i32) {
+        let offset = field as u32;
+        let (base, offset) = if offset.is_multiple_of(scale) && offset / scale < 0x1000 {
+            (4, offset)
+        } else {
+            a.mov_imm(17, offset);
+            a.arith(true, false, false, 17, 4, 17, Shift::Lsl, 0);
+            (17, 0)
+        };
+        match scale {
+            1 => a.strb(rt, base, offset),
+            4 => a.str(false, rt, base, offset),
+            _ => a.str(true, rt, base, offset),
+        }
+    }
+
+    fn bus_load(a: &mut Asm, rt: R, field: i32) {
+        let offset = field as u32;
+        if offset.is_multiple_of(4) && offset / 4 < 0x1000 {
+            a.ldr(false, rt, 4, offset);
+        } else {
+            a.mov_imm(17, offset);
+            a.arith(true, false, false, 17, 4, 17, Shift::Lsl, 0);
+            a.ldr(false, rt, 17, 0);
+        }
+    }
+
+    fn found_words(bytes: &[u8], build: impl FnOnce(&mut Asm)) -> usize {
+        let mut a = Asm::new();
+        build(&mut a);
+        let code = a.finish().expect("assembles");
+        let code: Vec<&[u8]> = code.chunks(4).collect();
+        let words: Vec<&[u8]> = bytes.chunks(4).collect();
+        words
+            .windows(code.len())
+            .filter(|window| *window == code.as_slice())
+            .count()
+    }
+
+    #[test]
+    fn gba_prefetch_restarts_and_stops_with_wide_stores_and_word_loads_skip_the_reload() {
+        let gba = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let q = gba.quick.expect("the GBA bus has quick fetches");
+        assert!(q.packed());
+        let helpers = Helpers::of::<false, crate::gba::bus::Bus>();
+        let bytes = runtime(&Setup {
+            offsets: &gba,
+            helpers: &helpers,
+            chain: None,
+            psr: 0,
+            specs: &[],
+            pages: false,
+            v5: false,
+            timed: true,
+        })
+        .expect("assembles")
+        .bytes;
+        let restart = move |one: R| {
+            move |a: &mut Asm| {
+                bus_store(a, 8, ZR, q.count);
+                bus_store(a, 4, ZR, q.parked);
+                a.mov_imm(one, 0x0101);
+                bus_store(a, 8, one, q.active);
+            }
+        };
+        assert!(found_words(&bytes, restart(5)) > 0);
+        assert_eq!(found_words(&bytes, restart(7)), 1);
+        let stopped = |a: &mut Asm| {
+            for zero in [q.head, q.count, q.parked] {
+                bus_store(a, 8, ZR, zero);
+            }
+            bus_store(a, 4, ZR, q.active);
+            bus_store(a, 1, ZR, q.stuck);
+            bus_store(a, 1, ZR, q.following);
+        };
+        assert!(found_words(&bytes, stopped) > 0);
+        for field in [q.paused, q.force_n] {
+            assert_eq!(found_words(&bytes, |a| bus_store(a, 1, ZR, field)), 0);
+        }
+        let reloaded = found_words(&bytes, |a| {
+            bus_store(a, 4, 3, q.open_iwram);
+            bus_load(a, 16, q.open_iwram);
+            bus_store(a, 4, 16, q.open_last);
+        });
+        assert_eq!(reloaded, 0);
+        let copied = found_words(&bytes, |a| {
+            a.mov(16, 3);
+            bus_store(a, 4, 16, q.open_last);
+        });
+        assert_eq!(copied, 0);
+    }
+
+    #[test]
+    fn only_timed_gba_loads_read_rom_inline() {
+        let found = |offsets: &Offsets, timed: bool, pages: bool| {
+            let helpers = Helpers::of::<false, crate::gba::bus::Bus>();
+            let bytes = runtime(&Setup {
+                offsets,
+                helpers: &helpers,
+                chain: None,
+                psr: 0,
+                specs: &[],
+                pages,
+                v5: false,
+                timed,
+            })
+            .expect("assembles")
+            .bytes;
+            (0..bytes.len() / 4)
+                .filter(|&at| word(&bytes, at) & 0xFFF8_001F == 0x37D8_0000)
+                .count()
+        };
+        let gba = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        assert_eq!(found(&gba, true, false), 2);
+        assert_eq!(found(&gba, false, false), 0);
+        assert_eq!(found(&gba, true, true), 0);
+        assert_eq!(found(&Offsets::of::<false>(), true, false), 0);
+    }
+
+    #[test]
+    fn only_timed_gba_loads_read_rom_literals_inline() {
+        let mut a = Asm::new();
+        a.lsr64(0, 2, 32);
+        let unpacked = word(&a.finish().expect("assembles"), 0);
+        assert_eq!(unpacked, 0xD360_FC40);
+        let found = |offsets: &Offsets, timed: bool, pages: bool| {
+            let helpers = Helpers::of::<false, crate::gba::bus::Bus>();
+            let bytes = runtime(&Setup {
+                offsets,
+                helpers: &helpers,
+                chain: None,
+                psr: 0,
+                specs: &[],
+                pages,
+                v5: false,
+                timed,
+            })
+            .expect("assembles")
+            .bytes;
+            (0..bytes.len() / 4)
+                .filter(|&at| word(&bytes, at) == unpacked)
+                .count()
+        };
+        let gba = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        assert_eq!(found(&gba, true, false), 2);
+        assert_eq!(found(&gba, false, false), 0);
+        assert_eq!(found(&gba, true, true), 0);
+        assert_eq!(found(&Offsets::of::<false>(), true, false), 0);
+    }
+
+    fn literal_loads(
+        pc: u32,
+        thumb: bool,
+        words: &[u32],
+        literals: &[Literal],
+        offsets: &Offsets,
+        timed: bool,
+    ) -> usize {
+        let size = if thumb { 2 } else { 4 };
+        let ops: Vec<Op> = words
+            .iter()
+            .enumerate()
+            .map(|(at, &word)| {
+                if thumb {
+                    classify_thumb::<false>(word, pc + size * at as u32)
+                } else {
+                    classify::<false>(word)
+                }
+            })
+            .collect();
+        let fetch = vec![[2, 1]; ops.len()];
+        let mut all = words.to_vec();
+        all.extend([0, 0]);
+        let plan = Plan {
+            pc,
+            thumb,
+            words: &all,
+            ops: &ops,
+            fetch: &fetch,
+            literals,
+        };
+        let lowered = lower(&plan, false, false, timed).expect("lowers");
+        let bytes = block(&lowered, &plan, offsets).expect("emits").bytes;
+        let mut marks = Asm::new();
+        marks.movk(true, 2, 0xBEEF, 2);
+        marks.movk(true, 2, 0xDEAD, 3);
+        let marks = marks.finish().expect("assembles");
+        let (beef, dead) = (word(&marks, 0), word(&marks, 1));
+        let movz = |at: usize| {
+            let w = word(&bytes, at);
+            w & 0xFFE0_001F == 0xD280_0002 && (w >> 5) & 7 == (ROM_LITERAL | 2)
+        };
+        (0..(bytes.len() / 4).saturating_sub(1))
+            .filter(|&at| word(&bytes, at) == beef && word(&bytes, at + 1) == dead)
+            .filter(|&at| (1..=2).any(|back| at >= back && movz(at - back)))
+            .count()
+    }
+
+    #[test]
+    fn thumb_rom_literals_hand_the_load_stub_their_word() {
+        let gba = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        let words = [0x4A01, 0x1880, 0x4A01, 0x4770];
+        let baked = [Literal {
+            index: 0,
+            addr: 0x0800_0108,
+            word: 0xDEAD_BEEF,
+        }];
+        let moved = [Literal {
+            addr: 0x0800_010C,
+            ..baked[0]
+        }];
+        assert_eq!(
+            literal_loads(0x0800_0100, true, &words, &baked, &gba, true),
+            1
+        );
+        assert_eq!(literal_loads(0x0800_0100, true, &words, &[], &gba, true), 0);
+        assert_eq!(
+            literal_loads(0x0800_0100, true, &words, &moved, &gba, true),
+            0
+        );
+        assert_eq!(
+            literal_loads(
+                0x0800_0100,
+                true,
+                &words,
+                &baked,
+                &Offsets::of::<false>(),
+                true
+            ),
+            0
+        );
+        assert_eq!(
+            literal_loads(0x0800_0100, true, &words, &baked, &gba, false),
+            0
+        );
+        let arm = [0xE59F_0004, 0xE12F_FF1E];
+        let arm_literal = [Literal {
+            addr: 0x0800_010C,
+            ..baked[0]
+        }];
+        assert_eq!(
+            literal_loads(0x0800_0100, false, &arm, &arm_literal, &gba, true),
+            0
+        );
+    }
+
+    #[test]
+    fn only_timed_gba_block_transfers_copy_ram_inline() {
+        let mut a = Asm::new();
+        a.mul(1, 1, 7, ZR);
+        let multiplied = a.finish().expect("assembles");
+        assert_eq!(multiplied, 0x1B07_7C21u32.to_le_bytes());
+        let found = |offsets: &Offsets, timed: bool, pages: bool| {
+            let helpers = Helpers::of::<false, crate::gba::bus::Bus>();
+            let bytes = runtime(&Setup {
+                offsets,
+                helpers: &helpers,
+                chain: None,
+                psr: 0,
+                specs: &[],
+                pages,
+                v5: false,
+                timed,
+            })
+            .expect("assembles")
+            .bytes;
+            (0..bytes.len() / 4)
+                .filter(|&at| word(&bytes, at) == 0x1B07_7C21)
+                .count()
+        };
+        let gba = Offsets::of_bus::<false, crate::gba::bus::Bus>();
+        assert_eq!(found(&gba, true, false), 2);
+        assert_eq!(found(&gba, false, false), 0);
+        assert_eq!(found(&gba, true, true), 0);
+        assert_eq!(found(&Offsets::of::<false>(), true, false), 0);
     }
 
     #[test]
@@ -2058,6 +3224,7 @@ mod tests {
             words: &words,
             ops: &ops,
             fetch: &[[2, 1]; 2],
+            literals: &[],
         };
         let lowered = lower(&plan, true, true, false).expect("lowers");
         assert!(block(&lowered, &plan, &Offsets::of::<true>()).is_none());
@@ -2071,6 +3238,42 @@ mod tests {
         }
         let bytes = build(&[0x2001, 0xBD10], true);
         assert_eq!(word(&bytes, 0) & 0xFFFF, MARK);
+    }
+
+    #[test]
+    fn timed_armv4_returns_gather_and_leave_through_the_branch_stub() {
+        let stubs = |words: &[u32], thumb: bool, timed: bool| -> Vec<u32> {
+            linked_timed::<false>(words, thumb, timed)
+                .expect("emits")
+                .links
+                .iter()
+                .map(|link| link.helper & !LINK)
+                .collect()
+        };
+        let has = |found: &[u32], stub: Stub| found.contains(&(stub as u32));
+        let pop = stubs(&[0xE8BD_8070], false, true);
+        assert!(has(&pop, Stub::Gather) && has(&pop, Stub::Branch));
+        for stub in [Stub::Step, Stub::Collect, Stub::Return] {
+            assert!(!has(&pop, stub));
+        }
+        let maybe = stubs(&[0x18BD_8070], false, true);
+        for stub in [Stub::Gather, Stub::Branch, Stub::Exit] {
+            assert!(has(&maybe, stub));
+        }
+        assert!(!has(&maybe, Stub::Collect));
+        let thumb = stubs(&[0xB510, 0xBD10], true, true);
+        for stub in [Stub::Scatter, Stub::Gather, Stub::Branch] {
+            assert!(has(&thumb, stub));
+        }
+        for stub in [Stub::Step, Stub::Collect, Stub::Return] {
+            assert!(!has(&thumb, stub));
+        }
+        let user = stubs(&[0xE8FD_8010], false, true);
+        assert!(has(&user, Stub::Step) && has(&user, Stub::Exit));
+        assert!(!has(&user, Stub::Gather));
+        let untimed = stubs(&[0xE8BD_8070], false, false);
+        assert!(has(&untimed, Stub::Step));
+        assert!(!has(&untimed, Stub::Gather));
     }
 
     #[test]

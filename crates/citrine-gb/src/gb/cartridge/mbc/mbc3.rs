@@ -168,6 +168,30 @@ impl Rtc {
         }
     }
 
+    pub fn shift(&mut self, seconds: i64) {
+        if seconds >= 0 {
+            self.advance_seconds(seconds as u64);
+            return;
+        }
+        if self.real.halted() {
+            return;
+        }
+        let day = SECONDS_PER_DAY as i64;
+        let real = &mut self.real;
+        let total = i64::from(real.days()) * day
+            + i64::from(real.hours.min(23)) * 3600
+            + i64::from(real.minutes.min(59)) * 60
+            + i64::from(real.seconds.min(59));
+        let total = (total + seconds).max(0);
+        let days = (total / day).min(DAY_COUNTER_PERIOD as i64 - 1);
+        let rest = total % day;
+        real.days_low = (days & 0xFF) as u8;
+        real.days_high = (real.days_high & !DAYS_HIGH_BIT) | ((days >> 8) as u8 & DAYS_HIGH_BIT);
+        real.hours = (rest / 3600) as u8;
+        real.minutes = (rest / 60 % 60) as u8;
+        real.seconds = (rest % 60) as u8;
+    }
+
     pub fn latch(&mut self) {
         self.latched = self.real;
     }
@@ -594,5 +618,41 @@ mod tests {
                 assert_eq!(advanced.rtc, stepped.rtc, "{start} {cycles}");
             }
         }
+    }
+
+    #[test]
+    fn the_clock_moves_back_and_forward_by_whole_seconds() {
+        let mut rtc = Rtc::default();
+        rtc.shift(2 * 86_400 + 3 * 3600 + 61);
+        assert_eq!(rtc.real.days(), 2);
+        assert_eq!(
+            (rtc.real.hours, rtc.real.minutes, rtc.real.seconds),
+            (3, 1, 1)
+        );
+        rtc.shift(-(86_400 + 3600 + 2));
+        assert_eq!(rtc.real.days(), 1);
+        assert_eq!(
+            (rtc.real.hours, rtc.real.minutes, rtc.real.seconds),
+            (2, 0, 59)
+        );
+        rtc.shift(-10 * 86_400);
+        assert_eq!(rtc.real.days(), 0);
+        assert_eq!(
+            (rtc.real.hours, rtc.real.minutes, rtc.real.seconds),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn moving_back_keeps_the_halt_and_carry_bits() {
+        let mut rtc = Rtc::default();
+        rtc.real.days_low = 0xFF;
+        rtc.real.days_high = 0x81;
+        rtc.shift(-86_400);
+        assert_eq!(rtc.real.days(), 510);
+        assert_eq!(rtc.real.days_high & 0x80, 0x80);
+        rtc.real.days_high |= 0x40;
+        rtc.shift(-86_400);
+        assert_eq!(rtc.real.days(), 510);
     }
 }

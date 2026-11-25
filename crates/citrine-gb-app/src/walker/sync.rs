@@ -50,6 +50,14 @@ impl LastStored {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Release {
+    #[default]
+    No,
+    Wanted,
+    Sent,
+}
+
 #[derive(Default)]
 pub struct Sync {
     hold: Hold,
@@ -61,6 +69,9 @@ pub struct Sync {
     sent: Option<u64>,
     stuck: Option<u64>,
     busy: bool,
+    release: Release,
+    again: bool,
+    overwrite: bool,
 }
 
 impl Sync {
@@ -90,6 +101,25 @@ impl Sync {
         };
     }
 
+    pub fn stay_elsewhere(&mut self, device: String) {
+        self.hold = Hold::Elsewhere(device);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn took(&mut self, remote: WalkerRemote) {
+        self.base = Some(remote.version);
+        self.last_stored = Some(LastStored::of(&remote));
+        self.synced = Some(self.changes);
+        self.sent = None;
+        self.stuck = None;
+        self.busy = false;
+        self.release = Release::No;
+        self.again = false;
+        self.overwrite = false;
+        self.hold = Hold::Here;
+        self.listed = Some(Some(remote));
+    }
+
     pub fn last_stored(&self) -> Option<LastStored> {
         self.last_stored
     }
@@ -108,6 +138,100 @@ impl Sync {
         }
     }
 
+    pub fn untake(&mut self) -> bool {
+        if self.hold == Hold::Taking && !self.busy {
+            self.hold = match self.listed() {
+                Some(remote) => Hold::Elsewhere(remote.device.clone()),
+                None => Hold::Idle,
+            };
+            self.release = Release::No;
+            return true;
+        }
+        false
+    }
+
+    pub fn releasing(&self) -> bool {
+        self.release != Release::No
+    }
+
+    pub fn release(&mut self) {
+        if matches!(self.hold, Hold::Taking | Hold::Here) && self.release == Release::No {
+            self.release = Release::Wanted;
+        }
+    }
+
+    pub fn claim(&mut self) {
+        if self.hold == Hold::Idle && self.listed == Some(None) {
+            self.hold = Hold::Taking;
+        }
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start_taking(&mut self) {
+        if self.hold != Hold::Local {
+            self.hold = Hold::Taking;
+            self.release = Release::No;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn cancel_take(&mut self, hold: Hold) {
+        if self.hold == Hold::Taking {
+            self.hold = hold;
+            self.busy = false;
+            self.sent = None;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn step_aside(&mut self) -> bool {
+        let Some(device) = self.listed().map(|remote| remote.device.clone()) else {
+            return false;
+        };
+        if !matches!(self.hold, Hold::Here | Hold::Taking) {
+            return false;
+        }
+        let unsent = self.unsent();
+        self.hold = Hold::Elsewhere(device);
+        self.release = Release::No;
+        self.busy = false;
+        unsent
+    }
+
+    pub fn resend(&mut self) {
+        if self.hold == Hold::Here {
+            self.again = true;
+        }
+    }
+
+    pub fn overwrite(&mut self) {
+        if self.hold != Hold::Local {
+            self.hold = Hold::Here;
+            self.release = Release::No;
+            self.overwrite = true;
+            self.again = true;
+        }
+    }
+
+    pub fn rewire(&mut self) {
+        self.resend_release();
+        self.listed = None;
+        self.base = None;
+        self.busy = false;
+        self.sent = None;
+        self.stuck = None;
+        self.again = false;
+        self.overwrite = false;
+    }
+
+    pub fn listed(&self) -> Option<&WalkerRemote> {
+        self.listed.as_ref()?.as_ref()
+    }
+
     fn unsent(&self) -> bool {
         self.synced
             .map_or(self.changes > 0, |synced| synced != self.changes)
@@ -117,27 +241,46 @@ impl Sync {
         if self.busy || self.hold == Hold::Local {
             return None;
         }
+        if self.overwrite
+            && let Some(Some(remote)) = &self.listed
+        {
+            self.base = Some(remote.version);
+        }
         let listed = self.listed.as_ref()?;
         if let Some(remote) = listed
             && Some(remote.version) != self.base
         {
+            let fetch = match self.hold {
+                Hold::Taking | Hold::Here => true,
+                Hold::Idle => self.unsent(),
+                Hold::Local | Hold::Elsewhere(_) => false,
+            };
+            if !fetch {
+                self.hold = Hold::Elsewhere(remote.device.clone());
+                return None;
+            }
             self.busy = true;
             return Some(WalkerRequest::Fetch);
         }
+        let releasing = self.release == Release::Wanted;
         let put = match self.hold {
             Hold::Taking => true,
-            Hold::Here => self.unsent(),
+            Hold::Here => self.unsent() || releasing || self.again,
             _ => false,
         };
-        if !put || self.stuck == Some(self.changes) {
+        if !put || (!releasing && self.stuck == Some(self.changes)) {
             return None;
         }
         let base = listed.as_ref().map_or(0, |remote| remote.version);
         self.busy = true;
         self.sent = Some(self.changes);
+        if releasing {
+            self.release = Release::Sent;
+        }
         Some(WalkerRequest::Put {
             base,
             data: copy.to_vec(),
+            name: String::new(),
         })
     }
 
@@ -149,6 +292,12 @@ impl Sync {
             WalkerReply::Listed(remote) => {
                 if remote.is_none() {
                     self.base = None;
+                    if matches!(self.hold, Hold::Elsewhere(_)) {
+                        self.hold = Hold::Idle;
+                    }
+                }
+                if let (Some(remote), Hold::Elsewhere(device)) = (&remote, &mut self.hold) {
+                    device.clone_from(&remote.device);
                 }
                 if let Some(remote) = &remote
                     && self.base.is_none()
@@ -188,7 +337,12 @@ impl Sync {
                 self.last_stored = Some(LastStored::of(&remote));
                 self.synced = self.sent.take();
                 self.stuck = None;
-                if self.hold == Hold::Taking {
+                self.again = false;
+                self.overwrite = false;
+                if self.release == Release::Sent {
+                    self.release = Release::No;
+                    self.hold = Hold::Elsewhere(remote.device.clone());
+                } else if self.hold == Hold::Taking {
                     self.hold = Hold::Here;
                 }
                 self.listed = Some(Some(remote));
@@ -198,17 +352,26 @@ impl Sync {
                 self.busy = false;
                 let sent = self.sent.take();
                 if changed {
+                    self.resend_release();
                     self.base = None;
                 } else {
+                    self.release = Release::No;
                     self.stuck = sent;
                 }
                 None
             }
             WalkerReply::Lost => {
                 self.busy = false;
+                self.resend_release();
                 self.sent = None;
                 None
             }
+        }
+    }
+
+    fn resend_release(&mut self) {
+        if self.release == Release::Sent {
+            self.release = Release::Wanted;
         }
     }
 
@@ -216,6 +379,7 @@ impl Sync {
         self.base = Some(remote.version);
         self.synced = Some(self.changes);
         if self.hold != Hold::Taking {
+            self.release = Release::No;
             self.hold = Hold::Elsewhere(remote.device);
         }
     }
@@ -241,6 +405,7 @@ pub(crate) mod tests {
         version: u64,
         device: String,
         data: Vec<u8>,
+        fetches: usize,
     }
 
     impl Server {
@@ -249,6 +414,8 @@ pub(crate) mod tests {
                 version: self.version,
                 device: self.device.clone(),
                 hash: digest(&self.data),
+                saved_at: 0,
+                name: String::new(),
             }
         }
 
@@ -258,10 +425,13 @@ pub(crate) mod tests {
 
         fn answer(&mut self, device: &str, request: WalkerRequest) -> WalkerReply {
             match request {
-                WalkerRequest::Fetch => WalkerReply::Fetched {
-                    remote: self.remote(),
-                    data: self.data.clone(),
-                },
+                WalkerRequest::Fetch => {
+                    self.fetches += 1;
+                    WalkerReply::Fetched {
+                        remote: self.remote(),
+                        data: self.data.clone(),
+                    }
+                }
                 WalkerRequest::Put { base, .. } if base != self.version => {
                     WalkerReply::Refused { changed: true }
                 }
@@ -386,6 +556,7 @@ pub(crate) mod tests {
             version: 1,
             device: "Phone".into(),
             data: b"after a cloud delete".to_vec(),
+            fetches: 0,
         };
         let last_stored = LastStored {
             version: 1,
@@ -485,21 +656,81 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_read_only_copy_refreshes_and_the_walker_can_be_taken_back() {
+    fn a_device_without_the_walker_fetches_it_only_to_take_it_back() {
         let mut server = Server::default();
         let mut pc = holding(&mut server, "PC", b"v1");
         let mut phone = holding(&mut server, "Phone", b"");
         pc.sync(&mut server);
         phone.edit(b"phone walked");
         phone.sync(&mut server);
+        let fetches = server.fetches;
         pc.sync(&mut server);
-        assert_eq!(pc.copy, b"phone walked");
+        assert_eq!(server.fetches, fetches);
+        assert_eq!(pc.copy, b"v1");
+        assert_eq!(pc.sync.listed().map(|remote| remote.version), Some(3));
         pc.sync.take();
         pc.sync(&mut server);
         assert_eq!(pc.sync.hold(), &Hold::Here);
+        assert_eq!(pc.copy, b"phone walked");
         phone.sync(&mut server);
         assert_eq!(phone.sync.hold(), &Hold::Elsewhere("PC".into()));
         assert!(pc.kept.is_empty() && phone.kept.is_empty());
+    }
+
+    #[test]
+    fn a_new_device_meeting_the_account_walker_shows_where_it_is_without_fetching() {
+        let mut server = Server::default();
+        holding(&mut server, "Phone", b"account walker");
+        let mut pc = Device::new("PC", b"");
+        pc.sync(&mut server);
+        assert_eq!(pc.sync.hold(), &Hold::Elsewhere("Phone".into()));
+        assert_eq!(server.fetches, 0);
+        assert!(!pc.sync.may_change());
+    }
+
+    #[test]
+    fn a_device_with_its_own_walker_keeps_it_aside_when_another_holds_the_account_walker() {
+        let mut server = Server::default();
+        holding(&mut server, "Phone", b"account walker");
+        let mut pc = Device::new("PC", b"pc local walker");
+        pc.sync(&mut server);
+        assert_eq!(pc.sync.hold(), &Hold::Elsewhere("Phone".into()));
+        assert_eq!(pc.kept, vec![b"pc local walker".to_vec()]);
+        assert_eq!(server.data, b"account walker");
+    }
+
+    #[test]
+    fn the_holder_name_follows_the_listing() {
+        let mut server = Server::default();
+        holding(&mut server, "Phone", b"v1");
+        let mut pc = Device::new("PC", b"");
+        pc.sync(&mut server);
+        assert_eq!(pc.sync.hold(), &Hold::Elsewhere("Phone".into()));
+        server.device = "Clara's Pixel".into();
+        pc.sync(&mut server);
+        assert_eq!(pc.sync.hold(), &Hold::Elsewhere("Clara's Pixel".into()));
+        server.version = 0;
+        pc.sync(&mut server);
+        assert_eq!(pc.sync.hold(), &Hold::Idle);
+    }
+
+    #[test]
+    fn a_device_claims_the_walker_only_when_the_account_has_none() {
+        let mut server = Server::default();
+        let mut pc = Device::new("PC", b"local");
+        pc.sync.claim();
+        assert_eq!(pc.sync.hold(), &Hold::Idle);
+        pc.sync(&mut server);
+        pc.sync.claim();
+        pc.sync(&mut server);
+        assert_eq!(pc.sync.hold(), &Hold::Here);
+        assert_eq!(server.data, b"local");
+        let mut phone = Device::new("Phone", b"");
+        phone.sync(&mut server);
+        phone.sync.claim();
+        phone.sync(&mut server);
+        assert_eq!(phone.sync.hold(), &Hold::Elsewhere("PC".into()));
+        assert_eq!(server.device, "PC");
     }
 
     #[test]

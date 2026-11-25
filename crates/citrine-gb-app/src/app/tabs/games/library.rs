@@ -8,13 +8,13 @@ use crate::app::ui_state::library::{
     Access, FileState, Filter, Library, LibraryGame, Place, Sort, TagPick, scan::folder_label,
     scan::shown_path,
 };
-use crate::app::ui_state::settings::kind_name;
-use crate::app::widgets::game_tile::{GameTile, Progress, Tag};
+use crate::app::ui_state::settings::{kind_icon, kind_label};
+use crate::app::widgets::game_tile::{Archive, GameTile, Progress, Tag, name_lines};
 use crate::app::widgets::pager::Pager;
 use crate::app::widgets::settings::page::{Heading, Page};
 use crate::icons;
 use citrine_gb::console::ConsoleKind;
-use egui::{Align, Layout, RichText, Ui};
+use egui::{Align, Layout, RichText, Ui, WidgetText};
 
 pub const DESK_ROWS: usize = 5;
 const DESK_COLUMNS: usize = 8;
@@ -31,10 +31,12 @@ const CONSOLES: [ConsoleKind; 4] = [
 pub struct LibraryTile {
     pub path: String,
     pub name: String,
-    pub console: Option<&'static str>,
+    pub console: Option<ConsoleKind>,
     pub tag: Option<Tag>,
     pub cover: Option<Cover>,
     pub progress: Option<Progress>,
+    pub archive: Option<Archive>,
+    pub from_archive: bool,
 }
 
 pub struct FolderRow {
@@ -52,6 +54,11 @@ pub struct CoverSource<'a> {
     pub boxes: bool,
 }
 
+pub struct TileFacts<'a> {
+    pub progress: &'a dyn Fn(Option<&str>) -> Option<Progress>,
+    pub downloads: &'a dyn Fn(&LibraryGame) -> Option<(u64, u64)>,
+}
+
 pub struct Shelf {
     pub tiles: Vec<LibraryTile>,
     pub shown: usize,
@@ -65,7 +72,7 @@ pub fn shelf(
     per_page: usize,
     covers: &mut Covers,
     source: &CoverSource<'_>,
-    progress: &dyn Fn(Option<&str>) -> Option<Progress>,
+    facts: &TileFacts<'_>,
 ) -> Shelf {
     if pane.filter.missing && library.missing_count() == 0 {
         pane.filter.missing = false;
@@ -80,12 +87,14 @@ pub fn shelf(
         .map(|game| LibraryTile {
             path: game.path.clone(),
             name: game.name.clone(),
-            console: game.console.map(kind_name),
+            console: game.console,
             tag: tag_of(game),
             cover: game.rom_key.as_deref().and_then(|key| {
                 covers.get(source.ctx, source.store, key, source.playing, source.boxes)
             }),
-            progress: progress(game.ra_hash.as_deref()),
+            progress: (facts.progress)(game.ra_hash.as_deref()),
+            archive: archive_of(game, (facts.downloads)(game)),
+            from_archive: game.archive.is_some(),
         })
         .collect();
     Shelf {
@@ -98,9 +107,43 @@ pub fn shelf(
 pub fn tag_of(game: &LibraryGame) -> Option<Tag> {
     match game.file {
         FileState::Missing => Some(Tag::Missing),
+        FileState::Offline if game.archive.is_some() => Some(Tag::ArchiveOffline),
         FileState::Offline if game.path.starts_with("content://") => Some(Tag::NoAccess),
         FileState::Offline => Some(Tag::NotConnected),
         FileState::Present | FileState::Unchecked => None,
+    }
+}
+
+pub fn recent_marks(
+    library: &Library,
+    online: &crate::online::Online,
+    recent: &[crate::app::mobile::games::RecentGame],
+) -> Vec<(Option<Tag>, Option<Archive>)> {
+    recent
+        .iter()
+        .map(|game| {
+            let row = library
+                .find(&game.path.to_string_lossy())
+                .filter(|row| row.archive.is_some());
+            match row {
+                Some(row) => (
+                    tag_of(row),
+                    archive_of(row, crate::app::archive::download_progress(online, row)),
+                ),
+                None => (game.gone.then_some(Tag::Missing), None),
+            }
+        })
+        .collect()
+}
+
+pub fn archive_of(game: &LibraryGame, download: Option<(u64, u64)>) -> Option<Archive> {
+    let copy = game.archive.as_ref()?;
+    match download {
+        Some((done, total)) => Some(Archive::Downloading { done, total }),
+        None if copy.downloaded => Some(Archive::Downloaded),
+        None => Some(Archive::Remote {
+            bytes: copy.download,
+        }),
     }
 }
 
@@ -179,17 +222,28 @@ pub fn count_words(count: usize) -> String {
 pub fn console_label(consoles: &[ConsoleKind]) -> String {
     match consoles {
         [] => "All consoles".to_owned(),
-        [console] => kind_name(*console).to_owned(),
+        [console] => kind_label(*console),
         many => format!("{} consoles", many.len()),
     }
 }
 
 pub fn place_label(place: &Place) -> String {
     match place {
-        Place::All => "All folders".to_owned(),
+        Place::All => "Anywhere".to_owned(),
         Place::Folder(tree) => folder_label(tree),
         Place::Opened => "Opened files".to_owned(),
+        Place::Archive => "Game Archive".to_owned(),
     }
+}
+
+pub fn place_choice(place: &Place) -> String {
+    let icon = match place {
+        Place::All => icons::BOOKS,
+        Place::Folder(_) => icons::FOLDER,
+        Place::Opened => icons::FILE,
+        Place::Archive => icons::CLOUD,
+    };
+    format!("{icon} {}", place_label(place))
 }
 
 pub fn sort_label(sort: Sort) -> &'static str {
@@ -225,7 +279,12 @@ pub fn places(library: &Library) -> Vec<Place> {
             .iter()
             .map(|folder| Place::Folder(folder.tree.clone())),
     );
-    places.push(Place::Opened);
+    if cfg!(not(target_arch = "wasm32")) {
+        places.push(Place::Opened);
+    }
+    if library.archive_games().next().is_some() {
+        places.push(Place::Archive);
+    }
     places
 }
 
@@ -262,6 +321,7 @@ pub fn section(
     page.section(Heading::new(icons::BOOKS, "Library").aside(&total), |ui| {
         let mut action = controls(ui, view.library, view.pane, folders);
         action = action.or(strip(ui, view.library, view.pane));
+        ui.add_space((super::ROW_GAP - ui.spacing().item_spacing.y).max(0.0));
         if view.shelf.tiles.is_empty() {
             let words = if view.library.is_empty() {
                 "No games yet"
@@ -291,12 +351,13 @@ fn controls(
     let search = &mut pane.tag_search;
     let mut action = None;
     let gap = ui.spacing().item_spacing.x;
-    let combos = if folders { 4.0 } else { 3.0 };
+    let from = places(library).len() > 1;
+    let combos = if from { 4.0 } else { 3.0 };
     let fits = ui.available_width() >= combos * (FILTER_WIDTH + gap) + FOLDERS_ROOM;
     ui.horizontal(|ui| {
         if fits {
             console_filter(ui, filter, FILTER_WIDTH);
-            if folders {
+            if from {
                 place_filter(ui, library, &mut filter.place, FILTER_WIDTH);
             }
             sort_filter(ui, &mut filter.sort, FILTER_WIDTH);
@@ -307,7 +368,7 @@ fn controls(
                 action = folders_button(ui, library);
             }
             if !fits {
-                filter_button(ui, library, filter, search, folders);
+                filter_button(ui, library, filter, search, from);
             }
         });
     });
@@ -322,7 +383,7 @@ fn filter_button(
     library: &Library,
     filter: &mut Filter,
     search: &mut String,
-    folders: bool,
+    from: bool,
 ) {
     let mut text = RichText::new(format!("{} Filter", icons::FUNNEL));
     if filter.narrows() {
@@ -337,16 +398,13 @@ fn filter_button(
                 menu_label(ui, "Console", &console_label(&filter.consoles)),
                 |ui| console_ticks(ui, filter),
             );
-            if folders {
-                ui.menu_button(
-                    menu_label(ui, "Folder", &place_label(&filter.place)),
-                    |ui| {
-                        for place in places(library) {
-                            let label = place_label(&place);
-                            ui.selectable_value(&mut filter.place, place, label);
-                        }
-                    },
-                );
+            if from {
+                ui.menu_button(menu_label(ui, "From", &place_label(&filter.place)), |ui| {
+                    for place in places(library) {
+                        let label = place_choice(&place);
+                        ui.selectable_value(&mut filter.place, place, label);
+                    }
+                });
             }
             ui.menu_button(menu_label(ui, "Sort", sort_word(filter.sort)), |ui| {
                 for (pick, word) in SORT_WORDS {
@@ -358,7 +416,7 @@ fn filter_button(
             if !tags.is_empty() || !genres.is_empty() || filter.tag.is_some() {
                 let shown = ui.menu_button(
                     menu_label(ui, "Tags", tag_label(filter.tag.as_ref())),
-                    |ui| tag_choices(ui, &tags, &genres, &mut filter.tag, search),
+                    |ui| tag_choices(ui, tags, genres, &mut filter.tag, search),
                 );
                 if shown.inner.is_none() {
                     search.clear();
@@ -392,29 +450,51 @@ fn console_filter(ui: &mut Ui, filter: &mut Filter, width: f32) {
         .show_ui(ui, |ui| console_ticks(ui, filter));
 }
 
-fn console_ticks(ui: &mut Ui, filter: &mut Filter) {
-    if ui
-        .selectable_label(filter.consoles.is_empty(), console_label(&[]))
-        .clicked()
-    {
+pub(super) fn console_ticks(ui: &mut Ui, filter: &mut Filter) {
+    let mut all = filter.consoles.is_empty();
+    if ui.checkbox(&mut all, all_consoles_text(ui)).changed() {
         filter.consoles.clear();
     }
     for kind in consoles() {
         let mut on = filter.consoles.contains(&kind);
-        if ui.checkbox(&mut on, kind_name(kind)).changed() {
+        if ui.checkbox(&mut on, kind_label(kind)).changed() {
             filter.toggle_console(kind);
         }
     }
 }
 
+fn all_consoles_text(ui: &Ui) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let mark = ui.ctx().fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(
+                format!("{}  ", kind_icon(ConsoleKind::Gb)),
+                font.clone(),
+                egui::Color32::PLACEHOLDER,
+            )
+            .size()
+            .x
+    });
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &console_label(&[]),
+        mark,
+        egui::TextFormat::simple(font, egui::Color32::PLACEHOLDER),
+    );
+    job
+}
+
 fn place_filter(ui: &mut Ui, library: &Library, picked: &mut Place, width: f32) {
     egui::ComboBox::from_id_salt("library_folder")
-        .selected_text(place_label(picked))
+        .selected_text(match &*picked {
+            Place::All => "From anywhere".to_owned(),
+            place => format!("From {}", place_label(place)),
+        })
         .truncate()
         .width(width)
         .show_ui(ui, |ui| {
             for place in places(library) {
-                let label = place_label(&place);
+                let label = place_choice(&place);
                 ui.selectable_value(picked, place, label);
             }
         });
@@ -455,7 +535,7 @@ fn tag_filter(
         .selected_text(tag_label(tag.as_ref()))
         .truncate()
         .width(width)
-        .show_ui(ui, |ui| tag_choices(ui, &tags, &genres, tag, search));
+        .show_ui(ui, |ui| tag_choices(ui, tags, genres, tag, search));
     if shown.inner.is_none() {
         search.clear();
     }
@@ -566,7 +646,13 @@ fn strip(ui: &mut Ui, library: &Library, pane: &mut GamesPane) -> Option<GamesAc
     if let Some(undo) = &pane.undo {
         return ui
             .horizontal(|ui| {
-                ui.label(&undo.words);
+                let button = WidgetText::from("Undo")
+                    .into_galley(ui, None, f32::INFINITY, egui::TextStyle::Button)
+                    .size()
+                    .x
+                    + 2.0 * ui.spacing().button_padding.x
+                    + ui.spacing().item_spacing.x;
+                crate::app::widgets::text::name_then(ui, &undo.name, &undo.tail, None, button);
                 ui.button("Undo").clicked().then_some(GamesAction::Undo)
             })
             .inner;
@@ -599,19 +685,26 @@ fn grid(
     tiles: &[LibraryTile],
     selected: Option<&str>,
 ) -> (Option<GamesAction>, usize) {
-    let (columns, width) = super::tile_layout(ui.available_width());
+    let grid = super::tile_layout(ui.available_width());
+    let (columns, width) = (grid.columns, grid.width);
     let mut action = None;
+    let names: Vec<&str> = tiles.iter().map(|tile| tile.name.as_str()).collect();
     ui.spacing_mut().item_spacing.y = super::ROW_GAP;
     for row in tiles.chunks(columns) {
+        let row_names: Vec<&str> = row.iter().map(|tile| tile.name.as_str()).collect();
+        let lines = name_lines(ui, &row_names, width, false);
         ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = super::TILE_GAP;
+            ui.spacing_mut().item_spacing.x = grid.gap;
             for tile in row {
                 let response = ui.add(
                     GameTile::new(&tile.name, width)
+                        .neighbours(&names)
+                        .name_lines(lines)
                         .cover(tile.cover.as_ref())
                         .console(tile.console)
                         .tag(tile.tag, &shown_path(&tile.path))
                         .progress(tile.progress)
+                        .archive(tile.archive)
                         .selected(selected == Some(tile.path.as_str())),
                 );
                 if let Some(press) = Press::of(&response)
@@ -635,27 +728,39 @@ fn grid(
                         ui.close();
                     }
                     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-                    if ui
-                        .add_enabled(
-                            tile.tag.is_none(),
-                            egui::Button::new(format!(
-                                "{} {}",
-                                icons::FOLDER_OPEN,
-                                crate::media::reveal::LABEL
-                            )),
-                        )
-                        .clicked()
+                    if !tile.from_archive
+                        && ui
+                            .add_enabled(
+                                tile.tag.is_none(),
+                                egui::Button::new(format!(
+                                    "{} {}",
+                                    icons::FOLDER_OPEN,
+                                    crate::media::reveal::LABEL
+                                )),
+                            )
+                            .clicked()
                     {
                         action = Some(GamesAction::ShowInFolder(tile.path.clone()));
                         ui.close();
                     }
-                    ui.separator();
-                    if ui
-                        .button(format!("{} Remove from library", icons::TRASH))
-                        .clicked()
-                    {
-                        action = Some(GamesAction::RemoveGame(tile.path.clone()));
-                        ui.close();
+                    if !tile.from_archive {
+                        ui.separator();
+                        if ui
+                            .button(format!("{} Remove from library", icons::TRASH))
+                            .clicked()
+                        {
+                            action = Some(GamesAction::RemoveGame(tile.path.clone()));
+                            ui.close();
+                        }
+                    } else if tile.archive == Some(Archive::Downloaded) {
+                        ui.separator();
+                        if ui
+                            .button(format!("{} Delete download", icons::TRASH))
+                            .clicked()
+                        {
+                            action = Some(GamesAction::DeleteDownload(tile.path.clone()));
+                            ui.close();
+                        }
                     }
                 });
             }

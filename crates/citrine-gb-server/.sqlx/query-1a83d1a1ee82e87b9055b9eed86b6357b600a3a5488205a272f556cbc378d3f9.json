@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT g.id AS \"id!\", g.sealed AS \"sealed!\", g.wrapped_key AS \"wrapped_key!\",\n                      g.stored AS \"stored!\", g.added_at AS \"added_at!\"\n               FROM archive_games g\n               WHERE EXISTS (SELECT 1 FROM archive_access a\n                             WHERE a.account = ?1 AND (a.game IS NULL OR a.game = g.id))\n               ORDER BY g.added_at, g.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "sealed!",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "sealed"
+          }
+        }
+      },
+      {
+        "name": "wrapped_key!",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "wrapped_key"
+          }
+        }
+      },
+      {
+        "name": "stored!",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "stored"
+          }
+        }
+      },
+      {
+        "name": "added_at!",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "added_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1a83d1a1ee82e87b9055b9eed86b6357b600a3a5488205a272f556cbc378d3f9"
+}

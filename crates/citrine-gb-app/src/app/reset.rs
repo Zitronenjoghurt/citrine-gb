@@ -14,7 +14,7 @@ impl Citrine {
                 was_running: self.emulator.running,
                 stop_asking: false,
             });
-            self.emulator.running = false;
+            self.emulator.try_pause();
             self.emulator.release_all();
         }
     }

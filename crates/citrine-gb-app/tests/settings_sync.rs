@@ -32,6 +32,7 @@ impl Relay {
             ("CITRINE_BIND", "127.0.0.1".into()),
             ("CITRINE_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_MB", "0".into()),
+            ("CITRINE_STUN_PORT", "0".into()),
             ("CITRINE_DISK_FLOOR_PERCENT", "0".into()),
             (
                 "CITRINE_DATA_DIR",
@@ -144,7 +145,7 @@ impl Device {
         loop {
             self.online.update(Instant::now());
             self.online.cloud_flush();
-            self.online.sync_settings(&mut self.doc, true);
+            self.online.sync_settings(&mut self.doc, true, false);
             if done(self) {
                 return;
             }
@@ -253,12 +254,12 @@ fn turning_sync_off_stops_the_uploads() {
     desk.doc
         .note(&defaults(), &defaults(), |_| true, now_millis());
     desk.settled();
-    desk.online.sync_settings(&mut desk.doc, false);
+    desk.online.sync_settings(&mut desk.doc, false, false);
     desk.change("theme", json!("Latte"));
     for _ in 0..200 {
         desk.online.update(Instant::now());
         desk.online.cloud_flush();
-        desk.online.sync_settings(&mut desk.doc, false);
+        desk.online.sync_settings(&mut desk.doc, false, false);
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(desk.online.account_state("settings"), None);

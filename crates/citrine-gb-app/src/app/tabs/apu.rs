@@ -7,6 +7,7 @@ use egui::Widget;
 pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
     let machine = viewer.emulator.debug();
     ApuWidget::new(
+        viewer.emulator.kind(),
         machine.audio_channels(),
         machine.waves(),
         &mut viewer.ui.settings,

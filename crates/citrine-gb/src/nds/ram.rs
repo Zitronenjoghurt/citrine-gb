@@ -155,9 +155,9 @@ impl Ram {
     }
 
     #[cfg(jit)]
-    pub fn window(&mut self, base: u32, size: u64) -> Window {
+    pub fn window(&mut self, base: u32, size: u64, hardware: usize) -> Window {
         let (bytes, len, dirty) = self.bytes.raw();
-        if len == 0 {
+        if len == 0 || len != hardware {
             return Window::CLOSED;
         }
         let code = self.code.pages();
@@ -238,6 +238,22 @@ mod tests {
         assert_eq!(ram.inside(0x0200_1000, 0x1000), Some(0x1000));
         assert_eq!(ram.inside(0x0200_1800, 0x1000), None);
         assert_eq!(Ram::empty().inside(0, 0x1000), None);
+    }
+
+    #[cfg(jit)]
+    #[test]
+    fn a_window_stays_closed_unless_the_ram_has_its_hardware_size() {
+        let mut short = Ram::new(0x1000);
+        assert!(
+            short
+                .window(0x0200_0000, 0x0100_0000, 0x40_0000)
+                .bytes
+                .is_null()
+        );
+        let mut fitting = Ram::new(0x40_0000);
+        let window = fitting.window(0x0200_0000, 0x0100_0000, 0x40_0000);
+        assert_eq!(window.bytes.cast_const(), fitting.bytes().as_ptr());
+        assert!(Ram::empty().window(0, 0x1000, 0x1000).bytes.is_null());
     }
 
     #[test]

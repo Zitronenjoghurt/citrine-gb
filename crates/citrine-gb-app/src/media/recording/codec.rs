@@ -263,7 +263,7 @@ fn install(binary: Binary, dir: &Path, fetch: Fetch, counter: &Counter) -> anyho
 pub fn shared() -> &'static Codec {
     static CODEC: std::sync::LazyLock<Codec> = std::sync::LazyLock::new(|| {
         Codec::new(
-            crate::storage::cache_dir().join(crate::storage::CODECS),
+            crate::storage::folder(crate::storage::kinds::Folder::Codecs),
             binary_for(std::env::consts::OS, std::env::consts::ARCH),
         )
     });
@@ -298,7 +298,8 @@ mod tests {
     }
 
     fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("citrine-codec-{name}-{}", std::process::id()));
+        let dir = crate::storage::scratch_dir()
+            .join(format!("citrine-codec-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

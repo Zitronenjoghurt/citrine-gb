@@ -1,6 +1,8 @@
 mod account;
 mod device;
+mod keep;
 mod ledger;
+mod network;
 mod reconcile;
 mod server;
 mod walker;
@@ -14,7 +16,10 @@ use crate::storage::{MAX_SAVE_NAME, default_slot_name};
 pub use account::AccountCopy;
 use citrine_gb_net::{ErrorCode, GameKey, SaveInfo, SaveLabel, SavePayload, Tag, storage_cost};
 use citrine_gb_threads::Spawner;
-pub(crate) use device::device_name;
+pub use device::system_name;
+pub(crate) use device::{device_name, device_name_from};
+pub use keep::Elsewhere;
+pub use network::{NetworkDevice, Peer, PeerSync};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
@@ -269,6 +274,11 @@ pub struct CloudState {
     listing: Option<BTreeMap<(GameKey, String), Remote>>,
     asked: bool,
     rom_of: BTreeMap<GameKey, String>,
+    keep: super::KeepSaves,
+    library: BTreeSet<String>,
+    wanted: BTreeSet<String>,
+    index: BTreeMap<GameKey, String>,
+    here: BTreeSet<GameKey>,
     names: BTreeMap<String, String>,
     due: BTreeMap<String, Instant>,
     op: Option<Op>,
@@ -289,12 +299,16 @@ pub struct CloudState {
     account: account::AccountSlots,
     walker: walker::WalkerSlot,
     parts: Vec<u8>,
+    chosen_name: Option<String>,
+    device_name: String,
     spawner: Option<Spawner>,
     scan: Option<work::Scan>,
     rescan: BTreeSet<String>,
     sealing: Option<work::Sealing>,
     sending: Option<(Tag, VecDeque<Vec<u8>>)>,
     opening: Option<work::Opening>,
+    writing: Option<work::Writing>,
+    network: network::Network,
 }
 
 fn ledger_name(owner: &str) -> String {
@@ -400,25 +414,6 @@ impl CloudState {
         }
     }
 
-    fn local_save(&self, rom: &str, slot: &str) -> Option<LocalSave> {
-        match slot_kind(slot)? {
-            SlotKind::Battery => Some(LocalSave::Battery),
-            SlotKind::OtherBattery => slot
-                .strip_prefix(&battery_slot(Some("")))
-                .filter(|token| !token.is_empty() && !token.contains('.'))
-                .map(|token| LocalSave::OtherBattery(token.to_string())),
-            SlotKind::Snapshot(n) => Some(LocalSave::Snapshot(n)),
-            SlotKind::Autosave => {
-                let store = self.store.as_ref()?;
-                store
-                    .autosave_ids(rom)
-                    .into_iter()
-                    .find(|id| store.autosave_slot(rom, *id).as_deref() == Some(slot))
-                    .map(LocalSave::Autosave)
-            }
-        }
-    }
-
     fn slot_of(&self, rom: &str, save: &LocalSave) -> Option<String> {
         match save {
             LocalSave::Battery => Some(battery_slot(None)),
@@ -446,6 +441,16 @@ impl CloudState {
     }
 }
 
+impl CloudState {
+    fn device_name(&self) -> String {
+        if self.chosen_name.is_some() {
+            self.device_name.clone()
+        } else {
+            device_name()
+        }
+    }
+}
+
 impl Online {
     pub fn cloud_attach(&mut self, store: SaveStore) {
         self.cloud.store = Some(store);
@@ -453,6 +458,17 @@ impl Online {
 
     pub fn cloud_spawner(&mut self, spawner: Spawner) {
         self.cloud.spawner = Some(spawner);
+    }
+
+    pub fn choose_device_name(&mut self, chosen: &str) {
+        if self.cloud.chosen_name.as_deref() != Some(chosen) {
+            self.cloud.chosen_name = Some(chosen.to_owned());
+            self.cloud.device_name = device_name_from(chosen);
+        }
+    }
+
+    pub fn device_name(&self) -> String {
+        self.cloud.device_name()
     }
 
     pub fn set_cloud(&mut self, owner: Option<String>, enabled: bool) {
@@ -464,6 +480,7 @@ impl Online {
         if owner != self.cloud.owner {
             self.cloud.ledger = None;
             self.cloud.account.reset();
+            self.cloud.forget_keep();
             if let Some(owner) = &owner {
                 self.cloud.load(owner);
             }
@@ -481,9 +498,12 @@ impl Online {
             if let Some((rom, _)) = self.cloud.open.clone() {
                 self.cloud.due.insert(rom, Instant::now());
             }
-        } else if self.cloud.owner.is_some() && self.cloud.ledger.is_some() {
-            self.cloud.ledger().enabled = false;
-            self.cloud.ledger_dirty = true;
+        } else {
+            self.cloud_index_stop();
+            if self.cloud.owner.is_some() && self.cloud.ledger.is_some() {
+                self.cloud.ledger().enabled = false;
+                self.cloud.ledger_dirty = true;
+            }
         }
         self.cloud.save_ledger();
     }
@@ -492,6 +512,9 @@ impl Online {
         if let Some(store) = &self.cloud.store {
             store.take_touched();
             for name in store.ledger_names() {
+                if name == network::LEDGER {
+                    continue;
+                }
                 let Some(mut ledger) = store
                     .read_ledger(&name)
                     .and_then(|bytes| postcard::from_bytes::<Ledger>(&bytes).ok())
@@ -513,6 +536,7 @@ impl Online {
         self.cloud.disconnect();
         self.cloud.due.clear();
         self.cloud.save_ledger();
+        self.network_forget_local();
     }
 
     pub fn cloud_enabled(&self) -> bool {
@@ -535,9 +559,9 @@ impl Online {
                 self.cloud.game(rom).title = title.clone();
             }
             if let Some(keys) = &self.keys {
-                self.cloud
-                    .rom_of
-                    .insert(keys.game_key(&rom_bytes(rom)), rom.clone());
+                let key = keys.game_key(&rom_bytes(rom));
+                self.cloud.rom_of.insert(key, rom.clone());
+                self.cloud.here.insert(key);
             }
             self.cloud.due.insert(rom.clone(), Instant::now());
         }
@@ -557,6 +581,14 @@ impl Online {
     }
 
     pub fn cloud_settled(&self, rom: &str) -> bool {
+        self.cloud_only_settled(rom) && self.network_settled(rom)
+    }
+
+    pub fn syncs_saves(&self) -> bool {
+        self.cloud.enabled || self.network_syncs_any()
+    }
+
+    fn cloud_only_settled(&self, rom: &str) -> bool {
         if !self.cloud.enabled || !is_game_key(rom) {
             return true;
         }
@@ -599,6 +631,7 @@ impl Online {
             .conflicts
             .values()
             .find(|c| c.rom == rom && c.save.as_ref() == Some(save))
+            .or_else(|| self.network_conflict(rom, save))
     }
 
     pub fn cloud_ask(&self) -> Option<&Conflict> {
@@ -607,9 +640,14 @@ impl Online {
             .conflicts
             .values()
             .find(|c| &c.rom == rom && !c.dismissed)
+            .or_else(|| self.network_ask())
     }
 
     pub fn cloud_dismiss(&mut self, rom: &str, slot: &str) {
+        if self.network_has_conflict(rom, slot) {
+            self.network_dismiss(rom, slot, true);
+            return;
+        }
         if let Some(c) = self
             .cloud
             .conflicts
@@ -621,6 +659,10 @@ impl Online {
     }
 
     pub fn cloud_ask_again(&mut self, rom: &str, slot: &str) {
+        if self.network_has_conflict(rom, slot) {
+            self.network_dismiss(rom, slot, false);
+            return;
+        }
         if let Some(c) = self
             .cloud
             .conflicts
@@ -632,6 +674,9 @@ impl Online {
     }
 
     pub fn cloud_resolve(&mut self, rom: &str, slot: &str, choice: Choice) -> std::io::Result<()> {
+        if self.network_has_conflict(rom, slot) {
+            return self.network_resolve(rom, slot, choice);
+        }
         let key = (rom.to_string(), slot.to_string());
         let Some(conflict) = self.cloud.conflicts.get(&key).cloned() else {
             return Ok(());
@@ -652,12 +697,13 @@ impl Online {
                 let Some(payload) = &conflict.payload else {
                     return Ok(());
                 };
-                if !self
-                    .cloud
-                    .write_fetched(rom, slot, payload, payload.hash(), conflict.version)
-                {
+                let kept = self.cloud.fetched_store(rom, payload).and_then(|store| {
+                    reconcile::keep_fetched(&store, rom, slot, payload, payload.hash())
+                });
+                let Some(kept) = kept else {
                     return Err(std::io::Error::other("the cloud save could not be kept"));
-                }
+                };
+                self.cloud.kept_fetched(rom, slot, conflict.version, kept);
             }
             Choice::KeepBoth => {
                 let Some(payload) = &conflict.payload else {
@@ -696,12 +742,16 @@ impl Online {
     }
 
     pub fn cloud_forget(&mut self, rom: &str, save: &LocalSave, cloud_too: bool) {
-        if !self.cloud.enabled || !is_game_key(rom) {
+        if !is_game_key(rom) {
             return;
         }
         let Some(slot) = self.cloud.slot_of(rom, save) else {
             return;
         };
+        self.network_forget(rom, &slot);
+        if !self.cloud.enabled {
+            return;
+        }
         let version = match (&self.cloud.listing, &self.keys) {
             (Some(listing), Some(keys)) => listing
                 .get(&(keys.game_key(&rom_bytes(rom)), slot.clone()))

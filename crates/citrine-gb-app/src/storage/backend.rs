@@ -1,7 +1,7 @@
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub use native::TestDirs;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Backend, cache_dir, data_dir};
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub use native::{TestDirs, scratch_dir};
 #[cfg(target_arch = "wasm32")]
 pub use web::{Backend, keep_crash_save, open_saves};
 
@@ -23,6 +23,37 @@ mod native {
     thread_local! {
         static TEST_DIRS: std::cell::RefCell<Option<(PathBuf, PathBuf)>> =
             const { std::cell::RefCell::new(None) };
+        static THREAD_ROOT: ThreadRoot = ThreadRoot::new();
+    }
+
+    #[cfg(test)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "tests make their folders under the system temp folder"
+    )]
+    pub fn scratch_dir() -> PathBuf {
+        std::env::temp_dir()
+    }
+
+    #[cfg(test)]
+    struct ThreadRoot(PathBuf);
+
+    #[cfg(test)]
+    impl ThreadRoot {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = scratch_dir().join(format!("citrine-test-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            Self(root)
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for ThreadRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[cfg(test)]
@@ -34,8 +65,7 @@ mod native {
     #[cfg(test)]
     impl TestDirs {
         pub fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("citrine-dirs-{}-{name}", std::process::id()));
+            let root = scratch_dir().join(format!("citrine-dirs-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let dirs = Self {
                 data: root.join("data"),
@@ -64,8 +94,7 @@ mod native {
                     .map(|(data, cached)| if cache { cached } else { data }.clone())
             })
             .unwrap_or_else(|| {
-                let suffix = if cache { "-cache" } else { "" };
-                std::env::temp_dir().join(format!("citrine-test-{}{suffix}", std::process::id()))
+                THREAD_ROOT.with(|root| root.0.join(if cache { "cache" } else { "data" }))
             })
     }
 
@@ -85,7 +114,12 @@ mod native {
         if let Some(dir) = crate::platform::android::data_dir() {
             return dir;
         }
-        match directories::ProjectDirs::from("", "", "citrine") {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "storage picks the two folders every file goes under"
+        )]
+        let dirs = directories::ProjectDirs::from("", "", "citrine");
+        match dirs {
             Some(dirs) => dirs.data_dir().to_path_buf(),
             None => PathBuf::from(FALLBACK_DIR),
         }
@@ -97,7 +131,12 @@ mod native {
         if let Some(dir) = crate::platform::android::cache_dir() {
             return dir;
         }
-        match directories::ProjectDirs::from("", "", "citrine") {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "storage picks the two folders every file goes under"
+        )]
+        let dirs = directories::ProjectDirs::from("", "", "citrine");
+        match dirs {
             Some(dirs) => dirs.cache_dir().to_path_buf(),
             None => PathBuf::from(FALLBACK_CACHE_DIR),
         }
@@ -153,15 +192,30 @@ mod native {
             self.path(namespace, name).is_file()
         }
 
-        pub fn size(&self, namespace: &str, name: &str) -> u64 {
-            std::fs::metadata(self.path(namespace, name)).map_or(0, |m| m.len())
-        }
-
         pub fn clear(&self, namespace: &str) -> std::io::Result<()> {
             match std::fs::remove_dir_all(self.root.join(namespace)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 other => other,
             }
+        }
+
+        pub fn clear_all(&self) -> std::io::Result<()> {
+            let Ok(entries) = std::fs::read_dir(&self.root) else {
+                return Ok(());
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let removed = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                match removed {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+            }
+            Ok(())
         }
 
         pub fn list(&self, namespace: &str) -> Vec<String> {

@@ -5,7 +5,7 @@
 
 use super::arena::{Linked, relocate};
 use super::emit::{Emitted, Emitter};
-use super::scan::{Op, Plan};
+use super::scan::{Literal, Op, Plan};
 use super::{CodeRam, CodeSpan};
 use crate::jit_cache::{JitCache, Record};
 use citrine_gb_threads::Spawner;
@@ -26,6 +26,13 @@ pub struct Scan {
     pub fetch: Box<[[u32; 2]]>,
     pub pages: Box<[(CodeRam, usize)]>,
     pub gens: Box<[u32]>,
+    pub literals: Box<[Literal]>,
+}
+
+impl Scan {
+    fn literal_keys(&self) -> Vec<[u32; 2]> {
+        self.literals.iter().map(|literal| literal.key()).collect()
+    }
 }
 
 pub enum Outcome {
@@ -40,7 +47,6 @@ pub struct Job {
     pub emit: Emit,
     pub table: Box<[usize]>,
     pub disk: Option<(Arc<JitCache>, u64)>,
-    pub cached: Option<Arc<Record>>,
 }
 
 pub struct Done {
@@ -62,6 +68,7 @@ struct Sent {
 struct Pending<T> {
     sent: Vec<(Heat, T)>,
     lanes: usize,
+    idle: usize,
 }
 
 struct Queue<T> {
@@ -75,6 +82,7 @@ impl<T> Default for Queue<T> {
             pending: Mutex::new(Pending {
                 sent: Vec::new(),
                 lanes: 0,
+                idle: 0,
             }),
             wake: Condvar::new(),
         }
@@ -85,7 +93,9 @@ impl<T> Queue<T> {
     fn push(&self, heat: Heat, item: T) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.sent.push((heat, item));
-            self.wake.notify_one();
+            if pending.idle > 0 {
+                self.wake.notify_one();
+            }
         }
     }
 
@@ -104,7 +114,9 @@ impl<T> Queue<T> {
             if pending.lanes == 0 {
                 return None;
             }
+            pending.idle += 1;
             pending = self.wake.wait(pending).ok()?;
+            pending.idle -= 1;
         }
     }
 
@@ -212,9 +224,34 @@ fn serve(queue: &Queue<Sent>) {
 
 pub fn compile(emitter: &mut Option<Emitter>, job: Job) -> Done {
     let began = Instant::now();
-    let (outcome, loaded) = emit(emitter, &job);
+    let scan = &job.scan;
+    let literals = scan.literal_keys();
+    let cached = job.disk.as_ref().and_then(|(disk, cpu)| {
+        disk.find(
+            *cpu,
+            super::key(scan.pc, scan.thumb),
+            &scan.words,
+            &scan.fetch,
+            &literals,
+        )
+    });
+    if !cfg!(feature = "jit-lockstep")
+        && let Some(record) = &cached
+        && let Some(bytes) = relocate(&record.code, &record.relocs, &job.table)
+    {
+        return Done {
+            scan: job.scan,
+            tag: job.tag,
+            outcome: Outcome::Code(bytes),
+            nanos: began.elapsed().as_nanos() as u64,
+            loaded: true,
+            mismatched: false,
+        };
+    }
+    let cached = cached.filter(|_| cfg!(feature = "jit-lockstep"));
+    let (outcome, loaded) = emit(emitter, &job, cached.as_deref());
     Done {
-        mismatched: job.cached.is_some() && !loaded,
+        mismatched: cached.is_some() && !loaded,
         scan: job.scan,
         tag: job.tag,
         outcome,
@@ -223,7 +260,7 @@ pub fn compile(emitter: &mut Option<Emitter>, job: Job) -> Done {
     }
 }
 
-fn emit(emitter: &mut Option<Emitter>, job: &Job) -> (Outcome, bool) {
+fn emit(emitter: &mut Option<Emitter>, job: &Job, cached: Option<&Record>) -> (Outcome, bool) {
     if emitter.is_none() {
         *emitter = Emitter::new();
     }
@@ -237,6 +274,7 @@ fn emit(emitter: &mut Option<Emitter>, job: &Job) -> (Outcome, bool) {
         words: &scan.words,
         ops: &scan.ops,
         fetch: &scan.fetch,
+        literals: &scan.literals,
     };
     let emitted = match catch_unwind(AssertUnwindSafe(|| (job.emit)(built, &plan))) {
         Ok(Some(emitted)) => emitted,
@@ -246,9 +284,7 @@ fn emit(emitter: &mut Option<Emitter>, job: &Job) -> (Outcome, bool) {
             return (Outcome::Refused, false);
         }
     };
-    let same = job
-        .cached
-        .as_ref()
+    let same = cached
         .is_some_and(|record| *emitted.code == *record.code && *emitted.relocs == *record.relocs);
     if !same
         && emitted.portable
@@ -259,6 +295,7 @@ fn emit(emitter: &mut Option<Emitter>, job: &Job) -> (Outcome, bool) {
             super::key(scan.pc, scan.thumb),
             &scan.words,
             &scan.fetch,
+            &scan.literal_keys(),
             &emitted.code,
             &emitted.relocs,
         ));

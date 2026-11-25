@@ -166,7 +166,7 @@ impl<'de, T: Packed> Visitor<'de> for Items<T> {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        let mut items = Vec::with_capacity(crate::utils::bytes::cautious::<T>(seq.size_hint()));
         while let Some(item) = seq.next_element()? {
             items.push(item);
         }
@@ -232,5 +232,11 @@ mod tests {
         };
         let bytes = rmp_serde::to_vec(&listed).unwrap();
         assert_eq!(rmp_serde::from_slice::<Frame>(&bytes).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_list_that_claims_four_billion_polygons_is_refused_without_reserving_them() {
+        let claim = [0x92, 0xDD, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert!(rmp_serde::from_slice::<Frame>(&claim).is_err());
     }
 }

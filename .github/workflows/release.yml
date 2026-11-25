@@ -201,7 +201,9 @@ jobs:
         if: env.SIGNED == 'true'
         with:
           name: android-mapping
-          path: android/app/build/outputs/mapping/release/mapping.txt
+          path: |
+            android/app/build/outputs/mapping/release/mapping.txt
+            android/app/build/rust/release/jniLibs/arm64-v8a/libcitrine_gb_app.so
 
   release:
     needs: [build, android]

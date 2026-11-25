@@ -37,9 +37,13 @@ pub fn device_name(input: &str) -> String {
 }
 
 pub fn is_phone(device_name: &str) -> bool {
-    ["phone", "Android", "iPhone", "iPad"]
-        .iter()
-        .any(|word| device_name.contains(word))
+    let name = device_name.to_lowercase();
+    [
+        "phone", "android", "ipad", "pixel", "galaxy", "xperia", "oneplus", "redmi", "xiaomi",
+        "moto", "nokia", "oppo", "vivo", "huawei", "honor",
+    ]
+    .iter()
+    .any(|word| name.contains(word))
 }
 
 pub fn initials(name: &str) -> String {
@@ -79,6 +83,9 @@ mod tests {
         assert!(is_phone("Safari on iPhone"));
         assert!(!is_phone("Linux PC"));
         assert!(!is_phone("Firefox on Mac"));
+        assert!(is_phone("Pixel 8"));
+        assert!(is_phone("Galaxy S24"));
+        assert!(!is_phone("Clara's MacBook Pro"));
     }
 
     #[test]

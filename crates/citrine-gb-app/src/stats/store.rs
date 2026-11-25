@@ -2,12 +2,13 @@ use super::record::{Book, Record};
 use super::recorder::Recorder;
 use crate::online::Online;
 use crate::online::cloud::SyncState;
-use crate::storage::{Backend, compress, decompress};
+use crate::storage::kinds::Folder;
+use crate::storage::{Folders, compress, decompress};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use web_time::Instant;
 
-const NAMESPACE: &str = "stats";
+const NAMESPACE: Folder = Folder::Stats;
 const FILE: &str = "stats.json.br";
 const SLOT: &str = "stats";
 const KEEP_EVERY: Duration = Duration::from_secs(30);
@@ -20,24 +21,16 @@ impl Online {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct StatsStore {
-    backend: Backend,
-}
-
-impl Default for StatsStore {
-    fn default() -> Self {
-        Self {
-            backend: Backend::settings(),
-        }
-    }
+    backend: Folders,
 }
 
 impl StatsStore {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn in_dir(root: std::path::PathBuf) -> Self {
         Self {
-            backend: Backend::at(root),
+            backend: Folders::at(root),
         }
     }
 
@@ -246,7 +239,8 @@ mod tests {
     const DAY: &str = "2026-10-31";
 
     fn dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("citrine-stats-{}-{name}", std::process::id()));
+        let dir = crate::storage::scratch_dir()
+            .join(format!("citrine-stats-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

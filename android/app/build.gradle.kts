@@ -146,6 +146,7 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("release")
+            ndk.debugSymbolLevel = "SYMBOL_TABLE"
         }
     }
 }
@@ -168,7 +169,9 @@ androidComponents {
             outputs.upToDateWhen { false }
         }
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargoNdk, CargoNdk::outputDir)
-        variant.packaging.jniLibs.keepDebugSymbols.add("**/libcitrine_gb_app.so")
+        if (variant.buildType == "debug") {
+            variant.packaging.jniLibs.keepDebugSymbols.add("**/libcitrine_gb_app.so")
+        }
         variant.sources.res?.addGeneratedSourceDirectory(launcherIcon, LauncherIcon::outputDir)
         val kotlinSources = variant.sources.kotlin ?: variant.sources.java
         if (firebase == null) {

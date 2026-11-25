@@ -12,7 +12,9 @@ use std::sync::Arc;
 pub const MAGIC: [u8; 4] = *b"CGBN";
 const PATTERN: &str = "Noise_NX_25519_ChaChaPoly_BLAKE2s";
 const PROLOGUE: &[u8] = b"citrine-gb relay v2";
-const NOISE_MAX: usize = 65535;
+const KEYED_PATTERN: &str = "Noise_NNpsk2_25519_ChaChaPoly_BLAKE2s";
+const BINDING_CONTEXT: &[u8] = b"citrine channel binding";
+pub(crate) const NOISE_MAX: usize = 65535;
 const TAG: usize = 16;
 const CHUNK: usize = NOISE_MAX - TAG;
 const FINGERPRINT_BYTES: usize = 10;
@@ -152,12 +154,16 @@ impl CryptoResolver for RandomResolver {
     }
 }
 
-fn builder<'a>() -> Builder<'a> {
-    let params: NoiseParams = PATTERN.parse().expect("a valid noise pattern");
+pub(crate) fn noise<'a>(pattern: &str, prologue: &'a [u8]) -> Builder<'a> {
+    let params: NoiseParams = pattern.parse().expect("a valid noise pattern");
     let resolver = FallbackResolver::new(Box::new(RandomResolver), Box::new(DefaultResolver));
     Builder::with_resolver(params, Box::new(resolver))
-        .prologue(PROLOGUE)
+        .prologue(prologue)
         .expect("a prologue")
+}
+
+fn builder<'a>() -> Builder<'a> {
+    noise(PATTERN, PROLOGUE)
 }
 
 pub struct ClientHandshake(HandshakeState);
@@ -210,13 +216,72 @@ pub fn accept(secret: &RelaySecret, first: &[u8]) -> Result<(Vec<u8>, Channel), 
     Ok((out, Channel::new(state)?))
 }
 
+fn keyed<'a>(prologue: &'a [u8], key: &'a [u8; 32]) -> Result<Builder<'a>, SecureError> {
+    noise(KEYED_PATTERN, prologue)
+        .psk(2, key)
+        .map_err(|_| SecureError::Handshake)
+}
+
+pub struct KeyedDial(HandshakeState);
+
+impl KeyedDial {
+    pub fn start(prologue: &[u8]) -> Result<(Self, Vec<u8>), SecureError> {
+        let mut state = noise(KEYED_PATTERN, prologue)
+            .build_initiator()
+            .map_err(|_| SecureError::Handshake)?;
+        let mut out = vec![0; NOISE_MAX];
+        let len = state
+            .write_message(&[], &mut out)
+            .map_err(|_| SecureError::Handshake)?;
+        out.truncate(len);
+        Ok((Self(state), out))
+    }
+
+    pub fn finish(mut self, key: &[u8; 32], reply: &[u8]) -> Result<Channel, SecureError> {
+        self.0.set_psk(2, key).map_err(|_| SecureError::Handshake)?;
+        let mut payload = vec![0; NOISE_MAX];
+        self.0
+            .read_message(reply, &mut payload)
+            .map_err(|_| SecureError::Handshake)?;
+        Channel::new(self.0)
+    }
+}
+
+pub fn keyed_answer(
+    prologue: &[u8],
+    key: &[u8; 32],
+    first: &[u8],
+) -> Result<(Vec<u8>, Channel), SecureError> {
+    let mut state = keyed(prologue, key)?
+        .build_responder()
+        .map_err(|_| SecureError::Handshake)?;
+    let mut payload = vec![0; NOISE_MAX];
+    state
+        .read_message(first, &mut payload)
+        .map_err(|_| SecureError::Handshake)?;
+    let mut out = vec![0; NOISE_MAX];
+    let len = state
+        .write_message(&[], &mut out)
+        .map_err(|_| SecureError::Handshake)?;
+    out.truncate(len);
+    Ok((out, Channel::new(state)?))
+}
+
 pub struct Channel {
     sealer: Sealer,
     opener: Opener,
+    binding: [u8; 32],
 }
 
 impl Channel {
-    fn new(state: HandshakeState) -> Result<Self, SecureError> {
+    pub(crate) fn new(mut state: HandshakeState) -> Result<Self, SecureError> {
+        let (one, two) = state.dangerously_get_raw_split();
+        let binding = Sha256::new()
+            .chain_update(BINDING_CONTEXT)
+            .chain_update(one)
+            .chain_update(two)
+            .finalize()
+            .into();
         let state = Arc::new(
             state
                 .into_stateless_transport_mode()
@@ -228,7 +293,12 @@ impl Channel {
                 nonce: 0,
             },
             opener: Opener { state, nonce: 0 },
+            binding,
         })
+    }
+
+    pub fn binding(&self) -> [u8; 32] {
+        self.binding
     }
 
     pub fn split(self) -> (Sealer, Opener) {
@@ -364,6 +434,61 @@ mod tests {
             accept(&RelaySecret::random(), &hello),
             Err(SecureError::NotSecure)
         ));
+    }
+
+    fn keyed_pair(
+        dial_key: &[u8; 32],
+        answer_key: &[u8; 32],
+        prologues: (&[u8], &[u8]),
+    ) -> Result<(Channel, Channel), SecureError> {
+        let (dial, first) = KeyedDial::start(prologues.0)?;
+        let (reply, answer) = keyed_answer(prologues.1, answer_key, &first)?;
+        Ok((dial.finish(dial_key, &reply)?, answer))
+    }
+
+    #[test]
+    fn a_shared_key_opens_a_channel_both_ways() {
+        let (mut dial, mut answer) = keyed_pair(&[3; 32], &[3; 32], (b"p", b"p")).unwrap();
+        let sealed = dial.seal(b"hello");
+        assert_ne!(sealed, b"hello");
+        assert_eq!(answer.open(&sealed).unwrap(), b"hello");
+        assert_eq!(dial.open(&answer.seal(b"back")).unwrap(), b"back");
+    }
+
+    #[test]
+    fn the_dialer_refuses_an_answer_without_its_key() {
+        assert!(matches!(
+            keyed_pair(&[3; 32], &[4; 32], (b"p", b"p")),
+            Err(SecureError::Handshake)
+        ));
+        assert!(matches!(
+            keyed_pair(&[3; 32], &[3; 32], (b"p", b"q")),
+            Err(SecureError::Handshake)
+        ));
+    }
+
+    #[test]
+    fn both_ends_share_a_binding_no_other_session_or_key_has() {
+        let (dial, first) = KeyedDial::start(b"p").unwrap();
+        let (reply, answer) = keyed_answer(b"p", &[0; 32], &first).unwrap();
+        let dial = dial.finish(&[0; 32], &reply).unwrap();
+        assert_eq!(dial.binding(), answer.binding());
+        assert_ne!(dial.binding(), [0; 32]);
+        for sent in [&first, &reply] {
+            assert!(!sent.windows(32).any(|w| w == dial.binding()));
+        }
+        let (other, _) = keyed_pair(&[0; 32], &[0; 32], (b"p", b"p")).unwrap();
+        assert_ne!(other.binding(), dial.binding());
+    }
+
+    #[test]
+    fn a_replayed_first_message_opens_no_channel_the_dialer_can_use() {
+        let (dial, first) = KeyedDial::start(b"p").unwrap();
+        let (reply, _) = keyed_answer(b"p", &[3; 32], &first).unwrap();
+        let mut dial = dial.finish(&[3; 32], &reply).unwrap();
+        let sealed = dial.seal(b"once");
+        let (_, mut again) = keyed_answer(b"p", &[3; 32], &first).unwrap();
+        assert_eq!(again.open(&sealed), Err(SecureError::Decrypt));
     }
 
     #[test]

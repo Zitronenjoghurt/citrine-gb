@@ -39,7 +39,7 @@ pub fn bar(ui: &mut Ui, entries: &[Entry]) -> Option<Place> {
             pos2(rect.left() + width * index as f32, rect.top()),
             vec2(width, height),
         );
-        if show(ui, cell, entry) {
+        if show(ui, cell, entry, true) {
             picked = Some(entry.place);
         }
     }
@@ -48,16 +48,23 @@ pub fn bar(ui: &mut Ui, entries: &[Entry]) -> Option<Place> {
 
 pub fn rail(ui: &mut Ui, entries: &[Entry]) -> Option<Place> {
     let area = ui.available_rect_before_wrap();
-    let step = rail_entry(ui.style());
-    let total = step * entries.len() as f32;
-    let top = area.top() + ((area.height() - total) / 2.0).max(8.0);
+    let count = entries.len().max(1) as f32;
+    let full = rail_entry(ui.style());
+    let labels = full * count + 16.0 <= area.height();
+    let step = if labels {
+        full
+    } else {
+        (area.height() / count).max(PILL.y)
+    };
+    let total = step * count;
+    let top = area.top() + ((area.height() - total) / 2.0).max(if labels { 8.0 } else { 0.0 });
     let mut picked = None;
     for (index, entry) in entries.iter().enumerate() {
         let cell = Rect::from_min_size(
             pos2(area.left(), top + step * index as f32),
             vec2(area.width(), step),
         );
-        if show(ui, cell, entry) {
+        if show(ui, cell, entry, labels) {
             picked = Some(entry.place);
         }
     }
@@ -90,7 +97,7 @@ pub fn task_bar(ui: &mut Ui, entries: &[TaskEntry]) -> Option<usize> {
             dot: None,
             face: None,
         };
-        if show_item(ui, cell, &item) {
+        if show_item(ui, cell, &item, true) {
             picked = Some(index);
         }
     }
@@ -106,7 +113,7 @@ struct Item<'a> {
     face: Option<&'a (String, u64)>,
 }
 
-fn show(ui: &mut Ui, cell: Rect, entry: &Entry) -> bool {
+fn show(ui: &mut Ui, cell: Rect, entry: &Entry, labels: bool) -> bool {
     let item = Item {
         id: ui.id().with(("place", entry.place)),
         icon: entry.place.icon(),
@@ -115,10 +122,10 @@ fn show(ui: &mut Ui, cell: Rect, entry: &Entry) -> bool {
         dot: entry.dot,
         face: entry.face.as_ref(),
     };
-    show_item(ui, cell, &item)
+    show_item(ui, cell, &item, labels)
 }
 
-fn show_item(ui: &mut Ui, cell: Rect, entry: &Item<'_>) -> bool {
+fn show_item(ui: &mut Ui, cell: Rect, entry: &Item<'_>, labels: bool) -> bool {
     let response = ui.interact(cell, entry.id, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, true, entry.selected, entry.label)
@@ -127,7 +134,12 @@ fn show_item(ui: &mut Ui, cell: Rect, entry: &Item<'_>) -> bool {
         return response.clicked();
     }
     let visuals = ui.visuals();
-    let pill = Rect::from_center_size(pos2(cell.center().x, cell.top() + 22.0), PILL);
+    let middle = if labels {
+        cell.top() + 22.0
+    } else {
+        cell.center().y
+    };
+    let pill = Rect::from_center_size(pos2(cell.center().x, middle), PILL);
     crate::app::big_screen::ring::mark(
         &response,
         crate::app::big_screen::ring::Mark::Ring {
@@ -170,6 +182,9 @@ fn show_item(ui: &mut Ui, cell: Rect, entry: &Item<'_>) -> bool {
             Rect::from_center_size(pill.center(), vec2(30.0, 26.0)),
             color,
         );
+    }
+    if !labels {
+        return response.clicked();
     }
     let label = if entry.selected {
         visuals.strong_text_color()

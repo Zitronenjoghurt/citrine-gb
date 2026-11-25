@@ -108,11 +108,11 @@ samples = 964178
 [gb-state-tobu]
 frames = ["e531d4ed83a7fea9", "e531d4ed83a7fea9", "9ab4e008dd5a4325"]
 audio = ""
-state = "63b61cd628b87e89"
+state = "8348c812f7465f7b"
 
 [gb-state-tobu.facts]
 rounds = 10
-state_bytes = 346233
+state_bytes = 346323
 
 [gb-tobu]
 frames = ["e531d4ed83a7fea9", "ed4b4d2dc76a54ae", "ed4b4d2dc76a54ae"]
@@ -205,7 +205,7 @@ state = "84b946458f273ac2"
 
 [gba-state-pentris.facts]
 rounds = 6
-state_bytes = 2383506
+state_bytes = 2383560
 
 [gba-status-irq-dma]
 frames = ["c60d23db47e79325", "c60d23db47e79325", "c60d23db47e79325"]
@@ -270,11 +270,11 @@ samples = 481814
 [gbc-state-ucity]
 frames = ["3ef553076b0c96df", "c58d1a0d0131eb8d", "9ab4e008dd5a4325"]
 audio = ""
-state = "d7a529fca3cbe1c3"
+state = "48f1aef4098508ac"
 
 [gbc-state-ucity.facts]
 rounds = 10
-state_bytes = 1883137
+state_bytes = 1883227
 
 [gbc-tobu-deluxe]
 frames = ["328fc9cb74799c46", "012407129a1f2c47", "012407129a1f2c47"]

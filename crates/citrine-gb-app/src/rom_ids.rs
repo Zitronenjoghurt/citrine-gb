@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const FILE: &str = "rom-ids.json";
+pub const FILE: &str = "rom-ids.json";
 #[cfg(target_arch = "wasm32")]
-const NAMESPACE: &str = "rom-ids";
+const NAMESPACE: crate::storage::kinds::Folder = crate::storage::kinds::Folder::RomIds;
 const KEPT: usize = 64;
 const SETTLED: Duration = Duration::from_secs(10);
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_READ_BYTES: u64 = 1 << 30;
 #[cfg(target_arch = "wasm32")]
 const WARM_LEN: usize = 64 * 1024;
 
@@ -51,7 +53,11 @@ impl Stamp {
         Self::new(meta.len(), meta.modified().ok()?)
     }
 
-    fn settled(&self, now: Duration) -> bool {
+    pub fn settled(&self) -> bool {
+        self.settled_at(now())
+    }
+
+    fn settled_at(&self, now: Duration) -> bool {
         now.checked_sub(Duration::from_nanos(self.modified_ns))
             .is_some_and(|age| age >= SETTLED)
     }
@@ -63,6 +69,10 @@ impl Seen {
             key: key.into(),
             stamp,
         }
+    }
+
+    pub fn inside(&self, entry: &str) -> Self {
+        Self::at(self.key.join(entry), self.stamp)
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
@@ -114,8 +124,8 @@ pub fn read_shared(path: &Path) -> std::io::Result<Arc<[u8]>> {
 #[cfg(not(target_arch = "wasm32"))]
 fn read_hashing(path: &Path, hashing: Hashing) -> std::io::Result<(Arc<[u8]>, Option<Ids>)> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let len = usize::try_from(file.metadata()?.len()).map_err(std::io::Error::other)?;
+    let (mut file, len) = open_regular(path)?;
+    let len = usize::try_from(len).map_err(std::io::Error::other)?;
     let mut data = unsafe { Arc::<[u8]>::new_zeroed_slice(len).assume_init() };
     let whole = Arc::get_mut(&mut data).expect("a new slice has one owner");
     let ids = match hashing {
@@ -130,7 +140,34 @@ fn read_hashing(path: &Path, hashing: Hashing) -> std::io::Result<(Arc<[u8]>, Op
     if file.read(&mut [0])? == 0 {
         return Ok((data, ids));
     }
-    std::fs::read(path).map(|data| (Arc::from(data), None))
+    let mut data = Vec::new();
+    open_regular(path)?
+        .0
+        .take(MAX_READ_BYTES + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_READ_BYTES {
+        return Err(not_a_game_file());
+    }
+    Ok((Arc::from(data), None))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_regular(path: &Path) -> std::io::Result<(std::fs::File, u64)> {
+    let fits = |meta: &std::fs::Metadata| meta.is_file() && meta.len() <= MAX_READ_BYTES;
+    if !fits(&std::fs::metadata(path)?) {
+        return Err(not_a_game_file());
+    }
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !fits(&meta) {
+        return Err(not_a_game_file());
+    }
+    Ok((file, meta.len()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn not_a_game_file() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a game file")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,7 +202,7 @@ impl RomIds {
     }
 
     pub fn learn(&mut self, seen: &Seen, ids: Ids, spawner: &Spawner) {
-        if !seen.stamp.settled(now()) {
+        if !seen.stamp.settled() {
             return;
         }
         let entry = Entry {
@@ -199,7 +236,7 @@ impl RomIds {
 
     #[cfg(target_arch = "wasm32")]
     fn keep(&mut self, text: Vec<u8>, _spawner: &Spawner) {
-        if let Err(err) = crate::storage::Backend::cache().write(NAMESPACE, FILE, &text) {
+        if let Err(err) = crate::storage::Folders::default().write(NAMESPACE, FILE, &text) {
             log::warn!("couldn't keep the ROM ids: {err}");
         }
     }
@@ -207,7 +244,9 @@ impl RomIds {
     #[cfg(not(target_arch = "wasm32"))]
     fn file(&mut self) -> PathBuf {
         self.file
-            .get_or_insert_with(|| crate::storage::cache_dir().join(FILE))
+            .get_or_insert_with(|| {
+                crate::storage::folder(crate::storage::kinds::Folder::RomIds).join(FILE)
+            })
             .clone()
     }
 
@@ -218,7 +257,7 @@ impl RomIds {
 
     #[cfg(target_arch = "wasm32")]
     fn stored(&mut self) -> Option<Vec<u8>> {
-        crate::storage::Backend::cache().read(NAMESPACE, FILE)
+        crate::storage::Folders::default().read(NAMESPACE, FILE)
     }
 
     fn entries(&mut self) -> &mut Vec<Entry> {
@@ -249,8 +288,8 @@ mod tests {
     use std::fs::File;
 
     fn folder(name: &str) -> PathBuf {
-        let folder =
-            std::env::temp_dir().join(format!("citrine-rom-ids-{}-{name}", std::process::id()));
+        let folder = crate::storage::scratch_dir()
+            .join(format!("citrine-rom-ids-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).unwrap();
         folder
@@ -345,6 +384,20 @@ mod tests {
         }
         assert_eq!(Seen::file("game.nds", 4, None), None);
 
+        let zip = Seen::file("pack.zip", 4, Some(at)).unwrap();
+        let inside = zip.inside("roms/game.nds");
+        assert_eq!(
+            inside,
+            Seen::at(Path::new("pack.zip/roms/game.nds"), zip.stamp)
+        );
+        assert_ne!(inside, zip.inside("roms/other.nds"));
+        assert_ne!(
+            inside,
+            Seen::file("pack.zip", 5, Some(at))
+                .unwrap()
+                .inside("roms/game.nds")
+        );
+
         let kept = Seen::kept(Path::new("ab12.nds"), 4).unwrap();
         cache.learn(&kept, ids, &threads.spawner());
         assert_eq!(cache.known(&kept), Some(ids));
@@ -391,6 +444,24 @@ mod tests {
         put(&rom, b"data", Duration::from_secs(3600));
         assert!(read_stamped(&rom).unwrap().1.is_some());
         assert!(read_stamped(&folder.join("missing.gb")).is_err());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn only_a_regular_file_within_the_cap_is_read() {
+        let folder = folder("regular");
+        let big = folder.join("big.nds");
+        File::create(&big)
+            .unwrap()
+            .set_len(MAX_READ_BYTES + 1)
+            .unwrap();
+        assert!(read_stamped(&big).is_err());
+        assert!(read_stamped(&folder).is_err());
+        #[cfg(unix)]
+        assert!(read_stamped(Path::new("/dev/null")).is_err());
+        let fine = folder.join("fine.gb");
+        std::fs::write(&fine, b"rom").unwrap();
+        assert_eq!(&read_stamped(&fine).unwrap().0[..], b"rom");
         let _ = std::fs::remove_dir_all(&folder);
     }
 }

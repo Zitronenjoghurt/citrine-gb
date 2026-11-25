@@ -1,4 +1,6 @@
-use super::lines::{card_name, full_name, game_title, quality, short_name, watched_line};
+use super::lines::{
+    card_name, full_name, game_title, path_line, path_mark, quality, short_name, watched_line,
+};
 use super::sound::{FriendSound, friend_sound};
 use super::{BarAction, PickFor, PlayingUi, STRIP_AVATAR, needs_copy, watching};
 use crate::app::widgets::avatar;
@@ -35,6 +37,7 @@ pub(super) struct Tail {
     pub(super) full: egui::WidgetText,
     pub(super) short: egui::WidgetText,
     pub(super) hover: Option<String>,
+    pub(super) short_hover: Option<String>,
 }
 
 fn connection_tail(ui: &Ui, session: &PlaySession) -> Tail {
@@ -44,6 +47,7 @@ fn connection_tail(ui: &Ui, session: &PlaySession) -> Tail {
             full: text.clone().into(),
             short: text.into(),
             hover: None,
+            short_hover: None,
         };
     };
     let (word, color) = quality(ms, ui.visuals().dark_mode);
@@ -55,13 +59,19 @@ fn connection_tail(ui: &Ui, session: &PlaySession) -> Tail {
         valign: egui::Align::Center,
         ..Default::default()
     };
+    let path = session.path();
+    let mark = format!("{} ", path_mark(path));
     let mut job = egui::text::LayoutJob::default();
+    job.append(&mark, 0.0, format(weak));
+    let mut short = job.clone();
     job.append(word, 0.0, format(color));
     job.append(&format!(" \u{b7} {ms} ms"), 0.0, format(weak));
+    short.append(&format!("{ms} ms"), 0.0, format(color));
     Tail {
         full: job.into(),
-        short: RichText::new(word).color(color).into(),
-        hover: Some(format!("{ms} ms")),
+        short: short.into(),
+        hover: Some(path_line(path).into()),
+        short_hover: Some(format!("{} \u{b7} {word}", path_line(path))),
     }
 }
 
@@ -173,15 +183,14 @@ pub(super) fn bar_line(ui: &mut Ui, name: &str, title: Option<&str>, tail: Tail)
     if let Some(title_text) = title_text.filter(|_| widths.title > 0.0) {
         fixed_label(ui, title_text, widths.title);
     }
-    let shown = if widths.full_tail {
-        tail.full
+    let (shown, hover) = if widths.full_tail {
+        (tail.full, tail.hover)
     } else {
-        tail.short
+        (tail.short, tail.short_hover)
     };
     let response = fixed_label(ui, shown, widths.tail);
-    if !widths.full_tail
-        && let Some(response) = response
-        && let Some(hover) = tail.hover
+    if let Some(response) = response
+        && let Some(hover) = hover
     {
         response.on_hover_text(hover);
     }
@@ -265,7 +274,7 @@ fn switch_icon(switch: Switch) -> &'static str {
     match switch {
         Switch::Show => icons::SCREENCAST,
         Switch::Watch => icons::EYE,
-        Switch::Cable => icons::PLUGS,
+        Switch::Cable => icons::LINK_CABLE,
     }
 }
 
@@ -299,13 +308,17 @@ pub(super) fn switch_missing(session: &PlaySession, item: &BarSwitch) -> bool {
 }
 
 pub(super) fn change_button(ui: &mut Ui) -> bool {
-    ui.button(format!("{}  Change game", icons::SIM_CARD))
+    ui.button(format!("{}  Change game", icons::CHANGE_GAME))
         .clicked()
 }
 
 pub(super) fn change_entry(ui: &mut Ui) -> bool {
-    crate::app::widgets::menu_row::menu_row(ui, format!("{}  Change game", icons::SIM_CARD), None)
-        .clicked()
+    crate::app::widgets::menu_row::menu_row(
+        ui,
+        format!("{}  Change game", icons::CHANGE_GAME),
+        None,
+    )
+    .clicked()
 }
 
 struct BarButtons<'a> {
@@ -466,6 +479,7 @@ pub fn bar(
                     full: text.clone().into(),
                     short: text.into(),
                     hover: None,
+                    short_hover: None,
                 }
             } else {
                 connection_tail(ui, session)

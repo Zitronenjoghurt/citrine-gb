@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 const SHARED: &[(&str, &str)] = &[
     (
+        "app/big_screen.rs",
+        "the big screen's hold for menu tip on the TV; it takes the kit card fill token as the TV keyboard does",
+    ),
+    (
         "app/big_screen/keyboard.rs",
         "the big screen TV keyboard, not a desktop widget; it takes the kit card fill and hairline colour tokens",
     ),
@@ -46,12 +50,20 @@ const SHARED: &[(&str, &str)] = &[
         "phone stats pages, called only when the layout is touch",
     ),
     (
+        "app/tabs/walker.rs",
+        "the kit switch is the phone branch of the steps row, drawn only when phone is set",
+    ),
+    (
         "app/ui_state/ui_theme.rs",
         "theme tests check the kit colours",
     ),
     (
         "app/widgets/confirm.rs",
         "kit rows, switches and buttons are the phone branch of each dialog",
+    ),
+    (
+        "app/widgets/game_tile.rs",
+        "the big screen library tile takes the kit card fill so it matches the Recent covers",
     ),
     (
         "app/widgets/section.rs",
@@ -64,6 +76,10 @@ const SHARED: &[(&str, &str)] = &[
     (
         "app/widgets/settings/online/accounts.rs",
         "ROW_HEIGHT sizes only Look::CARD",
+    ),
+    (
+        "app/widgets/settings/online/devices.rs",
+        "kit pills and the kit field draw only when touch_square is set",
     ),
     (
         "app/widgets/settings/online/phone_join.rs",

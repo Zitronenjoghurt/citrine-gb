@@ -1,3 +1,4 @@
+mod link;
 mod pieces;
 mod wire;
 
@@ -8,10 +9,14 @@ use crate::proto::{GameHash, SessionId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub use pieces::{MAX_PIECED_BYTES, PIECE_BYTES, Pieces, WHOLE_BYTES};
+pub use link::{
+    ACK_DELAY, DIRECT_ECHOES, DIRECT_MAX_BYTES, DIRECT_RETRIES, DIRECT_SILENT, DIRECT_SLOWER,
+    DIRECT_UNACKED, LinkPath, MIN_RESEND, PROBE_EVERY, PeerLink,
+};
+pub use pieces::{MAX_PIECED_BYTES, PIECE_BYTES, WHOLE_BYTES};
 
-pub const PLAY_VERSION: u16 = 13;
-pub const OLDEST_PLAY_VERSION: u16 = 13;
+pub const PLAY_VERSION: u16 = 16;
+pub const OLDEST_PLAY_VERSION: u16 = 16;
 pub const MAX_UNITS: usize = 4;
 pub const GAME_PART_BYTES: usize = 192 * 1024;
 const GAME_SAMPLE_BYTES: usize = 16 * 1024;
@@ -231,6 +236,7 @@ pub enum PlayMsg {
     Setup {
         round: u32,
         from: Origin,
+        budget: u8,
     },
     Ping(u32),
     Pong(u32),
@@ -289,6 +295,15 @@ pub enum PlayMsg {
         round: u32,
         delay: u8,
     },
+    Direct(Signal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Signal {
+    Want(bool),
+    Offer { attempt: u32, sdp: String },
+    Answer { attempt: u32, sdp: String },
+    Candidate { attempt: u32, line: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +397,53 @@ impl PlayMsg {
         seal(self, keys, to)
     }
 
+    pub fn held_bytes(&self) -> usize {
+        let inside = match self {
+            Self::Join { game, .. } => game.as_ref().map_or(0, |g| g.title.len()),
+            Self::Setup { from, .. } => match from {
+                Origin::Boot(data) => data.as_ref().map_or(0, Vec::len),
+                Origin::Resume(data) => data.len(),
+                Origin::Download => 0,
+            },
+            Self::Start(start) => start.power_on.len() * size_of::<u32>(),
+            Self::Pads { pads, .. } => pads.len() * size_of::<Pad>(),
+            Self::Check { hashes, .. } => hashes.len() * size_of::<u64>(),
+            Self::Resync { data, cable, .. } => data.len() + cable.as_ref().map_or(0, Vec::len),
+            Self::Bytes(bytes) => bytes.len() * size_of::<CableByte>(),
+            Self::LinkGroup(group) => {
+                (group.members.len() + group.watchers.len()) * size_of::<OnlineId>()
+            }
+            Self::WatchFrom {
+                members,
+                games,
+                cable,
+                ..
+            } => {
+                members.len() * size_of::<OnlineId>()
+                    + games.len() * size_of::<(u8, GameHash)>()
+                    + cable.len()
+            }
+            Self::DsUser { user, .. } => user.nickname.len() + user.message.len(),
+            Self::Direct(Signal::Offer { sdp, .. } | Signal::Answer { sdp, .. }) => sdp.len(),
+            Self::Direct(Signal::Candidate { line, .. }) => line.len(),
+            Self::Holds { .. }
+            | Self::Ping(_)
+            | Self::Pong(_)
+            | Self::Watch(_)
+            | Self::Cable(_)
+            | Self::LinkRequest(_)
+            | Self::MemberLeft { .. }
+            | Self::Rejoin { .. }
+            | Self::Paused(_)
+            | Self::WatchGroup(_)
+            | Self::Away(_)
+            | Self::Got { .. }
+            | Self::Delay { .. }
+            | Self::Direct(Signal::Want(_)) => 0,
+        };
+        size_of::<Self>() + inside
+    }
+
     pub fn open(keys: &Keys, from: &PublicKey, sealed: &Sealed) -> Result<Self, OpenError> {
         open(keys, from, sealed)
     }
@@ -458,14 +520,17 @@ mod tests {
             PlayMsg::Setup {
                 round: 2,
                 from: Origin::Boot(Some(vec![3; 8 * 1024])),
+                budget: 2,
             },
             PlayMsg::Setup {
                 round: 2,
                 from: Origin::Boot(None),
+                budget: 0,
             },
             PlayMsg::Setup {
                 round: 3,
                 from: Origin::Resume(vec![4; 60 * 1024]),
+                budget: 30,
             },
             PlayMsg::Ping(9),
             PlayMsg::Pong(9),
@@ -576,6 +641,11 @@ mod tests {
                 upto: MAX_GAME_BYTES,
             },
             PlayMsg::Delay { round: 3, delay: 9 },
+            PlayMsg::Direct(Signal::Want(true)),
+            PlayMsg::Direct(Signal::Candidate {
+                attempt: 2,
+                line: "candidate:1 1 udp 2130706431 192.0.2.4 5000 typ host".into(),
+            }),
         ];
         for msg in msgs {
             let sealed = msg.seal(&a, &b.public_key());
@@ -626,6 +696,8 @@ mod tests {
             }),
             23
         );
+        assert_eq!(tag(&PlayMsg::Delay { round: 0, delay: 0 }), 28);
+        assert_eq!(tag(&PlayMsg::Direct(Signal::Want(false))), 31);
     }
 
     #[test]
@@ -903,9 +975,9 @@ mod tests {
     }
 
     #[test]
-    fn this_build_plays_with_play_version_thirteen_only() {
-        assert!(!plays_with(12));
-        assert!(plays_with(13));
-        assert!(!plays_with(14));
+    fn this_build_plays_with_play_version_sixteen_only() {
+        assert!(!plays_with(15));
+        assert!(plays_with(16));
+        assert!(!plays_with(17));
     }
 }

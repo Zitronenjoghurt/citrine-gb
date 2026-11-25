@@ -1,7 +1,9 @@
 use super::Credited;
 use super::sync::LastStored;
-use crate::storage::Backend;
+use crate::storage::Folders;
+use crate::storage::kinds::Folder;
 use citrine_gb_walker::{EEPROM_SIZE, Eeprom, Memory, Walker};
+use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 4] = b"CWLK";
 const VERSION: u8 = 4;
@@ -10,20 +12,50 @@ const HEADER: usize = MEMORY + Credited::SIZE;
 const V3_HEADER: usize = MEMORY;
 const V2_HEADER: usize = MAGIC.len() + 1 + Memory::OLD_SIZE;
 const V1_HEADER: usize = MAGIC.len() + 1 + 8;
-pub(super) const NAMESPACE: &str = "walker";
+pub(super) const NAMESPACE: Folder = Folder::Walker;
 const FILE: &str = "walker.bin";
 const UNREADABLE: &str = "walker-unreadable.bin";
 const LAST_STORED: &str = "cloud-stored.dat";
+const TICKED: &str = "walker-clock.dat";
+const COPIED: &str = "walker-copy.dat";
+const LAN: &str = "walker-lan.dat";
+const KEPT: &str = "walker-kept-";
+const NOTE: &str = ".why";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeptWhy {
+    Replaced { by: String },
+    ChangedHere { holder: Option<String> },
+    Imported,
+    SwappedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptNote {
+    pub why: KeptWhy,
+    pub steps: u32,
+    #[serde(default)]
+    pub closed: bool,
+}
 
 pub trait WalkerStore {
     fn load(&mut self) -> Option<(Walker, Credited)>;
     fn save(&mut self, bytes: &[u8]);
-    fn keep(&mut self, bytes: &[u8]);
+    fn keep(&mut self, bytes: &[u8]) -> Option<String>;
+    fn notes(&self) -> Vec<(String, KeptNote)>;
+    fn set_note(&mut self, name: &str, note: &KeptNote);
+    fn drop_kept(&mut self, name: &str);
     fn files(&self) -> Vec<(String, Vec<u8>)>;
     fn put(&mut self, name: &str, bytes: &[u8]) -> std::io::Result<()>;
     fn clear(&mut self) -> std::io::Result<()>;
     fn last_stored(&self) -> Option<LastStored>;
     fn set_last_stored(&mut self, last_stored: Option<LastStored>);
+    fn ticked_at(&self) -> Option<u64>;
+    fn set_ticked_at(&mut self, ms: Option<u64>);
+    fn copied(&self) -> bool;
+    fn set_copied(&mut self, copied: bool);
+    fn lan(&self) -> Option<Vec<u8>>;
+    fn set_lan(&mut self, bytes: Option<&[u8]>);
 }
 
 pub const MAIN: &str = FILE;
@@ -32,6 +64,18 @@ pub fn is_walker_file(name: &str) -> bool {
     name.strip_prefix("walker")
         .and_then(|rest| rest.strip_suffix(".bin"))
         .is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
+fn kept_number(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix(KEPT)?;
+    let number = rest
+        .strip_suffix(".bin")
+        .or_else(|| rest.strip_suffix(NOTE))?;
+    number.parse().ok()
+}
+
+fn note_name(name: &str) -> Option<String> {
+    Some(format!("{KEPT}{}{NOTE}", kept_number(name)?))
 }
 
 pub fn encode(walker: &Walker, credited: Credited) -> Vec<u8> {
@@ -48,18 +92,19 @@ pub fn decode(bytes: &[u8]) -> Option<(Walker, Credited)> {
     if bytes.get(..MAGIC.len())? != MAGIC {
         return None;
     }
-    if bytes[MAGIC.len()] == VERSION && bytes.len() == HEADER + EEPROM_SIZE {
+    let version = *bytes.get(MAGIC.len())?;
+    if version == VERSION && bytes.len() == HEADER + EEPROM_SIZE {
         let walker = Walker::restore(
             Eeprom::from_bytes(&bytes[HEADER..])?,
             Memory::from_bytes(&bytes[MAGIC.len() + 1..MEMORY])?,
         );
         return Some((walker, Credited::from_bytes(&bytes[MEMORY..HEADER])?));
     }
-    decode_old(bytes).map(|walker| (walker, Credited::default()))
+    decode_old(version, bytes).map(|walker| (walker, Credited::default()))
 }
 
-fn decode_old(bytes: &[u8]) -> Option<Walker> {
-    match (bytes[MAGIC.len()], bytes.len()) {
+fn decode_old(version: u8, bytes: &[u8]) -> Option<Walker> {
+    match (version, bytes.len()) {
         (3, len) if len == V3_HEADER + EEPROM_SIZE => Some(Walker::restore(
             Eeprom::from_bytes(&bytes[V3_HEADER..])?,
             Memory::from_bytes(&bytes[MAGIC.len() + 1..V3_HEADER])?,
@@ -76,23 +121,16 @@ fn decode_old(bytes: &[u8]) -> Option<Walker> {
     }
 }
 
+#[derive(Default)]
 pub struct FileStore {
-    backend: Backend,
-}
-
-impl Default for FileStore {
-    fn default() -> Self {
-        Self {
-            backend: Backend::settings(),
-        }
-    }
+    backend: Folders,
 }
 
 impl FileStore {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn at(root: std::path::PathBuf) -> Self {
         Self {
-            backend: Backend::at(root),
+            backend: Folders::at(root),
         }
     }
 }
@@ -116,14 +154,66 @@ impl WalkerStore for FileStore {
         }
     }
 
-    fn keep(&mut self, bytes: &[u8]) {
-        let name = format!("walker-kept-{}.bin", crate::storage::now_unix());
+    fn keep(&mut self, bytes: &[u8]) -> Option<String> {
+        let newest = self
+            .backend
+            .list(NAMESPACE)
+            .iter()
+            .filter_map(|name| kept_number(name))
+            .max();
+        let number = newest.map_or(0, |n| n + 1).max(crate::storage::now_unix());
+        let name = format!("{KEPT}{number}.bin");
         match self.backend.write(NAMESPACE, &name, bytes) {
-            Ok(()) => log::info!(
-                "another device took the walker, this copy is kept in {} as {NAMESPACE}/{name}",
-                self.backend.location()
-            ),
-            Err(err) => log::error!("failed to keep the walker: {err}"),
+            Ok(()) => {
+                log::info!(
+                    "a walker copy is kept in {} as {}/{name}",
+                    self.backend.location(),
+                    NAMESPACE.name()
+                );
+                Some(name)
+            }
+            Err(err) => {
+                log::error!("failed to keep the walker: {err}");
+                None
+            }
+        }
+    }
+
+    fn notes(&self) -> Vec<(String, KeptNote)> {
+        let mut notes: Vec<(u64, String, KeptNote)> = self
+            .backend
+            .list(NAMESPACE)
+            .into_iter()
+            .filter(|name| name.ends_with(NOTE))
+            .filter_map(|name| {
+                let number = kept_number(&name)?;
+                let note = serde_json::from_slice(&self.backend.read(NAMESPACE, &name)?).ok()?;
+                Some((number, format!("{KEPT}{number}.bin"), note))
+            })
+            .collect();
+        notes.sort_by_key(|(number, _, _)| *number);
+        notes
+            .into_iter()
+            .map(|(_, name, note)| (name, note))
+            .collect()
+    }
+
+    fn set_note(&mut self, name: &str, note: &KeptNote) {
+        let Some(file) = note_name(name) else {
+            return;
+        };
+        let bytes = serde_json::to_vec(note).unwrap_or_default();
+        if let Err(err) = self.backend.write(NAMESPACE, &file, &bytes) {
+            log::error!("failed to note why the walker copy was kept: {err}");
+        }
+    }
+
+    fn drop_kept(&mut self, name: &str) {
+        let note = note_name(name);
+        for file in [Some(name.to_owned()), note].into_iter().flatten() {
+            if let Err(err) = self.backend.delete(NAMESPACE, &file) {
+                log::error!("failed to remove the walker copy {file}: {err}");
+            }
         }
     }
 
@@ -161,6 +251,50 @@ impl WalkerStore for FileStore {
             log::error!("failed to note the walker's cloud copy: {err}");
         }
     }
+
+    fn ticked_at(&self) -> Option<u64> {
+        let bytes = self.backend.read(NAMESPACE, TICKED)?;
+        Some(u64::from_le_bytes(bytes.as_slice().try_into().ok()?))
+    }
+
+    fn set_ticked_at(&mut self, ms: Option<u64>) {
+        let done = match ms {
+            Some(ms) => self.backend.write(NAMESPACE, TICKED, &ms.to_le_bytes()),
+            None => self.backend.delete(NAMESPACE, TICKED),
+        };
+        if let Err(err) = done {
+            log::error!("failed to note the walker's clock: {err}");
+        }
+    }
+
+    fn copied(&self) -> bool {
+        self.backend.read(NAMESPACE, COPIED).is_some()
+    }
+
+    fn set_copied(&mut self, copied: bool) {
+        let done = if copied {
+            self.backend.write(NAMESPACE, COPIED, &[])
+        } else {
+            self.backend.delete(NAMESPACE, COPIED)
+        };
+        if let Err(err) = done {
+            log::error!("failed to note where the walker came from: {err}");
+        }
+    }
+
+    fn lan(&self) -> Option<Vec<u8>> {
+        self.backend.read(NAMESPACE, LAN)
+    }
+
+    fn set_lan(&mut self, bytes: Option<&[u8]>) {
+        let done = match bytes {
+            Some(bytes) => self.backend.write(NAMESPACE, LAN, bytes),
+            None => self.backend.delete(NAMESPACE, LAN),
+        };
+        if let Err(err) = done {
+            log::error!("failed to note who keeps the walker nearby: {err}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -168,7 +302,7 @@ mod tests {
     use super::*;
 
     fn root(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::storage::scratch_dir().join(format!(
             "citrine-walker-store-{}-{name}",
             std::process::id()
         ));
@@ -238,7 +372,7 @@ mod tests {
         let mut store = FileStore::at(dir.clone());
         store.save(b"CWLK mine");
         store.keep(b"CWLK theirs");
-        let names: Vec<String> = std::fs::read_dir(dir.join(NAMESPACE))
+        let names: Vec<String> = std::fs::read_dir(dir.join(NAMESPACE.name()))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
@@ -248,9 +382,32 @@ mod tests {
             .find(|name| name.starts_with("walker-kept-"))
             .expect("kept");
         assert_eq!(
-            std::fs::read(dir.join(NAMESPACE).join(kept)).unwrap(),
+            std::fs::read(dir.join(NAMESPACE.name()).join(kept)).unwrap(),
             b"CWLK theirs"
         );
+    }
+
+    #[test]
+    fn a_kept_note_survives_a_restart_and_goes_with_its_copy() {
+        let dir = root("note");
+        let mut store = FileStore::at(dir.clone());
+        let first = store.keep(b"CWLK first").unwrap();
+        let second = store.keep(b"CWLK second").unwrap();
+        assert_ne!(first, second);
+        let note = KeptNote {
+            why: KeptWhy::Replaced {
+                by: "Pixel 8".into(),
+            },
+            steps: 1_032,
+            closed: false,
+        };
+        store.set_note(&second, &note);
+        let mut again = FileStore::at(dir);
+        assert_eq!(again.notes(), vec![(second.clone(), note)]);
+        assert_eq!(again.files().len(), 2);
+        again.drop_kept(&second);
+        assert!(again.notes().is_empty());
+        assert_eq!(again.files(), vec![(first, b"CWLK first".to_vec())]);
     }
 
     #[test]
@@ -295,7 +452,7 @@ mod tests {
         store.backend.write(NAMESPACE, FILE, b"CWLK junk").unwrap();
         assert!(store.load().is_none());
         assert_eq!(
-            std::fs::read(dir.join(NAMESPACE).join(UNREADABLE)).unwrap(),
+            std::fs::read(dir.join(NAMESPACE.name()).join(UNREADABLE)).unwrap(),
             b"CWLK junk"
         );
     }
@@ -306,5 +463,17 @@ mod tests {
         assert!(decode(&bytes[..bytes.len() - 1]).is_none());
         bytes[4] = VERSION + 1;
         assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn a_short_file_decodes_to_nothing() {
+        let bytes = encode(&Walker::new(1), Credited::default());
+        for len in 0..=8 {
+            assert!(decode(&bytes[..len]).is_none(), "{len} bytes");
+        }
+        let dir = root("short");
+        let mut store = FileStore::at(dir);
+        store.backend.write(NAMESPACE, FILE, MAGIC).unwrap();
+        assert!(store.load().is_none());
     }
 }

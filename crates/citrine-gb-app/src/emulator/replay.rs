@@ -11,6 +11,9 @@ impl Emulator {
         recording: citrine_gb::recording::Recording,
         game: &str,
     ) -> Result<(), crate::replay::ReplayError> {
+        if self.hardcore {
+            return Err(crate::replay::ReplayError::Hardcore);
+        }
         let loaded = self.has_game()
             && self
                 .seat

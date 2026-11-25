@@ -2,12 +2,14 @@ use crate::codec::Encoder;
 use crate::link::{Link, Poll, Route};
 use crate::mode::{Mode, ScreenShape};
 use crate::pairing::{CODE_LIFE_SECS, Code};
-use crate::proof::{Nonce, ProofKey};
+use crate::proof::{LinkKey, OPEN_LINK, ProofKey, code_answer, resume_link};
 use crate::proto::{
-    Action, Bye, GameCard, HostMsg, MAX_NAME_CHARS, Resume, SURFACE_VERSION, SurfaceId,
+    Action, Bye, Entry, GameCard, Hello, HostMsg, MAX_NAME_CHARS, SURFACE_VERSION, SurfaceId,
     SurfaceKind, SurfaceMsg, Wire,
 };
+use crate::secure::Sealed;
 use crate::touch::{Pointer, ScreenTouch, Stylus, clamped};
+use citrine_gb_net::{CheckCode, keyed_answer};
 use std::net::IpAddr;
 
 pub const KEEP_LOST_SECS: f64 = 60.0;
@@ -15,7 +17,14 @@ pub const HELLO_WAIT_SECS: f64 = 10.0;
 pub const FRAMES_IN_FLIGHT: usize = 2;
 pub const MAX_ASKS: usize = 3;
 pub const ASK_SECS: f64 = 60.0;
+pub const MAX_ASK_TRIES: usize = 10;
+pub const MAX_ASK_TRIES_ALL: usize = 30;
+pub const ASK_TRIES_SECS: f64 = 600.0;
 pub const NEEDS_UPDATE_EVERY_SECS: f64 = 60.0;
+pub const MAX_CODE_TRIES: u8 = 5;
+pub const MAX_WAITING: usize = 16;
+pub const MAX_WAITING_PER_ADDRESS: usize = 4;
+pub const MAX_READS_PER_STEP: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenFrame<'a> {
@@ -47,10 +56,28 @@ struct Waiting {
     trusted: bool,
 }
 
-#[derive(PartialEq, Eq)]
+struct Opening {
+    link: Sealed,
+    name: String,
+    kind: SurfaceKind,
+    entry: Entry,
+    code: Option<Code>,
+    binding: [u8; 32],
+    since: f64,
+    trusted: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 enum Sender {
     Address(IpAddr),
     Name(String),
+}
+
+impl Sender {
+    fn of(link: &dyn Link, name: &str) -> Self {
+        link.address()
+            .map_or_else(|| Self::Name(name.to_owned()), Self::Address)
+    }
 }
 
 struct Asking {
@@ -58,10 +85,10 @@ struct Asking {
     link: Box<dyn Link>,
     name: String,
     kind: SurfaceKind,
+    binding: [u8; 32],
+    code: CheckCode,
     sender: Sender,
-    nonce: Nonce,
     since: f64,
-    shown: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +96,7 @@ pub struct Asker {
     pub id: u32,
     pub name: String,
     pub kind: SurfaceKind,
+    pub code: CheckCode,
 }
 
 struct Slot {
@@ -78,7 +106,7 @@ struct Slot {
     link: Option<Box<dyn Link>>,
     route: Route,
     trusted: bool,
-    resume: Resume,
+    resume: LinkKey,
     mode: Mode,
     encoders: Vec<Encoder>,
     seq: u32,
@@ -113,10 +141,14 @@ impl Slot {
 pub struct Host {
     name: String,
     code: Option<(Code, f64)>,
+    code_tries: u8,
+    code_spent: bool,
+    removed: Vec<(SurfaceId, LinkKey, f64)>,
     waiting: Vec<Waiting>,
+    opening: Vec<Opening>,
     asking: Vec<Asking>,
+    asked_at: Vec<(Sender, f64)>,
     next_ask: u32,
-    instance: u64,
     proof_key: Option<ProofKey>,
     outdated: Vec<String>,
     outdated_at: Vec<(String, f64)>,
@@ -133,10 +165,14 @@ impl Host {
         Self {
             name: name.into(),
             code: None,
+            code_tries: 0,
+            code_spent: false,
+            removed: Vec::new(),
             waiting: Vec::new(),
+            opening: Vec::new(),
             asking: Vec::new(),
+            asked_at: Vec::new(),
             next_ask: 1,
-            instance: crate::proof::instance(),
             proof_key: None,
             outdated: Vec::new(),
             outdated_at: Vec::new(),
@@ -151,16 +187,23 @@ impl Host {
 
     pub fn open_code(&mut self, now: f64) -> Code {
         let code = Code::random();
-        self.code = Some((code, now));
+        self.open_code_as(code, now);
         code
     }
 
     pub fn open_code_as(&mut self, code: Code, now: f64) {
         self.code = Some((code, now));
+        self.code_tries = 0;
+        self.code_spent = false;
     }
 
     pub fn close_code(&mut self) {
         self.code = None;
+        self.code_spent = false;
+    }
+
+    pub fn code_spent(&self) -> bool {
+        self.code_spent
     }
 
     pub fn code(&self) -> Option<(Code, f64)> {
@@ -170,6 +213,15 @@ impl Host {
     }
 
     pub fn accept(&mut self, link: Box<dyn Link>) {
+        let address = link.address();
+        let strangers = self.waiting.iter().filter(|w| !w.trusted);
+        let same = strangers
+            .clone()
+            .filter(|w| address.is_some() && w.link.address() == address)
+            .count();
+        if strangers.count() >= MAX_WAITING || same >= MAX_WAITING_PER_ADDRESS {
+            return;
+        }
         self.waiting.push(Waiting {
             link,
             since: self.now,
@@ -192,24 +244,24 @@ impl Host {
     pub fn askers(&self) -> Vec<Asker> {
         self.asking
             .iter()
-            .filter(|ask| ask.shown)
             .map(|ask| Asker {
                 id: ask.id,
                 name: ask.name.clone(),
                 kind: ask.kind,
+                code: ask.code,
             })
             .collect()
     }
 
     pub fn allow(&mut self, id: u32) {
-        if let Some(at) = self.asking.iter().position(|ask| ask.id == id && ask.shown) {
+        if let Some(at) = self.asking.iter().position(|ask| ask.id == id) {
             let ask = self.asking.remove(at);
-            self.admit(ask.link, ask.name, ask.kind, false);
+            self.admit(ask.link, ask.name, ask.kind, false, &ask.binding);
         }
     }
 
     pub fn decline(&mut self, id: u32) {
-        if let Some(at) = self.asking.iter().position(|ask| ask.id == id && ask.shown) {
+        if let Some(at) = self.asking.iter().position(|ask| ask.id == id) {
             let mut ask = self.asking.remove(at);
             ask.link.send(HostMsg::Bye(Bye::Declined).encode());
         }
@@ -254,6 +306,8 @@ impl Host {
     pub fn step(&mut self, now: f64) {
         self.now = now;
         self.greet();
+        self.hear_openings();
+        self.spend_code();
         self.hear_askers();
         for at in 0..self.slots.len() {
             self.listen(at);
@@ -263,6 +317,26 @@ impl Host {
             None => true,
         };
         self.slots.retain(kept);
+        self.removed.retain(|(_, _, at)| now - at < KEEP_LOST_SECS);
+    }
+
+    fn spend_code(&mut self) {
+        let trying = self.opening.iter().any(|o| o.code.is_some());
+        if self.code_tries >= MAX_CODE_TRIES && self.code().is_some() && !trying {
+            self.code = None;
+            self.code_spent = true;
+        }
+    }
+
+    fn resume_key(&self, id: SurfaceId) -> Option<LinkKey> {
+        let slot = self.slots.iter().find(|s| s.id == id).map(|s| s.resume);
+        let removed = || {
+            self.removed
+                .iter()
+                .find(|(removed, _, _)| *removed == id)
+                .map(|(_, resume, _)| *resume)
+        };
+        slot.or_else(removed)
     }
 
     fn greet(&mut self) {
@@ -270,18 +344,7 @@ impl Host {
         let mut still = Vec::new();
         for mut wait in waiting.drain(..) {
             match wait.link.poll() {
-                Poll::Message(bytes) => {
-                    if let Some(SurfaceMsg::Hello {
-                        version,
-                        name,
-                        kind,
-                        code,
-                        resume,
-                    }) = SurfaceMsg::decode(&bytes)
-                    {
-                        self.hello(wait, version, name, kind, code, resume);
-                    }
-                }
+                Poll::Message(bytes) => self.hello(wait, &bytes),
                 Poll::Idle if self.now - wait.since < HELLO_WAIT_SECS => still.push(wait),
                 Poll::Idle | Poll::Closed => {}
             }
@@ -290,51 +353,146 @@ impl Host {
         self.waiting = still;
     }
 
-    fn hello(
-        &mut self,
-        mut wait: Waiting,
-        version: u16,
-        name: String,
-        kind: SurfaceKind,
-        code: Option<Code>,
-        resume: Option<Resume>,
-    ) {
+    fn hello(&mut self, mut wait: Waiting, bytes: &[u8]) {
+        let Some((version, name)) = Hello::front(bytes) else {
+            return;
+        };
         let name: String = name.chars().take(MAX_NAME_CHARS).collect();
         if version != SURFACE_VERSION {
             wait.link.send(HostMsg::Bye(Bye::NeedsUpdate).encode());
             self.name_outdated(name);
             return;
         }
-        let route = wait.link.route();
-        if let Some(slot) = resume.and_then(|r| self.slots.iter_mut().find(|s| s.resume == r)) {
-            slot.link = Some(wait.link);
-            slot.route = route;
-            slot.lost_at = None;
-            slot.restart();
-            let welcome = HostMsg::Welcome {
-                id: slot.id,
-                resume: slot.resume,
-                host: self.name.clone(),
-            };
-            let mode = HostMsg::Mode(slot.mode.clone());
-            slot.send(&welcome);
-            slot.send(&HostMsg::Game(self.game.clone()));
-            slot.send(&mode);
+        let Some(SurfaceMsg::Hello(hello)) = SurfaceMsg::decode(bytes) else {
             return;
-        }
-        if !wait.trusted && code.is_none() {
-            self.ask(wait.link, name, kind);
+        };
+        let code = self.code().map(|(code, _)| code);
+        let sender = Sender::of(wait.link.as_ref(), &name);
+        let (key, pake) = match hello.entry {
+            Entry::Own => match self.proof_key {
+                Some(key) => (key.link(), Vec::new()),
+                None => return,
+            },
+            Entry::Code => match code.filter(|_| self.code_tries < MAX_CODE_TRIES) {
+                Some(code) => match code_answer(code, &hello.pake) {
+                    Some((pake, key)) => (key, pake),
+                    None => return,
+                },
+                None => {
+                    wait.link.send(HostMsg::Bye(Bye::WrongCode).encode());
+                    return;
+                }
+            },
+            Entry::Resume(id) => match self.resume_key(id) {
+                Some(key) => (key, Vec::new()),
+                None => {
+                    wait.link.send(HostMsg::Bye(Bye::Removed).encode());
+                    return;
+                }
+            },
+            Entry::Asked(_) if !wait.trusted && !self.may_ask(&sender) => {
+                wait.link.send(HostMsg::Bye(Bye::TooManyAsks).encode());
+                return;
+            }
+            Entry::Asked(_) => (OPEN_LINK, Vec::new()),
+        };
+        let Ok((reply, channel)) = keyed_answer(&hello.prologue(), &key, &hello.handshake) else {
             return;
+        };
+        if hello.entry == Entry::Code {
+            self.code_tries += 1;
         }
-        let open = self.code().map(|(c, _)| c);
-        if !wait.trusted && code != open {
-            wait.link.send(HostMsg::Bye(Bye::WrongCode).encode());
+        if matches!(hello.entry, Entry::Asked(_)) && !wait.trusted {
+            self.asked_at.push((sender, self.now));
+        }
+        wait.link.send(HostMsg::Opened { reply, pake }.encode());
+        self.opening.push(Opening {
+            binding: channel.binding(),
+            link: Sealed::new(wait.link, channel),
+            name,
+            kind: hello.kind,
+            entry: hello.entry,
+            code: code.filter(|_| hello.entry == Entry::Code),
+            since: self.now,
+            trusted: wait.trusted,
+        });
+    }
+
+    fn hear_openings(&mut self) {
+        let now = self.now;
+        for mut opening in std::mem::take(&mut self.opening) {
+            match opening.link.poll() {
+                Poll::Message(bytes) => match (SurfaceMsg::decode(&bytes), opening.entry) {
+                    (Some(SurfaceMsg::Check(nonce)), Entry::Asked(commit))
+                        if nonce.commit() == commit =>
+                    {
+                        let code = CheckCode::new(&opening.binding, &nonce);
+                        self.enter(opening, Some(code));
+                    }
+                    (Some(SurfaceMsg::Ready), entry) if !matches!(entry, Entry::Asked(_)) => {
+                        self.enter(opening, None);
+                    }
+                    _ => {}
+                },
+                Poll::Idle if now - opening.since < HELLO_WAIT_SECS => self.opening.push(opening),
+                Poll::Idle | Poll::Closed => {}
+            }
+        }
+    }
+
+    fn may_ask(&mut self, sender: &Sender) -> bool {
+        let now = self.now;
+        self.asked_at.retain(|(_, at)| now - at < ASK_TRIES_SECS);
+        let same = self.asked_at.iter().filter(|(s, _)| s == sender).count();
+        same < MAX_ASK_TRIES && self.asked_at.len() < MAX_ASK_TRIES_ALL
+    }
+
+    fn enter(&mut self, opening: Opening, check: Option<CheckCode>) {
+        let Opening {
+            link,
+            name,
+            kind,
+            entry,
+            code,
+            binding,
+            trusted,
+            ..
+        } = opening;
+        let mut link: Box<dyn Link> = Box::new(link);
+        match entry {
+            Entry::Resume(id) => self.resume(id, link),
+            _ if trusted => self.admit(link, name, kind, true, &binding),
+            Entry::Own => self.admit(link, name, kind, false, &binding),
+            Entry::Code if code.is_some() && code == self.code().map(|(c, _)| c) => {
+                self.code = None;
+                self.admit(link, name, kind, false, &binding);
+            }
+            Entry::Code => link.send(HostMsg::Bye(Bye::WrongCode).encode()),
+            Entry::Asked(_) => {
+                if let Some(code) = check {
+                    self.ask(link, name, kind, binding, code);
+                }
+            }
+        }
+    }
+
+    fn resume(&mut self, id: SurfaceId, mut link: Box<dyn Link>) {
+        let Some(slot) = self.slots.iter_mut().find(|s| s.id == id) else {
+            link.send(HostMsg::Bye(Bye::Removed).encode());
             return;
-        }
-        if !wait.trusted {
-            self.code = None;
-        }
-        self.admit(wait.link, name, kind, wait.trusted);
+        };
+        slot.route = link.route();
+        slot.link = Some(link);
+        slot.lost_at = None;
+        slot.restart();
+        let welcome = HostMsg::Welcome {
+            id: slot.id,
+            host: self.name.clone(),
+        };
+        let mode = HostMsg::Mode(slot.mode.clone());
+        slot.send(&welcome);
+        slot.send(&HostMsg::Game(self.game.clone()));
+        slot.send(&mode);
     }
 
     fn name_outdated(&mut self, name: String) {
@@ -348,23 +506,25 @@ impl Host {
         self.outdated.push(name);
     }
 
-    fn ask(&mut self, mut link: Box<dyn Link>, name: String, kind: SurfaceKind) {
+    fn ask(
+        &mut self,
+        mut link: Box<dyn Link>,
+        name: String,
+        kind: SurfaceKind,
+        binding: [u8; 32],
+        code: CheckCode,
+    ) {
         if self.game.is_none() {
             link.send(HostMsg::Bye(Bye::NoGame).encode());
             return;
         }
-        let sender = link
-            .address()
-            .map_or_else(|| Sender::Name(name.clone()), Sender::Address);
+        let sender = Sender::of(link.as_ref(), &name);
         self.asking.retain(|ask| ask.sender != sender);
-        let nonce = crate::proof::nonce();
-        link.send(
-            HostMsg::Challenge {
-                nonce,
-                host: self.instance,
-            }
-            .encode(),
-        );
+        if self.asking.len() >= MAX_ASKS {
+            link.send(HostMsg::Bye(Bye::Declined).encode());
+            return;
+        }
+        link.send(HostMsg::Asking.encode());
         let id = self.next_ask;
         self.next_ask += 1;
         self.asking.push(Asking {
@@ -372,61 +532,43 @@ impl Host {
             link,
             name,
             kind,
+            binding,
+            code,
             sender,
-            nonce,
             since: self.now,
-            shown: false,
         });
     }
 
     fn hear_askers(&mut self) {
         let now = self.now;
-        let (key, host) = (self.proof_key, self.instance);
-        let mut shown = self.asking.iter().filter(|ask| ask.shown).count();
-        let mut proven = Vec::new();
         self.asking.retain_mut(|ask| {
-            loop {
+            for _ in 0..MAX_READS_PER_STEP {
                 match ask.link.poll() {
-                    Poll::Message(bytes) => match SurfaceMsg::decode(&bytes) {
-                        Some(SurfaceMsg::Proof(proof)) if !ask.shown => {
-                            let own = key
-                                .zip(proof)
-                                .is_some_and(|(key, proof)| key.checks(&ask.nonce, host, &proof));
-                            if own {
-                                proven.push(ask.id);
-                                return true;
-                            }
-                            if shown >= MAX_ASKS {
-                                ask.link.send(HostMsg::Bye(Bye::Declined).encode());
-                                return false;
-                            }
-                            ask.link.send(HostMsg::Asking.encode());
-                            ask.shown = true;
-                            ask.since = now;
-                            shown += 1;
+                    Poll::Message(bytes) => {
+                        if SurfaceMsg::decode(&bytes) == Some(SurfaceMsg::Leave) {
+                            return false;
                         }
-                        Some(SurfaceMsg::Leave) => return false,
-                        _ => {}
-                    },
+                    }
                     Poll::Idle => break,
                     Poll::Closed => return false,
                 }
             }
-            if ask.shown && now - ask.since >= ASK_SECS {
+            if now - ask.since >= ASK_SECS {
                 ask.link.send(HostMsg::Bye(Bye::NoAnswer).encode());
                 return false;
             }
-            ask.shown || now - ask.since < HELLO_WAIT_SECS
+            true
         });
-        for id in proven {
-            if let Some(at) = self.asking.iter().position(|ask| ask.id == id) {
-                let ask = self.asking.remove(at);
-                self.admit(ask.link, ask.name, ask.kind, false);
-            }
-        }
     }
 
-    fn admit(&mut self, link: Box<dyn Link>, name: String, kind: SurfaceKind, trusted: bool) {
+    fn admit(
+        &mut self,
+        link: Box<dyn Link>,
+        name: String,
+        kind: SurfaceKind,
+        trusted: bool,
+        binding: &[u8; 32],
+    ) {
         let route = link.route();
         let id = SurfaceId(self.next_id);
         self.next_id += 1;
@@ -437,7 +579,7 @@ impl Host {
             link: Some(link),
             route,
             trusted,
-            resume: Resume::random(),
+            resume: resume_link(binding),
             mode: Mode::default_for(self.screens()),
             encoders: Vec::new(),
             seq: 0,
@@ -449,7 +591,6 @@ impl Host {
         };
         slot.send(&HostMsg::Welcome {
             id,
-            resume: slot.resume,
             host: self.name.clone(),
         });
         slot.send(&HostMsg::Game(self.game.clone()));
@@ -496,7 +637,7 @@ impl Host {
                     slot.lost_at = Some(now - KEEP_LOST_SECS);
                     return;
                 }
-                Some(SurfaceMsg::Hello { .. } | SurfaceMsg::Proof(_)) | None => {}
+                Some(SurfaceMsg::Hello(_) | SurfaceMsg::Ready | SurfaceMsg::Check(_)) | None => {}
             }
         }
     }
@@ -605,6 +746,7 @@ impl Host {
         if let Some(at) = self.slots.iter().position(|s| s.id == id) {
             let mut slot = self.slots.remove(at);
             slot.send(&HostMsg::Bye(Bye::Removed));
+            self.removed.push((slot.id, slot.resume, self.now));
         }
     }
 
@@ -617,6 +759,7 @@ impl Host {
         }
         self.slots.clear();
         self.waiting.clear();
+        self.opening.clear();
         self.asking.clear();
     }
 }
@@ -624,9 +767,15 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::InApp;
     use crate::link::in_app;
     use crate::mode::{Preset, View};
-    use crate::remote::{Phase, Remote};
+    use crate::remote::{Knock, Phase, Remote};
+    use citrine_gb_net::{Channel, KeyedDial};
+
+    mod check_codes;
+    mod code_knocks;
+    mod resumes;
 
     fn ds() -> GameCard {
         GameCard {
@@ -654,7 +803,8 @@ mod tests {
     fn pair(host: &mut Host, code: Option<Code>, now: f64) -> Remote {
         let (a, b) = in_app();
         host.accept(Box::new(a));
-        let mut remote = Remote::join(Box::new(b), "Pixel 8", SurfaceKind::Device, code, None);
+        let knock = code.map_or(Knock::Asked, Knock::Code);
+        let mut remote = Remote::join(Box::new(b), "Pixel 8", SurfaceKind::Device, knock);
         settle(host, &mut remote, now);
         remote
     }
@@ -817,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_surface_comes_back_with_its_token_and_mode() {
+    fn a_lost_surface_comes_back_with_its_key_and_mode() {
         let mut host = Host::new("PC");
         host.set_game(Some(ds()));
         let code = host.open_code(0.0);
@@ -844,6 +994,23 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_removed_while_lost_hears_it_inside_the_link() {
+        let mut host = playing("PC");
+        let code = host.open_code(0.0);
+        let mut remote = pair(&mut host, Some(code), 0.0);
+        host.slots[0].lose(0.2);
+        remote.step(0.2);
+        assert_eq!(remote.phase(), Phase::Lost);
+        host.remove(host.surfaces()[0].id);
+        let (a, b) = in_app();
+        host.accept(Box::new(a));
+        remote.resume_over(Box::new(b));
+        settle(&mut host, &mut remote, 1.0);
+        assert_eq!(remote.phase(), Phase::Ended(Some(Bye::Removed)));
+        assert!(host.surfaces().is_empty());
+    }
+
+    #[test]
     fn a_surface_that_leaves_is_gone_at_once() {
         let mut host = Host::new("PC");
         host.set_game(Some(ds()));
@@ -862,7 +1029,7 @@ mod tests {
         host.set_game(Some(ds()));
         let (a, b) = in_app();
         host.accept_trusted(Box::new(a));
-        let mut remote = Remote::join(Box::new(b), "Window", SurfaceKind::Window, None, None);
+        let mut remote = Remote::join(Box::new(b), "Window", SurfaceKind::Window, Knock::Asked);
         settle(&mut host, &mut remote, 0.0);
         assert!(host.shows_screen(1));
         assert!(!host.wants_frames());
@@ -886,7 +1053,7 @@ mod tests {
         let mut host = Host::new("PC");
         let (a, b) = in_app();
         host.accept_trusted(Box::new(a));
-        let mut remote = Remote::join(Box::new(b), "Window", SurfaceKind::Window, None, None);
+        let mut remote = Remote::join(Box::new(b), "Window", SurfaceKind::Window, Knock::Asked);
         settle(&mut host, &mut remote, 0.0);
         assert_eq!(remote.phase(), Phase::Joined);
         drop(remote);
@@ -899,21 +1066,16 @@ mod tests {
         let mut host = Host::new("PC");
         let (a, mut b) = in_app();
         host.accept(Box::new(a));
-        b.send(
-            SurfaceMsg::Hello {
-                version: SURFACE_VERSION + 1,
-                name: "x".into(),
-                kind: SurfaceKind::Device,
-                code: None,
-                resume: None,
-            }
-            .encode(),
-        );
+        let commit = citrine_gb_net::CheckNonce::random().commit();
+        let mut hello = Hello::new("x".into(), SurfaceKind::Device, Entry::Asked(commit));
+        hello.version = SURFACE_VERSION + 1;
+        b.send(SurfaceMsg::Hello(hello).encode());
         host.step(0.0);
         assert_eq!(
             b.poll(),
             Poll::Message(HostMsg::Bye(Bye::NeedsUpdate).encode())
         );
+        assert_eq!(host.take_outdated(), vec!["x".to_owned()]);
     }
 
     #[test]
@@ -941,10 +1103,8 @@ mod tests {
     fn ask_as(host: &mut Host, name: &str, proof: Option<ProofKey>, now: f64) -> Remote {
         let (a, b) = in_app();
         host.accept(Box::new(a));
-        let mut remote = Remote::join(Box::new(b), name, SurfaceKind::Device, None, None);
-        if let Some(key) = proof {
-            remote.prove_with(key);
-        }
+        let knock = proof.map_or(Knock::Asked, Knock::Own);
+        let mut remote = Remote::join(Box::new(b), name, SurfaceKind::Device, knock);
         settle(host, &mut remote, now);
         remote
     }
@@ -1011,22 +1171,25 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_with_the_own_key_skips_the_ask() {
+    fn the_own_key_skips_the_ask_and_a_wrong_key_is_refused() {
         let mut host = playing("Mac");
         host.set_proof_key(Some(OWN));
         let stranger = ask_as(&mut host, "Stranger", Some(ProofKey([8; 32])), 1.0);
-        assert_eq!(stranger.phase(), Phase::Asking);
+        assert_eq!(stranger.phase(), Phase::Ended(None));
+        assert!(host.askers().is_empty());
+        assert!(host.surfaces().is_empty());
         let own = ask_as(&mut host, "Pixel 8", Some(OWN), 1.0);
         assert_eq!(own.phase(), Phase::Joined);
-        assert_eq!(host.askers().len(), 1);
+        assert!(host.askers().is_empty());
         assert_eq!(host.surfaces().len(), 1);
     }
 
     #[test]
-    fn a_host_without_a_proof_key_asks_its_own_devices() {
+    fn a_host_without_a_proof_key_refuses_an_own_knock() {
         let mut host = playing("Mac");
         let own = ask_as(&mut host, "Pixel 8", Some(OWN), 1.0);
-        assert_eq!(own.phase(), Phase::Asking);
+        assert_eq!(own.phase(), Phase::Ended(None));
+        assert!(host.askers().is_empty());
         assert!(host.surfaces().is_empty());
     }
 
@@ -1038,6 +1201,48 @@ mod tests {
         let own = ask_as(&mut host, "Pixel 8", Some(OWN), 1.0);
         assert_eq!(own.phase(), Phase::Joined);
         assert_eq!(host.code().map(|(c, _)| c), Some(code));
+    }
+
+    struct Addressed(crate::link::InApp, IpAddr);
+
+    impl Link for Addressed {
+        fn send(&mut self, bytes: Vec<u8>) {
+            self.0.send(bytes);
+        }
+
+        fn poll(&mut self) -> Poll {
+            self.0.poll()
+        }
+
+        fn route(&self) -> Route {
+            self.0.route()
+        }
+
+        fn address(&self) -> Option<IpAddr> {
+            Some(self.1)
+        }
+    }
+
+    #[test]
+    fn quiet_links_cant_fill_the_waiting_room() {
+        let mut host = Host::new("PC");
+        let mut far = Vec::new();
+        let mut knock = |host: &mut Host, last: u8| {
+            let (near, other) = in_app();
+            far.push(other);
+            host.accept(Box::new(Addressed(near, IpAddr::from([192, 168, 1, last]))));
+        };
+        for _ in 0..10 {
+            knock(&mut host, 66);
+        }
+        assert_eq!(host.waiting.len(), MAX_WAITING_PER_ADDRESS);
+        for last in 0..40 {
+            knock(&mut host, last);
+        }
+        assert_eq!(host.waiting.len(), MAX_WAITING);
+        let (own, _) = in_app();
+        host.accept_trusted(Box::new(own));
+        assert_eq!(host.waiting.len(), MAX_WAITING + 1);
     }
 
     type Seen = std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>;
@@ -1076,31 +1281,43 @@ mod tests {
             sent: Seen::clone(&sent),
             heard: Seen::clone(&heard),
         };
-        let mut own = Remote::join(Box::new(tap), "Pixel 8", SurfaceKind::Device, None, None);
-        own.prove_with(OWN);
+        let mut own = Remote::join(
+            Box::new(tap),
+            "Pixel 8",
+            SurfaceKind::Device,
+            Knock::Own(OWN),
+        );
         settle(host, &mut own, now);
         (own, sent, heard)
     }
 
+    fn welcomed_by(host: &str) -> impl Fn(&HostMsg) -> bool {
+        move |m| matches!(m, HostMsg::Welcome { host: name, .. } if name == host)
+    }
+
     #[test]
-    fn no_message_on_the_link_carries_the_proof_key() {
+    fn the_link_carries_neither_the_key_nor_a_readable_message() {
         let mut host = playing("Mac");
         host.set_proof_key(Some(OWN));
         let (own, sent, heard) = tapped_own_join(&mut host, 1.0);
         assert_eq!(own.phase(), Phase::Joined);
         let sent = sent.borrow();
         let heard = heard.borrow();
-        assert!(
-            sent.iter()
-                .any(|m| matches!(SurfaceMsg::decode(m), Some(SurfaceMsg::Proof(Some(_)))))
-        );
+        assert!(sent.len() >= 3 && heard.len() >= 4);
         for message in sent.iter().chain(heard.iter()) {
-            assert!(!message.windows(OWN.0.len()).any(|w| w == OWN.0));
+            assert!(!message.windows(32).any(|w| w == OWN.0 || w == OWN.link()));
         }
+        assert!(
+            !heard
+                .iter()
+                .filter_map(|m| HostMsg::decode(m))
+                .any(|m| welcomed_by("Mac")(&m))
+        );
+        assert!(!heard.iter().any(|m| m.windows(3).any(|w| w == b"Mac")));
     }
 
     #[test]
-    fn a_replayed_own_join_is_asked_not_admitted() {
+    fn a_replayed_own_join_is_refused() {
         let mut host = playing("Mac");
         host.set_proof_key(Some(OWN));
         let (own, sent, _) = tapped_own_join(&mut host, 1.0);
@@ -1118,60 +1335,169 @@ mod tests {
             }
         }
         assert_eq!(host.surfaces().len(), 1);
-        assert_eq!(host.askers().len(), 1);
-        assert!(heard.contains(&HostMsg::Asking));
-        assert!(!heard.iter().any(|m| matches!(m, HostMsg::Welcome { .. })));
+        assert!(host.askers().is_empty());
+        assert!(host.opening.is_empty());
+        assert!(matches!(heard.first(), Some(HostMsg::Opened { .. })));
+        assert!(!heard.iter().any(welcomed_by("Mac")));
+    }
+
+    struct Middle {
+        phone_side: crate::link::InApp,
+        host_side: crate::link::InApp,
+        read: Vec<HostMsg>,
+    }
+
+    impl Middle {
+        fn relay(&mut self) {
+            while let Poll::Message(bytes) = self.phone_side.poll() {
+                self.host_side.send(bytes);
+            }
+            while let Poll::Message(bytes) = self.host_side.poll() {
+                self.read.extend(HostMsg::decode(&bytes));
+                self.phone_side.send(bytes);
+            }
+        }
     }
 
     #[test]
-    fn a_proof_for_another_challenge_is_asked_not_admitted() {
+    fn a_machine_in_the_middle_gets_no_session() {
         let mut host = playing("Mac");
         host.set_proof_key(Some(OWN));
+        let (to_host, host_side) = crate::link::in_app_as(Route::Network);
+        let (phone_side, to_phone) = crate::link::in_app_as(Route::Network);
+        host.accept(Box::new(to_host));
+        let mut middle = Middle {
+            phone_side,
+            host_side,
+            read: Vec::new(),
+        };
+        let mut own = Remote::join(
+            Box::new(to_phone),
+            "Pixel 8",
+            SurfaceKind::Device,
+            Knock::Own(OWN),
+        );
+        for _ in 0..8 {
+            middle.relay();
+            host.step(1.0);
+            own.step(1.0);
+        }
+        assert_eq!(own.phase(), Phase::Joined);
+        middle.host_side.send(SurfaceMsg::Buttons(0b1111).encode());
+        host.step(1.1);
+        assert!(
+            !middle.read.iter().any(welcomed_by("Mac")),
+            "the middle read the welcome"
+        );
+        assert_eq!(host.buttons(), 0, "the middle pressed buttons on the host");
+        assert_eq!(host.surfaces()[0].presence, Presence::Reconnecting);
+    }
+
+    fn knock_raw(
+        host: &mut Host,
+        entry: Entry,
+        key: &[u8; 32],
+        now: f64,
+    ) -> (InApp, Option<HostMsg>, Option<Channel>) {
         let (a, mut b) = in_app();
         host.accept(Box::new(a));
-        b.send(
-            SurfaceMsg::Hello {
-                version: SURFACE_VERSION,
-                name: "Forger".into(),
-                kind: SurfaceKind::Device,
-                code: None,
-                resume: None,
-            }
-            .encode(),
-        );
-        host.step(1.0);
-        let Poll::Message(bytes) = b.poll() else {
-            panic!("the host challenges");
+        let mut hello = Hello::new("Forger".into(), SurfaceKind::Device, entry);
+        let (dial, first) = KeyedDial::start(&hello.prologue()).unwrap();
+        hello.handshake = first;
+        b.send(SurfaceMsg::Hello(hello).encode());
+        host.step(now);
+        let heard = match b.poll() {
+            Poll::Message(bytes) => HostMsg::decode(&bytes),
+            _ => None,
         };
-        let Some(HostMsg::Challenge { nonce, host: id }) = HostMsg::decode(&bytes) else {
-            panic!("a challenge");
+        let channel = match &heard {
+            Some(HostMsg::Opened { reply, .. }) => dial.finish(key, reply).ok(),
+            _ => None,
         };
-        let mut other = nonce;
-        other[0] ^= 1;
-        b.send(SurfaceMsg::Proof(Some(OWN.prove(&other, id))).encode());
+        (b, heard, channel)
+    }
+
+    #[test]
+    fn an_own_knock_without_the_key_gets_no_session_and_no_prompt() {
+        let mut host = playing("Mac");
+        host.set_proof_key(Some(OWN));
+        let wrong = ProofKey([8; 32]).link();
+        let (mut b, _, channel) = knock_raw(&mut host, Entry::Own, &wrong, 1.0);
+        assert!(channel.is_none());
+        b.send(SurfaceMsg::Ready.encode());
         host.step(1.1);
+        b.send(SurfaceMsg::Buttons(1).encode());
+        host.step(1.2);
         assert!(host.surfaces().is_empty());
-        assert_eq!(host.askers().len(), 1);
+        assert!(host.askers().is_empty());
+        assert!(host.opening.is_empty());
+        assert_eq!(host.buttons(), 0);
+    }
+
+    #[test]
+    fn the_host_admits_whoever_proves_the_key_over_any_link() {
+        let mut host = playing("Mac");
+        host.set_proof_key(Some(OWN));
+        let (b, _, channel) = knock_raw(&mut host, Entry::Own, &OWN.link(), 1.0);
+        let mut sealed = Sealed::new(Box::new(b), channel.unwrap());
+        sealed.send(SurfaceMsg::Ready.encode());
+        host.step(1.1);
+        assert_eq!(host.surfaces().len(), 1);
+        assert!(
+            matches!(sealed.poll(), Poll::Message(m) if welcomed_by("Mac")(&HostMsg::decode(&m).unwrap()))
+        );
+    }
+
+    #[test]
+    fn a_resume_needs_the_key_not_just_the_id() {
+        let mut host = playing("Mac");
+        let code = host.open_code(0.0);
+        let mut remote = pair(&mut host, Some(code), 0.0);
+        let id = host.surfaces()[0].id;
+        host.slots[0].lose(0.5);
+        remote.step(0.5);
+        let guess = resume_link(&[0; 32]);
+        let (_, _, channel) = knock_raw(&mut host, Entry::Resume(id), &guess, 1.0);
+        assert!(channel.is_none());
+        let (_, heard, _) = knock_raw(&mut host, Entry::Resume(SurfaceId(99)), &guess, 1.0);
+        assert_eq!(heard, Some(HostMsg::Bye(Bye::Removed)));
+        host.step(1.1);
+        assert_eq!(host.surfaces()[0].presence, Presence::Reconnecting);
+    }
+
+    #[test]
+    fn an_own_phone_joins_a_restarted_host_again() {
+        let mut host = playing("Mac");
+        host.set_proof_key(Some(OWN));
+        let mut own = ask_as(&mut host, "Pixel 8", Some(OWN), 1.0);
+        assert_eq!(own.phase(), Phase::Joined);
+        drop(host);
+        own.step(2.0);
+        assert_eq!(own.phase(), Phase::Lost);
+        let mut host = playing("Mac");
+        host.set_proof_key(Some(OWN));
+        let (a, b) = in_app();
+        host.accept(Box::new(a));
+        own.resume_over(Box::new(b));
+        settle(&mut host, &mut own, 3.0);
+        assert_eq!(own.phase(), Phase::Lost);
+        let (a, b) = in_app();
+        host.accept(Box::new(a));
+        own.resume_over(Box::new(b));
+        settle(&mut host, &mut own, 5.0);
+        assert_eq!(own.phase(), Phase::Joined);
+        assert_eq!(host.surfaces().len(), 1);
     }
 
     #[test]
     fn a_silent_link_never_raises_a_prompt() {
         let mut host = playing("Mac");
-        let (a, mut b) = in_app();
-        host.accept(Box::new(a));
-        b.send(
-            SurfaceMsg::Hello {
-                version: SURFACE_VERSION,
-                name: "Quiet".into(),
-                kind: SurfaceKind::Device,
-                code: None,
-                resume: None,
-            }
-            .encode(),
-        );
+        let (_quiet, _, channel) = knock_raw(&mut host, check_codes::asked(), &OPEN_LINK, 1.0);
+        assert!(channel.is_some());
         host.step(1.0);
         assert!(host.askers().is_empty());
         host.step(1.0 + HELLO_WAIT_SECS);
+        assert!(host.opening.is_empty());
         let real = ask(&mut host, 1.0 + HELLO_WAIT_SECS);
         assert_eq!(real.phase(), Phase::Asking);
         assert_eq!(host.askers().len(), 1);
@@ -1240,17 +1566,15 @@ mod tests {
     fn old_hello(host: &mut Host, name: &str, now: f64) {
         let (a, mut b) = in_app();
         host.accept(Box::new(a));
-        b.send(
-            SurfaceMsg::Hello {
-                version: SURFACE_VERSION - 1,
-                name: name.into(),
-                kind: SurfaceKind::Device,
-                code: None,
-                resume: None,
-            }
-            .encode(),
-        );
+        b.send(hello_of_0_12(name));
         host.step(now);
+    }
+
+    fn hello_of_0_12(name: &str) -> Vec<u8> {
+        let mut bytes = vec![0, 2, name.len() as u8];
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&[2, 0, 0]);
+        bytes
     }
 
     #[test]
@@ -1272,24 +1596,9 @@ mod tests {
         let mut host = Host::new("Mac");
         let (a, mut b) = in_app();
         host.accept(Box::new(a));
-        b.send(
-            SurfaceMsg::Hello {
-                version: SURFACE_VERSION - 1,
-                name: "Old phone".into(),
-                kind: SurfaceKind::Device,
-                code: None,
-                resume: None,
-            }
-            .encode(),
-        );
+        b.send(hello_of_0_12("Old phone"));
         host.step(1.0);
-        let Poll::Message(bytes) = b.poll() else {
-            panic!("the host answers");
-        };
-        assert_eq!(
-            HostMsg::decode(&bytes),
-            Some(HostMsg::Bye(Bye::NeedsUpdate))
-        );
+        assert_eq!(b.poll(), Poll::Message(vec![4, 2]));
         assert_eq!(host.take_outdated(), vec!["Old phone".to_string()]);
         assert!(host.take_outdated().is_empty());
     }

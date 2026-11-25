@@ -191,6 +191,20 @@ impl Client {
         Ok(())
     }
 
+    async fn chat_room(&self, me: i64, size: u64) -> Result<(), ErrorCode> {
+        let cap = self.app.config.limits.chat_history_bytes;
+        let mut kept = db(self.app.db.sent_bytes(me).await)?;
+        if kept + size > cap {
+            db(self.app.db.trim_sent(me, cap.saturating_sub(size)).await)?;
+            kept = db(self.app.db.sent_bytes(me).await)?;
+        }
+        if kept + size > cap {
+            self.refused(Refused::Storage);
+            return Err(ErrorCode::QuotaFull);
+        }
+        self.room(size).await
+    }
+
     pub(super) async fn chat(
         &mut self,
         tag: Tag,
@@ -224,7 +238,7 @@ impl Client {
             self.refused(Refused::Inbox);
             return Err(ErrorCode::InboxFull);
         }
-        self.room(size).await?;
+        self.chat_room(me_id, size).await?;
         let at = now();
         let id = db(self
             .app
@@ -291,7 +305,7 @@ impl Client {
             .iter()
             .map(|c| c.sealed.ciphertext.len() as u64)
             .sum();
-        self.room(size).await?;
+        self.chat_room(me, size).await?;
         let old: Vec<OldRow> = rows
             .iter()
             .zip(&kept_chats)

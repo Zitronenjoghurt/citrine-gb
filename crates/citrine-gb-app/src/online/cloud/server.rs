@@ -1,14 +1,12 @@
-use super::device::device_name;
-use super::work::Upload;
+use super::work::{Fetched, Upload};
 use super::{Action, Entry, Mark, OP_TIMEOUT, Op, Remote, SETTLE, SyncState, name_of, rom_bytes};
 use crate::online::{Online, Phase};
-use crate::storage::SaveStore;
 use crate::storage::cloud::thumb_of;
 use citrine_gb_net::{
     ClientMsg, ErrorCode, GameKey, MAX_CLOUD_SAVE_BYTES, MAX_SAVE_BYTES, SAVE_PART_BYTES,
     SAVE_PARTS_PROTOCOL, SaveInfo, SaveLabel, ServerMsg, Tag, last_part_at,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use web_time::Instant;
 
 impl Online {
@@ -99,6 +97,9 @@ impl Online {
             return;
         };
         let touched = store.take_touched();
+        self.network_touched(&touched);
+        self.network_tick(now);
+        self.cloud_written();
         let account = (self.cloud.account.is_active() || self.cloud.walker.is_active())
             && self.cloud.owner.is_some();
         if !self.cloud.enabled && !account {
@@ -112,6 +113,7 @@ impl Online {
         } else {
             Default::default()
         };
+        let new_saves = !touched.is_empty();
         for rom in touched {
             self.cloud.touched(&rom);
             if self.cloud.entry_title(&rom).is_none() || !self.cloud.is_dirty(&rom) {
@@ -138,12 +140,17 @@ impl Online {
                 self.send(ClientMsg::ListSaves);
             }
             self.cloud_storage_changed();
+            if new_saves {
+                self.cloud_index_put();
+            }
+            self.cloud_index_follow();
             self.cloud_expire(now);
             self.cloud_opened();
             self.cloud_send_parts();
             self.cloud_sealed(now);
             if self.cloud.listing.is_some()
                 && self.cloud.op.is_none()
+                && !self.cloud.writing()
                 && !self.walker_pump()
                 && !self.account_pump(now)
                 && self.cloud.enabled
@@ -269,6 +276,7 @@ impl Online {
         };
         let game = keys.game_key(&rom_bytes(&rom));
         self.cloud.rom_of.insert(game, rom.clone());
+        self.cloud.here.insert(game);
         let Some(items) = self.cloud.scanned(&rom) else {
             return;
         };
@@ -292,7 +300,7 @@ impl Online {
                 let label = SaveLabel {
                     game: title,
                     name: name_of(&payload),
-                    device: device_name(),
+                    device: self.device_name(),
                     saved_at,
                     hash,
                 };
@@ -315,14 +323,7 @@ impl Online {
                 });
                 self.cloud_sealed(now);
             }
-            Some(Action::Get { slot }) => {
-                self.cloud.parts.clear();
-                self.send(ClientMsg::GetSave {
-                    game,
-                    slot: slot.clone(),
-                });
-                self.cloud.start(Op::Get { game, slot });
-            }
+            Some(Action::Get { slot }) => self.cloud_get(game, slot),
             Some(Action::Delete { slot, base }) => {
                 let tag = self.cloud.tag();
                 self.send(ClientMsg::DeleteSave {
@@ -641,14 +642,20 @@ impl Online {
                         conflict.payload = Some(payload);
                     }
                     Some(_) => {}
-                    None => {
-                        if !self
-                            .cloud
-                            .write_fetched(&rom, &slot, &payload, hash, version)
-                        {
+                    None => match self.cloud.fetched_store(&rom, &payload) {
+                        Some(store) => {
+                            let fetched = Fetched {
+                                game,
+                                rom: rom.clone(),
+                                slot,
+                                version,
+                            };
+                            self.cloud.write(store, fetched, payload, hash);
+                        }
+                        None => {
                             self.cloud.unreadable.insert((game, slot, version));
                         }
-                    }
+                    },
                 }
             }
             None => {
@@ -660,30 +667,44 @@ impl Online {
         self.cloud.changed = true;
     }
 
-    pub(super) fn cloud_listed_now(&mut self) {
-        let Some(keys) = self.keys.as_ref() else {
+    pub(super) fn cloud_get(&mut self, game: GameKey, slot: String) {
+        let size = self
+            .cloud
+            .listing
+            .as_ref()
+            .and_then(|listing| listing.get(&(game, slot.clone())))
+            .and_then(|remote| usize::try_from(remote.info.size).ok())
+            .filter(|size| (MAX_SAVE_BYTES + 1..=MAX_CLOUD_SAVE_BYTES).contains(size))
+            .unwrap_or(0);
+        self.cloud.parts = Vec::with_capacity(size);
+        self.send(ClientMsg::GetSave {
+            game,
+            slot: slot.clone(),
+        });
+        self.cloud.start(Op::Get { game, slot });
+    }
+
+    fn cloud_written(&mut self) {
+        let Some((fetched, kept)) = self.cloud.written() else {
             return;
         };
-        let mut roms: BTreeSet<String> = self
-            .cloud
-            .store
-            .as_ref()
-            .map(SaveStore::games)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        if let Some(ledger) = &self.cloud.ledger {
-            roms.extend(ledger.games.keys().cloned());
+        let Fetched {
+            game,
+            rom,
+            slot,
+            version,
+        } = fetched;
+        match kept {
+            Some(kept) => self.cloud.kept_fetched(&rom, &slot, version, kept),
+            None => {
+                self.cloud.unreadable.insert((game, slot, version));
+            }
         }
-        if let Some((rom, _)) = &self.cloud.open {
-            roms.insert(rom.clone());
-        }
-        let now = Instant::now();
-        for rom in roms {
-            let game = keys.game_key(&rom_bytes(&rom));
-            self.cloud.rom_of.insert(game, rom.clone());
-            self.cloud.due.entry(rom).or_insert(now);
-        }
+        self.cloud.due.insert(rom, Instant::now());
         self.cloud.changed = true;
+    }
+
+    pub(super) fn cloud_listed_now(&mut self) {
+        self.cloud_keep_listed();
     }
 }

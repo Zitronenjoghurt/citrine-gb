@@ -3,3 +3,9 @@ SQLX_OFFLINE = "true"
 
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
+
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--build-id=sha1"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--build-id=sha1"]

@@ -1,4 +1,4 @@
-use crate::app::ui_state::keybinds::{BindingCapture, KeyBindings, PadButton};
+use crate::app::ui_state::keybinds::{BindingCapture, KeyBindings};
 use crate::app::ui_state::settings::{ScalingMode, Settings};
 use crate::audio::even_clock::EvenClock;
 use crate::audio::mix::{SoundLevels, level};
@@ -21,6 +21,7 @@ use citrine_gb::error::GbResult;
 use citrine_gb::gb::{GameBoy, GbModel};
 use citrine_gb::machine::{Firmware, Machine};
 use citrine_gb::rom::Rom;
+use citrine_gb_replay::Input;
 use link::borrowed_key;
 use runner::{Core, Effects, Hooks, Plan, Ran, Taken};
 use seat::Seat;
@@ -32,12 +33,14 @@ pub mod fast_forward;
 pub mod gimmicks;
 #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
 mod gpu_clock;
+mod hardcore;
 mod input;
 #[cfg(feature = "nds")]
 pub mod jit_cache;
 pub mod layout;
 mod link;
 pub mod load;
+pub mod peer_saves;
 mod replay;
 pub mod rewind;
 mod runner;
@@ -47,6 +50,7 @@ mod seat;
 #[cfg(threaded)]
 mod show_lag;
 mod snapshots;
+pub mod tape_play;
 #[cfg(threaded)]
 mod ui_wait;
 #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
@@ -65,6 +69,12 @@ pub struct StatEvents {
     pub loads: u32,
     pub played: std::time::Duration,
     pub together: Option<TogetherPlay>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Display {
+    pub monitor: Option<crate::app::monitor::MonitorRate>,
+    pub paced: bool,
 }
 
 #[derive(Debug)]
@@ -125,17 +135,28 @@ pub struct Emulator {
     away_keys: Vec<(egui::Key, bool, egui::Modifiers)>,
     away_dt: f64,
     refreshes: Option<u64>,
+    display: Display,
     away_due: usize,
     #[cfg(all(threaded, feature = "nds"))]
     jit_spawner: Option<citrine_gb_threads::Spawner>,
     pub running: bool,
     pub fast_forward: bool,
     pub fast_forward_speed: fast_forward::FastForwardSpeed,
+    fast_forward_clock: fast_forward::FastForwardClock,
     pub match_screen: bool,
+    pub hide_pointer: bool,
     pub rewind_length: rewind::RewindLength,
+    pub clip_length: rewind::ClipLength,
     pub rewind_held: bool,
     pub together: bool,
     rewinding: bool,
+    taping: bool,
+    tape_resume: Option<bool>,
+    playing_tape: bool,
+    tape_times: Option<crate::frame_log::TapeTimes>,
+    hardcore: bool,
+    pause_due: Option<u32>,
+    pause_news: Option<u32>,
     pub enable_matrix: bool,
     /// 0.0 to 1.0 (e.g., 0.85 = 15% darker)
     pub matrix_edge_brightness: f32,
@@ -150,9 +171,14 @@ pub struct Emulator {
     pub screen_context: crate::app::ui_state::ds_screens::ScreenContext,
     shown_layout: Option<layout::ScreenLayout>,
     placed_screens: Vec<egui::Rect>,
+    placed_pass: Option<u64>,
     placed_touch: Option<egui::Rect>,
+    #[cfg(all(test, feature = "nds"))]
+    spotted_room: Option<egui::Rect>,
+    pub screen_spots: Option<crate::emulator::layout::ScreenSpots>,
     pub ds_3d: crate::app::ui_state::ds_3d::Ds3d,
     pub ds_jit: bool,
+    pub gba_jit: bool,
     load: load::Load,
     #[cfg(feature = "nds")]
     jit_cache: Option<std::sync::Arc<citrine_gb::nds::machine::JitCache>>,
@@ -162,6 +188,8 @@ pub struct Emulator {
     gpu: Option<(egui::Context, eframe::egui_wgpu::RenderState)>,
     #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
     upscaler: Option<upscale::Upscaler>,
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    gpu_3d_failed: bool,
     #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
     upscaled: Option<upscale::Upscaled>,
     held: HeldButtons,
@@ -190,8 +218,10 @@ pub struct Emulator {
     download_key: Option<String>,
     cheats_for: Option<(String, Vec<crate::cheats::SavedCheat>)>,
     game_name: String,
-    loose_presses: Vec<PadButton>,
-    loose_held: Vec<PadButton>,
+    hotkeys: crate::app::ui_state::hotkeys::Hotkeys,
+    key_chords: crate::combo::Chords<egui::Key, input::KeyFire>,
+    pad_chords: crate::pad_input::PadChords,
+    shortcuts: Vec<crate::app::ui_state::hotkeys::HotkeyAction>,
     #[cfg(not(target_arch = "wasm32"))]
     rom_path: Option<std::path::PathBuf>,
     pub imported_legacy_save: bool,
@@ -200,6 +230,7 @@ pub struct Emulator {
     pub last_save: Option<web_time::Instant>,
     pub save_loaded: bool,
     started_at: Option<web_time::Instant>,
+    games_started: u32,
     pub recorder: InputRecorder,
     pub replay: Option<crate::replay::ReplayPlayer>,
     pub screen_recorder: ScreenRecorder,
@@ -209,6 +240,8 @@ pub struct Emulator {
     pub last_good: LastGood,
     drop_history: Option<DropHistory>,
     handed_back: Option<citrine_gb_net::OnlineId>,
+    divert: Option<peer_saves::Divert>,
+    peer_notice: Vec<peer_saves::PeerNotice>,
     console_switched: Option<GbModel>,
     stat_events: StatEvents,
     pub gimmicks: gimmicks::Gimmicks,
@@ -224,6 +257,10 @@ pub struct Emulator {
     #[cfg(feature = "nds")]
     walker_watched: bool,
     #[cfg(feature = "nds")]
+    walker_game: Option<&'static str>,
+    #[cfg(feature = "nds")]
+    walker_connect: Option<u64>,
+    #[cfg(feature = "nds")]
     ds_clock: i64,
     #[cfg(feature = "nds")]
     ds_clock_set: Option<i64>,
@@ -235,9 +272,12 @@ pub struct Emulator {
     #[cfg(ds_wifi)]
     pub ds_wifi: crate::ds_wifi::DsWifi,
     pub firmware: Firmware,
+    pub boot_rom_names: [String; 2],
     pub gba_bios_name: String,
     #[cfg(feature = "nds")]
     pub ds_file_names: [String; 3],
+    #[cfg(feature = "nds")]
+    pub ds_languages: crate::app::ui_state::ds_user::BootLanguages,
 }
 
 impl Default for Emulator {
@@ -268,30 +308,46 @@ impl Default for Emulator {
             away_dt: 0.0,
             refreshes: None,
             away_due: 0,
+            display: Display::default(),
             #[cfg(all(threaded, feature = "nds"))]
             jit_spawner: None,
             running: true,
             fast_forward: false,
             fast_forward_speed: fast_forward::FastForwardSpeed::default(),
+            fast_forward_clock: fast_forward::FastForwardClock::default(),
             match_screen: true,
+            hide_pointer: false,
             rewind_length: rewind::RewindLength::default(),
+            clip_length: rewind::ClipLength::default(),
             rewind_held: false,
             together: false,
             rewinding: false,
-            enable_matrix: true,
-            matrix_edge_brightness: 0.85,
-            matrix_corner_brightness: 0.75,
-            enable_ghosting: true,
-            ghosting_blend: 0.7,
+            taping: false,
+            tape_resume: None,
+            playing_tape: false,
+            tape_times: None,
+            hardcore: false,
+            pause_due: None,
+            pause_news: None,
+            enable_matrix: false,
+            matrix_edge_brightness: 1.0 - Settings::DEFAULT_MATRIX_EDGE_DARKNESS,
+            matrix_corner_brightness: 1.0 - Settings::DEFAULT_MATRIX_CORNER_DARKNESS,
+            enable_ghosting: false,
+            ghosting_blend: 1.0 - Settings::DEFAULT_GHOSTING_STRENGTH,
             scaling: ScalingMode::default(),
             same_size_pixels: false,
             ds_screens: Default::default(),
             screen_context: Default::default(),
             shown_layout: None,
             placed_screens: Vec::new(),
+            placed_pass: None,
             placed_touch: None,
+            #[cfg(all(test, feature = "nds"))]
+            spotted_room: None,
+            screen_spots: None,
             ds_3d: Default::default(),
             ds_jit: crate::app::ui_state::settings::DS_JIT_DEFAULT,
+            gba_jit: crate::app::ui_state::settings::DS_JIT_DEFAULT,
             load: load::Load::default(),
             #[cfg(feature = "nds")]
             jit_cache: None,
@@ -301,6 +357,8 @@ impl Default for Emulator {
             gpu: None,
             #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
             upscaler: None,
+            #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+            gpu_3d_failed: false,
             #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
             upscaled: None,
             held: HeldButtons::default(),
@@ -327,13 +385,16 @@ impl Default for Emulator {
                 mine: level(Settings::DEFAULT_VOLUME, false),
                 friend: level(OnlineSettings::DEFAULT_FRIEND_VOLUME, false),
                 slow: crate::audio::pacer::SlowSound::default(),
+                fast: crate::audio::pacer::FastForwardSound::default(),
             },
             rom_key: None,
             download_key: None,
             cheats_for: None,
             game_name: String::new(),
-            loose_presses: Vec::new(),
-            loose_held: Vec::new(),
+            hotkeys: crate::app::ui_state::hotkeys::Hotkeys::default(),
+            key_chords: crate::combo::Chords::default(),
+            pad_chords: crate::pad_input::PadChords::default(),
+            shortcuts: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             rom_path: None,
             imported_legacy_save: false,
@@ -342,6 +403,7 @@ impl Default for Emulator {
             last_save: None,
             save_loaded: false,
             started_at: None,
+            games_started: 0,
             recorder: InputRecorder::default(),
             replay: None,
             screen_recorder: ScreenRecorder::default(),
@@ -351,6 +413,8 @@ impl Default for Emulator {
             last_good: LastGood::default(),
             drop_history: None,
             handed_back: None,
+            divert: None,
+            peer_notice: Vec::new(),
             console_switched: None,
             stat_events: StatEvents::default(),
             gimmicks: gimmicks::Gimmicks::default(),
@@ -366,6 +430,10 @@ impl Default for Emulator {
             #[cfg(feature = "nds")]
             walker_watched: false,
             #[cfg(feature = "nds")]
+            walker_game: None,
+            #[cfg(feature = "nds")]
+            walker_connect: None,
+            #[cfg(feature = "nds")]
             ds_clock: 0,
             #[cfg(feature = "nds")]
             ds_clock_set: None,
@@ -377,9 +445,12 @@ impl Default for Emulator {
             #[cfg(ds_wifi)]
             ds_wifi: Default::default(),
             firmware: Firmware::default(),
+            boot_rom_names: Default::default(),
             gba_bios_name: String::new(),
             #[cfg(feature = "nds")]
             ds_file_names: Default::default(),
+            #[cfg(feature = "nds")]
+            ds_languages: Default::default(),
         }
     }
 }
@@ -517,13 +588,13 @@ impl Emulator {
 
         if self.cheats_for.as_ref().map(|(key, _)| key.as_str()) != self.rom_key.as_deref() {
             self.cheats_for = None;
-            self.seat.core_mut().cheats.clear();
+            self.seat.core_mut().set_cheats(Vec::new());
         }
+        self.follow_taping();
         let rewind = self.rewind_plan();
         self.rewinding = rewind.back;
-        let machine = &mut self.seat.core_mut().machine;
         #[cfg(feature = "nds")]
-        match machine {
+        match &mut self.seat.core_mut().machine {
             Machine::Nds(nds) => {
                 nds.set_jit(self.ds_jit);
                 #[cfg(threaded)]
@@ -532,7 +603,7 @@ impl Emulator {
                 }
             }
             Machine::Gba(gba) => {
-                gba.set_jit(crate::app::ui_state::settings::GBA_USES_JIT && self.ds_jit);
+                gba.set_jit(crate::app::ui_state::settings::GBA_USES_JIT && self.gba_jit);
                 #[cfg(threaded)]
                 if let Some(spawner) = &self.jit_spawner {
                     gba.compile_jit_on(spawner);
@@ -540,15 +611,17 @@ impl Emulator {
             }
             _ => {}
         }
-        self.gimmicks.follow_clock(machine, now_unix());
-        self.gimmicks.feed(machine);
-        let timing = machine.timing();
+        let core = self.seat.core_mut();
+        self.gimmicks.follow_clock(core, now_unix());
+        self.gimmicks.feed(core);
+        let timing = core.machine.timing();
         let (dt, fed) = self.advance_clock(now, timing);
         let due = fed + std::mem::take(&mut self.away_due);
         let dt = dt + std::mem::take(&mut self.away_dt);
         let fast = self.fast_forward && !rewind.back;
         let frames = if fast {
-            self.fast_forward_speed.frames(due)
+            self.fast_forward_clock
+                .due(self.fast_forward_speed, dt, timing.frame_secs())
         } else {
             due
         };
@@ -616,12 +689,19 @@ impl Emulator {
     }
 
     #[cfg(threaded)]
-    fn show_lag_basis(&self) -> Option<(std::time::Duration, std::time::Duration)> {
+    fn show_lag_basis(&self) -> Option<show_lag::Basis> {
         if self.fast_forward || self.rewinding {
             return None;
         }
-        let frame = std::time::Duration::from_secs_f64(self.seat.facts().timing.frame_secs());
-        Some((self.show_refresh(), frame))
+        let facts = self.seat.facts();
+        let game_boy = matches!(facts.kind, ConsoleKind::Gb | ConsoleKind::Gbc)
+            && !facts.linked
+            && !facts.partnered;
+        Some(show_lag::Basis {
+            refresh: self.show_refresh(),
+            frame: std::time::Duration::from_secs_f64(facts.timing.frame_secs()),
+            least: u32::from(game_boy),
+        })
     }
 
     #[cfg(threaded)]
@@ -641,10 +721,12 @@ impl Emulator {
         {
             let core = self.seat.core_mut();
             self.ds_wifi.follow(&mut core.machine, &mut core.wifi);
+            self.restart_for_saved_user();
         }
-        if ran.hit {
+        if ran.hit && !self.hardcore {
             self.running = false;
         }
+        self.follow_tape_play();
         let step = std::time::Duration::from_secs_f64(dt.min(MAX_PLAY_STEP));
         self.play.play(step);
         self.stat_events.played += step;
@@ -821,11 +903,20 @@ impl Emulator {
         if let (Some(partner), Some(gb)) = (core.partner.take(), core.machine.as_gb_mut()) {
             partner.finish(gb);
         }
+        self.seat.core_mut().clear_rewind();
+        self.taping = false;
+        #[cfg(feature = "nds")]
+        if kind == ConsoleKind::Nds {
+            self.boot_language(rom);
+        }
         match (
             GbModel::try_from(kind),
             self.seat.core_mut().machine.as_gb_mut(),
         ) {
-            (Ok(model), Some(gb)) => gb.load_rom_with_model(rom, model)?,
+            (Ok(model), Some(gb)) => {
+                gb.set_boot_rom(self.firmware.boot_rom(model));
+                gb.load_rom_with_model(rom, model)?;
+            }
             _ => self.replace_machine(Machine::load(rom, kind, &self.firmware)?),
         }
         #[cfg(feature = "nds")]
@@ -860,11 +951,13 @@ impl Emulator {
             self.save_loaded = true;
         }
 
+        self.stop_divert();
         self.rom_key = Some(key);
         self.name_game(None);
         self.stat_events.launched = true;
         self.last_save = None;
         self.running = true;
+        self.games_started = self.games_started.wrapping_add(1);
         self.started_at = Some(web_time::Instant::now());
         self.play = PlayClock::default();
         self.last_good.clear();
@@ -879,8 +972,19 @@ impl Emulator {
         self.seat.core().machine.rom_bytes()
     }
 
+    pub fn games_started(&self) -> u32 {
+        self.games_started
+    }
+
     pub fn kind(&self) -> ConsoleKind {
         self.seat.facts().kind
+    }
+
+    pub fn jit_switch(&self) -> bool {
+        match self.played_kind() {
+            ConsoleKind::Gba => self.gba_jit,
+            _ => self.ds_jit,
+        }
     }
 
     pub fn console(&self) -> GbModel {
@@ -918,6 +1022,15 @@ impl Emulator {
         }
     }
 
+    #[cfg(feature = "nds")]
+    fn boot_language(&mut self, rom: &Rom) {
+        let key = rom.ids().0.sha256_hex_string();
+        let language = self.ds_languages.of(&key).firmware();
+        if let Some(user) = &mut self.firmware.nds.user_settings {
+            user.language = language;
+        }
+    }
+
     #[cfg(all(test, feature = "nds"))]
     pub fn load_nds(&mut self, data: &[u8]) -> GbResult<()> {
         self.running = false;
@@ -925,6 +1038,36 @@ impl Emulator {
         let machine = Machine::load(&Rom::new(data), ConsoleKind::Nds, &self.firmware)?;
         self.replace_machine(machine);
         Ok(())
+    }
+
+    pub fn boot_rom_name(&self, file: crate::app::boot_rom::BootRom) -> Option<&str> {
+        self.boot_rom_slot(file)
+            .is_some()
+            .then(|| self.boot_rom_names[file.index()].as_str())
+    }
+
+    pub fn set_boot_rom(
+        &mut self,
+        file: crate::app::boot_rom::BootRom,
+        value: Option<(Vec<u8>, String)>,
+    ) {
+        let (image, name) = value.unzip();
+        *self.boot_rom_slot_mut(file) = image;
+        self.boot_rom_names[file.index()] = name.unwrap_or_default();
+    }
+
+    fn boot_rom_slot(&self, file: crate::app::boot_rom::BootRom) -> &Option<Vec<u8>> {
+        match file {
+            crate::app::boot_rom::BootRom::Gb => &self.firmware.gb_boot_rom,
+            crate::app::boot_rom::BootRom::Gbc => &self.firmware.gbc_boot_rom,
+        }
+    }
+
+    fn boot_rom_slot_mut(&mut self, file: crate::app::boot_rom::BootRom) -> &mut Option<Vec<u8>> {
+        match file {
+            crate::app::boot_rom::BootRom::Gb => &mut self.firmware.gb_boot_rom,
+            crate::app::boot_rom::BootRom::Gbc => &mut self.firmware.gbc_boot_rom,
+        }
     }
 
     #[cfg(feature = "nds")]
@@ -1007,6 +1150,14 @@ impl Emulator {
         }
     }
 
+    #[cfg(all(test, feature = "gba"))]
+    pub fn as_gba_mut(&mut self) -> Option<&mut citrine_gb::gba::machine::Gba> {
+        match &mut self.seat.core_mut().machine {
+            Machine::Gba(gba) => Some(gba),
+            _ => None,
+        }
+    }
+
     #[cfg(feature = "gba")]
     pub fn set_gba_color_correction(
         &mut self,
@@ -1041,7 +1192,15 @@ impl Emulator {
     }
 
     pub fn shows_console(&self) -> bool {
-        self.linked_frame.is_some() || self.has_game()
+        self.shows_session() || self.has_game()
+    }
+
+    pub fn shows_session(&self) -> bool {
+        self.linked_frame.is_some()
+    }
+
+    pub fn shows_session_frame(&self) -> bool {
+        self.linked_frame.is_some()
     }
 
     pub fn played_kind(&self) -> ConsoleKind {
@@ -1058,6 +1217,14 @@ impl Emulator {
 
     pub fn refresh_period(&self) -> Option<f64> {
         self.clock.refresh_period()
+    }
+
+    pub fn set_display(&mut self, display: Display) {
+        self.display = display;
+    }
+
+    pub fn display(&self) -> Display {
+        self.display
     }
 
     pub fn timing(&self) -> Timing {
@@ -1123,6 +1290,7 @@ impl Emulator {
 
     #[cfg(threaded)]
     pub fn run_on(&mut self, threads: &citrine_gb_threads::Threads) {
+        self.seat.core_mut().run_rewind_gaps_on(threads.spawner());
         self.seat.run_on(threads);
         #[cfg(feature = "nds")]
         {
@@ -1166,8 +1334,8 @@ impl Emulator {
         upscale::tests::gpu()
     }
 
-    #[cfg(all(test, feature = "nds", not(target_arch = "wasm32")))]
-    pub(crate) fn rewind_kept(&self) -> (usize, usize, usize) {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn rewind_kept(&self) -> (u64, usize) {
         self.seat.core().rewind.kept()
     }
 
@@ -1207,6 +1375,11 @@ impl Emulator {
         let core = self.seat.core_mut();
         self.ready = core.taken.take();
         core.ran.take().map_or(0, |ran| ran.frames)
+    }
+
+    #[cfg(all(test, feature = "nds"))]
+    pub(crate) fn set_rom_key_for_tests(&mut self, key: &str) {
+        self.rom_key = Some(key.to_owned());
     }
 
     #[cfg(test)]
@@ -1274,6 +1447,33 @@ impl Emulator {
         Ok(())
     }
 
+    #[cfg(ds_wifi)]
+    fn restart_for_saved_user(&mut self) {
+        if !self.ds_wifi.take_restart()
+            || self.linked()
+            || self.partnered()
+            || self.rewinding
+            || self.taping
+            || self.replay.is_some()
+            || self.recorder.is_active()
+            || self.screen_recorder.is_recording()
+            || self.ds_wifi.peer_console
+        {
+            return;
+        }
+        if let Some(identity) = &self.ds_wifi.identity {
+            self.firmware
+                .nds
+                .online
+                .connections
+                .clone_from(&identity.connections);
+        }
+        self.play.saved();
+        if let Err(err) = self.restart_ds() {
+            log::error!("could not restart the game with the saved wifi user: {err}");
+        }
+    }
+
     pub fn unload(&mut self) {
         #[cfg(feature = "nds")]
         self.detach_ir();
@@ -1281,6 +1481,9 @@ impl Emulator {
         self.save_jit_cache();
         self.screen_recorder.stop();
         self.last_good.clear();
+        self.stop_divert();
+        self.seat.core_mut().clear_rewind();
+        let cut = self.seat.core_mut().cut_recording.take();
         let mut seat = std::mem::take(&mut self.seat);
         let feed = seat.core_mut().audio_feed.take();
         #[cfg(not(target_arch = "wasm32"))]
@@ -1295,11 +1498,13 @@ impl Emulator {
             });
         }
         core.follow_feed_rate();
+        core.cut_recording = cut;
         seat.replace(core);
         *self = Self {
             seat,
             store: self.store.clone(),
             writes: std::mem::take(&mut self.writes),
+            peer_notice: std::mem::take(&mut self.peer_notice),
             last_good: std::mem::take(&mut self.last_good),
             sound: self.sound,
             match_screen: self.match_screen,
@@ -1321,7 +1526,12 @@ impl Emulator {
             #[cfg(ds_wifi)]
             ds_wifi: std::mem::take(&mut self.ds_wifi),
             firmware: std::mem::take(&mut self.firmware),
+            boot_rom_names: std::mem::take(&mut self.boot_rom_names),
             gba_bios_name: std::mem::take(&mut self.gba_bios_name),
+            #[cfg(feature = "nds")]
+            ds_file_names: std::mem::take(&mut self.ds_file_names),
+            #[cfg(feature = "nds")]
+            ds_languages: std::mem::take(&mut self.ds_languages),
             ..Self::default()
         };
     }
@@ -1349,11 +1559,11 @@ impl Emulator {
             return;
         }
         let cheats = match saved {
-            Some((_, list)) => crate::cheats::compile(self.kind(), list),
-            None => Vec::new(),
+            Some((_, list)) if !self.hardcore => crate::cheats::compile(self.kind(), list),
+            _ => Vec::new(),
         };
         self.cheats_for = saved.map(|(key, list)| (key.to_owned(), list.to_vec()));
-        self.seat.core_mut().cheats = cheats;
+        self.seat.core_mut().set_cheats(cheats);
     }
 
     pub fn screen_texture(&self) -> Option<egui::TextureId> {
@@ -1371,6 +1581,7 @@ impl Emulator {
             || self.replay.is_some()
             || self.recorder.is_active()
             || self.screen_recorder.is_recording()
+            || self.taping
             || self.linked()
             || self.partnered()
             || self.step_pending()
@@ -1405,6 +1616,16 @@ impl Emulator {
             self.seat.core_mut().machine.cancel_step();
             return;
         }
+        if self.pause_due.take().is_some() {
+            return;
+        }
+        if self.running
+            && let Some(frames) = self.pause_wait()
+        {
+            self.pause_due = Some(frames);
+            self.pause_news = Some(frames);
+            return;
+        }
         self.running = !self.running;
         if !self.running {
             self.release_all();
@@ -1414,6 +1635,9 @@ impl Emulator {
     }
 
     pub fn step(&mut self, step: Step) -> Stop {
+        if self.hardcore {
+            return Stop::Finished;
+        }
         if self.running {
             self.running = false;
             self.release_all();
@@ -1452,10 +1676,15 @@ impl Emulator {
         let same_channels =
             self.seat.core().machine.audio_channels().len() == machine.audio_channels().len();
         self.seat.core_mut().put_machine(machine);
+        self.seat.core_mut().tape_play = None;
+        self.tape_resume = None;
+        self.playing_tape = false;
+        self.tape_times = None;
         #[cfg(feature = "nds")]
         self.follow_jit_cache();
         self.ready = None;
         self.drop_history = None;
+        self.stop_divert();
         if same_channels {
             for (index, enabled) in enabled.into_iter().enumerate() {
                 self.seat
@@ -1469,7 +1698,7 @@ impl Emulator {
 
     pub fn soft_reset(&mut self, ctx: &egui::Context) {
         let core = self.seat.core_mut();
-        core.machine.soft_reset();
+        core.feed(Input::Reset);
         core.flight.note_reset();
         #[cfg(not(target_arch = "wasm32"))]
         self.achievements_reset();
@@ -1477,6 +1706,10 @@ impl Emulator {
     }
 
     pub fn reset_to(&mut self, ctx: &egui::Context, start_cycles: u32) {
+        if self.hardcore {
+            return;
+        }
+        self.seat.core_mut().clear_rewind();
         self.seat.core_mut().machine.soft_reset();
         self.seat.core_mut().flight.restart();
         #[cfg(not(target_arch = "wasm32"))]
@@ -1535,11 +1768,12 @@ impl Hooks for InlineHooks<'_> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
     use crate::app::ui_state::keybinds::{
-        BindingKind, BindingTarget, Captured, GbButton, PadButton,
+        BindingKind, BindingTarget, Captured, GbButton, PadButton, Shoulder,
     };
+    use crate::combo::Combo;
     use crate::held::InputSource;
-    use crate::pad_input::PadEvent;
     use crate::pad_input::{PadAxis, PadInput, PadKey};
     use crate::storage::Written;
     use citrine_gb::console::ConsoleKind;
@@ -1549,8 +1783,8 @@ mod tests {
     const KEYS: InputSource = InputSource::Keyboard;
 
     fn emulator(name: &str) -> Emulator {
-        let root =
-            std::env::temp_dir().join(format!("citrine-import-test-{}-{name}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-import-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         Emulator {
             store: SaveStore::at(root),
@@ -1646,6 +1880,55 @@ mod tests {
             "the release reaches the game"
         );
         assert_eq!(gb_held(&mut emulator), 0);
+    }
+
+    #[cfg(all(threaded, not(target_arch = "wasm32")))]
+    #[test]
+    fn a_clip_reaches_back_its_length_with_rewind_off_or_shorter() {
+        use crate::emulator::rewind::{ClipLength, RewindLength};
+
+        let threads = citrine_gb_threads::Threads::new(citrine_gb_threads::Mode::Inline);
+        for (rewind_length, clip_length) in [
+            (RewindLength::Off, ClipLength::TenSeconds),
+            (RewindLength::TenSeconds, ClipLength::ThirtySeconds),
+        ] {
+            let mut emulator = emulator("clip-reach");
+            running(&mut emulator, 0x00);
+            emulator.rewind_length = rewind_length;
+            emulator.clip_length = clip_length;
+            let seconds = clip_length.seconds().unwrap();
+            let plan = emulator.rewind_plan();
+            assert_eq!(plan.keep, Some(seconds), "{rewind_length:?}");
+            assert_eq!(plan.reach, rewind_length.seconds().unwrap_or(0));
+            let fps = 1.0 / emulator.timing().frame_secs();
+            let wanted = (f64::from(seconds) * fps).ceil() as u64;
+            emulator.run_on(&threads);
+            for _ in 0..wanted + 90 {
+                assert_eq!(emulator.lend_one_frame(), 1);
+            }
+            let (clip, _) = emulator.take_clip().expect("a clip");
+            assert!(
+                clip.frames() >= wanted,
+                "{rewind_length:?}: {} of {wanted} frames",
+                clip.frames()
+            );
+        }
+    }
+
+    #[test]
+    fn clip_length_off_keeps_no_history_without_rewind() {
+        use crate::emulator::rewind::{ClipLength, RewindLength, RewindPlan};
+
+        let mut emulator = emulator("clip-off");
+        running(&mut emulator, 0x00);
+        emulator.clip_length = ClipLength::Off;
+        assert!(!emulator.can_clip());
+        assert!(emulator.take_clip().is_none());
+        emulator.rewind_length = RewindLength::TwoMinutes;
+        let plan = emulator.rewind_plan();
+        assert_eq!((plan.keep, plan.reach), (Some(120), 120));
+        emulator.rewind_length = RewindLength::Off;
+        assert_eq!(emulator.rewind_plan(), RewindPlan::OFF);
     }
 
     #[test]
@@ -1913,7 +2196,7 @@ mod tests {
         write_sram(&mut emulator, 0x33);
         emulator.save_snapshot(0).expect("snapshot");
         let key = emulator.rom_key().expect("key").to_owned();
-        let meta = std::env::temp_dir()
+        let meta = crate::storage::scratch_dir()
             .join(format!("citrine-import-test-{}-{name}", std::process::id()))
             .join(&key)
             .join("slot0.meta");
@@ -2018,7 +2301,8 @@ mod tests {
     #[test]
     fn a_screenshot_lands_in_the_media_store() {
         use crate::media::{MediaKind, MediaStore, save_screenshot};
-        let root = std::env::temp_dir().join(format!("citrine-shot-test-{}", std::process::id()));
+        let root =
+            crate::storage::scratch_dir().join(format!("citrine-shot-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut media = MediaStore::at(root.clone());
         let mut emulator = emulator("screenshot");
@@ -2035,34 +2319,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    struct FakePads(std::collections::VecDeque<PadEvent>);
-
-    impl PadSource for FakePads {
-        fn next_event(&mut self) -> Option<PadEvent> {
-            self.0.pop_front()
-        }
-
-        fn pads(&self, _seen: &[usize]) -> Vec<crate::controller_debug::PadInfo> {
-            Vec::new()
-        }
-
-        fn api(&self) -> String {
-            "fake".to_string()
-        }
-    }
-
-    fn fake(events: &[(usize, PadInput)]) -> FakePads {
-        FakePads(
-            events
-                .iter()
-                .map(|&(pad, input)| PadEvent {
-                    pad,
-                    input,
-                    code: None,
-                })
-                .collect(),
-        )
-    }
+    use crate::pad_input::fake;
 
     #[test]
     fn any_pad_source_drives_the_bindings() {
@@ -2096,19 +2353,66 @@ mod tests {
         let bindings = KeyBindings::default();
         let mut capture = BindingCapture::default();
         capture.start(BindingTarget::Button(GbButton::B), BindingKind::Gamepad);
-        let mut pads = fake(&[(
-            1,
-            PadInput::Pressed(PadKey::Known(PadButton::RightTrigger2)),
-        )]);
+        let mut pads = fake(&[
+            (1, d_pad(PadButton::LeftTrigger, true)),
+            (1, d_pad(PadButton::RightTrigger2, true)),
+        ]);
         emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
+        assert!(capture.take().is_none(), "both are still held");
+        let mut pads = fake(&[
+            (1, d_pad(PadButton::RightTrigger2, false)),
+            (1, d_pad(PadButton::LeftTrigger, false)),
+        ]);
+        emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
+        let both = Combo::new([PadButton::LeftTrigger, PadButton::RightTrigger2]).expect("two");
         assert_eq!(
             capture.take(),
-            Some((
-                BindingTarget::Button(GbButton::B),
-                Captured::Pad(PadButton::RightTrigger2)
-            ))
+            Some((BindingTarget::Button(GbButton::B), Captured::Pads(both)))
         );
-        assert!(!emulator.is_held(GbButton::B.key()));
+        assert!(!emulator.is_held(Shoulder::L.key()));
+    }
+
+    #[test]
+    fn a_pad_combo_fires_its_shortcut_and_lets_go_of_its_buttons() {
+        let mut emulator = emulator("pad-combo");
+        let bindings = KeyBindings::default();
+        let mut hotkeys = Hotkeys::default();
+        let menu = Combo::new([
+            PadButton::LeftTrigger,
+            PadButton::RightTrigger,
+            PadButton::Select,
+        ])
+        .expect("three");
+        hotkeys.bind_pads(menu, HotkeyAction::ToggleMute);
+        emulator.set_hotkeys(&hotkeys);
+        let mut capture = BindingCapture::default();
+        let mut pads = fake(&[
+            (0, d_pad(PadButton::East, true)),
+            (0, d_pad(PadButton::LeftTrigger, true)),
+            (0, d_pad(PadButton::RightTrigger, true)),
+        ]);
+        emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
+        assert!(emulator.is_held(Shoulder::L.key() | Shoulder::R.key() | GbButton::A.key()));
+        assert!(emulator.take_shortcuts().is_empty());
+        let mut pads = fake(&[(0, d_pad(PadButton::Select, true))]);
+        emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
+        assert_eq!(emulator.take_shortcuts(), [HotkeyAction::ToggleMute]);
+        assert!(!emulator.is_held(Shoulder::L.key()));
+        assert!(
+            !emulator.is_held(GbButton::Select.key()),
+            "the game never saw Select"
+        );
+        assert!(emulator.is_held(GbButton::A.key()), "A stays held");
+        assert!(emulator.holds_shortcut(HotkeyAction::ToggleMute));
+        let mut pads = fake(&[
+            (0, d_pad(PadButton::Select, false)),
+            (0, d_pad(PadButton::LeftTrigger, false)),
+            (0, d_pad(PadButton::RightTrigger, false)),
+        ]);
+        emulator.handle_pads(&mut pads, &bindings, &mut capture, None);
+        assert!(!emulator.holds_shortcut(HotkeyAction::ToggleMute));
+        assert!(emulator.take_shortcuts().is_empty());
+        assert!(emulator.is_held(GbButton::A.key()));
     }
 
     fn d_pad(button: PadButton, pressed: bool) -> PadInput {
@@ -2475,6 +2779,42 @@ mod tests {
 
     #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
     #[test]
+    fn a_lost_gpu_keeps_the_ds_3d_on_the_cpu() {
+        use crate::app::ui_state::ds_3d::{Ds3d, Resolution};
+        const CUBE: &[u8] = include_bytes!("../fixtures/nds/blocksds-lighting_cube.nds");
+        let Some(state) = Emulator::test_gpu() else {
+            return;
+        };
+        state.device.destroy();
+        let ctx = egui::Context::default();
+        let mut lost = emulator("lost-gpu");
+        let mut plain = emulator("lost-gpu-plain");
+        for emu in [&mut lost, &mut plain] {
+            emu.load_nds(CUBE).unwrap();
+            emu.ds_3d = Ds3d {
+                resolution: Resolution::Double,
+                ..Ds3d::default()
+            };
+        }
+        lost.gpu = Some((ctx.clone(), state));
+        for _ in 0..3 {
+            for emu in [&mut lost, &mut plain] {
+                for _ in 0..30 {
+                    emu.seat.core_mut().machine.run_frame();
+                }
+                emu.update_texture(&ctx);
+            }
+        }
+        assert!(lost.gpu_3d_failed);
+        assert!(lost.upscaler.is_none() && lost.upscaled.is_none());
+        let frame = lost.seat.core().machine.frame();
+        assert_eq!(frame, plain.seat.core().machine.frame());
+        let colours: std::collections::HashSet<&[u8]> = frame.chunks(4).collect();
+        assert!(colours.len() > 2, "the CPU drew the cube");
+    }
+
+    #[cfg(all(feature = "nds", not(target_arch = "wasm32")))]
+    #[test]
     fn upscaled_3d_in_a_ds_pair_shows_the_game_played_together() {
         use crate::app::ui_state::ds_3d::{Ds3d, Resolution, SmoothEdges};
         use crate::play::MyGame;
@@ -2492,6 +2832,7 @@ mod tests {
             emu.ds_3d = Ds3d {
                 resolution: Resolution::Double,
                 smooth_edges: SmoothEdges::Off,
+                ..Ds3d::default()
             };
             emu.update_texture(&ctx);
             for _ in 0..60 {
@@ -2679,11 +3020,417 @@ mod tests {
                 friend,
                 history: None,
                 downloaded,
+                peer_touched: false,
             });
             assert_eq!(emu.game_file().is_some(), !downloaded);
             assert_eq!(
                 can_play_again(&host.play, &host.online, &emu, friend),
                 !downloaded
+            );
+        }
+    }
+
+    fn peer_returned(emu: &Emulator, friend: citrine_gb_net::OnlineId) -> crate::play::Returned {
+        crate::play::Returned {
+            console: Machine::load(&rom(0x03), GbModel::Dmg.into(), &emu.firmware)
+                .expect("console"),
+            borrowed: None,
+            paused: false,
+            friend,
+            history: None,
+            downloaded: false,
+            peer_touched: true,
+        }
+    }
+
+    fn battery(emu: &mut Emulator, key: &str) -> Option<Vec<u8>> {
+        emu.writes.settle();
+        emu.store.load_battery(key)
+    }
+
+    fn played_with_a_friend(
+        name: &str,
+        edit: impl FnOnce(&mut GameBoy),
+    ) -> (Emulator, Vec<u8>, citrine_gb_net::OnlineId) {
+        use crate::play::MyGame;
+        use crate::play::tests::{Pair, homebrew};
+        let mut emu = emulator(name);
+        running(&mut emu, 0x03);
+        write_sram(&mut emu, 0x11);
+        emu.flush_save().expect("flush");
+        let own = emu.rom_key().expect("key").to_owned();
+        let before = battery(&mut emu, &own).expect("my save");
+        let mut file = emu.game_file().expect("the game");
+        file.running = false;
+        let mut pair = Pair::new(false, 0, 0, homebrew());
+        let session = pair.invite(file.clone());
+        pair.accept(session, MyGame::Own(file));
+        pair.play_frames(120);
+        pair.host
+            .play
+            .session_mut()
+            .unwrap()
+            .resync_friend(edit)
+            .expect("a checkpoint");
+        pair.until("the resync arrives", |p| p.guest.session().resyncs() >= 1);
+        assert!(pair.guest.session().from_peer());
+        assert!(!pair.host.session().from_peer());
+        pair.play_frames(60);
+        let friend = pair.host.id();
+        pair.guest.play.leave(&mut pair.guest.online);
+        let session = pair.guest.play.close().unwrap();
+        emu.finish_session(session).expect("finished");
+        (emu, before, friend)
+    }
+
+    #[test]
+    fn a_game_synced_from_a_friend_saves_to_a_separate_file_and_asks_to_keep_it() {
+        let (mut emu, before, friend) = played_with_a_friend("peer-saves-honest", |_| {});
+        let own = emu.rom_key().expect("key").to_owned();
+        write_sram(&mut emu, 0x22);
+        emu.flush_save().expect("flush");
+        let notice = emu.take_peer_notice().expect("the notice");
+        assert_eq!(notice.friend, friend);
+        assert_eq!(notice.divert.own, own);
+        assert_eq!(battery(&mut emu, &own), Some(before));
+        assert_eq!(
+            battery(&mut emu, &notice.divert.borrowed).map(|ram| ram[0]),
+            Some(0x22)
+        );
+    }
+
+    #[test]
+    fn a_crafted_save_from_a_friend_never_reaches_my_file_without_keep() {
+        let (mut emu, before, _) = played_with_a_friend("peer-saves-crafted", |gb| {
+            use citrine_gb::WriteMemory;
+            gb.cartridge.write_naive(0x0000, 0x0A);
+            gb.cartridge.write_naive(0xA000, 0x66);
+            gb.cartridge.write_naive(0x0000, 0x00);
+        });
+        let own = emu.rom_key().expect("key").to_owned();
+        let divert = emu.take_peer_notice().expect("the notice").divert;
+        assert_eq!(
+            battery(&mut emu, &divert.borrowed).map(|ram| ram[0]),
+            Some(0x66)
+        );
+        assert_eq!(battery(&mut emu, &own), Some(before.clone()));
+        assert!(emu.autosave().expect("autosave"));
+        emu.flush_save().expect("flush");
+        assert_eq!(battery(&mut emu, &own), Some(before));
+        emu.keep_peer_saves(&divert, "Mika").expect("kept");
+        assert_eq!(battery(&mut emu, &own).map(|ram| ram[0]), Some(0x66));
+    }
+
+    #[test]
+    fn keep_moves_the_synced_save_into_my_file_and_undo_puts_mine_back() {
+        let mut emu = emulator("peer-saves-keep");
+        running(&mut emu, 0x03);
+        write_sram(&mut emu, 0x11);
+        emu.flush_save().expect("flush");
+        let own = emu.rom_key().expect("key").to_owned();
+        let mine = battery(&mut emu, &own).expect("my save");
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        write_sram(&mut emu, 0x22);
+        emu.flush_save().expect("flush");
+        let divert = emu.take_peer_notice().expect("the notice").divert;
+        let theirs = battery(&mut emu, &divert.borrowed).expect("the synced save");
+        assert_eq!(battery(&mut emu, &own), Some(mine.clone()));
+
+        let kept = emu.keep_peer_saves(&divert, "Mika").expect("kept");
+        assert_eq!(battery(&mut emu, &own), Some(theirs));
+        assert!(emu.divert().is_none());
+        let aside = kept.aside().expect("my old save is set aside").to_owned();
+        assert!(
+            emu.store
+                .files()
+                .contains(&(own.clone(), format!("battery-{aside}.sav")))
+        );
+        assert_eq!(
+            emu.store.read_file(&own, &format!("battery-{aside}.sav")),
+            Some(mine.clone())
+        );
+        assert_eq!(
+            emu.store.other_batteries(&own)[0].name.as_deref(),
+            Some("Your save before Mika's")
+        );
+        assert_eq!(emu.store.battery_name(&own).as_deref(), Some("Mika's save"));
+        write_sram(&mut emu, 0x33);
+        emu.flush_save().expect("flush");
+        assert_eq!(battery(&mut emu, &own).map(|ram| ram[0]), Some(0x33));
+
+        emu.undo_kept_saves(&kept).expect("undone");
+        assert_eq!(battery(&mut emu, &own), Some(mine));
+        assert_eq!(emu.store.battery_name(&own), None);
+        assert!(emu.store.other_batteries(&own).is_empty());
+        assert!(
+            !emu.store
+                .files()
+                .contains(&(own.clone(), format!("battery-{aside}.name")))
+        );
+        assert_eq!(emu.divert(), Some(&divert));
+        emu.flush_save().expect("flush");
+        assert_eq!(
+            battery(&mut emu, &divert.borrowed).map(|ram| ram[0]),
+            Some(0x33)
+        );
+    }
+
+    #[test]
+    fn use_keeps_the_name_i_gave_my_save_on_the_one_it_sets_aside() {
+        let mut emu = emulator("peer-saves-keep-named");
+        running(&mut emu, 0x03);
+        write_sram(&mut emu, 0x11);
+        emu.flush_save().expect("flush");
+        let own = emu.rom_key().expect("key").to_owned();
+        emu.store
+            .set_battery_name(&own, "Main run", "")
+            .expect("named");
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        write_sram(&mut emu, 0x22);
+        emu.flush_save().expect("flush");
+        let divert = emu.take_peer_notice().expect("the notice").divert;
+
+        let kept = emu.keep_peer_saves(&divert, "Mika").expect("kept");
+        assert_eq!(emu.store.battery_name(&own).as_deref(), Some("Mika's save"));
+        assert_eq!(
+            emu.store.other_batteries(&own)[0].name.as_deref(),
+            Some("Main run")
+        );
+        emu.undo_kept_saves(&kept).expect("undone");
+        assert_eq!(emu.store.battery_name(&own).as_deref(), Some("Main run"));
+    }
+
+    #[test]
+    fn a_friend_autosave_is_spoken_with_its_date_and_seconds_when_two_share_a_minute() {
+        use crate::media::local_stamp;
+        use crate::storage::timed_name;
+        let at = 1_800_000_000;
+        assert_eq!(
+            timed_name("Mika's autosave", at, &[at, at + 300]),
+            format!("Mika's autosave from {}", local_stamp(at, "%b %-d, %H:%M"))
+        );
+        let first = timed_name("Mika's autosave", at, &[at, at + 20]);
+        let second = timed_name("Mika's autosave", at + 20, &[at, at + 20]);
+        assert_eq!(
+            first,
+            format!(
+                "Mika's autosave from {}",
+                local_stamp(at, "%b %-d, %H:%M:%S")
+            )
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn undo_of_a_keep_removes_my_save_when_there_was_none() {
+        let mut emu = emulator("peer-saves-keep-none");
+        running(&mut emu, 0x03);
+        let own = emu.rom_key().expect("key").to_owned();
+        assert_eq!(battery(&mut emu, &own), None);
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        write_sram(&mut emu, 0x22);
+        emu.flush_save().expect("flush");
+        let divert = emu.take_peer_notice().expect("the notice").divert;
+        assert_eq!(battery(&mut emu, &own), None);
+        let kept = emu.keep_peer_saves(&divert, "Mika").expect("kept");
+        assert_eq!(kept.aside(), None);
+        assert_eq!(battery(&mut emu, &own).map(|ram| ram[0]), Some(0x22));
+        emu.undo_kept_saves(&kept).expect("undone");
+        assert_eq!(battery(&mut emu, &own), None);
+    }
+
+    #[test]
+    fn saves_made_during_a_divert_stay_apart_and_resume_shows_my_last_autosave() {
+        let mut emu = emulator("peer-saves-resume");
+        running(&mut emu, 0x03);
+        assert!(emu.autosave().expect("my autosave"));
+        emu.writes.settle();
+        let own = emu.rom_key().expect("key").to_owned();
+        let mine = emu.store.autosave_ids(&own);
+        assert_eq!(mine.len(), 1);
+        let my_state = emu.store.load_autosave(&own, mine[0]).expect("my state");
+
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        emu.gb_mut().run_cycles(50_000);
+        assert!(emu.autosave().expect("an autosave during the divert"));
+        emu.save_snapshot(0).expect("a snapshot during the divert");
+        emu.writes.settle();
+        let divert = emu.take_peer_notice().expect("the notice").divert;
+        assert_eq!(emu.store.autosave_ids(&own), mine);
+        assert!(emu.store.used_slots(&own).is_empty());
+        assert_eq!(emu.store.autosave_ids(&divert.borrowed).len(), 1);
+        assert_eq!(emu.store.used_slots(&divert.borrowed), vec![0]);
+
+        running(&mut emu, 0x03);
+        assert!(emu.divert().is_none());
+        assert_eq!(emu.saves_key().as_deref(), Some(own.as_str()));
+        let newest = *emu.store.autosave_ids(&own).last().expect("my autosave");
+        assert_eq!(emu.store.load_autosave(&own, newest), Some(my_state));
+        assert!(emu.load_autosave(newest).expect("resumed"));
+        assert!(emu.store.used_slots(&own).is_empty());
+    }
+
+    #[test]
+    fn keep_moves_snapshots_and_autosaves_too_and_undo_moves_them_back() {
+        let mut emu = emulator("peer-saves-keep-all");
+        running(&mut emu, 0x03);
+        emu.save_snapshot(0).expect("my snapshot");
+        emu.writes.settle();
+        let own = emu.rom_key().expect("key").to_owned();
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        assert!(emu.autosave().expect("an autosave during the divert"));
+        emu.save_snapshot(0).expect("a snapshot during the divert");
+        emu.save_snapshot(1)
+            .expect("an unnamed snapshot during the divert");
+        emu.writes.settle();
+        let divert = emu.take_peer_notice().expect("the notice").divert;
+        emu.store
+            .set_snapshot_name(&divert.borrowed, 0, "Gym")
+            .expect("named");
+        let theirs = emu
+            .store
+            .load_snapshot(&divert.borrowed, 0)
+            .expect("the synced snapshot");
+        let autosave = emu.store.autosave_ids(&divert.borrowed)[0];
+        let their_autosave = emu
+            .store
+            .load_autosave(&divert.borrowed, autosave)
+            .expect("the synced autosave");
+
+        let kept = emu.keep_peer_saves(&divert, "Mika").expect("kept");
+        assert_eq!(emu.store.used_slots(&own), vec![0, 1, 2, 3]);
+        assert_eq!(emu.store.load_snapshot(&own, 1), Some(theirs.clone()));
+        let names: Vec<Option<String>> = (0..4)
+            .map(|slot| emu.store.snapshot_name(&own, slot))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                None,
+                Some("Mika's Gym".to_owned()),
+                Some("Mika's snapshot".to_owned()),
+                Some("Mika's autosave".to_owned()),
+            ]
+        );
+        assert!(emu.store.is_filed_autosave(&own, 3));
+        assert_eq!(
+            emu.store.load_snapshot(&own, 3),
+            Some(their_autosave.clone())
+        );
+        assert!(emu.store.autosave_ids(&own).is_empty());
+        assert!(emu.store.used_slots(&divert.borrowed).is_empty());
+        assert!(emu.store.autosave_ids(&divert.borrowed).is_empty());
+
+        emu.undo_kept_saves(&kept).expect("undone");
+        emu.writes.settle();
+        assert_eq!(emu.store.used_slots(&own), vec![0]);
+        assert!(emu.store.autosave_ids(&own).is_empty());
+        assert_eq!(emu.store.used_slots(&divert.borrowed), vec![0, 1]);
+        assert_eq!(emu.store.load_snapshot(&divert.borrowed, 0), Some(theirs));
+        assert_eq!(
+            emu.store.snapshot_name(&divert.borrowed, 0).as_deref(),
+            Some("Gym")
+        );
+        assert_eq!(emu.store.snapshot_name(&divert.borrowed, 1), None);
+        let back = emu.store.autosave_ids(&divert.borrowed);
+        assert_eq!(back.len(), 1);
+        assert_eq!(
+            emu.store.load_autosave(&divert.borrowed, back[0]),
+            Some(their_autosave)
+        );
+    }
+
+    #[test]
+    fn keep_after_a_reload_puts_the_synced_save_into_the_running_game() {
+        use citrine_gb::{ReadMemory, WriteMemory};
+        let mut emu = emulator("peer-saves-keep-reloaded");
+        running(&mut emu, 0x03);
+        write_sram(&mut emu, 0x11);
+        emu.flush_save().expect("flush");
+        let own = emu.rom_key().expect("key").to_owned();
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        write_sram(&mut emu, 0x22);
+        emu.flush_save().expect("flush");
+        let divert = emu.take_peer_notice().expect("the notice").divert;
+        running(&mut emu, 0x03);
+        assert!(emu.divert().is_none());
+        emu.keep_peer_saves(&divert, "Mika").expect("kept");
+        emu.gb_mut().cartridge.write_naive(0x0000, 0x0A);
+        assert_eq!(emu.gb_mut().cartridge.read_naive(0xA000), 0x22);
+        emu.flush_save().expect("flush");
+        assert_eq!(battery(&mut emu, &own).map(|ram| ram[0]), Some(0x22));
+    }
+
+    #[test]
+    fn importing_a_save_during_a_sync_writes_my_own_file() {
+        let mut emu = emulator("peer-saves-import");
+        running(&mut emu, 0x03);
+        let own = emu.rom_key().expect("key").to_owned();
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        let ram = vec![0x44; 0x2000];
+        emu.import_save(Some(&ram), None).expect("imported");
+        assert!(emu.divert().is_none());
+        assert_eq!(battery(&mut emu, &own).map(|ram| ram[0]), Some(0x44));
+    }
+
+    #[test]
+    fn loading_another_game_stops_the_separate_file() {
+        let mut emu = emulator("peer-saves-reload");
+        running(&mut emu, 0x03);
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        emu.adopt(peer_returned(&emu, friend));
+        assert!(emu.divert().is_some());
+        running(&mut emu, 0x03);
+        assert!(emu.divert().is_none());
+    }
+
+    #[cfg(ds_wifi)]
+    #[test]
+    fn a_ds_console_synced_from_a_friend_never_hands_over_its_wifi_connections() {
+        use crate::play::tests::nickname;
+        use citrine_gb::nds::spi::firmware::online::CONNECTIONS_BYTES;
+        let mut emu = emulator("peer-ds-wifi");
+        let mut identity = crate::ds_wifi::Identity::random();
+        identity.connections = Some(vec![7; CONNECTIONS_BYTES]);
+        emu.ds_wifi.identity = Some(identity.clone());
+        let friend = citrine_gb_net::OnlineId::new(7).unwrap();
+        for peer_touched in [true, false] {
+            let mut console =
+                Machine::load(&Rom::new(&nickname().rom), ConsoleKind::Nds, &emu.firmware).unwrap();
+            let Machine::Nds(nds) = &mut console else {
+                panic!("a ds console");
+            };
+            let firmware = &mut nds.buses_mut().spi_mut().devices_mut().firmware;
+            for command in [&[0x06_u8][..], &[0x0A, 0x03, 0xFE, 0x00, 0x12, 0x34][..]] {
+                for &byte in command {
+                    let _ = firmware.transfer(byte);
+                }
+                firmware.deselect();
+            }
+            assert!(firmware.dirty());
+            emu.adopt(crate::play::Returned {
+                console,
+                borrowed: None,
+                paused: true,
+                friend,
+                history: None,
+                downloaded: false,
+                peer_touched,
+            });
+            let core = emu.seat.core_mut();
+            emu.ds_wifi.follow(&mut core.machine, &mut core.wifi);
+            let kept = emu.ds_wifi.identity.as_ref().map(|i| i.connections.clone());
+            assert_eq!(
+                kept == Some(identity.connections.clone()),
+                peer_touched,
+                "peer touched {peer_touched}"
             );
         }
     }
@@ -2795,6 +3542,97 @@ mod tests {
             .expect("gb loads");
         let made = samples_per_second(&mut emulator);
         assert!(near(made), "gb made {made:.0} samples a second for {rate}");
+    }
+
+    #[test]
+    fn the_pointer_hides_once_it_rests_over_the_running_game() {
+        use egui::CursorIcon;
+        let mut emulator = emulator("hide-pointer");
+        emulator
+            .load_rom(&rom(0x00), GbModel::Dmg, None)
+            .expect("rom loads");
+        emulator.running = true;
+        emulator.hide_pointer = true;
+        let ctx = egui::Context::default();
+        emulator.update_texture(&ctx);
+        let run = |emulator: &mut Emulator, time: f64, at: Option<egui::Pos2>, draw: bool| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(time),
+                events: at.map(egui::Event::PointerMoved).into_iter().collect(),
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if draw {
+                        emulator.ui_at(ui, ui.max_rect());
+                    }
+                });
+                emulator.rest_pointer(ctx);
+            })
+            .platform_output
+            .cursor_icon
+        };
+        let centre = egui::pos2(400.0, 300.0);
+        assert_eq!(
+            run(&mut emulator, 0.0, Some(centre), true),
+            CursorIcon::Default
+        );
+        assert_eq!(run(&mut emulator, 1.0, None, true), CursorIcon::Default);
+        assert_eq!(run(&mut emulator, 2.5, None, true), CursorIcon::None);
+        let moved = Some(centre + egui::vec2(4.0, 0.0));
+        assert_eq!(run(&mut emulator, 2.6, moved, true), CursorIcon::Default);
+        assert_eq!(run(&mut emulator, 5.0, None, false), CursorIcon::Default);
+        emulator.running = false;
+        assert_eq!(run(&mut emulator, 6.0, None, true), CursorIcon::Default);
+        emulator.running = true;
+        emulator.hide_pointer = false;
+        assert_eq!(run(&mut emulator, 7.0, None, true), CursorIcon::Default);
+        emulator.hide_pointer = true;
+        assert_eq!(run(&mut emulator, 8.0, None, true), CursorIcon::None);
+        let corner = Some(egui::pos2(2.0, 2.0));
+        run(&mut emulator, 9.0, corner, true);
+        assert_eq!(run(&mut emulator, 12.0, None, true), CursorIcon::Default);
+    }
+
+    #[test]
+    fn a_tilt_cart_tilts_with_the_bound_tilt_keys() {
+        use crate::app::ui_state::keybinds::{KeyBindings, Tilt};
+        let mut emulator = emulator("tilt-keys");
+        emulator
+            .load_rom(&rom(0x22), GbModel::Dmg, None)
+            .expect("tilt cart loads");
+        let mut bindings = KeyBindings::default();
+        bindings.bind_tilt_key(Tilt::Left, egui::Key::G);
+        let mut capture = BindingCapture::default();
+        let ctx = egui::Context::default();
+        let mut key = |emulator: &mut Emulator, key: egui::Key, pressed: bool| {
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                emulator.handle_input(ctx, &mut fake(&[]), &bindings, &mut capture, None);
+            });
+            emulator.gimmicks.update_motion(0.25);
+        };
+        key(&mut emulator, egui::Key::J, true);
+        assert_eq!(emulator.gimmicks.motion.x, 0.0, "J no longer tilts");
+        key(&mut emulator, egui::Key::J, false);
+        key(&mut emulator, egui::Key::G, true);
+        assert!(emulator.gimmicks.motion.x < 0.0, "G tilts left");
+        key(&mut emulator, egui::Key::G, false);
+        key(&mut emulator, egui::Key::K, true);
+        assert!(emulator.gimmicks.motion.y > 0.0, "K still tilts down");
     }
 
     #[cfg(feature = "nds")]
@@ -2945,6 +3783,7 @@ mod tests {
     #[cfg(feature = "gba")]
     mod gba {
         use super::*;
+        use crate::pad_input::{FakePads, PadEvent};
         use citrine_gb::gba::save::SaveType;
         use citrine_gb::persistence::state::GBA_STATE_MAGIC;
 
@@ -2980,7 +3819,7 @@ mod tests {
         }
 
         fn store_root(name: &str) -> std::path::PathBuf {
-            let root = std::env::temp_dir()
+            let root = crate::storage::scratch_dir()
                 .join(format!("citrine-gba-test-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             root
@@ -3152,15 +3991,15 @@ mod tests {
                 let mut changed = state.clone();
                 changed[4] = version;
                 let err = emulator.restore(&changed).expect_err("refused");
-                failed_message(FailedStep::Load, "'Boss fight'", &err)
+                failed_message(FailedStep::Load, "Boss fight", &err)
             };
             assert_eq!(
                 told(&mut emulator, state[4] + 1),
-                "Couldn't load 'Boss fight'. It needs a newer version of Citrine."
+                "Couldn't load Boss fight. It needs a newer version of Citrine."
             );
             assert_eq!(
                 told(&mut emulator, state[4] - 1),
-                "Couldn't load 'Boss fight'. It was saved by an older version of Citrine."
+                "Couldn't load Boss fight. It was saved by an older version of Citrine."
             );
         }
 
@@ -3424,6 +4263,10 @@ mod tests {
         const TICKS: usize = 120;
 
         fn ticked(speed: Option<FastForwardSpeed>) -> Vec<Plan> {
+            ticked_at(TICK, TICKS, speed)
+        }
+
+        fn ticked_at(tick: f64, ticks: usize, speed: Option<FastForwardSpeed>) -> Vec<Plan> {
             let mut emulator = emulator("fast-forward");
             running(&mut emulator, 0x00);
             emulator.running = true;
@@ -3432,9 +4275,9 @@ mod tests {
                 emulator.fast_forward_speed = speed;
             }
             let start = web_time::Instant::now();
-            (0..=TICKS)
-                .filter_map(|tick| {
-                    let now = start + Duration::from_secs_f64(tick as f64 * TICK);
+            (0..=ticks)
+                .filter_map(|at| {
+                    let now = start + Duration::from_secs_f64(at as f64 * tick);
                     emulator.prepare(now).map(|(plan, _)| plan)
                 })
                 .collect()
@@ -3454,7 +4297,28 @@ mod tests {
                 (FastForwardSpeed::Five, 5),
                 (FastForwardSpeed::Ten, 10),
             ] {
-                assert_eq!(frames(&ticked(Some(speed))), normal * times, "{speed}");
+                let fast = frames(&ticked(Some(speed)));
+                assert!(fast.abs_diff(normal * times) <= times, "{speed}: {fast}");
+            }
+        }
+
+        #[test]
+        fn a_fast_screen_gets_its_fast_forward_frames_spread_over_every_refresh() {
+            let hz = 180.0;
+            let normal = frames(&ticked_at(1.0 / hz, 360, None));
+            for (speed, times) in [
+                (FastForwardSpeed::Two, 2),
+                (FastForwardSpeed::Three, 3),
+                (FastForwardSpeed::Five, 5),
+            ] {
+                let plans = ticked_at(1.0 / hz, 360, Some(speed));
+                let fast = frames(&plans);
+                assert!(fast.abs_diff(normal * times) <= times, "{speed}: {fast}");
+                let most = plans.iter().map(|plan| plan.frames).max().unwrap_or(0);
+                assert!(
+                    most <= times.div_ceil(3),
+                    "{speed}: {most} frames in one refresh"
+                );
             }
         }
 
@@ -3605,6 +4469,19 @@ mod tests {
         }
 
         #[test]
+        fn the_monitors_own_rate_names_an_unmatched_screen() {
+            let mut emulator = shown_at(139.0, true);
+            emulator.set_display(Display {
+                monitor: Some(crate::app::monitor::MonitorRate {
+                    hz: 144.0,
+                    source: crate::app::monitor::RateSource::WindowsDisplayConfig,
+                }),
+                paced: false,
+            });
+            assert_eq!(emulator.screen_match(), Some(ScreenMatch::Unmatched(144.0)));
+        }
+
+        #[test]
         fn matching_held_off_or_turned_off_says_so() {
             let mut emulator = shown_at(120.0, false);
             assert_eq!(emulator.screen_match(), Some(ScreenMatch::Shared));
@@ -3627,7 +4504,11 @@ mod tests {
             running(&mut emulator, 0x00);
             emulator.running = true;
             let start = web_time::Instant::now();
-            let basis = Some((REFRESH_180, DS_FRAME));
+            let basis = Some(show_lag::Basis {
+                refresh: REFRESH_180,
+                frame: DS_FRAME,
+                least: 0,
+            });
             emulator.show_pace.begin(None);
             emulator.show_pace.lent(start, 1, basis);
             emulator
@@ -3637,6 +4518,52 @@ mod tests {
             emulator.show_pace.lent(start, 1, basis);
             emulator.lent = Some(0.0);
             emulator
+        }
+
+        fn refreshes_to_show_a_quick_frame(
+            emulator: &mut Emulator,
+            refresh: Duration,
+        ) -> Option<u64> {
+            emulator.clock.seed_refresh(refresh.as_secs_f64());
+            emulator.show_pace.begin(None);
+            let basis = emulator.show_lag_basis();
+            emulator.show_pace.lent(web_time::Instant::now(), 1, basis);
+            emulator.show_pace.refreshes_to_show()
+        }
+
+        #[test]
+        fn a_game_boy_frame_shows_one_refresh_after_its_lend_where_two_refreshes_fit() {
+            let mut emulator = emulator("least-gb");
+            running(&mut emulator, 0x03);
+            assert_eq!(
+                refreshes_to_show_a_quick_frame(&mut emulator, REFRESH_180),
+                Some(1)
+            );
+            assert_eq!(
+                refreshes_to_show_a_quick_frame(&mut emulator, Duration::from_nanos(8_333_333)),
+                Some(1)
+            );
+            assert_eq!(
+                refreshes_to_show_a_quick_frame(&mut emulator, Duration::from_nanos(16_666_667)),
+                Some(0)
+            );
+            emulator.fast_forward = true;
+            assert_eq!(
+                refreshes_to_show_a_quick_frame(&mut emulator, REFRESH_180),
+                Some(0)
+            );
+        }
+
+        #[cfg(feature = "gba")]
+        #[test]
+        fn a_quick_gba_frame_still_shows_in_its_own_update() {
+            let mut emulator = emulator("least-gba");
+            let rom: Vec<u8> = 0xEAFF_FFFE_u32.to_le_bytes().repeat(64);
+            emulator.put_gba(&rom, "least-gba");
+            assert_eq!(
+                refreshes_to_show_a_quick_frame(&mut emulator, REFRESH_180),
+                Some(0)
+            );
         }
 
         #[test]
@@ -3655,6 +4582,27 @@ mod tests {
         #[test]
         fn a_frame_that_fits_its_refresh_keeps_every_refresh() {
             let emulator = lent_with_cost(Duration::from_millis(3));
+            assert_eq!(emulator.idle_refreshes(), None);
+        }
+
+        #[test]
+        fn a_lend_without_a_frame_wakes_every_refresh() {
+            let mut emulator = lent_with_cost(Duration::from_millis(3));
+            emulator.clock.seed_refresh(REFRESH_180.as_secs_f64());
+            let now = web_time::Instant::now();
+            emulator
+                .show_pace
+                .shown(Some(now), REFRESH_180, REFRESH_180);
+            emulator.show_pace.begin(None);
+            emulator.show_pace.lent(
+                now,
+                0,
+                Some(show_lag::Basis {
+                    refresh: REFRESH_180,
+                    frame: DS_FRAME,
+                    least: 0,
+                }),
+            );
             assert_eq!(emulator.idle_refreshes(), None);
         }
     }

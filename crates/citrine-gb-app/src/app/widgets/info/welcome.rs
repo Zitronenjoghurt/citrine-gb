@@ -1,5 +1,5 @@
 use super::Controls;
-use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
+use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys, QuickLoadKey};
 use crate::app::ui_state::keybinds::{BindingTarget, GbButton, KeyBindings};
 use strum::IntoEnumIterator;
 
@@ -86,12 +86,16 @@ The on-screen d-pad reads diagonals. In **Settings → Controls** you can resize
 the buttons for left-handed play, or hide them to play with a paired controller.
 "
         .to_owned(),
-        Controls::Desktop { bindings, hotkeys } => format!(
+        Controls::Desktop {
+            bindings,
+            hotkeys,
+            quick_load,
+        } => format!(
             "# Controls\nYou can remap every binding below in **Settings → Controls**.\n\n\
              {}\n{}\n**Touch**\n\n{TOUCH}\n\n**Shortcuts**\n\n{}",
             keyboard_table(bindings),
             controller_table(bindings),
-            shortcuts_table(hotkeys),
+            shortcuts_table(hotkeys, *quick_load),
         ),
     }
 }
@@ -142,7 +146,7 @@ fn controller_table(bindings: &KeyBindings) -> String {
     )
 }
 
-fn shortcuts_table(hotkeys: &Hotkeys) -> String {
+fn shortcuts_table(hotkeys: &Hotkeys, quick_load: QuickLoadKey) -> String {
     table(
         ("Action", "Keys"),
         HotkeyAction::iter().filter_map(|action| {
@@ -150,7 +154,7 @@ fn shortcuts_table(hotkeys: &Hotkeys) -> String {
                 .keys_for(action)
                 .iter()
                 .map(|hotkey| {
-                    if action.is_hold() {
+                    if action.is_hold() && quick_load == QuickLoadKey::Hold {
                         format!("Hold {hotkey}")
                     } else {
                         hotkey.to_string()
@@ -165,6 +169,10 @@ fn shortcuts_table(hotkeys: &Hotkeys) -> String {
 fn quick_slot_note(controls: &Controls) -> &'static str {
     match controls {
         Controls::Touch => "",
+        Controls::Desktop {
+            quick_load: QuickLoadKey::Press,
+            ..
+        } => "Quick save and quick load use the slot marked with a star.\n",
         Controls::Desktop { .. } => {
             "Quick save and quick load use the slot marked with a star. You have to hold quick load
 for a moment, so a stray press cannot throw away your progress.

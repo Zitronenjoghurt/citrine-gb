@@ -1,7 +1,6 @@
 use super::PlayMsg;
 use super::wire::Wire;
 use crate::chat::{pack, unpack};
-use crate::crypto::{Keys, OpenError, PublicKey, Sealed};
 use std::borrow::Cow;
 
 pub const WHOLE_BYTES: usize = 768 * 1024;
@@ -9,10 +8,10 @@ pub const PIECE_BYTES: usize = 192 * 1024;
 pub const MAX_PIECED_BYTES: usize = 24 << 20;
 
 impl PlayMsg {
-    pub fn seal_in_pieces(&self, keys: &Keys, to: &PublicKey, last_id: &mut u32) -> Vec<Sealed> {
+    pub(super) fn bodies(&self, last_id: &mut u32) -> Vec<Vec<u8>> {
         let bytes = postcard::to_allocvec(self).expect("session messages always encode");
         if bytes.len() <= WHOLE_BYTES {
-            return vec![keys.seal(to, &bytes)];
+            return vec![bytes];
         }
         let packed = pack(&bytes, true);
         if packed.len() > MAX_PIECED_BYTES {
@@ -30,7 +29,7 @@ impl PlayMsg {
                     total,
                     data: Cow::Borrowed(data),
                 };
-                super::seal(&piece, keys, to)
+                postcard::to_allocvec(&piece).expect("pieces always encode")
             })
             .collect()
     }
@@ -43,23 +42,13 @@ struct Joining {
 }
 
 #[derive(Default)]
-pub struct Pieces {
+pub(super) struct Pieces {
     joining: Option<Joining>,
 }
 
 impl Pieces {
-    pub fn open(
-        &mut self,
-        keys: &Keys,
-        from: &PublicKey,
-        sealed: &Sealed,
-    ) -> Result<Option<PlayMsg>, OpenError> {
-        let bytes = keys.open(from, sealed)?;
-        let wire: Wire = match postcard::take_from_bytes(&bytes) {
-            Ok((wire, [])) => wire,
-            _ => return Err(OpenError),
-        };
-        Ok(match wire {
+    pub(super) fn read(&mut self, wire: Wire) -> Option<PlayMsg> {
+        match wire {
             Wire::Piece {
                 id,
                 offset,
@@ -67,10 +56,10 @@ impl Pieces {
                 data,
             } => self.join(id, offset, total, &data),
             wire => wire.into_msg(),
-        })
+        }
     }
 
-    pub fn receiving(&self) -> Option<(u32, u32)> {
+    pub(super) fn receiving(&self) -> Option<(u32, u32)> {
         self.joining
             .as_ref()
             .map(|j| (j.data.len() as u32, j.total))
@@ -108,7 +97,8 @@ impl Pieces {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ClientMsg, CodecError, MAX_FRAME_BYTES, Origin, RejoinPoint, RelayId};
+    use crate::crypto::{Keys, OpenError};
+    use crate::{ClientMsg, CodecError, Origin, RejoinPoint, RelayId};
 
     fn pair() -> (Keys, Keys) {
         (RelayId::random().keys(), RelayId::random().keys())
@@ -142,18 +132,14 @@ mod tests {
         PlayMsg::Setup {
             round: 3,
             from: Origin::Resume(pack(&noise(2 << 20, 11), true)),
+            budget: 0,
         }
     }
 
-    fn frames(sealed: Vec<Sealed>) -> Vec<Sealed> {
-        for sealed in &sealed {
-            let msg = ClientMsg::Play {
-                session: u64::MAX,
-                sealed: sealed.clone(),
-            };
-            assert!(msg.encode().unwrap().len() <= MAX_FRAME_BYTES);
-        }
-        sealed
+    fn read(pieces: &mut Pieces, body: &[u8]) -> Option<PlayMsg> {
+        let (wire, rest) = postcard::take_from_bytes::<Wire>(body).unwrap();
+        assert!(rest.is_empty());
+        pieces.read(wire)
     }
 
     #[test]
@@ -167,36 +153,14 @@ mod tests {
     }
 
     #[test]
-    fn heartgold_sized_states_cross_in_pieces_that_fit_a_frame() {
-        let (a, b) = pair();
-        let mut last = 0;
-        let mut pieces = Pieces::default();
-        for msg in [heartgold_resync(), heartgold_resume()] {
-            let sealed = frames(msg.seal_in_pieces(&a, &b.public_key(), &mut last));
-            assert!(sealed.len() > 1);
-            let mut seen = Vec::new();
-            let mut out = Vec::new();
-            for sealed in &sealed {
-                out.extend(pieces.open(&b, &a.public_key(), sealed).unwrap());
-                seen.extend(pieces.receiving());
-            }
-            assert_eq!(out, vec![msg]);
-            assert_eq!(pieces.receiving(), None);
-            assert!(seen.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 == w[1].1));
-        }
-    }
-
-    #[test]
     fn a_resync_crosses_packed() {
-        let (a, b) = pair();
-        let sealed = heartgold_resync().seal_in_pieces(&a, &b.public_key(), &mut 0);
-        let bytes: usize = sealed.iter().map(|s| s.ciphertext.len()).sum();
+        let bodies = heartgold_resync().bodies(&mut 0);
+        let bytes: usize = bodies.iter().map(Vec::len).sum();
         assert!(bytes < 5 << 19, "{bytes} bytes");
     }
 
     #[test]
-    fn small_messages_stay_whole_and_open_as_before() {
-        let (a, b) = pair();
+    fn small_messages_stay_whole() {
         let msg = PlayMsg::Rejoin {
             round: 1,
             from: RejoinPoint {
@@ -206,58 +170,48 @@ mod tests {
                 oldest: 280,
             },
         };
-        let sealed = msg.seal_in_pieces(&a, &b.public_key(), &mut 0);
-        assert_eq!(sealed.len(), 1);
-        assert_eq!(
-            PlayMsg::open(&b, &a.public_key(), &sealed[0]),
-            Ok(msg.clone())
-        );
-        let opened = Pieces::default().open(&b, &a.public_key(), &sealed[0]);
-        assert_eq!(opened, Ok(Some(msg)));
+        let bodies = msg.bodies(&mut 0);
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(read(&mut Pieces::default(), &bodies[0]), Some(msg));
     }
 
     #[test]
     fn a_missing_piece_drops_the_message_and_the_next_one_arrives() {
-        let (a, b) = pair();
         let mut last = 0;
         let mut pieces = Pieces::default();
-        let first = heartgold_resume().seal_in_pieces(&a, &b.public_key(), &mut last);
-        for (i, sealed) in first.iter().enumerate() {
+        let first = heartgold_resume().bodies(&mut last);
+        for (i, body) in first.iter().enumerate() {
             if i != 2 {
-                let out = pieces.open(&b, &a.public_key(), sealed).unwrap();
-                assert_eq!(out, None);
+                assert_eq!(read(&mut pieces, body), None);
             }
         }
         let msg = heartgold_resync();
-        let mut out = Vec::new();
-        for sealed in msg.seal_in_pieces(&a, &b.public_key(), &mut last) {
-            out.extend(pieces.open(&b, &a.public_key(), &sealed).unwrap());
-        }
+        let out: Vec<PlayMsg> = msg
+            .bodies(&mut last)
+            .iter()
+            .filter_map(|body| read(&mut pieces, body))
+            .collect();
         assert_eq!(out, vec![msg]);
     }
 
     #[test]
     fn a_piece_claiming_more_than_the_limit_is_dropped() {
-        let (a, b) = pair();
         let piece = Wire::Piece {
             id: 1,
             offset: 0,
             total: MAX_PIECED_BYTES as u32 + 1,
             data: Cow::Owned(vec![0; 16]),
         };
-        let sealed = crate::play::seal(&piece, &a, &b.public_key());
         let mut pieces = Pieces::default();
-        assert_eq!(pieces.open(&b, &a.public_key(), &sealed), Ok(None));
+        assert_eq!(pieces.read(piece), None);
         assert_eq!(pieces.receiving(), None);
     }
 
     #[test]
     fn a_lone_piece_never_opens_as_a_whole_message() {
         let (a, b) = pair();
-        let sealed = heartgold_resume().seal_in_pieces(&a, &b.public_key(), &mut 0);
-        assert_eq!(
-            PlayMsg::open(&b, &a.public_key(), &sealed[0]),
-            Err(OpenError)
-        );
+        let bodies = heartgold_resume().bodies(&mut 0);
+        let sealed = a.seal(&b.public_key(), &bodies[0]);
+        assert_eq!(PlayMsg::open(&b, &a.public_key(), &sealed), Err(OpenError));
     }
 }

@@ -1,5 +1,5 @@
 use super::{
-    CableByte, DsUser, GameCard, LinkGroup, Mode, Origin, Pad, PlayMsg, RejoinPoint, Start,
+    CableByte, DsUser, GameCard, LinkGroup, Mode, Origin, Pad, PlayMsg, RejoinPoint, Signal, Start,
 };
 use crate::id::OnlineId;
 use crate::proto::GameHash;
@@ -31,6 +31,7 @@ pub(super) enum Wire<'a> {
     Setup {
         round: u32,
         from: Cow<'a, Origin>,
+        budget: u8,
     },
     Ping(u32),
     Pong(u32),
@@ -118,6 +119,28 @@ pub(super) enum Wire<'a> {
         round: u32,
         delay: u8,
     },
+    Seq {
+        link: u32,
+        base: u64,
+        seq: u64,
+        peer: u32,
+        upto: u64,
+        highest: u64,
+    },
+    Ack {
+        peer: u32,
+        upto: u64,
+        highest: u64,
+    },
+    Direct(Cow<'a, Signal>),
+    Probe {
+        link: u32,
+        n: u32,
+    },
+    Echo {
+        peer: u32,
+        n: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -193,9 +216,14 @@ impl<'a> From<&'a PlayMsg> for Wire<'a> {
                 game: *game,
                 holds: *holds,
             },
-            PlayMsg::Setup { round, from } => Wire::Setup {
+            PlayMsg::Setup {
+                round,
+                from,
+                budget,
+            } => Wire::Setup {
                 round: *round,
                 from: Cow::Borrowed(from),
+                budget: *budget,
             },
             PlayMsg::Ping(n) => Wire::Ping(*n),
             PlayMsg::Pong(n) => Wire::Pong(*n),
@@ -322,6 +350,7 @@ impl<'a> From<&'a PlayMsg> for Wire<'a> {
                 round: *round,
                 delay: *delay,
             },
+            PlayMsg::Direct(signal) => Wire::Direct(Cow::Borrowed(signal)),
         }
     }
 }
@@ -339,9 +368,14 @@ impl Wire<'_> {
                 game: game.into_owned(),
             },
             Wire::Holds { game, holds } => PlayMsg::Holds { game, holds },
-            Wire::Setup { round, from } => PlayMsg::Setup {
+            Wire::Setup {
+                round,
+                from,
+                budget,
+            } => PlayMsg::Setup {
                 round,
                 from: from.into_owned(),
+                budget,
             },
             Wire::Ping(n) => PlayMsg::Ping(n),
             Wire::Pong(n) => PlayMsg::Pong(n),
@@ -455,7 +489,12 @@ impl Wire<'_> {
                 user: user.into_owned(),
             },
             Wire::Delay { round, delay } => PlayMsg::Delay { round, delay },
-            Wire::Piece { .. } => return None,
+            Wire::Direct(signal) => PlayMsg::Direct(signal.into_owned()),
+            Wire::Piece { .. }
+            | Wire::Seq { .. }
+            | Wire::Ack { .. }
+            | Wire::Probe { .. }
+            | Wire::Echo { .. } => return None,
         })
     }
 }
@@ -494,6 +533,7 @@ mod tests {
         Setup {
             round: u32,
             from: Origin,
+            budget: u8,
         },
         Ping(u32),
         Pong(u32),
@@ -589,10 +629,12 @@ mod tests {
                 Before::Setup {
                     round: 3,
                     from: Origin::Resume(vec![4; 300]),
+                    budget: 2,
                 },
                 PlayMsg::Setup {
                     round: 3,
                     from: Origin::Resume(vec![4; 300]),
+                    budget: 2,
                 },
             ),
             (Before::Ping(9), PlayMsg::Ping(9)),

@@ -4,7 +4,30 @@ use super::ppu::types::theme::DmgTheme;
 use crate::console::Rollback;
 use crate::error::GbResult;
 use crate::netplay::state::CheckHash;
+use crate::persistence::state::check_game;
+use crate::utils::digest::game_key;
 use std::io::Write;
+
+impl GameBoy {
+    pub(crate) fn check_hash(&self) -> u64 {
+        let mut scratch = self.scratch();
+        scratch.serial.forget_link();
+        scratch.hashed()
+    }
+
+    fn hashed(&mut self) -> u64 {
+        self.ppu.dmg_theme = DmgTheme::default();
+        self.ppu.dmg_colors = DmgColors::default();
+        self.ppu.color_correction = ColorCorrection::default();
+        self.cartridge.forget_unsaved();
+        let mut hash = CheckHash::new();
+        let _ = rmp_serde::encode::write(&mut hash, &*self);
+        for bank in self.cartridge.ram_banks() {
+            let _ = hash.write_all(bank);
+        }
+        hash.finish()
+    }
+}
 
 impl Rollback for GameBoy {
     fn clone_state(&self) -> GameBoy {
@@ -84,15 +107,7 @@ impl Rollback for GameBoy {
 
     fn state_hash(&self, scratch: &mut GameBoy) -> u64 {
         scratch.copy_state_from(self);
-        scratch.ppu.dmg_theme = DmgTheme::default();
-        scratch.ppu.dmg_colors = DmgColors::default();
-        scratch.ppu.color_correction = ColorCorrection::default();
-        let mut hash = CheckHash::new();
-        let _ = rmp_serde::encode::write(&mut hash, &*scratch);
-        for bank in scratch.cartridge.ram_banks() {
-            let _ = hash.write_all(bank);
-        }
-        hash.finish()
+        scratch.hashed()
     }
 
     fn encode_state(&self) -> GbResult<Vec<u8>> {
@@ -103,15 +118,18 @@ impl Rollback for GameBoy {
 
     fn encode_state_into(&self, out: &mut Vec<u8>) -> GbResult<()> {
         let ram = self.cartridge.ram_banks().concat();
-        Ok(rmp_serde::encode::write(out, &(self, ram))?)
+        let game = game_key(self.cartridge.pristine_rom());
+        Ok(rmp_serde::encode::write(out, &(self, ram, game))?)
     }
 
     fn decode_state(&self, data: &[u8]) -> GbResult<GameBoy> {
-        let (mut gb, ram): (GameBoy, Vec<u8>) = rmp_serde::from_slice(data)?;
-        gb.cartridge.restore_storage(&self.cartridge, &ram);
+        let (mut gb, ram, game): (GameBoy, Vec<u8>, u64) = rmp_serde::from_slice(data)?;
+        check_game(game, self.cartridge.pristine_rom())?;
+        gb.cartridge.restore_storage(&self.cartridge, &ram)?;
         gb.memory.ensure_wram_banks(gb.model);
         gb.cgb.ensure_model(gb.model);
         gb.apu.restore(gb.model);
+        gb.ppu.clamp_loaded();
         Ok(gb)
     }
 

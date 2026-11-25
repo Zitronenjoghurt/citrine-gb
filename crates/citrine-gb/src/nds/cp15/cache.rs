@@ -7,6 +7,7 @@ const HIGH_PAGES: usize = 0x10;
 const ALL_PAGES: u64 = 1 << 20;
 const CODE: u8 = 1;
 const DATA: u8 = 2;
+const IO_PAGES: std::ops::Range<usize> = 0x4000..0x5000;
 
 #[cfg(jit)]
 static GENERATIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -15,6 +16,7 @@ static GENERATIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 pub struct CacheMap {
     low: Box<[u8]>,
     high: [u8; HIGH_PAGES],
+    io: u8,
     inputs: Option<CacheInputs>,
     #[cfg(jit)]
     generation: u32,
@@ -25,6 +27,7 @@ impl Default for CacheMap {
         Self {
             low: vec![0; LOW_PAGES].into_boxed_slice(),
             high: [0; HIGH_PAGES],
+            io: 0,
             inputs: None,
             #[cfg(jit)]
             generation: 0,
@@ -48,6 +51,11 @@ impl CacheMap {
         flags & side != 0
     }
 
+    #[inline(always)]
+    pub fn io_data(&self) -> bool {
+        self.io & DATA != 0
+    }
+
     pub fn refresh(&mut self, cp15: &Cp15) {
         let inputs = cp15.cache_inputs();
         if self.inputs.as_ref() == Some(&inputs) {
@@ -63,6 +71,7 @@ impl CacheMap {
                 self.fill(u64::from(first), u64::from(first) + u64::from(pages), flags);
             }
         }
+        self.io = self.low[IO_PAGES].iter().fold(0, |all, &flags| all | flags);
         self.inputs = Some(inputs);
         #[cfg(jit)]
         {

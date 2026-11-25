@@ -206,14 +206,17 @@ impl Tcm {
         if itcm.reads != itcm.writes || dtcm.reads != dtcm.writes {
             return None;
         }
-        let window = |ram: &mut Ram, window: Window| {
+        let window = |ram: &mut Ram, window: Window, hardware: usize| {
             if window.writes == 0 {
                 jit::Window::CLOSED
             } else {
-                ram.window(window.base, window.writes)
+                ram.window(window.base, window.writes, hardware)
             }
         };
-        Some([window(&mut self.itcm, itcm), window(&mut self.dtcm, dtcm)])
+        Some([
+            window(&mut self.itcm, itcm, ITCM_SIZE),
+            window(&mut self.dtcm, dtcm, DTCM_SIZE),
+        ])
     }
 
     pub fn hits(&self, addr: u32, fetch: Fetch) -> bool {

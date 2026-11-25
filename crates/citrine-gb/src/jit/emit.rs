@@ -8,10 +8,10 @@ mod thumb;
 mod timing;
 mod transfer;
 
-use super::JitBus;
 use super::fast::{Fast, Spec, WINDOWS};
 use super::helpers::{EXIT, Helpers};
 use super::scan::{Op, Plan};
+use super::{JitBus, QuickFetch};
 use crate::gba::cpu::psr::{FLAG_C, FLAG_I, FLAG_N, FLAG_V, FLAG_Z};
 use crate::gba::cpu::registers::{CPSR_OFFSET, Registers};
 use crate::gba::cpu::{Core, END_LINE};
@@ -160,6 +160,7 @@ impl Emitter {
             V5,
             B::TIMED_FETCH,
         );
+        block.quick = B::QUICK_FETCH.filter(|_| B::TIMED_FETCH);
         block.build();
         let portable = !block.fixed;
         block.b.seal_all_blocks();
@@ -267,6 +268,7 @@ struct Builder<'a, 'f> {
     ahead: Vec<(Value, usize)>,
     merge: Vec<Merge>,
     merged: bool,
+    quick: Option<QuickFetch>,
 }
 
 impl<'a, 'f> Builder<'a, 'f> {
@@ -352,6 +354,7 @@ impl<'a, 'f> Builder<'a, 'f> {
             ahead: Vec::new(),
             merge: Vec::new(),
             merged: false,
+            quick: None,
         }
     }
 

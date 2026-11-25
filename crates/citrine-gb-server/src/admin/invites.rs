@@ -47,7 +47,10 @@ fn flash(done: Option<&str>) -> Option<Flash> {
         "long-note" => (false, "Keep the note to 80 characters"),
         _ => return None,
     };
-    Some(Flash { ok, text })
+    Some(Flash {
+        ok,
+        text: text.into(),
+    })
 }
 
 fn url_part(text: &str) -> String {

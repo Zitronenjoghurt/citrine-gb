@@ -1,23 +1,36 @@
 mod art;
-mod names;
 pub mod net;
-mod source;
 mod store;
 
 use citrine_gb::console::ConsoleKind;
+use citrine_gb_gameinfo::covers::{names, source};
+use citrine_gb_threads::Spawner;
 use names::Names;
 pub use names::System;
 use net::{Answer, Net};
 pub(crate) use source::encode;
-use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, TryRecvError};
-pub use store::{CoverStore, NAMESPACES};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+pub use store::{CoverStore, FOLDERS};
 
 const MISS_WAIT: u64 = 7 * 24 * 60 * 60;
 const NAMES_FRESH: u64 = 30 * 24 * 60 * 60;
 const MOST_LINKS: u8 = 2;
 
 pub use art::decode;
+
+pub trait SystemOf {
+    fn of(console: ConsoleKind, rom: &[u8]) -> Self;
+}
+
+impl SystemOf for System {
+    fn of(console: ConsoleKind, rom: &[u8]) -> Self {
+        match console {
+            ConsoleKind::Gba => Self::Gba,
+            ConsoleKind::Nds => Self::Nds,
+            _ => Self::game_boy(rom),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Game {
@@ -55,11 +68,82 @@ impl Game {
 }
 
 enum List {
+    Reading(Receiver<Option<(u64, Names)>>),
     Loading {
         reply: Receiver<Answer>,
         stale: Option<Names>,
     },
+    Parsing {
+        reply: Receiver<Option<Names>>,
+        stale: Option<Names>,
+    },
     Ready(Names),
+    Failed,
+}
+
+impl List {
+    fn is_pending(&self) -> bool {
+        matches!(
+            self,
+            List::Reading(_) | List::Loading { .. } | List::Parsing { .. }
+        )
+    }
+
+    fn next(
+        self,
+        system: System,
+        net: &mut dyn Net,
+        store: &CoverStore,
+        spawner: &Spawner,
+        now: u64,
+    ) -> Self {
+        match self {
+            List::Reading(reply) => match reply.try_recv() {
+                Err(TryRecvError::Empty) => List::Reading(reply),
+                Ok(Some((fetched, names))) if now.saturating_sub(fetched) < NAMES_FRESH => {
+                    List::Ready(names)
+                }
+                stored => List::Loading {
+                    reply: net.get(source::names_url(system)),
+                    stale: stored.ok().flatten().map(|(_, names)| names),
+                },
+            },
+            List::Loading { reply, stale } => {
+                let answer = match reply.try_recv() {
+                    Ok(answer) => answer,
+                    Err(TryRecvError::Empty) => return List::Loading { reply, stale },
+                    Err(TryRecvError::Disconnected) => Err("no answer".to_owned()),
+                };
+                let Ok(dat) = answer else {
+                    return stale.map_or(List::Failed, List::Ready);
+                };
+                let (done, reply) = channel();
+                let store = store.clone();
+                spawner.run("cover names", move || {
+                    let names = Some(Names::parse(&String::from_utf8_lossy(&dat)))
+                        .filter(|names| !names.is_empty());
+                    if let Some(names) = &names
+                        && let Err(err) = store.put_names(system, now, names)
+                    {
+                        log::warn!("could not keep the cover names: {err}");
+                    }
+                    let _ = done.send(names);
+                });
+                List::Parsing { reply, stale }
+            }
+            List::Parsing { reply, stale } => match reply.try_recv() {
+                Err(TryRecvError::Empty) => List::Parsing { reply, stale },
+                Ok(Some(names)) => List::Ready(names),
+                _ => stale.map_or(List::Failed, List::Ready),
+            },
+            done => done,
+        }
+    }
+}
+
+enum Kept {
+    Stored,
+    NotArt,
     Failed,
 }
 
@@ -72,11 +156,18 @@ enum Step {
         links: u8,
         reply: Receiver<Answer>,
     },
+    Keep {
+        system: System,
+        files: Vec<String>,
+        at: usize,
+        reply: Receiver<Kept>,
+    },
 }
 
 pub struct Finder {
     net: Box<dyn Net>,
-    lists: HashMap<System, List>,
+    lists: Vec<(System, List)>,
+    asked: Vec<System>,
     games: Vec<(Game, Step)>,
 }
 
@@ -84,7 +175,8 @@ impl Finder {
     pub fn new(net: Box<dyn Net>) -> Self {
         Self {
             net,
-            lists: HashMap::new(),
+            lists: Vec::new(),
+            asked: Vec::new(),
             games: Vec::new(),
         }
     }
@@ -99,15 +191,14 @@ impl Finder {
         {
             return;
         }
-        for system in game.systems() {
-            self.open_list(store, system, now);
-        }
+        self.asked.extend(game.systems());
         self.games.push((game, Step::Name));
     }
 
     pub fn forget_all(&mut self) {
         self.games.clear();
         self.lists.clear();
+        self.asked.clear();
     }
 
     #[cfg(test)]
@@ -115,12 +206,15 @@ impl Finder {
         !self.games.is_empty()
     }
 
-    pub fn poll(&mut self, store: &CoverStore, now: u64) -> Vec<String> {
-        self.poll_lists(store, now);
+    pub fn poll(&mut self, store: &CoverStore, spawner: &Spawner, now: u64) -> Vec<String> {
+        for system in std::mem::take(&mut self.asked) {
+            self.open_list(store, spawner, system);
+        }
+        self.poll_lists(store, spawner, now);
         let mut found = Vec::new();
         let games = std::mem::take(&mut self.games);
         for (game, step) in games {
-            match self.advance(store, &game, step, now) {
+            match self.advance(store, spawner, &game, step, now) {
                 Some(Ok(step)) => self.games.push((game, step)),
                 Some(Err(())) => {}
                 None => found.push(game.rom_key),
@@ -129,52 +223,31 @@ impl Finder {
         found
     }
 
-    fn open_list(&mut self, store: &CoverStore, system: System, now: u64) {
-        if self.lists.contains_key(&system) {
+    fn open_list(&mut self, store: &CoverStore, spawner: &Spawner, system: System) {
+        if list_of(&self.lists, system).is_some() {
             return;
         }
-        let list = match store.names(system) {
-            Some((fetched, names)) if now.saturating_sub(fetched) < NAMES_FRESH => {
-                List::Ready(names)
-            }
-            stored => List::Loading {
-                reply: self.net.get(source::names_url(system)),
-                stale: stored.map(|(_, names)| names),
-            },
-        };
-        self.lists.insert(system, list);
+        let (done, reply) = channel();
+        let store = store.clone();
+        spawner.run("cover names read", move || {
+            let _ = done.send(store.names(system));
+        });
+        self.lists.push((system, List::Reading(reply)));
     }
 
-    fn poll_lists(&mut self, store: &CoverStore, now: u64) {
+    fn poll_lists(&mut self, store: &CoverStore, spawner: &Spawner, now: u64) {
         for (system, list) in &mut self.lists {
-            let List::Loading { reply, stale } = list else {
-                continue;
-            };
-            let answer = match reply.try_recv() {
-                Ok(answer) => answer,
-                Err(TryRecvError::Empty) => continue,
-                Err(TryRecvError::Disconnected) => Err("no answer".to_owned()),
-            };
-            let fresh = answer
-                .ok()
-                .map(|dat| Names::parse(&String::from_utf8_lossy(&dat)))
-                .filter(|names| !names.is_empty());
-            *list = match (fresh, stale.take()) {
-                (Some(names), _) => {
-                    if let Err(err) = store.put_names(*system, now, &names) {
-                        log::warn!("could not keep the cover names: {err}");
-                    }
-                    List::Ready(names)
-                }
-                (None, Some(stale)) => List::Ready(stale),
-                (None, None) => List::Failed,
-            };
+            if list.is_pending() {
+                let taken = std::mem::replace(list, List::Failed);
+                *list = taken.next(*system, self.net.as_mut(), store, spawner, now);
+            }
         }
     }
 
     fn advance(
         &mut self,
         store: &CoverStore,
+        spawner: &Spawner,
         game: &Game,
         step: Step,
         now: u64,
@@ -183,11 +256,11 @@ impl Finder {
             Step::Name => {
                 let lists = game
                     .systems()
-                    .map(|system| (system, self.lists.get(&system)))
+                    .map(|system| (system, list_of(&self.lists, system)))
                     .collect::<Vec<_>>();
                 if lists
                     .iter()
-                    .any(|(_, list)| matches!(list, Some(List::Loading { .. })))
+                    .any(|(_, list)| list.is_none_or(List::is_pending))
                 {
                     return Some(Ok(Step::Name));
                 }
@@ -260,28 +333,73 @@ impl Finder {
                         reply,
                     }));
                 }
-                if let Some(png) = art::shrink(&body) {
-                    if let Err(err) = store.put_art(&game.rom_key, &png) {
-                        log::warn!("could not keep a cover: {err}");
-                        return Some(Err(()));
-                    }
-                    return None;
+                if body.is_empty() {
+                    return self.next_file(store, game, system, files, at, now);
                 }
-                let next = at + 1;
-                let Some(file) = files.get(next) else {
-                    missed(store, game, now);
-                    return Some(Err(()));
-                };
-                let reply = self.net.get(source::art_url(system, file));
-                Some(Ok(Step::Art {
+                let (done, reply) = channel();
+                let store = store.clone();
+                let rom_key = game.rom_key.clone();
+                spawner.run("cover art", move || {
+                    let kept = match art::shrink(&body) {
+                        None => Kept::NotArt,
+                        Some(png) => match store.put_art(&rom_key, &png) {
+                            Ok(()) => Kept::Stored,
+                            Err(err) => {
+                                log::warn!("could not keep a cover: {err}");
+                                Kept::Failed
+                            }
+                        },
+                    };
+                    let _ = done.send(kept);
+                });
+                Some(Ok(Step::Keep {
                     system,
                     files,
-                    at: next,
-                    links: 0,
+                    at,
                     reply,
                 }))
             }
+            Step::Keep {
+                system,
+                files,
+                at,
+                reply,
+            } => match reply.try_recv() {
+                Err(TryRecvError::Empty) => Some(Ok(Step::Keep {
+                    system,
+                    files,
+                    at,
+                    reply,
+                })),
+                Ok(Kept::Stored) => None,
+                Ok(Kept::NotArt) => self.next_file(store, game, system, files, at, now),
+                Ok(Kept::Failed) | Err(TryRecvError::Disconnected) => Some(Err(())),
+            },
         }
+    }
+
+    fn next_file(
+        &mut self,
+        store: &CoverStore,
+        game: &Game,
+        system: System,
+        files: Vec<String>,
+        at: usize,
+        now: u64,
+    ) -> Option<Result<Step, ()>> {
+        let next = at + 1;
+        let Some(file) = files.get(next) else {
+            missed(store, game, now);
+            return Some(Err(()));
+        };
+        let reply = self.net.get(source::art_url(system, file));
+        Some(Ok(Step::Art {
+            system,
+            files,
+            at: next,
+            links: 0,
+            reply,
+        }))
     }
 }
 
@@ -289,6 +407,13 @@ impl Default for Finder {
     fn default() -> Self {
         Self::new(Box::new(net::Offline))
     }
+}
+
+fn list_of(lists: &[(System, List)], system: System) -> Option<&List> {
+    lists
+        .iter()
+        .find(|(listed, _)| *listed == system)
+        .map(|(_, list)| list)
 }
 
 fn missed(store: &CoverStore, game: &Game, now: u64) {
@@ -305,6 +430,18 @@ mod tests {
 
     const DAY: u64 = 24 * 60 * 60;
     const NOW: u64 = 1_800_000_000;
+    #[test]
+    fn a_colour_cartridge_looks_in_the_colour_list() {
+        let mut rom = vec![0; 0x150];
+        assert_eq!(System::of(ConsoleKind::Gb, &rom), System::Gb);
+        rom[0x143] = 0x80;
+        assert_eq!(System::of(ConsoleKind::Gbc, &rom), System::Gbc);
+        rom[0x143] = 0xC0;
+        assert_eq!(System::of(ConsoleKind::Gb, &rom), System::Gbc);
+        assert_eq!(System::of(ConsoleKind::Gba, &rom), System::Gba);
+        assert_eq!(System::of(ConsoleKind::Nds, &rom), System::Nds);
+    }
+
     const RED: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const PLATINUM: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     const GB_URL: &str = "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro/Nintendo%20-%20Game%20Boy.dat";
@@ -361,15 +498,20 @@ mod tests {
     struct Shelf {
         finder: Finder,
         store: CoverStore,
+        threads: citrine_gb_threads::Threads,
     }
 
     impl Shelf {
         fn want(&mut self, game: Game, now: u64) {
             self.finder.want(&self.store, game, now);
+            for _ in 0..3 {
+                assert!(self.poll(now).is_empty());
+            }
         }
 
         fn poll(&mut self, now: u64) -> Vec<String> {
-            self.finder.poll(&self.store, now)
+            assert!(self.threads.run_side_jobs().is_empty());
+            self.finder.poll(&self.store, &self.threads.spawner(), now)
         }
 
         fn is_busy(&self) -> bool {
@@ -386,6 +528,7 @@ mod tests {
         let shelf = Shelf {
             finder: Finder::new(Box::new(net.clone())),
             store: CoverStore::at(dir.to_path_buf()),
+            threads: citrine_gb_threads::Threads::new(citrine_gb_threads::Mode::Inline),
         };
         (shelf, net)
     }
@@ -399,7 +542,7 @@ mod tests {
 
     fn settle(finder: &mut Shelf, net: &Fake, served: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
         let mut found = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..16 {
             net.answer(served);
             found.extend(finder.poll(NOW));
         }

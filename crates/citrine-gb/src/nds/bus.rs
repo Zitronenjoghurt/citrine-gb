@@ -341,7 +341,26 @@ impl Buses {
         }
     }
 
-    fn rams_mut(&mut self) -> impl Iterator<Item = &mut Ram> {
+    #[cfg(feature = "persistence")]
+    pub(crate) fn has_hardware_sizes(&mut self) -> bool {
+        use super::tcm::{DTCM_SIZE, ITCM_SIZE};
+        use super::vram::Bank;
+        use super::wram::SHARED_WRAM_SIZE;
+        let hardware = [
+            MAIN_RAM_SIZE,
+            SHARED_WRAM_SIZE,
+            PALETTE_OAM_SIZE,
+            PALETTE_OAM_SIZE,
+            ARM7_WRAM_SIZE,
+            ITCM_SIZE,
+            DTCM_SIZE,
+        ]
+        .into_iter()
+        .chain(Bank::ALL.map(Bank::size));
+        self.rams_mut().map(|ram| ram.bytes().len()).eq(hardware)
+    }
+
+    pub(crate) fn rams_mut(&mut self) -> impl Iterator<Item = &mut Ram> {
         let Self {
             shared, arm9, arm7, ..
         } = self;
@@ -715,6 +734,19 @@ impl Buses {
     pub fn set_pen(&mut self, pen: Option<(u8, u8)>) {
         self.shared.input.set_pen(pen.is_some());
         self.arm7.spi.devices_mut().touch.set_pen(pen);
+    }
+
+    pub fn set_mic(&mut self, samples: &[i16]) {
+        let now = self.shared.cart.clock();
+        self.arm7.spi.devices_mut().touch.set_mic(samples, now);
+    }
+
+    pub fn mic_in_use(&self) -> bool {
+        self.arm7.spi.devices().touch.mic_read()
+    }
+
+    pub fn mic_amplifier(&self) -> Option<u8> {
+        self.arm7.spi.devices().power.mic_amplifier()
     }
 
     pub fn halted(&self, cpu: Cpu) -> bool {

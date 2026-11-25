@@ -6,8 +6,8 @@ use crate::gba::open_bus::lane;
 use crate::gba::wait::{Access, Width};
 #[cfg(jit)]
 use crate::jit::{
-    Cache, CodeRam, CodeSpan, Cp15Cells, Fast, FastBus, JitBus, PAGE_BITS, PAGE_SIZE, Page, Pages,
-    Spec, Stamp, UNMARKED_PAGES, WINDOWS, Window,
+    CODE_RAMS, Cache, CodeRam, CodeSpan, Cp15Cells, Fast, FastBus, JitBus, PAGE_BITS, PAGE_SIZE,
+    Page, Pages, Spec, Stamp, UNMARKED_PAGES, WINDOWS, Window,
 };
 use crate::nds::Cpu;
 #[cfg(jit)]
@@ -273,19 +273,41 @@ impl<'a> Arm9Bus<'a> {
     }
 
     #[inline(always)]
-    fn near_write(&mut self, addr: u32, width: Width, value: u32, access: Access) -> Option<u32> {
-        if self.own.tcm.write(addr, width, value) {
-            if self.own.tcm.hits(addr, Fetch::Data) {
-                return Some(FAST_CYCLES);
-            }
-            return Some(self.bus_cycles(Region::of(addr), addr, width, access, Fetch::Data));
+    fn io_cycles(&self, addr: u32, width: Width, access: Access) -> u32 {
+        if self.own.caches.io_data() {
+            self.bus_cycles(Region::Io, addr, width, access, Fetch::Data)
+        } else {
+            Region::Io.waits().cycles(width, access)
         }
-        if addr >> 24 == 0x02 {
-            let cycles = self.bus_cycles(Region::MainRam, addr, width, access, Fetch::Data);
-            self.shared.main_ram.write(addr as usize, width, value);
+    }
+
+    #[inline(always)]
+    fn near_write(&mut self, addr: u32, width: Width, value: u32, access: Access) -> Option<u32> {
+        if let Some(cycles) = self.tcm_write(addr, width, value, access) {
             return Some(cycles);
         }
-        None
+        self.main_write(addr, width, value, access)
+    }
+
+    #[inline(always)]
+    fn tcm_write(&mut self, addr: u32, width: Width, value: u32, access: Access) -> Option<u32> {
+        if !self.own.tcm.write(addr, width, value) {
+            return None;
+        }
+        if self.own.tcm.hits(addr, Fetch::Data) {
+            return Some(FAST_CYCLES);
+        }
+        Some(self.bus_cycles(Region::of(addr), addr, width, access, Fetch::Data))
+    }
+
+    #[inline(always)]
+    fn main_write(&mut self, addr: u32, width: Width, value: u32, access: Access) -> Option<u32> {
+        if addr >> 24 != 0x02 {
+            return None;
+        }
+        let cycles = self.bus_cycles(Region::MainRam, addr, width, access, Fetch::Data);
+        self.shared.main_ram.write(addr as usize, width, value);
+        Some(cycles)
     }
 
     #[inline(always)]
@@ -294,7 +316,7 @@ impl<'a> Arm9Bus<'a> {
         let mut access = Access::NonSequential;
         for (index, value) in values.iter_mut().enumerate() {
             let at = addr + 4 * index as u32;
-            cycles += self.bus_cycles(Region::Io, at, Width::Word, access, Fetch::Data);
+            cycles += self.io_cycles(at, Width::Word, access);
             *value = self.read_io(at, Width::Word);
             access = Access::Sequential;
         }
@@ -307,7 +329,7 @@ impl<'a> Arm9Bus<'a> {
         let mut access = Access::NonSequential;
         for (index, &value) in values.iter().enumerate() {
             let at = addr + 4 * index as u32;
-            cycles += self.bus_cycles(Region::Io, at, Width::Word, access, Fetch::Data);
+            cycles += self.io_cycles(at, Width::Word, access);
             self.write_io(at, Width::Word, value);
             access = Access::Sequential;
         }
@@ -329,7 +351,7 @@ impl<'a> Arm9Bus<'a> {
     #[inline(never)]
     fn timed_read_elsewhere(&mut self, addr: u32, width: Width, access: Access) -> (u32, u32) {
         if addr >> 24 == 0x04 {
-            let cycles = self.bus_cycles(Region::Io, addr, width, access, Fetch::Data);
+            let cycles = self.io_cycles(addr, width, access);
             return (cycles, self.read_io(addr, width));
         }
         let region = Region::of(addr);
@@ -346,7 +368,7 @@ impl<'a> Arm9Bus<'a> {
         access: Access,
     ) -> u32 {
         if addr >> 24 == 0x04 {
-            let cycles = self.bus_cycles(Region::Io, addr, width, access, Fetch::Data);
+            let cycles = self.io_cycles(addr, width, access);
             self.write_io(addr, width, value);
             return cycles;
         }
@@ -737,6 +759,22 @@ impl JitBus for Arm9Bus<'_> {
     const CP15: bool = true;
     const WRITABLE: &'static [CodeRam] = &[CodeRam::Main, CodeRam::Itcm];
 
+    #[inline(always)]
+    fn jit_write(&mut self, addr: u32, width: Width, value: u32, access: Access) -> u32 {
+        if let Some(cycles) = self.tcm_write(addr, width, value, access) {
+            return cycles;
+        }
+        if addr >> 24 == 0x04 {
+            let cycles = self.io_cycles(addr, width, access);
+            self.write_io(addr, width, value);
+            return cycles;
+        }
+        if let Some(cycles) = self.main_write(addr, width, value, access) {
+            return cycles;
+        }
+        self.timed_write_elsewhere(addr, width, value, access)
+    }
+
     fn code_layout(&self) -> u64 {
         let itcm = self.own.tcm.itcm_region();
         itcm.virtual_size << 3
@@ -830,6 +868,13 @@ impl JitBus for Arm9Bus<'_> {
         }
     }
 
+    #[inline(always)]
+    fn code_quiet(&self, seen: &[u32; CODE_RAMS]) -> bool {
+        let main = self.shared.main_ram.code();
+        let itcm = self.own.tcm.itcm_ram().code();
+        main.quiet(seen[CodeRam::Main as usize]) & itcm.quiet(seen[CodeRam::Itcm as usize])
+    }
+
     fn written_page(&self, ram: CodeRam, stamp: u32) -> Option<usize> {
         match ram {
             CodeRam::Main => self.shared.main_ram.code().written_page(stamp),
@@ -899,11 +944,16 @@ impl Arm9Bus<'_> {
     #[inline(never)]
     fn refill_fast(&mut self, stamp: Stamp) -> *mut Fast {
         let windows = match self.own.tcm.windows() {
-            Some([itcm, dtcm]) => [
-                itcm,
-                dtcm,
-                self.shared.main_ram.window(MAIN_RAM_BASE, MAIN_RAM_WINDOW),
-            ],
+            Some([itcm, dtcm]) => {
+                let main = if u64::from(itcm.base) + itcm.size > u64::from(MAIN_RAM_BASE) {
+                    Window::CLOSED
+                } else {
+                    self.shared
+                        .main_ram
+                        .window(MAIN_RAM_BASE, MAIN_RAM_WINDOW, MAIN_RAM_SIZE)
+                };
+                [itcm, dtcm, main]
+            }
             None => [Window::CLOSED; WINDOWS],
         };
         let caches = &self.own.caches;
@@ -927,6 +977,8 @@ impl Arm9Bus<'_> {
             cache: self.own.caches.pages(),
             windows,
             pages: pages.table(),
+            rom: std::ptr::null(),
+            bios: std::ptr::null(),
         };
         self.own.fast.keep(stamp, table)
     }
@@ -1839,6 +1891,24 @@ mod tests {
     fn the_cache_table_reaches_every_main_ram_page() {
         let end = MAIN_RAM_BASE as u64 + MAIN_RAM_WINDOW - 1;
         assert!(CacheMap::reaches(end as u32));
+    }
+
+    #[cfg(jit)]
+    #[test]
+    fn an_itcm_reaching_main_ram_closes_the_main_window() {
+        let mut buses = placed(false);
+        assert_ne!(unsafe { (*buses.arm9().fast()).windows[2].size }, 0);
+        buses.tcm_mut().place_itcm(TcmRegion {
+            base: 0,
+            virtual_size: 0x400_0000,
+            enabled: true,
+            load_mode: false,
+        });
+        let mut bus = buses.arm9();
+        bus.own.fast.moved();
+        let fast = unsafe { *bus.fast() };
+        assert_ne!(fast.windows[0].size, 0);
+        assert_eq!(fast.windows[2].size, 0);
     }
 
     #[cfg(jit)]

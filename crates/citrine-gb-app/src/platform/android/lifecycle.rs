@@ -13,6 +13,7 @@ static BACKS: AtomicUsize = AtomicUsize::new(0);
 static AT_ROOT: AtomicBool = AtomicBool::new(false);
 static SAFE_AREA: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
 static KEYBOARD: AtomicI32 = AtomicI32::new(0);
+static KEYBOARD_STEP: AtomicI32 = AtomicI32::new(-1);
 static BARS: AtomicU8 = AtomicU8::new(0);
 static IMMERSIVE: AtomicU8 = AtomicU8::new(0);
 
@@ -40,11 +41,15 @@ pub fn at_root(root: bool) {
     AT_ROOT.store(root, Ordering::Relaxed);
 }
 
-fn keyboard_height(ctx: &egui::Context) -> f32 {
-    KEYBOARD.load(Ordering::Relaxed) as f32 / ctx.pixels_per_point()
+fn keyboard_pixels() -> i32 {
+    let step = KEYBOARD_STEP.load(Ordering::Relaxed);
+    if step < 0 {
+        return KEYBOARD.load(Ordering::Relaxed);
+    }
+    (step - SAFE_AREA[3].load(Ordering::Relaxed)).max(0)
 }
 
-fn leave() {
+pub fn leave() {
     super::java(|env, activity| env.call_method(activity, "leave", "()V", &[]).map(drop));
 }
 
@@ -69,11 +74,17 @@ pub fn input(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
     let [left, top, right, bottom] = SAFE_AREA
         .each_ref()
         .map(|inset| inset.load(Ordering::Relaxed) as f32 / points);
+    let keyboard = keyboard_pixels() as f32 / points;
+    let full = KEYBOARD.load(Ordering::Relaxed) as f32 / points;
+    let wide = raw_input
+        .screen_rect
+        .is_some_and(|screen| screen.width() > screen.height());
+    crate::app::widgets::soft_keyboard::note(ctx, keyboard, full, wide);
     raw_input.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
         left,
         right,
         top,
-        bottom: bottom + keyboard_height(ctx),
+        bottom: bottom + keyboard,
     }));
     let mut backs = BACKS.swap(0, Ordering::Relaxed);
     raw_input.events.retain(|event| match event {
@@ -135,6 +146,16 @@ extern "system" fn Java_io_github_zitronenjoghurt_citrine_MainActivity_nativeSaf
     }
     KEYBOARD.store((keyboard - bottom).max(0), Ordering::Relaxed);
     super::keyboard::shown(keyboard > bottom);
+    super::repaint();
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_io_github_zitronenjoghurt_citrine_MainActivity_nativeKeyboardStep(
+    _env: JNIEnv,
+    _activity: JObject,
+    keyboard: jint,
+) {
+    KEYBOARD_STEP.store(keyboard, Ordering::Relaxed);
     super::repaint();
 }
 

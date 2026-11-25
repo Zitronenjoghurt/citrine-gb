@@ -7,4 +7,5 @@ pub mod proof;
 pub mod proto;
 pub mod relay;
 pub mod remote;
+pub mod secure;
 pub mod touch;

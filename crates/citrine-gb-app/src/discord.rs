@@ -30,6 +30,34 @@ impl std::fmt::Display for ShotInterval {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, EnumIter)]
+pub enum ShotScreens {
+    #[default]
+    Both,
+    Top,
+    Bottom,
+}
+
+impl ShotScreens {
+    pub fn only(self) -> Option<usize> {
+        match self {
+            Self::Both => None,
+            Self::Top => Some(0),
+            Self::Bottom => Some(1),
+        }
+    }
+}
+
+impl std::fmt::Display for ShotScreens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Both => "Both",
+            Self::Top => "Top",
+            Self::Bottom => "Bottom",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiscordSettings {
@@ -39,6 +67,7 @@ pub struct DiscordSettings {
     pub play_time: bool,
     pub screenshot: bool,
     pub every: ShotInterval,
+    pub screens: ShotScreens,
 }
 
 impl Default for DiscordSettings {
@@ -50,6 +79,7 @@ impl Default for DiscordSettings {
             play_time: true,
             screenshot: false,
             every: ShotInterval::default(),
+            screens: ShotScreens::default(),
         }
     }
 }
@@ -168,7 +198,189 @@ impl Shots {
 }
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-pub const SHOT_SCALE: usize = 3;
+pub const SHOT_SIDE: usize = 256;
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn screen_png(shoot: impl Fn(usize) -> (usize, usize, Vec<u8>)) -> Result<Vec<u8>, usize> {
+    let native = shoot(1);
+    if native.0 == 0 || native.1 == 0 {
+        return Err(0);
+    }
+    let sharp = SHOT_SIDE.div_ceil(native.0.max(native.1).max(1)).max(1);
+    let mut smallest = usize::MAX;
+    for scale in (1..=sharp).rev() {
+        let (width, height, rgba) = if scale == 1 {
+            native.clone()
+        } else {
+            shoot(scale)
+        };
+        let picture = Picture::framed(width, height, &rgba);
+        for exact in [true, false] {
+            let png = picture.png(exact).unwrap_or_default();
+            if citrine_gb_net::check_screen(&png).is_ok() {
+                return Ok(png);
+            }
+            smallest = smallest.min(png.len());
+        }
+    }
+    let (width, height, rgba) = halved(native);
+    let png = Picture::framed(width, height, &rgba)
+        .png(false)
+        .unwrap_or_default();
+    match citrine_gb_net::check_screen(&png) {
+        Ok(()) => Ok(png),
+        Err(_) => Err(smallest.min(png.len())),
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+struct Picture {
+    side: [usize; 2],
+    at: [usize; 2],
+    size: [usize; 2],
+    rgba: Vec<u8>,
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+impl Picture {
+    fn framed(width: usize, height: usize, rgba: &[u8]) -> Self {
+        let (long, short) = (width.max(height), width.min(height));
+        let side = if long * 4 > short * 5 {
+            [long, long]
+        } else {
+            [width, height]
+        };
+        Self {
+            side,
+            at: [(side[0] - width) / 2, (side[1] - height) / 2],
+            size: [width, height],
+            rgba: rgba.to_vec(),
+        }
+    }
+
+    fn png(&self, exact: bool) -> Option<Vec<u8>> {
+        let [width, height] = self.size;
+        if width == 0 || height == 0 || self.rgba.len() != width * height * 4 {
+            return None;
+        }
+        match self.palette(exact) {
+            Some((palette, indices)) => self.indexed(&palette, &indices),
+            None => self.full(),
+        }
+    }
+
+    fn palette(&self, exact: bool) -> Option<(Vec<[u8; 3]>, Vec<u8>)> {
+        let pixels = self.rgba.as_chunks::<4>().0;
+        if !exact {
+            let opaque: Vec<u8> = pixels
+                .iter()
+                .flat_map(|&[r, g, b, _]| [r, g, b, 255])
+                .collect();
+            let quant = color_quant::NeuQuant::new(10, 255, &opaque);
+            let palette = quant.color_map_rgb().as_chunks::<3>().0.to_vec();
+            let mut found = std::collections::HashMap::new();
+            let indices = opaque
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    *found
+                        .entry(*pixel)
+                        .or_insert_with(|| quant.index_of(pixel) as u8 + 1)
+                })
+                .collect();
+            return Some((palette, indices));
+        }
+        let mut palette = Vec::new();
+        let mut found = std::collections::HashMap::new();
+        let mut indices = Vec::with_capacity(pixels.len());
+        for &[r, g, b, _] in pixels {
+            let next = palette.len();
+            let index = *found.entry([r, g, b]).or_insert(next);
+            if index == next {
+                if next == 255 {
+                    return None;
+                }
+                palette.push([r, g, b]);
+            }
+            indices.push(index as u8 + 1);
+        }
+        Some((palette, indices))
+    }
+
+    fn indexed(&self, palette: &[[u8; 3]], indices: &[u8]) -> Option<Vec<u8>> {
+        let mut plte = vec![0; 3];
+        plte.extend(palette.iter().flatten());
+        let rows = self.place(0, indices.chunks(self.size[0]));
+        self.encode(png::ColorType::Indexed, &rows, |encoder| {
+            encoder.set_palette(plte);
+            encoder.set_trns(vec![0]);
+        })
+    }
+
+    fn full(&self) -> Option<Vec<u8>> {
+        let opaque: Vec<u8> = self
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, _]| [r, g, b, 255])
+            .collect();
+        let rows = self.place([0; 4], opaque.as_chunks::<4>().0.chunks(self.size[0]));
+        let bytes: Vec<u8> = rows.into_iter().flatten().collect();
+        self.encode(png::ColorType::Rgba, &bytes, |_| {})
+    }
+
+    fn place<T: Copy>(&self, empty: T, rows: std::slice::Chunks<'_, T>) -> Vec<T> {
+        let [side_x, side_y] = self.side;
+        let mut out = vec![empty; side_x * side_y];
+        for (y, row) in rows.enumerate() {
+            let start = (self.at[1] + y) * side_x + self.at[0];
+            out[start..start + row.len()].copy_from_slice(row);
+        }
+        out
+    }
+
+    fn encode(
+        &self,
+        color: png::ColorType,
+        data: &[u8],
+        setup: impl FnOnce(&mut png::Encoder<'_, &mut Vec<u8>>),
+    ) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, self.side[0] as u32, self.side[1] as u32);
+            encoder.set_color(color);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::High);
+            setup(&mut encoder);
+            let mut writer = encoder.write_header().ok()?;
+            writer.write_image_data(data).ok()?;
+        }
+        Some(out)
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn halved((width, height, rgba): (usize, usize, Vec<u8>)) -> (usize, usize, Vec<u8>) {
+    let (half_w, half_h) = ((width / 2).max(1), (height / 2).max(1));
+    let mut out = Vec::with_capacity(half_w * half_h * 4);
+    for y in 0..half_h {
+        for x in 0..half_w {
+            for channel in 0..4 {
+                let sum: usize = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    .iter()
+                    .map(|&(dx, dy)| {
+                        let (sx, sy) = ((2 * x + dx).min(width - 1), (2 * y + dy).min(height - 1));
+                        usize::from(rgba[(sy * width + sx) * 4 + channel])
+                    })
+                    .sum();
+                out.push((sum / 4) as u8);
+            }
+        }
+    }
+    (half_w, half_h, out)
+}
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn frame_key(pixels: &[u8]) -> u64 {
@@ -411,5 +623,182 @@ mod tests {
             screen_url(&plain, "/f/ab12", 7),
             "http://192.168.1.5:13707/f/ab12?v=7"
         );
+    }
+
+    fn console_shot(rom: &[u8], kind: citrine_gb::console::ConsoleKind, frames: usize) -> Made {
+        console_shot_of(rom, kind, frames, ShotScreens::Both)
+    }
+
+    fn console_shot_of(
+        rom: &[u8],
+        kind: citrine_gb::console::ConsoleKind,
+        frames: usize,
+        screens: ShotScreens,
+    ) -> Made {
+        use citrine_gb::console::Console;
+        let firmware = citrine_gb::machine::Firmware::default();
+        let mut machine =
+            citrine_gb::machine::Machine::load(&citrine_gb::rom::Rom::new(rom), kind, &firmware)
+                .expect("the game loads");
+        for _ in 0..frames {
+            machine.run_frame();
+        }
+        let mut emulator = crate::emulator::Emulator::default();
+        emulator.put_machine(machine);
+        emulator.finish_picture();
+        let frame = emulator.published_frame().to_vec();
+        let shot = screen_png(|scale| emulator.screenshot_of_screen(&frame, scale, screens.only()));
+        Made { frame, shot }
+    }
+
+    #[cfg(any(feature = "gba", feature = "nds"))]
+    fn unpacked(packed: &[u8]) -> Vec<u8> {
+        crate::storage::decompress(packed).expect("the game unpacks")
+    }
+
+    struct Made {
+        frame: Vec<u8>,
+        shot: Result<Vec<u8>, usize>,
+    }
+
+    fn colors(rgba: &[u8]) -> usize {
+        let mut seen: Vec<[u8; 4]> = rgba.as_chunks::<4>().0.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        seen.len()
+    }
+
+    fn goes_out(name: &str, made: Made, side: u32) -> crate::media::Frame {
+        let png = match made.shot {
+            Ok(png) => png,
+            Err(bytes) => {
+                panic!("{name}: no picture under the relay limit, smallest {bytes} bytes")
+            }
+        };
+        assert_eq!(citrine_gb_net::check_screen(&png), Ok(()), "{name}");
+        let picture = crate::media::decode_png(&png).expect("the picture decodes");
+        eprintln!(
+            "discord shot {name}: {} bytes, {}x{}",
+            png.len(),
+            picture.width,
+            picture.height
+        );
+        if let Some(dir) = std::env::var_os("CITRINE_DISCORD_SHOTS") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(std::path::Path::new(&dir).join(format!("{name}.png")), &png).unwrap();
+        }
+        assert!(colors(&made.frame) > 1, "{name}: the game drew something");
+        assert!(
+            picture.width.max(picture.height) >= side,
+            "{name}: the picture keeps every pixel of the screen"
+        );
+        picture
+    }
+
+    #[test]
+    fn a_game_boy_screen_goes_to_discord() {
+        use citrine_gb::console::ConsoleKind;
+        let rom = include_bytes!("../homebrew/porklike.gb");
+        let picture = goes_out("gb", console_shot(rom, ConsoleKind::Gb, 600), 160);
+        assert_eq!(
+            picture.width * 144,
+            picture.height * 160,
+            "an old relay takes it"
+        );
+    }
+
+    #[test]
+    fn a_game_boy_color_screen_goes_to_discord() {
+        use citrine_gb::console::ConsoleKind;
+        let rom = include_bytes!("../homebrew/ucity.gbc");
+        goes_out("gbc", console_shot(rom, ConsoleKind::Gbc, 600), 160);
+    }
+
+    #[cfg(feature = "gba")]
+    #[test]
+    fn a_game_boy_advance_screen_goes_to_discord() {
+        use citrine_gb::console::ConsoleKind;
+        let games: [(&str, &[u8]); 2] = [
+            (
+                "gba-pentris",
+                include_bytes!("../homebrew/gba/pentris.gba.br"),
+            ),
+            (
+                "gba-hyperspace-roll",
+                include_bytes!("../homebrew/gba/hyperspace_roll.gba.br"),
+            ),
+        ];
+        for (name, rom) in games {
+            goes_out(
+                name,
+                console_shot(&unpacked(rom), ConsoleKind::Gba, 600),
+                240,
+            );
+        }
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn a_ds_screen_with_3d_goes_to_discord() {
+        use citrine_gb::console::ConsoleKind;
+        let rom = include_bytes!("../fixtures/nds/blocksds-lighting_cube.nds");
+        let picture = goes_out("ds-3d-cube", console_shot(rom, ConsoleKind::Nds, 90), 384);
+        assert!(
+            colors(&picture.rgba) > 32,
+            "the lit cube's shading reaches the picture"
+        );
+        let pong = include_bytes!("../homebrew/nds/pong_nds.nds.br");
+        goes_out(
+            "ds-pong",
+            console_shot(&unpacked(pong), ConsoleKind::Nds, 300),
+            384,
+        );
+    }
+
+    #[cfg(feature = "nds")]
+    #[test]
+    fn discord_gets_one_ds_screen_when_asked() {
+        use citrine_gb::console::ConsoleKind;
+        let rom = include_bytes!("../fixtures/nds/blocksds-lighting_cube.nds");
+        let opaque = |picture: &crate::media::Frame| {
+            picture
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] == 255)
+                .count()
+        };
+        let both = goes_out(
+            "ds-both",
+            console_shot_of(rom, ConsoleKind::Nds, 90, ShotScreens::Both),
+            384,
+        );
+        assert_eq!(opaque(&both), 256 * 384, "both screens, whole");
+        let top = goes_out(
+            "ds-top",
+            console_shot_of(rom, ConsoleKind::Nds, 90, ShotScreens::Top),
+            256,
+        );
+        assert_eq!(opaque(&top), 256 * 192, "one screen, whole");
+        assert!(colors(&top.rgba) > 32, "the top screen holds the lit cube");
+        let bottom = goes_out(
+            "ds-bottom",
+            console_shot_of(rom, ConsoleKind::Nds, 90, ShotScreens::Bottom),
+            256,
+        );
+        assert_eq!(opaque(&bottom), 256 * 192, "one screen, whole");
+        assert!(
+            colors(&bottom.rgba) <= 32,
+            "the bottom screen holds the text"
+        );
+    }
+
+    #[test]
+    fn old_discord_settings_share_both_ds_screens() {
+        let old = r#"{"enabled":true,"screenshot":true,"every":"Minute"}"#;
+        let settings: DiscordSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(settings.screens, ShotScreens::Both);
+        assert_eq!(settings.every, ShotInterval::Minute);
     }
 }

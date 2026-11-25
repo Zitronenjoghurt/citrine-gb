@@ -1,18 +1,20 @@
+use crate::utils::digest::{digest, game_key};
 use citrine_gb_threads::Claim;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-pub const JIT_VERSION: u32 = 19;
+pub const JIT_VERSION: u32 = 21;
 pub const FILE_LIMIT: usize = 64 << 20;
 const MAGIC: &[u8; 4] = b"CJIT";
 const BUILD: &str = env!("CITRINE_JIT_BUILD");
-const HEADER_BYTES: usize = 0x200;
 const VARIANTS: usize = 4;
 const MAX_WORDS: usize = 256;
 const MAX_CODE: usize = 1 << 20;
 const SESSION: u64 = 1 << 40;
 pub const LINK: u32 = 1 << 31;
+pub const KEY_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reloc {
@@ -46,6 +48,7 @@ pub struct Record {
     pub key: u32,
     pub words: Box<[u32]>,
     pub fetch: Box<[[u32; 2]]>,
+    pub literals: Box<[[u32; 2]]>,
     pub code: Box<[u8]>,
     pub relocs: Box<[Reloc]>,
     used: AtomicU64,
@@ -57,6 +60,7 @@ impl Record {
         key: u32,
         words: &[u32],
         fetch: &[[u32; 2]],
+        literals: &[[u32; 2]],
         code: &[u8],
         relocs: &[Reloc],
     ) -> Self {
@@ -65,18 +69,23 @@ impl Record {
             key,
             words: words.into(),
             fetch: fetch.into(),
+            literals: literals.into(),
             code: code.into(),
             relocs: relocs.into(),
             used: AtomicU64::new(0),
         }
     }
 
-    fn matches(&self, words: &[u32], fetch: &[[u32; 2]]) -> bool {
-        *self.words == *words && *self.fetch == *fetch
+    fn matches(&self, words: &[u32], fetch: &[[u32; 2]], literals: &[[u32; 2]]) -> bool {
+        *self.words == *words && *self.fetch == *fetch && *self.literals == *literals
     }
 
     fn bytes(&self) -> usize {
-        20 + self.words.len() * 4 + self.fetch.len() * 8 + self.relocs.len() * 8 + self.code.len()
+        22 + self.words.len() * 4
+            + self.fetch.len() * 8
+            + self.literals.len() * 8
+            + self.relocs.len() * 8
+            + self.code.len()
     }
 }
 
@@ -95,7 +104,7 @@ impl Shelf {
 
     fn add(&mut self, record: Arc<Record>) {
         let variants = self.blocks.entry((record.cpu, record.key)).or_default();
-        variants.retain(|known| !known.matches(&record.words, &record.fetch));
+        variants.retain(|known| !known.matches(&record.words, &record.fetch, &record.literals));
         if variants.len() >= VARIANTS
             && let Some(oldest) =
                 (0..variants.len()).min_by_key(|&at| variants[at].used.load(Ordering::Relaxed))
@@ -109,14 +118,16 @@ impl Shelf {
 pub struct JitCache {
     game: u64,
     stamp: u64,
+    key: [u8; KEY_BYTES],
     shelf: Claim<Shelf>,
 }
 
 impl JitCache {
-    pub fn for_rom(rom: &[u8]) -> Self {
+    pub fn for_rom(rom: &[u8], key: [u8; KEY_BYTES]) -> Self {
         Self {
             game: game_key(rom),
             stamp: stamp(),
+            key,
             shelf: Claim::new(Shelf::default()),
         }
     }
@@ -143,29 +154,28 @@ impl JitCache {
         key: u32,
         words: &[u32],
         fetch: &[[u32; 2]],
+        literals: &[[u32; 2]],
     ) -> Option<Arc<Record>> {
-        self.shelf
-            .try_with(|shelf| {
-                let found = shelf
-                    .blocks
-                    .get(&(cpu, key))?
-                    .iter()
-                    .find(|record| record.matches(words, fetch))
-                    .cloned()?;
-                let now = shelf.tick();
-                if found.used.swap(now, Ordering::Relaxed) < SESSION {
-                    shelf.changed = true;
-                }
-                Some(found)
-            })
-            .flatten()
+        self.hold(|shelf| {
+            let found = shelf
+                .blocks
+                .get(&(cpu, key))?
+                .iter()
+                .find(|record| record.matches(words, fetch, literals))
+                .cloned()?;
+            let now = shelf.tick();
+            if found.used.swap(now, Ordering::Relaxed) < SESSION {
+                shelf.changed = true;
+            }
+            Some(found)
+        })
     }
 
     pub fn keep(&self, record: Record) {
         let record = Arc::new(record);
-        self.shelf.try_with(|shelf| {
+        self.hold(|shelf| {
             record.used.store(shelf.tick(), Ordering::Relaxed);
-            shelf.add(record);
+            shelf.add(Arc::clone(&record));
             shelf.changed = true;
         });
     }
@@ -187,7 +197,7 @@ impl JitCache {
                 if !known.is_some_and(|known| {
                     known
                         .iter()
-                        .any(|k| k.matches(&record.words, &record.fetch))
+                        .any(|k| k.matches(&record.words, &record.fetch, &record.literals))
                 }) {
                     shelf.add(Arc::clone(record));
                 }
@@ -216,8 +226,8 @@ impl JitCache {
             count += 1;
         }
         out[count_at..count_at + 4].copy_from_slice(&count.to_le_bytes());
-        let sum = digest(&out);
-        out.extend_from_slice(&sum.to_le_bytes());
+        let tag = mac(&self.key, &out);
+        out.extend_from_slice(&tag);
         out
     }
 
@@ -225,8 +235,8 @@ impl JitCache {
         if !bytes.starts_with(MAGIC) {
             return Err(CacheError::NotCache);
         }
-        let (body, sum) = bytes
-            .split_at_checked(bytes.len().saturating_sub(8))
+        let (body, tag) = bytes
+            .split_at_checked(bytes.len().saturating_sub(KEY_BYTES))
             .ok_or(CacheError::Cut)?;
         let mut cursor = Cursor { bytes: body, at: 4 };
         let version = cursor.u32().ok_or(CacheError::Cut)?;
@@ -237,11 +247,7 @@ impl JitCache {
         if cursor.u64().ok_or(CacheError::Cut)? != self.game {
             return Err(CacheError::OtherGame);
         }
-        let sum = sum
-            .try_into()
-            .map(u64::from_le_bytes)
-            .map_err(|_| CacheError::Cut)?;
-        if digest(body) != sum {
+        if !same(&mac(&self.key, body), tag) {
             return Err(CacheError::Damaged);
         }
         let count = cursor.u32().ok_or(CacheError::Cut)?;
@@ -270,6 +276,7 @@ fn write_record(out: &mut Vec<u8>, record: &Record) {
     out.extend_from_slice(&record.key.to_le_bytes());
     out.extend_from_slice(&(record.words.len() as u16).to_le_bytes());
     out.extend_from_slice(&(record.relocs.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(record.literals.len() as u16).to_le_bytes());
     out.extend_from_slice(&(record.code.len() as u32).to_le_bytes());
     for word in &record.words {
         out.extend_from_slice(&word.to_le_bytes());
@@ -277,6 +284,11 @@ fn write_record(out: &mut Vec<u8>, record: &Record) {
     for pair in &record.fetch {
         for cycles in pair {
             out.extend_from_slice(&cycles.to_le_bytes());
+        }
+    }
+    for pair in &record.literals {
+        for part in pair {
+            out.extend_from_slice(&part.to_le_bytes());
         }
     }
     for reloc in &record.relocs {
@@ -291,8 +303,9 @@ fn read_record(cursor: &mut Cursor) -> Option<Record> {
     let key = cursor.u32()?;
     let words = usize::from(cursor.u16()?);
     let relocs = usize::from(cursor.u16()?);
+    let literals = usize::from(cursor.u16()?);
     let code = cursor.u32()? as usize;
-    if !(3..=MAX_WORDS).contains(&words) || code > MAX_CODE {
+    if !(3..=MAX_WORDS).contains(&words) || literals > words - 2 || code > MAX_CODE {
         return None;
     }
     let words = (0..words)
@@ -301,6 +314,15 @@ fn read_record(cursor: &mut Cursor) -> Option<Record> {
     let fetch = (0..words.len() - 2)
         .map(|_| Some([cursor.u32()?, cursor.u32()?]))
         .collect::<Option<Box<[[u32; 2]]>>>()?;
+    let literals = (0..literals)
+        .map(|_| Some([cursor.u32()?, cursor.u32()?]))
+        .collect::<Option<Box<[[u32; 2]]>>>()?;
+    let ops = words.len() as u32 - 2;
+    if literals.iter().any(|&[index, _]| index >= ops)
+        || literals.windows(2).any(|pair| pair[0][0] >= pair[1][0])
+    {
+        return None;
+    }
     let relocs = (0..relocs)
         .map(|_| {
             Some(Reloc {
@@ -321,6 +343,7 @@ fn read_record(cursor: &mut Cursor) -> Option<Record> {
         key,
         words,
         fetch,
+        literals,
         code,
         relocs,
         used: AtomicU64::new(0),
@@ -352,22 +375,32 @@ impl<'a> Cursor<'a> {
     }
 }
 
-pub fn game_key(rom: &[u8]) -> u64 {
-    digest(&rom[..rom.len().min(HEADER_BYTES)])
+fn mac(key: &[u8], body: &[u8]) -> [u8; KEY_BYTES] {
+    let pad = |byte: u8| {
+        let mut block = [byte; 64];
+        for (slot, key) in block.iter_mut().zip(key) {
+            *slot ^= key;
+        }
+        block
+    };
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(body)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5C))
+        .chain_update(inner)
+        .finalize()
+        .into()
 }
 
-pub fn digest(bytes: &[u8]) -> u64 {
-    const K: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mut hash = 0xCBF2_9CE4_8422_2325u64 ^ bytes.len() as u64;
-    let (chunks, rest) = bytes.as_chunks::<8>();
-    for chunk in chunks {
-        let word = u64::from_le_bytes(*chunk);
-        hash = (hash ^ word).wrapping_mul(K).rotate_left(29);
-    }
-    for &byte in rest {
-        hash = (hash ^ u64::from(byte)).wrapping_mul(K).rotate_left(29);
-    }
-    hash ^ (hash >> 31)
+fn same(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0, |differ, (left, right)| differ | (left ^ right))
+            == 0
 }
 
 pub fn cpu_tag(name: &str, v5: bool) -> u64 {
@@ -397,6 +430,10 @@ mod tests {
     use super::*;
 
     const ROM: &[u8] = &[7; 0x400];
+    const KEY: [u8; KEY_BYTES] = [3; KEY_BYTES];
+    const WORDS: &[u32] = &[1, 2, 3, 4];
+    const FETCH: &[[u32; 2]] = &[[1, 2], [1, 2]];
+    const LITERALS: &[[u32; 2]] = &[[0, 0xDEAD_BEEF], [1, 7]];
 
     fn record(key: u32, word: u32) -> Record {
         Record::new(
@@ -404,6 +441,7 @@ mod tests {
             key,
             &[word, 2, 3],
             &[[1, 2]],
+            &[],
             &[0xAA; 16],
             &[Reloc {
                 offset: 4,
@@ -413,19 +451,37 @@ mod tests {
     }
 
     fn filled() -> JitCache {
-        let cache = JitCache::for_rom(ROM);
+        let cache = JitCache::for_rom(ROM, KEY);
         cache.keep(record(0x200_0000, 1));
         cache.keep(record(0x200_0041, 5));
         cache
     }
 
+    fn literal_record(key: u32, literals: &[[u32; 2]], code: u8) -> Record {
+        Record::new(9, key, WORDS, FETCH, literals, &[code; 16], &[])
+    }
+
+    fn reloaded(literals: &[[u32; 2]]) -> Result<usize, CacheError> {
+        let cache = JitCache::for_rom(ROM, KEY);
+        cache.keep(literal_record(0x800_0101, literals, 0xAA));
+        JitCache::for_rom(ROM, KEY).merge(&cache.encode())
+    }
+
     #[test]
     fn a_saved_cache_loads_every_block_back() {
-        let bytes = filled().encode();
-        let loaded = JitCache::for_rom(ROM);
-        assert_eq!(loaded.merge(&bytes), Ok(2));
+        let cache = filled();
+        cache.keep(literal_record(0x800_0081, LITERALS, 0xBB));
+        let bytes = cache.encode();
+        let loaded = JitCache::for_rom(ROM, KEY);
+        assert_eq!(loaded.merge(&bytes), Ok(3));
         let found = loaded
-            .find(9, 0x200_0041, &[5, 2, 3], &[[1, 2]])
+            .find(9, 0x800_0081, WORDS, FETCH, LITERALS)
+            .expect("the block with literals loads");
+        assert_eq!(*found.literals, *LITERALS);
+        assert_eq!(*found.code, [0xBB; 16]);
+        assert!(loaded.find(9, 0x800_0081, WORDS, FETCH, &[]).is_none());
+        let found = loaded
+            .find(9, 0x200_0041, &[5, 2, 3], &[[1, 2]], &[])
             .expect("the block loads");
         assert_eq!(*found.code, [0xAA; 16]);
         assert_eq!(
@@ -440,7 +496,7 @@ mod tests {
 
     #[test]
     fn a_link_in_the_last_word_of_a_block_loads_back() {
-        let cache = JitCache::for_rom(ROM);
+        let cache = JitCache::for_rom(ROM, KEY);
         let link = Reloc {
             offset: 12,
             helper: LINK | 3,
@@ -450,13 +506,14 @@ mod tests {
             0x200_0000,
             &[1, 2, 3],
             &[[1, 2]],
+            &[],
             &[0xAA; 16],
             &[link],
         ));
-        let loaded = JitCache::for_rom(ROM);
+        let loaded = JitCache::for_rom(ROM, KEY);
         assert_eq!(loaded.merge(&cache.encode()), Ok(1));
         let found = loaded
-            .find(9, 0x200_0000, &[1, 2, 3], &[[1, 2]])
+            .find(9, 0x200_0000, &[1, 2, 3], &[[1, 2]], &[])
             .expect("the block loads");
         assert_eq!(*found.relocs, [link]);
     }
@@ -464,17 +521,90 @@ mod tests {
     #[test]
     fn a_block_is_found_only_when_its_code_and_timing_match() {
         let cache = filled();
-        assert!(cache.find(9, 0x200_0000, &[1, 2, 3], &[[1, 2]]).is_some());
-        assert!(cache.find(9, 0x200_0000, &[1, 2, 4], &[[1, 2]]).is_none());
-        assert!(cache.find(9, 0x200_0000, &[1, 2, 3], &[[1, 3]]).is_none());
-        assert!(cache.find(8, 0x200_0000, &[1, 2, 3], &[[1, 2]]).is_none());
-        assert!(cache.find(9, 0x200_0001, &[1, 2, 3], &[[1, 2]]).is_none());
+        assert!(
+            cache
+                .find(9, 0x200_0000, &[1, 2, 3], &[[1, 2]], &[])
+                .is_some()
+        );
+        assert!(
+            cache
+                .find(9, 0x200_0000, &[1, 2, 4], &[[1, 2]], &[])
+                .is_none()
+        );
+        assert!(
+            cache
+                .find(9, 0x200_0000, &[1, 2, 3], &[[1, 3]], &[])
+                .is_none()
+        );
+        assert!(
+            cache
+                .find(8, 0x200_0000, &[1, 2, 3], &[[1, 2]], &[])
+                .is_none()
+        );
+        assert!(
+            cache
+                .find(9, 0x200_0001, &[1, 2, 3], &[[1, 2]], &[])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_block_is_found_only_when_its_literals_match() {
+        let cache = JitCache::for_rom(ROM, KEY);
+        cache.keep(literal_record(0x800_0101, &[[0, 0x1234_5678]], 0xAA));
+        assert!(
+            cache
+                .find(9, 0x800_0101, WORDS, FETCH, &[[0, 0x1234_5678]])
+                .is_some()
+        );
+        assert!(
+            cache
+                .find(9, 0x800_0101, WORDS, FETCH, &[[0, 0x1234_565A]])
+                .is_none()
+        );
+        assert!(
+            cache
+                .find(9, 0x800_0101, WORDS, FETCH, &[[1, 0x1234_5678]])
+                .is_none()
+        );
+        assert!(cache.find(9, 0x800_0101, WORDS, FETCH, &[]).is_none());
+        cache.keep(literal_record(0x800_0101, &[[0, 0x1234_565A]], 0xBB));
+        assert_eq!(cache.blocks(), 2);
+        let found = cache
+            .find(9, 0x800_0101, WORDS, FETCH, &[[0, 0x1234_565A]])
+            .expect("the patched block is kept beside the first");
+        assert_eq!(*found.code, [0xBB; 16]);
+        let found = cache
+            .find(9, 0x800_0101, WORDS, FETCH, &[[0, 0x1234_5678]])
+            .expect("the first block stays");
+        assert_eq!(*found.code, [0xAA; 16]);
+    }
+
+    #[test]
+    fn damaged_literals_are_refused() {
+        assert_eq!(reloaded(LITERALS), Ok(1));
+        assert_eq!(reloaded(&[[2, 5]]), Err(CacheError::Damaged));
+        assert_eq!(reloaded(&[[1, 5], [0, 6]]), Err(CacheError::Damaged));
+        assert_eq!(reloaded(&[[1, 5], [1, 6]]), Err(CacheError::Damaged));
+        let cache = JitCache::for_rom(ROM, KEY);
+        cache.keep(literal_record(0x800_0101, &[[0, 5]], 0xAA));
+        let mut bytes = cache.encode();
+        let body = bytes.len() - KEY_BYTES;
+        assert_eq!(bytes[body..], mac(&KEY, &bytes[..body]));
+        assert_eq!(bytes[44..46], 1u16.to_le_bytes());
+        bytes[44..46].copy_from_slice(&3u16.to_le_bytes());
+        let tag = mac(&KEY, &bytes[..body]);
+        bytes[body..].copy_from_slice(&tag);
+        assert_eq!(
+            JitCache::for_rom(ROM, KEY).merge(&bytes),
+            Err(CacheError::Damaged)
+        );
     }
 
     #[test]
     fn a_cut_or_damaged_file_is_refused() {
         let bytes = filled().encode();
-        let cache = JitCache::for_rom(ROM);
+        let cache = JitCache::for_rom(ROM, KEY);
         assert_eq!(
             cache.merge(&bytes[..bytes.len() - 3]),
             Err(CacheError::Damaged)
@@ -488,32 +618,54 @@ mod tests {
     }
 
     #[test]
+    fn a_file_signed_with_another_key_is_refused() {
+        let bytes = filled().encode();
+        let other = JitCache::for_rom(ROM, [4; KEY_BYTES]);
+        assert_eq!(other.merge(&bytes), Err(CacheError::Damaged));
+        assert_eq!(other.blocks(), 0);
+        assert_eq!(JitCache::for_rom(ROM, KEY).merge(&bytes), Ok(2));
+    }
+
+    #[test]
+    fn files_are_signed_with_hmac_sha256() {
+        let hex = |tag: [u8; KEY_BYTES]| tag.map(|byte| format!("{byte:02x}")).concat();
+        assert_eq!(
+            hex(mac(&[0x0B; 20], b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hex(mac(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
     fn another_game_or_build_starts_empty() {
         let bytes = filled().encode();
-        let other = JitCache::for_rom(&[8; 0x400]);
+        let other = JitCache::for_rom(&[8; 0x400], KEY);
         assert_eq!(other.merge(&bytes), Err(CacheError::OtherGame));
         let mut older = bytes.clone();
         older[8] ^= 1;
         assert_eq!(
-            JitCache::for_rom(ROM).merge(&older),
+            JitCache::for_rom(ROM, KEY).merge(&older),
             Err(CacheError::OtherBuild)
         );
         let mut version = bytes;
         version[4] ^= 1;
         assert_eq!(
-            JitCache::for_rom(ROM).merge(&version),
+            JitCache::for_rom(ROM, KEY).merge(&version),
             Err(CacheError::OtherBuild)
         );
     }
 
     #[test]
     fn recently_used_blocks_are_saved_first() {
-        let cache = JitCache::for_rom(ROM);
+        let cache = JitCache::for_rom(ROM, KEY);
         for key in 0..4 {
             cache.keep(record(key * 4, key));
         }
-        cache.find(9, 0, &[0, 2, 3], &[[1, 2]]);
-        let loaded = JitCache::for_rom(ROM);
+        cache.find(9, 0, &[0, 2, 3], &[[1, 2]], &[]);
+        let loaded = JitCache::for_rom(ROM, KEY);
         loaded.merge(&cache.encode()).expect("the file loads");
         let mut order: Vec<(u64, u32)> = loaded.hold(|shelf| {
             shelf
@@ -530,13 +682,13 @@ mod tests {
 
     #[test]
     fn a_key_keeps_only_its_newest_variants() {
-        let cache = JitCache::for_rom(ROM);
+        let cache = JitCache::for_rom(ROM, KEY);
         for word in 0..VARIANTS as u32 + 2 {
             cache.keep(record(0, word));
         }
         assert_eq!(cache.blocks(), VARIANTS);
-        assert!(cache.find(9, 0, &[0, 2, 3], &[[1, 2]]).is_none());
+        assert!(cache.find(9, 0, &[0, 2, 3], &[[1, 2]], &[]).is_none());
         let newest = VARIANTS as u32 + 1;
-        assert!(cache.find(9, 0, &[newest, 2, 3], &[[1, 2]]).is_some());
+        assert!(cache.find(9, 0, &[newest, 2, 3], &[[1, 2]], &[]).is_some());
     }
 }

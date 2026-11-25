@@ -9,7 +9,7 @@ impl Code {
 
     pub fn random() -> Self {
         let mut bytes = [0; 4];
-        let _ = getrandom::getrandom(&mut bytes);
+        getrandom::getrandom(&mut bytes).expect("the system has randomness");
         Self(u32::from_le_bytes(bytes) % 1_000_000)
     }
 
@@ -37,13 +37,15 @@ pub const CODE_LIFE_SECS: f64 = 600.0;
 pub const DISCOVERY_PORT: u16 = 47813;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use lan::{Discovery, Listener, Nearby, NearbyHost, Presence, SCREEN_SERVICE, Sweep};
+pub use lan::{
+    ANSWERS_PER_SEC, Discovery, Listener, Nearby, NearbyHost, Presence, SCREEN_SERVICE, Sweep,
+};
 
 pub type Tag = [u8; 8];
 
 #[cfg(not(target_arch = "wasm32"))]
 mod lan {
-    use super::{Code, DISCOVERY_PORT, Tag};
+    use super::{DISCOVERY_PORT, Tag};
     use crate::link::Tcp;
     use crate::proof::{Nonce, TagKey};
     use crate::proto::MAX_NAME_CHARS;
@@ -51,19 +53,14 @@ mod lan {
     use std::io::ErrorKind;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
     use std::sync::mpsc::{Receiver, channel};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const SWEEP_THREADS: u8 = 32;
     const SWEEP_WAIT: Duration = Duration::from_millis(300);
     const PROBES_KEPT: usize = 4;
 
-    fn probe(code: Code) -> String {
-        format!("CITRINE-SCREEN {}", code.plain())
-    }
-
-    fn answer(code: Code, port: u16) -> String {
-        format!("CITRINE-HOST {} {port}", code.plain())
-    }
+    const PROBE: &str = "CITRINE-SCREEN";
+    const ANSWER: &str = "CITRINE-HOST";
 
     const NEARBY_PROBE: &str = "CITRINE-NEARBY";
     const NEARBY_ANSWER: &str = "CITRINE-HERE";
@@ -168,11 +165,16 @@ mod lan {
         pub services: Vec<String>,
     }
 
+    pub const ANSWERS_PER_SEC: u32 = 32;
+    const READS_PER_ANSWER: usize = 256;
+
     pub struct Listener {
         tcp: TcpListener,
         udp: Option<UdpSocket>,
         instance: u64,
         presence: Option<Presence>,
+        answers: u32,
+        answers_since: Instant,
     }
 
     impl Listener {
@@ -194,6 +196,8 @@ mod lan {
                 udp,
                 instance: u64::from_le_bytes(instance),
                 presence: None,
+                answers: 0,
+                answers_since: Instant::now(),
             })
         }
 
@@ -221,12 +225,24 @@ mod lan {
             Tcp::new(stream).ok()
         }
 
-        pub fn answer(&mut self, open: Option<Code>) {
+        pub fn answer(&mut self, showing_code: bool) {
             let Some(udp) = &self.udp else {
                 return;
             };
+            let now = Instant::now();
+            if now.duration_since(self.answers_since) >= Duration::from_secs(1) {
+                self.answers_since = now;
+                self.answers = 0;
+            }
             let mut buf = [0; 64];
-            while let Ok((n, from)) = udp.recv_from(&mut buf) {
+            for _ in 0..READS_PER_ANSWER {
+                let Ok((n, from)) = udp.recv_from(&mut buf) else {
+                    break;
+                };
+                if self.answers >= ANSWERS_PER_SEC {
+                    continue;
+                }
+                self.answers += 1;
                 if let Some(nonce) = parse_nearby_probe(&buf[..n]) {
                     if let Some(presence) = &self.presence {
                         let here = NearbyHost {
@@ -240,11 +256,9 @@ mod lan {
                     }
                     continue;
                 }
-                let Some(code) = open else {
-                    continue;
-                };
-                if buf[..n] == *probe(code).as_bytes() {
-                    let _ = udp.send_to(answer(code, self.port()).as_bytes(), from);
+                if showing_code && buf[..n] == *PROBE.as_bytes() {
+                    let answer = format!("{ANSWER} {}", self.port());
+                    let _ = udp.send_to(answer.as_bytes(), from);
                 }
             }
         }
@@ -405,16 +419,16 @@ mod lan {
 
     pub struct Discovery {
         udp: Option<UdpSocket>,
-        code: Code,
         targets: Vec<SocketAddr>,
+        heard: Vec<SocketAddr>,
     }
 
     impl Discovery {
-        pub fn start(code: Code) -> Self {
-            Self::toward(code, &broadcast_targets())
+        pub fn start() -> Self {
+            Self::toward(&broadcast_targets())
         }
 
-        pub fn toward(code: Code, targets: &[SocketAddr]) -> Self {
+        pub fn toward(targets: &[SocketAddr]) -> Self {
             let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
                 .and_then(|udp| {
                     udp.set_broadcast(true)?;
@@ -424,8 +438,8 @@ mod lan {
                 .ok();
             let discovery = Self {
                 udp,
-                code,
                 targets: targets.to_vec(),
+                heard: Vec::new(),
             };
             discovery.probe();
             discovery
@@ -434,7 +448,7 @@ mod lan {
         pub fn probe(&self) {
             if let Some(udp) = &self.udp {
                 for target in &self.targets {
-                    let _ = udp.send_to(probe(self.code).as_bytes(), target);
+                    let _ = udp.send_to(PROBE.as_bytes(), target);
                 }
             }
         }
@@ -444,12 +458,17 @@ mod lan {
             let mut buf = [0; 64];
             while let Ok((n, from)) = udp.recv_from(&mut buf) {
                 let text = std::str::from_utf8(&buf[..n]).unwrap_or_default();
-                let mut words = text.split(' ');
-                if words.next() == Some("CITRINE-HOST")
-                    && words.next() == Some(self.code.plain().as_str())
-                    && let Some(port) = words.next().and_then(|p| p.parse().ok())
-                {
-                    return Some(SocketAddr::new(from.ip(), port));
+                let Some(port) = text
+                    .strip_prefix(ANSWER)
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    .and_then(|port| port.parse().ok())
+                else {
+                    continue;
+                };
+                let host = SocketAddr::new(from.ip(), port);
+                if !self.heard.contains(&host) {
+                    self.heard.push(host);
+                    return Some(host);
                 }
             }
             None
@@ -481,25 +500,84 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_surface_finds_the_host_with_the_right_code_only() {
+    fn a_surface_finds_each_host_showing_a_code_once() {
         use std::net::{Ipv4Addr, SocketAddr};
-        let mut listener = Listener::on(0).unwrap();
-        let port = listener.discovery_port().unwrap();
-        let target = [SocketAddr::from((Ipv4Addr::LOCALHOST, port))];
-        let code = Code::parse("123456").unwrap();
-        let mut wrong = Discovery::toward(Code::parse("654321").unwrap(), &target);
-        let mut right = Discovery::toward(code, &target);
-        let mut found = None;
-        for _ in 0..2000 {
-            listener.answer(Some(code));
-            assert_eq!(wrong.poll(), None);
-            if let Some(at) = right.poll() {
-                found = Some(at);
+        let mut showing = Listener::on(0).unwrap();
+        let mut idle = Listener::on(0).unwrap();
+        let at =
+            |l: &Listener| SocketAddr::from((Ipv4Addr::LOCALHOST, l.discovery_port().unwrap()));
+        let mut phone = Discovery::toward(&[at(&showing), at(&idle)]);
+        let mut found = Vec::new();
+        for round in 0..2000 {
+            if round % 20 == 0 {
+                phone.probe();
+            }
+            showing.answer(true);
+            idle.answer(false);
+            found.extend(phone.poll());
+            if round > 100 && !found.is_empty() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert_eq!(found.map(|a| a.port()), Some(listener.port()));
+        let ports: Vec<u16> = found.iter().map(|a| a.port()).collect();
+        assert_eq!(ports, vec![showing.port()]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn holds_the_code(bytes: &[u8], code: Code) -> bool {
+        use sha2::{Digest, Sha256};
+        let plain = code.plain();
+        let hashed = Sha256::digest(plain.as_bytes());
+        let text = String::from_utf8_lossy(bytes);
+        text.contains(&plain)
+            || text.contains(&code.to_string())
+            || bytes.windows(8).any(|w| w == &hashed[..8])
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_sniffer_reads_no_code_from_discovery() {
+        use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+        let code = Code::parse("482 913").unwrap();
+        let sniffer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sniffer.set_nonblocking(true).unwrap();
+        let at = [sniffer.local_addr().unwrap()];
+        let _phone = Discovery::toward(&at);
+        let mut buf = [0; 256];
+        let mut probe = None;
+        for _ in 0..2000 {
+            if let Ok((n, _)) = sniffer.recv_from(&mut buf) {
+                probe = Some(buf[..n].to_vec());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let probe = probe.expect("the phone probes");
+        assert!(
+            !holds_the_code(&probe, code),
+            "{:?}",
+            String::from_utf8_lossy(&probe)
+        );
+
+        let mut host = Listener::on(0).unwrap();
+        let to = SocketAddr::from((Ipv4Addr::LOCALHOST, host.discovery_port().unwrap()));
+        sniffer.send_to(&probe, to).unwrap();
+        let mut answer = None;
+        for _ in 0..2000 {
+            host.answer(true);
+            if let Ok((n, _)) = sniffer.recv_from(&mut buf) {
+                answer = Some(buf[..n].to_vec());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let answer = answer.expect("the host showing a code answers");
+        assert!(
+            !holds_the_code(&answer, code),
+            "{:?}",
+            String::from_utf8_lossy(&answer)
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -564,10 +642,10 @@ mod tests {
         );
         let mut heard = Vec::new();
         for _ in 0..2000 {
-            mac.answer(None);
-            quiet.answer(None);
-            idle.answer(None);
-            own.answer(None);
+            mac.answer(false);
+            quiet.answer(false);
+            idle.answer(false);
+            own.answer(false);
             heard.extend(nearby.poll());
             if !heard.is_empty() {
                 break;
@@ -575,9 +653,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         for _ in 0..50 {
-            mac.answer(None);
-            idle.answer(None);
-            own.answer(None);
+            mac.answer(false);
+            idle.answer(false);
+            own.answer(false);
             heard.extend(nearby.poll());
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -647,7 +725,7 @@ mod tests {
             let mut nearby = Nearby::toward(vec![at], None);
             let mut first = None;
             for _ in 0..2000 {
-                mac.answer(None);
+                mac.answer(false);
                 first = first.or_else(|| nearby.poll().into_iter().next());
                 if first.is_some() {
                     break;
@@ -661,6 +739,34 @@ mod tests {
         }
         assert!(heard[0].tag.is_some());
         assert_ne!(heard[0].tag, heard[1].tag);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_flood_of_probes_hears_a_bounded_number_of_answers() {
+        use std::net::{Ipv4Addr, UdpSocket};
+        let mut mac = Listener::on(0).unwrap();
+        mac.set_presence(Some(Presence {
+            name: "Mac".into(),
+            tag_key: None,
+            services: vec![SCREEN_SERVICE.into()],
+        }));
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        udp.set_nonblocking(true).unwrap();
+        let at = (Ipv4Addr::LOCALHOST, mac.discovery_port().unwrap());
+        for _ in 0..100 {
+            udp.send_to(b"CITRINE-NEARBY", at).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        mac.answer(false);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut buf = [0; 256];
+        let mut heard = 0;
+        while udp.recv_from(&mut buf).is_ok() {
+            heard += 1;
+        }
+        assert!(heard > 0);
+        assert!(heard <= ANSWERS_PER_SEC, "{heard} answers");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -680,7 +786,7 @@ mod tests {
         let mut buf = [0; 256];
         let mut answer = None;
         for _ in 0..2000 {
-            mac.answer(None);
+            mac.answer(false);
             if let Ok((n, from)) = udp.recv_from(&mut buf) {
                 answer = NearbyHost::parse(std::str::from_utf8(&buf[..n]).unwrap(), from);
                 break;

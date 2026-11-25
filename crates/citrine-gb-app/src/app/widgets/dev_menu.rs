@@ -63,8 +63,9 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const NOT_DEV: [Tab; 23] = [
+    const NOT_DEV: [Tab; 24] = [
         Tab::Achievements,
+        Tab::ThisGame,
         Tab::GameBoy,
         Tab::BottomScreen,
         Tab::SecondScreens,

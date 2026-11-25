@@ -1,4 +1,5 @@
 use crate::app::ui_state::settings::Settings;
+use citrine_gb::console::ConsoleKind;
 use egui::{Align, Color32, Layout, Response, Ui, Widget, vec2};
 use egui_plot::{GridMark, Line, Plot, PlotBounds, PlotPoints};
 use std::collections::VecDeque;
@@ -35,6 +36,7 @@ const WAVE_COLORS: [(Color32, Color32); 6] = [
 ];
 
 pub struct ApuWidget<'a> {
+    kind: ConsoleKind,
     names: &'static [&'static str],
     waves: &'a [VecDeque<f32>],
     settings: &'a mut Settings,
@@ -42,11 +44,13 @@ pub struct ApuWidget<'a> {
 
 impl<'a> ApuWidget<'a> {
     pub fn new(
+        kind: ConsoleKind,
         names: &'static [&'static str],
         waves: &'a [VecDeque<f32>],
         settings: &'a mut Settings,
     ) -> Self {
         Self {
+            kind,
             names,
             waves,
             settings,
@@ -82,20 +86,25 @@ impl Widget for ApuWidget<'_> {
 
         let response = ui
             .vertical(|ui| {
-                for (index, (name, enabled)) in self
-                    .names
-                    .iter()
-                    .zip(self.settings.channels_for(self.names.len()).iter_mut())
-                    .enumerate()
-                {
+                let channels = self.settings.channels_of(self.kind);
+                for (index, name) in self.names.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.allocate_ui_with_layout(
                             vec2(name_width, row_height),
                             Layout::left_to_right(Align::Center),
                             |ui| {
                                 ui.set_width(name_width);
-                                dirty |= crate::app::widgets::check::checkbox(ui, enabled, *name)
-                                    .changed();
+                                match channels.get_mut(index) {
+                                    Some(enabled) => {
+                                        dirty |= crate::app::widgets::check::checkbox(
+                                            ui, enabled, *name,
+                                        )
+                                        .changed();
+                                    }
+                                    None => {
+                                        ui.label(*name);
+                                    }
+                                }
                             },
                         );
                         let wave = self.waves.get(index).unwrap_or(&empty);

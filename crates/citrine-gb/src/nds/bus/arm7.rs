@@ -7,7 +7,9 @@ use crate::gba::cpu::{CpuBus, Jump, read_words, write_words};
 use crate::gba::open_bus::lane;
 use crate::gba::wait::{Access, Width};
 #[cfg(jit)]
-use crate::jit::{CodeRam, CodeSpan, Fast, FastBus, JitBus, PAGE_SIZE, Page, Spec, Stamp, WINDOWS};
+use crate::jit::{
+    CODE_RAMS, CodeRam, CodeSpan, Fast, FastBus, JitBus, PAGE_SIZE, Page, Spec, Stamp, WINDOWS,
+};
 use crate::nds::Cpu;
 use crate::nds::dma::{Area, Dma, DmaBus, Timing};
 use crate::nds::sound::mixer::SoundMemory;
@@ -906,6 +908,16 @@ impl JitBus for Arm7Bus<'_> {
         }
     }
 
+    #[inline(always)]
+    fn code_quiet(&self, seen: &[u32; CODE_RAMS]) -> bool {
+        let main = self.shared.main_ram.code();
+        let wram = self.own.wram.code();
+        let shared = self.shared.wram.ram().code();
+        main.quiet(seen[CodeRam::Main as usize])
+            & wram.quiet(seen[CodeRam::Wram as usize])
+            & shared.quiet(seen[CodeRam::SharedWram as usize])
+    }
+
     fn written_page(&self, ram: CodeRam, stamp: u32) -> Option<usize> {
         match ram {
             CodeRam::Main => self.shared.main_ram.code().written_page(stamp),
@@ -998,8 +1010,14 @@ impl Arm7Bus<'_> {
     #[cold]
     #[inline(never)]
     fn refill_fast(&mut self, stamp: Stamp) -> *mut Fast {
-        let main = self.shared.main_ram.window(MAIN_RAM_BASE, MAIN_RAM_WINDOW);
-        let wram = self.own.wram.window(ARM7_WRAM_BASE, WRAM_WINDOW);
+        let main = self
+            .shared
+            .main_ram
+            .window(MAIN_RAM_BASE, MAIN_RAM_WINDOW, MAIN_RAM_SIZE);
+        let wram = self
+            .own
+            .wram
+            .window(ARM7_WRAM_BASE, WRAM_WINDOW, ARM7_WRAM_SIZE);
         let shared = self
             .shared
             .wram
@@ -1007,7 +1025,9 @@ impl Arm7Bus<'_> {
         let low = match shared {
             Some(low) => low,
             None => (
-                self.own.wram.window(SHARED_WRAM_BASE, WRAM_WINDOW),
+                self.own
+                    .wram
+                    .window(SHARED_WRAM_BASE, WRAM_WINDOW, ARM7_WRAM_SIZE),
                 ARM7_WRAM_SIZE as u32,
             ),
         };

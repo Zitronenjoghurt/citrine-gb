@@ -311,7 +311,7 @@ fn setup(
                 row_field(ui, &mut form.setup_code)
                     .hint_text("6-digit code")
                     .char_limit(7)
-                    .desired_width(ui.available_width()),
+                    .desired_width(crate::app::widgets::field::row_field_width(ui)),
             );
             go |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         });

@@ -1,17 +1,20 @@
 use citrine_gb_net::{
     Account, ClientMsg, DeviceId, DeviceInfo, ErrorCode, Friend, FriendState, GameHash, InviteCode,
-    Keys, Notice, OneTimeCode, OnlineId, PROTOCOL_VERSION, Presence, RelayId, RelayKey,
-    RelayPassword, SAVE_PART_BYTES, ServerInfo, ServerMsg,
+    Keys, Notice, OneTimeCode, OnlineId, PROTOCOL_VERSION, Presence, PublicKey, RelayId, RelayKey,
+    RelayPassword, SAVE_PART_BYTES, SafetyCode, ServerInfo, ServerMsg,
 };
+use pins::Pin;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 use web_time::Instant;
 
 pub mod address;
+pub mod archive;
 pub mod chat;
 pub mod chat_media;
 pub mod cloud;
 pub mod gts;
+pub mod pins;
 pub mod push;
 pub mod settings;
 pub mod synced;
@@ -24,7 +27,7 @@ pub mod two_factor;
 pub mod typing;
 
 pub use address::{AddressError, ServerAddress};
-pub use settings::{JoinedRelay, OnlineSettings, RelayEntry, Trust};
+pub use settings::{JoinedRelay, KeepSaves, OnlineSettings, RelayEntry, Trust};
 use transport::{Connector, Transport, TransportEvent};
 
 pub const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -242,6 +245,7 @@ pub struct Online {
     watched_until: Option<Instant>,
     failures: u32,
     info: Option<ServerInfo>,
+    stun_port: Option<u16>,
     account: Option<Account>,
     friends: BTreeMap<OnlineId, Friend>,
     playing: BTreeMap<OnlineId, GameHash>,
@@ -261,6 +265,8 @@ pub struct Online {
     relay_key: Option<RelayKey>,
     offered_key: Option<RelayKey>,
     trust_changed: bool,
+    key_changed: BTreeMap<OnlineId, PublicKey>,
+    codes: BTreeMap<([u8; 32], [u8; 32]), SafetyCode>,
     setup: Option<Vec<u8>>,
     recovery_codes: Option<Vec<String>>,
     deleted: bool,
@@ -270,6 +276,7 @@ pub struct Online {
     typing: typing::Typing,
     push: push::PushState,
     gts: gts::GtsCache,
+    archive: archive::ArchiveState,
 }
 
 impl Default for Online {
@@ -297,6 +304,7 @@ impl Online {
             watched_until: None,
             failures: 0,
             info: None,
+            stun_port: None,
             account: None,
             friends: BTreeMap::new(),
             playing: BTreeMap::new(),
@@ -316,6 +324,8 @@ impl Online {
             relay_key: None,
             offered_key: None,
             trust_changed: false,
+            key_changed: BTreeMap::new(),
+            codes: BTreeMap::new(),
             setup: None,
             recovery_codes: None,
             deleted: false,
@@ -325,6 +335,7 @@ impl Online {
             typing: typing::Typing::default(),
             push: push::PushState::default(),
             gts: gts::GtsCache::default(),
+            archive: archive::ArchiveState::default(),
         }
     }
 
@@ -444,6 +455,7 @@ impl Online {
         self.chat_reset();
         self.cloud_reset();
         self.gts_reset();
+        self.archive_reset();
         self.drop_connection();
         self.target = None;
         self.keys = None;
@@ -458,6 +470,8 @@ impl Online {
         self.relay_key = None;
         self.offered_key = None;
         self.trust_changed = false;
+        self.key_changed.clear();
+        self.codes.clear();
         self.setup = None;
         self.recovery_codes = None;
         self.deleted = false;
@@ -496,9 +510,25 @@ impl Online {
         self.asked_at = None;
     }
 
+    pub fn stun(&self) -> Option<citrine_gb_direct::Stun> {
+        let port = self.stun_port?;
+        let target = self.target.as_ref()?;
+        let host = target
+            .address
+            .host()
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        Some(citrine_gb_direct::Stun {
+            host: host.to_string(),
+            port,
+        })
+    }
+
     fn drop_connection(&mut self) {
         self.conn = None;
+        self.stun_port = None;
         self.gts_disconnected();
+        self.archive_disconnected();
         self.ping_out = None;
         self.round_trips.clear();
         self.sent_away = None;
@@ -731,23 +761,33 @@ impl Online {
                 }
                 self.account = Some(account);
                 self.account_changed = true;
+                self.archive_connected();
             }
             ServerMsg::Account(account) => {
                 self.account = Some(account);
                 self.account_changed = true;
             }
-            ServerMsg::Friends(list) => {
+            ServerMsg::Friends(mut list) => {
+                for friend in &mut list {
+                    self.pin_key(friend.online_id, &mut friend.public_key);
+                }
+                self.key_changed
+                    .retain(|id, _| list.iter().any(|f| f.online_id == *id));
                 self.friends = list.into_iter().map(|f| (f.online_id, f)).collect();
                 self.chat_changes_due();
                 self.playing.clear();
                 self.told.clear();
             }
-            ServerMsg::Friend(friend) => {
+            ServerMsg::Stun { port } => {
+                self.stun_port = (port != 0).then_some(port);
+            }
+            ServerMsg::Friend(mut friend) => {
                 let id = friend.online_id;
+                self.pin_key(id, &mut friend.public_key);
                 if friend.state != FriendState::Friend || !is_online(friend.presence) {
                     self.playing.remove(&id);
                     self.told.remove(&id);
-                    self.typing.gone(id);
+                    self.typing.offline(id);
                 }
                 self.friends.insert(id, friend);
             }
@@ -755,12 +795,12 @@ impl Online {
                 self.friends.remove(&id);
                 self.playing.remove(&id);
                 self.told.remove(&id);
-                self.typing.gone(id);
+                self.typing.offline(id);
             }
             ServerMsg::Presence { who, presence } => {
                 if !is_online(Some(presence)) {
                     self.playing.remove(&who);
-                    self.typing.gone(who);
+                    self.typing.offline(who);
                 }
                 self.told.remove(&who);
                 if let Some(friend) = self.friends.get_mut(&who) {
@@ -821,7 +861,9 @@ impl Online {
                 self.pictures_refused = true;
                 self.screen = None;
             }
-            ServerMsg::ScreenRefused(_) => {}
+            ServerMsg::ScreenRefused(code) => {
+                log::warn!("the relay refused the Discord screen: {code}");
+            }
             ServerMsg::Error(code) => match self.phase {
                 Phase::Connected if code == ErrorCode::GtsOff => {
                     self.gts_refused();
@@ -844,15 +886,87 @@ impl Online {
                 }
             },
             ServerMsg::Notice(notice) => self.fail(Problem::from_notice(notice), now),
+            ServerMsg::RoomJoined { room, mut members } => {
+                for member in &mut members {
+                    self.pin_member_key(member.who, &mut member.public_key);
+                }
+                self.inbox.push(ServerMsg::RoomJoined { room, members });
+            }
+            ServerMsg::MemberUpdate { room, mut member } => {
+                self.pin_member_key(member.who, &mut member.public_key);
+                self.inbox.push(ServerMsg::MemberUpdate { room, member });
+            }
+            ServerMsg::Invite { from, .. } if self.key_changed.contains_key(&from) => {}
             other => {
                 if let Some(other) = self.chat_receive(other)
                     && let Some(other) = self.cloud_receive(other)
                     && let Some(other) = self.gts_receive(other)
+                    && let Some(other) = self.archive_receive(other)
                 {
                     self.inbox.push(other);
                 }
             }
         }
+    }
+
+    fn pin_key(&mut self, id: OnlineId, key: &mut PublicKey) {
+        let Some(target) = self.target.as_mut() else {
+            return;
+        };
+        match target.trust.friend_keys.check(id, *key) {
+            Pin::First => self.trust_changed = true,
+            Pin::Same => {
+                self.key_changed.remove(&id);
+            }
+            Pin::Changed(pinned) => {
+                self.key_changed.insert(id, *key);
+                *key = pinned;
+            }
+        }
+    }
+
+    fn pin_member_key(&mut self, id: OnlineId, key: &mut PublicKey) {
+        if self.account.as_ref().is_some_and(|a| a.online_id == id) {
+            return;
+        }
+        self.pin_key(id, key);
+    }
+
+    pub fn key_changed(&self, id: OnlineId) -> bool {
+        self.key_changed.contains_key(&id)
+    }
+
+    pub fn trust_friend_key(&mut self, id: OnlineId) {
+        let Some(key) = self.key_changed.remove(&id) else {
+            return;
+        };
+        if let Some(target) = self.target.as_mut() {
+            target.trust.friend_keys.trust(id, key);
+            self.trust_changed = true;
+        }
+        if let Some(friend) = self.friends.get_mut(&id) {
+            friend.public_key = key;
+        }
+    }
+
+    pub fn safety_code(&mut self, id: OnlineId) -> Option<SafetyCode> {
+        let theirs = self.friends.get(&id)?.public_key;
+        self.code_with(theirs)
+    }
+
+    pub fn new_safety_code(&mut self, id: OnlineId) -> Option<SafetyCode> {
+        let theirs = *self.key_changed.get(&id)?;
+        self.code_with(theirs)
+    }
+
+    fn code_with(&mut self, theirs: PublicKey) -> Option<SafetyCode> {
+        let mine = self.keys.as_ref()?.public_key();
+        Some(
+            *self
+                .codes
+                .entry((mine.0, theirs.0))
+                .or_insert_with(|| SafetyCode::new(&mine, &theirs)),
+        )
     }
 
     fn send_plan(&mut self) {
@@ -876,7 +990,7 @@ impl Online {
                     public_key: keys.public_key(),
                     display_name: name.clone(),
                     invite: *invite,
-                    device_name: cloud::device_name(),
+                    device_name: self.device_name(),
                 }
             }
             Plan::SignIn { relay_id } => ClientMsg::SignIn {
@@ -884,7 +998,7 @@ impl Online {
                 auth_key: relay_id.keys().auth_key().clone(),
                 device: target.trust.device.clone(),
                 code: target.code.clone(),
-                device_name: cloud::device_name(),
+                device_name: self.device_name(),
             },
         };
         self.phase = Phase::SigningIn;
@@ -1177,8 +1291,15 @@ impl Online {
             return;
         }
         for signal in self.typing.compose(draft, now) {
+            if let typing::Signal::Start(to) = signal {
+                self.tell_typing_text(to, now);
+            }
             self.send_typing(signal, now);
         }
+    }
+
+    pub fn set_typing_text(&mut self, text: &str) {
+        self.typing.set_text(text);
     }
 
     fn send_typing(&mut self, signal: typing::Signal, now: Instant) {
@@ -1324,7 +1445,7 @@ pub(crate) mod tests {
         (online, wire)
     }
 
-    fn push(wire: &Rc<RefCell<Wire>>, msg: ServerMsg) {
+    pub(crate) fn push(wire: &Rc<RefCell<Wire>>, msg: ServerMsg) {
         wire.borrow_mut()
             .incoming
             .push_back(TransportEvent::Message(msg.encode().unwrap()));
@@ -1332,6 +1453,10 @@ pub(crate) mod tests {
 
     fn open(wire: &Rc<RefCell<Wire>>) {
         wire.borrow_mut().incoming.push_back(TransportEvent::Opened);
+    }
+
+    pub(crate) fn cut(wire: &Rc<RefCell<Wire>>) {
+        wire.borrow_mut().incoming.push_back(TransportEvent::Closed);
     }
 
     #[cfg(feature = "nds")]
@@ -1844,6 +1969,125 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_friends_key_is_pinned_and_a_changed_one_is_refused_until_trusted() {
+        let me = RelayId::random();
+        let (mut online, wire, now) = signed_in(&me);
+        let ana = RelayId::random();
+        let ana_id = OnlineId::new(1).unwrap();
+        let ana_key = ana.keys().public_key();
+        let online_now = Some(Presence::Online { away: false });
+        push(&wire, ServerMsg::Friends(vec![friend(&ana, 1, online_now)]));
+        online.update(now);
+        assert!(!online.key_changed(ana_id));
+        assert!(online.can_chat(ana_id));
+        let pinned = online.take_trust().unwrap().friend_keys;
+        assert_eq!(pinned.get(ana_id), Some(ana_key));
+
+        let eve = RelayId::random();
+        let swapped = Friend {
+            public_key: eve.keys().public_key(),
+            ..friend(&ana, 1, online_now)
+        };
+        push(&wire, ServerMsg::Friend(swapped.clone()));
+        online.update(now);
+        assert!(online.key_changed(ana_id));
+        assert!(!online.can_chat(ana_id));
+        assert_eq!(online.friend(ana_id).unwrap().public_key, ana_key);
+        assert_ne!(online.new_safety_code(ana_id), online.safety_code(ana_id));
+        push(
+            &wire,
+            ServerMsg::Playing {
+                from: ana_id,
+                sealed: eve
+                    .keys()
+                    .seal_playing(&me.keys().public_key(), Some([1; 20])),
+            },
+        );
+        online.update(now);
+        assert_eq!(
+            online.playing(ana_id),
+            None,
+            "the relay's key opens nothing"
+        );
+
+        push(&wire, ServerMsg::Friends(vec![swapped]));
+        online.update(now);
+        assert!(online.key_changed(ana_id), "a reconnect keeps the refusal");
+        assert_eq!(online.take_trust(), None);
+
+        online.trust_friend_key(ana_id);
+        assert!(!online.key_changed(ana_id));
+        assert_eq!(
+            online.friend(ana_id).unwrap().public_key,
+            eve.keys().public_key()
+        );
+        let pinned = online.take_trust().unwrap().friend_keys;
+        assert_eq!(pinned.get(ana_id), Some(eve.keys().public_key()));
+    }
+
+    #[test]
+    fn a_room_member_with_a_changed_key_keeps_the_pinned_one() {
+        let me = RelayId::random();
+        let (mut online, wire, now) = signed_in(&me);
+        let ana = RelayId::random();
+        let ana_id = OnlineId::new(1).unwrap();
+        push(&wire, ServerMsg::Friends(vec![friend(&ana, 1, None)]));
+        online.update(now);
+        let eve = RelayId::random();
+        let member = |key| citrine_gb_net::Member {
+            who: ana_id,
+            display_name: "Ana".into(),
+            public_key: key,
+            state: Default::default(),
+        };
+        push(
+            &wire,
+            ServerMsg::RoomJoined {
+                room: 5,
+                members: vec![member(eve.keys().public_key())],
+            },
+        );
+        online.update(now);
+        assert!(online.key_changed(ana_id));
+        let seen = online.inbox().iter().find_map(|m| match m {
+            ServerMsg::RoomJoined { members, .. } => Some(members[0].public_key),
+            _ => None,
+        });
+        assert_eq!(seen, Some(ana.keys().public_key()));
+    }
+
+    #[test]
+    fn an_invite_from_a_friend_whose_key_changed_never_arrives() {
+        let me = RelayId::random();
+        let (mut online, wire, now) = signed_in(&me);
+        let ana = RelayId::random();
+        let ana_id = OnlineId::new(1).unwrap();
+        push(&wire, ServerMsg::Friends(vec![friend(&ana, 1, None)]));
+        online.update(now);
+        let eve = RelayId::random();
+        let swapped = Friend {
+            public_key: eve.keys().public_key(),
+            ..friend(&ana, 1, None)
+        };
+        push(&wire, ServerMsg::Friend(swapped));
+        push(
+            &wire,
+            ServerMsg::Invite {
+                session: 3,
+                from: ana_id,
+                sealed: eve.keys().seal_playing(&me.keys().public_key(), None),
+            },
+        );
+        online.update(now);
+        assert!(
+            !online
+                .inbox()
+                .iter()
+                .any(|m| matches!(m, ServerMsg::Invite { .. }))
+        );
+    }
+
+    #[test]
     fn friends_sort_online_then_away_then_recently_seen() {
         let me = RelayId::random();
         let (mut online, wire, now) = signed_in(&me);
@@ -2171,6 +2415,7 @@ pub(crate) mod tests {
                 relay_key: key,
                 expected: None,
                 device,
+                friend_keys: Default::default(),
             },
             ..joined_relay(id)
         }
@@ -2461,13 +2706,13 @@ pub(crate) mod tests {
         sent(&wire);
         online.compose(Some((ana, "")), now);
         online.compose(Some((ana, "h")), now);
-        assert_eq!(
-            sent(&wire),
-            [ClientMsg::Typing {
-                to: ana,
-                typing: true
-            }]
-        );
+        assert!(matches!(
+            sent(&wire).as_slice(),
+            [
+                ClientMsg::Chat { to, .. },
+                ClientMsg::Typing { to: typing_to, typing: true },
+            ] if *to == ana && *typing_to == ana
+        ));
         push(&wire, ServerMsg::Error(ErrorCode::BadMessage));
         online.update(now);
         assert_eq!(online.request_error(), None);

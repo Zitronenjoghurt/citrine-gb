@@ -1,9 +1,11 @@
 pub mod popups;
 
 use crate::app::Citrine;
+use crate::app::screen_extras;
+use crate::app::ui_state::screen_layouts::{Item, LayoutConsole, LayoutView};
+use crate::app::widgets::layout_editor::{EditItem, PadEdit};
+use crate::emulator::layout::ScreenSpots;
 use egui::{Rect, Response, Sense, Ui, Vec2, pos2, vec2};
-
-const STEP: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScreenPlace {
@@ -47,16 +49,60 @@ impl ScreenPlace {
 impl Citrine {
     pub(super) fn placed_game(&mut self, ui: &mut Ui, area: Rect, touch: bool) -> Option<Rect> {
         let place = self.ui.settings.focus_place;
+        let big = self.big_screen_on();
+        let console = LayoutConsole::of(self.emulator.played_kind());
+        let view = if big {
+            Some(LayoutView::BigScreen)
+        } else {
+            (!touch).then_some(LayoutView::Desktop)
+        };
+        let mut spotted = false;
+        if let Some(view) = view {
+            self.follow_layout_view(view);
+            let spots = self.ui.settings.layouts.spots(console, view);
+            let screens = ScreenSpots {
+                room: area,
+                screen: spots.get(&Item::Screen).copied(),
+                touch: spots.get(&Item::TouchScreen).copied(),
+            };
+            spotted = screens.screen.is_some() || screens.touch.is_some();
+            self.emulator.screen_spots = Some(screens);
+        }
         let painted = self.paint_screen(ui, area, false, place);
-        let grips = painted.map_or_else(Vec::new, |(_, screen)| self.screen_grips(ui, screen));
+        self.emulator.screen_spots = None;
+        let editing = self.editing_layout();
+        let grips = match painted {
+            Some((_, screen)) if !editing && !spotted => self.screen_grips(ui, screen),
+            _ => Vec::new(),
+        };
         if let Some((_, screen)) = painted {
             self.ui.toast_picture = Some(screen);
         }
-        self.game_hud(ui, area, painted.map(|(_, screen)| screen), touch);
+        let marks = match (painted, view) {
+            (Some((_, screen)), Some(view)) => {
+                let touch = self.emulator.placed_touch();
+                let main = self
+                    .emulator
+                    .placed_screens()
+                    .iter()
+                    .copied()
+                    .find(|rect| Some(*rect) != touch)
+                    .unwrap_or(screen);
+                let taken = self.emulator.placed_screens();
+                screen_extras::place_marks(ui, &self.ui, console, view, area, main, taken)
+            }
+            _ => Vec::new(),
+        };
+        self.game_hud(ui, area, painted.map(|(_, screen)| screen), touch, None);
+        if editing {
+            self.edit_big_layout(ui, area, marks);
+        }
         let (room, screen) = painted?;
-        let moved = self.big.take_screen_move();
+        if editing {
+            return Some(screen);
+        }
         let settings = &mut self.ui.settings;
-        if moved.centre || grips.iter().any(Response::double_clicked) {
+        if grips.iter().any(Response::double_clicked) {
             settings.focus_place = ScreenPlace::default();
             settings.dirty = true;
             return Some(screen);
@@ -68,14 +114,40 @@ impl Citrine {
                 .iter()
                 .fold(Vec2::ZERO, |sum, grip| sum + grip.drag_delta())
         };
-        let stepped = moved.steps * (room.size() - screen.size()).max(Vec2::ZERO) * STEP;
-        if dragged + stepped != Vec2::ZERO {
-            settings.focus_place = place.dragged(dragged + stepped, room, screen.size());
+        if dragged != Vec2::ZERO {
+            settings.focus_place = place.dragged(dragged, room, screen.size());
         }
-        if moved.steps != Vec2::ZERO || grips.iter().any(Response::drag_stopped) {
+        if grips.iter().any(Response::drag_stopped) {
             settings.dirty = true;
         }
         Some(screen)
+    }
+
+    fn edit_big_layout(&mut self, ui: &mut Ui, area: Rect, marks: Vec<EditItem>) {
+        let touch = self.emulator.placed_touch();
+        let mut items: Vec<EditItem> = self
+            .emulator
+            .placed_screens()
+            .iter()
+            .map(|rect| {
+                let item = if Some(*rect) == touch {
+                    Item::TouchScreen
+                } else {
+                    Item::Screen
+                };
+                EditItem::new(item, *rect, rect.size())
+            })
+            .collect();
+        items.extend(marks);
+        items.extend(self.ui.hud_items());
+        let pad = PadEdit {
+            on: true,
+            ..self.big.take_layout_pad()
+        };
+        if pad.reset {
+            self.ui.press_layout_reset();
+        }
+        self.ui.edit_layout(ui, area, area, &items, pad);
     }
 
     fn screen_grips(&self, ui: &Ui, screen: Rect) -> Vec<Response> {

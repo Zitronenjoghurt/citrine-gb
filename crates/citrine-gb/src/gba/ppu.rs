@@ -155,6 +155,11 @@ fn blank_frame() -> Box<[u8]> {
 }
 
 impl Ppu {
+    pub(crate) fn clamp_loaded(&mut self) {
+        self.dot %= LINE_CYCLES;
+        self.vcount %= LINES;
+    }
+
     pub fn copy_state_from(&mut self, source: &Ppu) {
         let Ppu {
             dispcnt,
@@ -902,9 +907,30 @@ fn rgba_table() -> &'static [[u8; 4]; 1 << 15] {
 
 #[cfg(test)]
 mod tests {
-    use super::{HBLANK_START, LINE_CYCLES};
+    use super::{HBLANK_START, LINE_CYCLES, LINES, Ppu};
     use crate::gba::bus::Bus;
     use crate::gba::interrupt::Irq;
+
+    #[test]
+    fn a_loaded_dot_or_line_past_the_frame_wraps_into_it() {
+        let mut ppu = Ppu {
+            dot: u32::MAX,
+            vcount: u16::MAX,
+            ..Ppu::default()
+        };
+        ppu.clamp_loaded();
+        assert!(ppu.dot < LINE_CYCLES && ppu.vcount < LINES);
+        assert!(ppu.until_effect(0xFFFF, true, 4 * LINE_CYCLES) <= 4 * LINE_CYCLES);
+    }
+
+    #[test]
+    fn a_real_dot_and_line_are_unchanged_by_the_load_clamp() {
+        let mut bus = bus();
+        bus.step_video(100 * LINE_CYCLES + 517);
+        let (dot, vcount) = (bus.ppu().dot, bus.ppu().vcount);
+        bus.ppu_mut().clamp_loaded();
+        assert_eq!((bus.ppu().dot, bus.ppu().vcount), (dot, vcount));
+    }
 
     mod blend {
         use crate::gba::bus::Bus;

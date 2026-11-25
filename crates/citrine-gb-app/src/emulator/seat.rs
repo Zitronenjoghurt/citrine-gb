@@ -1,5 +1,6 @@
 use super::gimmicks::Cart;
 use super::runner::{Core, Plan, Ran};
+use super::tape_play::{TapePlay, TapeSpot};
 use citrine_gb::console::{Console, ConsoleKind, Timing, VideoSpec};
 use citrine_gb::debug::Debug;
 use citrine_gb::gb::GbModel;
@@ -25,6 +26,11 @@ pub(crate) struct Facts {
     pub(crate) wifi: bool,
     pub(crate) sample_rate: u32,
     pub(crate) channels: &'static [&'static str],
+    pub(crate) mic: bool,
+    #[cfg(feature = "nds")]
+    pub(crate) mic_line: bool,
+    pub(crate) tape: Option<TapeSpot>,
+    pub(crate) recording_frames: Option<u64>,
 }
 
 impl Facts {
@@ -46,6 +52,11 @@ impl Facts {
             wifi: core.wifi.is_some(),
             sample_rate: machine.sample_rate(),
             channels: machine.audio_channels(),
+            mic: machine.mic_in_use(),
+            #[cfg(feature = "nds")]
+            mic_line: core.mic.is_some(),
+            tape: core.tape_play.as_ref().map(TapePlay::spot),
+            recording_frames: core.rewind.recording_frames(),
         }
     }
 }

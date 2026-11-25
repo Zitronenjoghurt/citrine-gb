@@ -2,8 +2,8 @@ use super::RecentGame;
 use crate::app::Citrine;
 use crate::app::big_screen::Cover;
 use crate::app::mobile::kit;
+use crate::app::widgets::game_tile::{COUCH_NAME, COUCH_NAME_GAP};
 use crate::app::widgets::text::one_line;
-use crate::icons;
 use egui::{Align2, CornerRadius, FontId, Rect, Response, Sense, Ui, Vec2, pos2, vec2};
 
 const CARD_MIN_WIDTH: f32 = 150.0;
@@ -12,8 +12,6 @@ const PICTURE_SHAPE: f32 = 0.9;
 const ICON_SIDE: f32 = 64.0;
 const BOX_MARGIN: f32 = 10.0;
 const PLAIN_ICON: f32 = 40.0;
-const PLAIN_LIFT: f32 = 12.0;
-const PLAIN_GAP: f32 = 6.0;
 
 enum Picture {
     Cover(Cover),
@@ -72,7 +70,7 @@ fn shelf_card(ui: &mut Ui, game: &RecentGame, picture: &Picture, width: f32) -> 
     let picture_height = width * PICTURE_SHAPE;
     let line = 22.0;
     let lines = if game.gone { 2.0 } else { 1.0 };
-    let size = vec2(width, picture_height + 8.0 + line * lines);
+    let size = vec2(width, picture_height + COUCH_NAME_GAP + line * lines);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let visuals = ui.visuals();
@@ -116,27 +114,13 @@ fn shelf_card(ui: &mut Ui, game: &RecentGame, picture: &Picture, width: f32) -> 
                 );
             }
             Picture::Plain => {
-                let lift = if game.console.is_some() {
-                    PLAIN_LIFT
-                } else {
-                    0.0
-                };
                 ui.painter().text(
-                    frame.center() - vec2(0.0, lift),
+                    frame.center(),
                     Align2::CENTER_CENTER,
-                    icons::GAME_CONTROLLER,
+                    crate::app::ui_state::settings::kind_icon_or_cart(game.console),
                     FontId::proportional(PLAIN_ICON),
                     visuals.weak_text_color(),
                 );
-                if let Some(console) = game.console {
-                    ui.painter().text(
-                        frame.center() + vec2(0.0, PLAIN_ICON * 0.5 + PLAIN_GAP),
-                        Align2::CENTER_CENTER,
-                        console,
-                        FontId::proportional(14.0),
-                        visuals.weak_text_color(),
-                    );
-                }
             }
         }
         if response.is_pointer_button_down_on() || response.hovered() {
@@ -147,8 +131,8 @@ fn shelf_card(ui: &mut Ui, game: &RecentGame, picture: &Picture, width: f32) -> 
             );
         }
         let strong = visuals.strong_text_color();
-        let name = one_line(ui, &game.name, 16.0, strong, width);
-        let top = frame.bottom() + 8.0;
+        let name = one_line(ui, &game.name, COUCH_NAME, strong, width);
+        let top = frame.bottom() + COUCH_NAME_GAP;
         ui.painter().galley(pos2(rect.left(), top), name, strong);
         if game.gone {
             let weak = kit::value_color(visuals);

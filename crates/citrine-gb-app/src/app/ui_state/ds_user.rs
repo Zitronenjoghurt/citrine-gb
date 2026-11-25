@@ -106,27 +106,49 @@ impl DsUser {
         &self,
         account: Option<&str>,
     ) -> citrine_gb::nds::spi::firmware::UserSettings {
-        use citrine_gb::nds::spi::firmware::{Language, UserSettings};
+        use citrine_gb::nds::spi::firmware::UserSettings;
         UserSettings {
             nickname: self.nickname(account),
             favorite_color: self.favorite_color & 0x0F,
             birthday: self.birthday,
-            language: match self.language() {
-                DsLanguage::Japanese => Language::Japanese,
-                DsLanguage::English => Language::English,
-                DsLanguage::French => Language::French,
-                DsLanguage::German => Language::German,
-                DsLanguage::Italian => Language::Italian,
-                DsLanguage::Spanish => Language::Spanish,
-            },
+            language: self.language().firmware(),
             ..UserSettings::default()
         }
     }
 }
 
 #[cfg(feature = "nds")]
+impl DsLanguage {
+    pub fn firmware(self) -> citrine_gb::nds::spi::firmware::Language {
+        use citrine_gb::nds::spi::firmware::Language;
+        match self {
+            Self::Japanese => Language::Japanese,
+            Self::English => Language::English,
+            Self::French => Language::French,
+            Self::German => Language::German,
+            Self::Italian => Language::Italian,
+            Self::Spanish => Language::Spanish,
+        }
+    }
+}
+
+#[cfg(feature = "nds")]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BootLanguages {
+    pub all: DsLanguage,
+    pub games: std::collections::BTreeMap<String, DsLanguage>,
+}
+
+#[cfg(feature = "nds")]
+impl BootLanguages {
+    pub fn of(&self, rom_key: &str) -> DsLanguage {
+        self.games.get(rom_key).copied().unwrap_or(self.all)
+    }
+}
+
+#[cfg(feature = "nds")]
 pub const COLORS: [(u32, &str); 16] = [
-    (0x63849C, "Gray"),
+    (0x63849C, "Grey"),
     (0xBD4A00, "Brown"),
     (0xFF0019, "Red"),
     (0xFF8CFF, "Pink"),

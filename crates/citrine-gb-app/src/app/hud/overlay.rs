@@ -1,6 +1,6 @@
 use super::cells::Facts;
 use super::paint::{self, Look};
-use super::{HudSettings, HudState, INSET, SIZES, editor};
+use super::{HudSettings, HudState, INSET, SIZES, TRACKER, editor};
 use egui::{CursorIcon, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 const SNAP: f32 = 8.0;
@@ -51,6 +51,8 @@ pub struct Place {
     pub picture: Option<Rect>,
     pub screens: Vec<Rect>,
     pub touch: bool,
+    pub editing: bool,
+    pub keep_below: Option<f32>,
 }
 
 pub fn snap(rect: Rect, place: &Place) -> (Rect, [Option<f32>; 2]) {
@@ -110,25 +112,50 @@ pub fn show(
     ui: &mut Ui,
     place: &Place,
     facts: &Facts,
+    trackers: &[(String, String)],
     settings: &mut HudSettings,
     state: &mut HudState,
 ) -> Outcome {
     let mut outcome = Outcome::default();
-    if !settings.visible() {
+    state.placed.clear();
+    if !settings.visible(!trackers.is_empty()) {
         state.drag = None;
         return outcome;
     }
+    if place.editing {
+        state.drag = None;
+        state.editor = None;
+    }
+    let mut ids: Vec<u32> = settings.huds.iter().map(|hud| hud.id).collect();
+    if trackers.is_empty() {
+        if state.drag.is_some_and(|drag| drag.id == TRACKER) {
+            state.drag = None;
+        }
+    } else {
+        outcome.changed |= settings.tracker.is_none();
+        settings.tracker();
+        ids.push(TRACKER);
+    }
     let look = Look::of(ui.visuals(), settings.opacity());
     let painter = ui.painter().with_clip_rect(place.area);
-    let ids: Vec<u32> = settings.huds.iter().map(|hud| hud.id).collect();
     let mut taken = Vec::with_capacity(ids.len());
     for id in ids {
         let Some(hud) = settings.get(id) else {
             continue;
         };
-        let laid = paint::lay(&painter, hud, facts, look, place.area.size());
+        let laid = if id == TRACKER {
+            paint::lay_lines(&painter, hud, trackers, look, place.area.size())
+        } else {
+            paint::lay(&painter, hud, facts, look, place.area.size())
+        };
         let dragging = state.drag.filter(|drag| drag.id == id);
         let rect = hud.rect(place.area, laid.size);
+        let rect = match place.keep_below {
+            Some(line) if place.editing && rect.top() < line => {
+                rect.translate(vec2(0.0, line - rect.top()))
+            }
+            _ => rect,
+        };
         let rect = if dragging.is_some() {
             rect
         } else {
@@ -144,6 +171,10 @@ pub fn show(
             }
         }
         paint::paint(&painter, rect.min, &laid, facts, look);
+        state.placed.push((id, rect));
+        if place.editing {
+            continue;
+        }
         let key = Id::new(("hud", id));
         if place.touch {
             outcome = merge(outcome, touch(ui, place, settings, state, id, rect));
@@ -179,7 +210,7 @@ pub fn show(
                 outcome.changed = true;
             }
         }
-        if response.secondary_clicked() {
+        if response.secondary_clicked() && id != TRACKER {
             state.editor = Some(id);
         }
         let mut open = state.editor == Some(id);
@@ -271,7 +302,7 @@ fn touch(
             state.drag = None;
             if drag.changed() {
                 outcome.changed = true;
-            } else {
+            } else if id != TRACKER {
                 outcome.edit_sheet = Some(id);
             }
         }

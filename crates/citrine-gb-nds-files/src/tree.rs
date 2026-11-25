@@ -7,6 +7,8 @@ use crate::{FileType, Group, Narc, NdsRom, RomError, Sdat, SoundKind};
 pub type NodeId = u32;
 
 const ROOT: NodeId = 0;
+const MAX_NESTING: usize = 8;
+const MEMBER_BUDGET: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -102,6 +104,10 @@ enum Pending {
 
 impl FileTree {
     pub fn read(rom: &NdsRom) -> Result<Self, RomError> {
+        Self::read_within(rom, MEMBER_BUDGET)
+    }
+
+    fn read_within(rom: &NdsRom, mut budget: usize) -> Result<Self, RomError> {
         let mut root = Vec::new();
         for (path, id) in rom.named_files() {
             insert(&mut root, path.split('/'), id);
@@ -118,7 +124,7 @@ impl FileTree {
             }],
             files: 0,
         };
-        tree.place(rom, ROOT, root)?;
+        tree.place(rom, ROOT, root, &mut budget)?;
         tree.nodes[0].size = tree
             .children(ROOT)
             .map(|id| tree.nodes[id as usize].size)
@@ -132,6 +138,7 @@ impl FileTree {
         rom: &NdsRom,
         parent: NodeId,
         entries: Vec<Pending>,
+        budget: &mut usize,
     ) -> Result<(), RomError> {
         let start = self.nodes.len() as u32;
         let mut pending = Vec::new();
@@ -166,30 +173,39 @@ impl FileTree {
             let id = start + offset as u32;
             match inner {
                 Some(inner) => {
-                    self.place(rom, id, inner)?;
+                    self.place(rom, id, inner, budget)?;
                     self.nodes[id as usize].size =
                         self.children(id).map(|c| self.nodes[c as usize].size).sum();
                 }
-                None => self.place_members(rom, id),
+                None => {
+                    if let Ok(bytes) = self.bytes(rom, id) {
+                        self.place_members(id, bytes, 0, budget);
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    fn place_members(&mut self, rom: &NdsRom, id: NodeId) {
+    fn place_members(&mut self, id: NodeId, bytes: &[u8], depth: usize, budget: &mut usize) {
+        if *budget == 0 || depth >= MAX_NESTING {
+            return;
+        }
         if self.nodes[id as usize].kind == Some(FileType::Sdat) {
-            self.place_sounds(rom, id);
+            self.place_sounds(id, bytes, budget);
             return;
         }
         if self.nodes[id as usize].kind != Some(FileType::Narc) {
             return;
         }
-        let Ok(bytes) = self.bytes(rom, id) else {
-            return;
-        };
         let Ok(narc) = Narc::parse(bytes) else {
             return;
         };
+        if narc.len() > *budget {
+            *budget = 0;
+            return;
+        }
+        *budget -= narc.len();
         let start = self.nodes.len() as u32;
         for index in 0..narc.len() {
             let member = narc.file(index).unwrap_or_default();
@@ -205,15 +221,13 @@ impl FileTree {
             });
         }
         self.nodes[id as usize].children = start..self.nodes.len() as u32;
-        for member in start..self.nodes.len() as u32 {
-            self.place_members(rom, member);
+        for index in 0..narc.len() {
+            let member = narc.file(index).unwrap_or_default();
+            self.place_members(start + index as u32, member, depth + 1, budget);
         }
     }
 
-    fn place_sounds(&mut self, rom: &NdsRom, id: NodeId) {
-        let Ok(bytes) = self.bytes(rom, id) else {
-            return;
-        };
+    fn place_sounds(&mut self, id: NodeId, bytes: &[u8], budget: &mut usize) {
         let Ok(sdat) = Sdat::parse(bytes) else {
             return;
         };
@@ -221,6 +235,16 @@ impl FileTree {
             .into_iter()
             .filter(|&kind| !sdat.entries(kind).is_empty())
             .collect();
+        let count = kinds.len()
+            + kinds
+                .iter()
+                .map(|&kind| sdat.entries(kind).len())
+                .sum::<usize>();
+        if count > *budget {
+            *budget = 0;
+            return;
+        }
+        *budget -= count;
         let start = self.nodes.len() as u32;
         for kind in &kinds {
             let name = kind.label().to_owned();
@@ -735,6 +759,38 @@ mod tests {
         let narc = tree.find(&["a.narc"]).unwrap();
         assert_eq!(tree.node(narc).file_type(), Some(FileType::Narc));
         assert!(!tree.node(narc).has_children());
+    }
+
+    #[test]
+    fn deeply_nested_narcs_stop_opening_past_the_cap() {
+        let mut nested = narc::build(&[b"RGCN\xFF\xFE".to_vec()]);
+        for _ in 0..11 {
+            nested = narc::build(&[nested]);
+        }
+        let bytes = nds::build(b"CPUE", &[("a.narc", nested)]);
+        let tree = FileTree::read(&NdsRom::parse(&bytes).unwrap()).unwrap();
+        let mut path = vec!["a.narc"];
+        path.extend(["0"; MAX_NESTING]);
+        let last = tree.find(&path).unwrap();
+        assert_eq!(tree.node(last).file_type(), Some(FileType::Narc));
+        assert!(!tree.node(last).has_children());
+        assert_eq!(tree.len(), 2 + MAX_NESTING);
+    }
+
+    #[test]
+    fn narcs_past_the_member_budget_stay_plain_files() {
+        let inner = narc::build(&[vec![1], vec![2], vec![3], vec![4]]);
+        let outer = narc::build(&vec![inner; 10]);
+        let bytes = nds::build(b"CPUE", &[("a.narc", outer)]);
+        let rom = NdsRom::parse(&bytes).unwrap();
+        assert_eq!(FileTree::read(&rom).unwrap().len(), 2 + 10 + 40);
+        let tree = FileTree::read_within(&rom, 30).unwrap();
+        assert_eq!(tree.len(), 2 + 10 + 20);
+        let opened = tree.find(&["a.narc", "4"]).unwrap();
+        assert_eq!(tree.children(opened).len(), 4);
+        let closed = tree.find(&["a.narc", "5"]).unwrap();
+        assert_eq!(tree.node(closed).file_type(), Some(FileType::Narc));
+        assert!(!tree.node(closed).has_children());
     }
 
     #[test]

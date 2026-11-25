@@ -1,6 +1,7 @@
 use crate::config::Limits;
 use crate::db::Db;
 use citrine_gb_net::ErrorCode;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,18 +18,20 @@ pub struct Storage {
     floor_bytes: u64,
     floor_percent: u64,
     reserved: AtomicU64,
+    held: Mutex<HashMap<i64, Held>>,
     warned: Mutex<Option<Instant>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Held {
+    pub bytes: u64,
+    pub files: u64,
 }
 
 pub struct Reservation {
     storage: Arc<Storage>,
+    account: i64,
     bytes: u64,
-}
-
-impl Reservation {
-    pub fn bytes(&self) -> u64 {
-        self.bytes
-    }
 }
 
 impl Drop for Reservation {
@@ -36,6 +39,14 @@ impl Drop for Reservation {
         self.storage
             .reserved
             .fetch_sub(self.bytes, Ordering::Relaxed);
+        let mut held = self.storage.held();
+        if let Some(mine) = held.get_mut(&self.account) {
+            mine.bytes = mine.bytes.saturating_sub(self.bytes);
+            mine.files = mine.files.saturating_sub(1);
+            if mine.files == 0 {
+                held.remove(&self.account);
+            }
+        }
     }
 }
 
@@ -46,16 +57,30 @@ impl Storage {
             floor_bytes: limits.disk_floor_bytes,
             floor_percent: limits.disk_floor_percent,
             reserved: AtomicU64::new(0),
+            held: Mutex::new(HashMap::new()),
             warned: Mutex::new(None),
         }
     }
 
-    pub fn reserve(self: &Arc<Self>, bytes: u64) -> Reservation {
+    pub fn reserve(self: &Arc<Self>, account: i64, bytes: u64) -> Reservation {
         self.reserved.fetch_add(bytes, Ordering::Relaxed);
+        let mut held = self.held();
+        let mine = held.entry(account).or_default();
+        mine.bytes += bytes;
+        mine.files += 1;
         Reservation {
             storage: self.clone(),
+            account,
             bytes,
         }
+    }
+
+    pub fn held_by(&self, account: i64) -> Held {
+        self.held().get(&account).copied().unwrap_or_default()
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Held>> {
+        self.held.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn warn(&self, why: &str) {
@@ -135,11 +160,36 @@ mod tests {
     fn reservations_count_until_dropped() {
         let limits = Limits::from_vars(|_| None).unwrap();
         let storage = Arc::new(Storage::new(PathBuf::from("."), &limits));
-        let a = storage.reserve(100);
-        let b = storage.reserve(50);
+        let a = storage.reserve(1, 100);
+        let b = storage.reserve(1, 50);
         assert_eq!(storage.reserved.load(Ordering::Relaxed), 150);
         drop(a);
         assert_eq!(storage.reserved.load(Ordering::Relaxed), 50);
-        assert_eq!(b.bytes(), 50);
+        assert_eq!(
+            storage.held_by(1),
+            Held {
+                bytes: 50,
+                files: 1
+            }
+        );
+        drop(b);
+        assert_eq!(storage.held_by(1), Held::default());
+    }
+
+    #[test]
+    fn reservations_are_kept_per_account() {
+        let limits = Limits::from_vars(|_| None).unwrap();
+        let storage = Arc::new(Storage::new(PathBuf::from("."), &limits));
+        let _first = storage.reserve(1, 100);
+        let _second = storage.reserve(1, 200);
+        let _other = storage.reserve(2, 7);
+        assert_eq!(
+            storage.held_by(1),
+            Held {
+                bytes: 300,
+                files: 2
+            }
+        );
+        assert_eq!(storage.held_by(2), Held { bytes: 7, files: 1 });
     }
 }

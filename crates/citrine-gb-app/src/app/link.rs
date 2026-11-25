@@ -1,6 +1,7 @@
 use crate::app::Citrine;
 use crate::app::tabs::Tab;
-use crate::app::ui_state::settings::SettingsTab;
+use crate::app::ui_state::settings_tree::rows::RowId;
+use crate::app::ui_state::settings_tree::{GroupId, SettingsTab};
 use crate::local_link::Game;
 use crate::partner_link::PartnerLink;
 use crate::utils::file_loader::PickedFile;
@@ -9,6 +10,7 @@ use citrine_gb::error::GbError;
 use citrine_gb::rom::Rom;
 
 const ONLY_EACH_OTHER: &str = "Game Boy Advance games link only with each other";
+const LINK_OFF: &str = "Link play is off in hardcore";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkEntry {
@@ -21,6 +23,8 @@ impl Citrine {
     pub(super) fn link_entry(&self) -> LinkEntry {
         if self.emulator.linked() || self.emulator.partnered() {
             LinkEntry::Open
+        } else if self.emulator.hardcore() {
+            LinkEntry::Blocked(LINK_OFF)
         } else if self.play.is_live() {
             LinkEntry::Blocked("Not while you play together")
         } else if !self.emulator.has_game() {
@@ -32,6 +36,7 @@ impl Citrine {
 
     pub(super) fn pick_second_game(&mut self, touch: bool) {
         match self.link_entry() {
+            LinkEntry::Blocked(LINK_OFF) => self.hardcore_refused(LINK_OFF),
             LinkEntry::Blocked(why) => {
                 self.toasts.error(why);
             }
@@ -162,10 +167,33 @@ impl Citrine {
         }
     }
 
+    pub(super) fn find_setting(&mut self, row: RowId, touch: bool) {
+        if !row.per_game() {
+            self.ui.settings.leave_scope();
+        }
+        self.ui.settings.find = Some(row);
+        self.ui.settings.search.clear();
+        self.open_settings(row.page(), touch);
+    }
+
+    pub(super) fn find_group(&mut self, group: GroupId, touch: bool) {
+        if !group.rows().any(RowId::per_game) {
+            self.ui.settings.leave_scope();
+        }
+        self.ui.settings.find_group = Some(group);
+        self.ui.settings.search.clear();
+        self.open_settings(group.page(), touch);
+    }
+
     pub(super) fn open_settings(&mut self, tab: SettingsTab, touch: bool) {
         self.ui.settings.current_tab = tab;
+        self.ui.settings_list_open = false;
         if touch {
-            self.mobile.nav.open_settings(tab);
+            if self.ui.settings.focus_search {
+                self.mobile.nav.open(Tab::Settings);
+            } else {
+                self.mobile.nav.open_settings(tab);
+            }
             self.release_touch();
         } else {
             self.open_tab(Tab::Settings);

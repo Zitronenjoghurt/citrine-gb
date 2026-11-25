@@ -2,13 +2,24 @@ use super::pace::frame_us;
 use super::{SLOW_DELAY, SLOW_ROUND_TRIP_MS, kind_of};
 use citrine_gb::console::ConsoleKind;
 use citrine_gb::netplay::{MAX_ROLLBACK_FRAMES, Sync};
-use citrine_gb_net::{Console, OnlineId};
+use citrine_gb_net::{Console, GameHash, OnlineId, ROOM_MEMBERS};
+use std::collections::HashMap;
+use std::time::Duration;
 
 pub const MAX_INPUT_DELAY: u32 = 4;
 pub const MAX_DS_INPUT_DELAY: u32 = 8;
 pub const MAX_JITTER_FRAMES: u32 = 2;
+pub const SPELL_ROUND_TRIP_MS: u32 = 600;
 const DRAW_US: u32 = 4_000;
 const SPLIT_COST_PERCENT: u32 = 35;
+const MEASURED_FRAMES: u32 = 120;
+const MEASURED_REPLAYS: u32 = 20;
+const HIGH_STEP: f64 = 0.005;
+const HIGH_SHARE: f64 = 0.1;
+const REPLAY_PER_RUN_PERCENT: u32 = 90;
+const WARM_RUNS: u32 = 30;
+const WARM_REPLAYS: u32 = 5;
+const LONGEST_SAMPLE_US: f64 = 1e6;
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn replay_us(console: Option<Console>) -> u32 {
@@ -37,6 +48,146 @@ fn replay_us(console: Option<Console>) -> u32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DsCost {
+    pub run_us: u32,
+    pub replay_us: u32,
+    pub keep_us: u32,
+    pub restore_us: u32,
+}
+
+impl DsCost {
+    pub const MAC: Self = Self {
+        run_us: 2_740,
+        replay_us: 2_480,
+        keep_us: 100,
+        restore_us: 270,
+    };
+    pub const X86: Self = Self {
+        run_us: 6_460,
+        replay_us: 5_810,
+        keep_us: 880,
+        restore_us: 2_010,
+    };
+    pub const WEB: Self = Self::unmeasured(19_500);
+    pub const PHONE: Self = Self::unmeasured(37_500);
+
+    const fn unmeasured(replay_us: u32) -> Self {
+        Self {
+            run_us: replay_us,
+            replay_us,
+            keep_us: 0,
+            restore_us: 0,
+        }
+    }
+
+    pub const fn one_ds() -> Self {
+        if cfg!(target_arch = "wasm32") {
+            Self::WEB
+        } else if cfg!(target_os = "android") {
+            Self::PHONE
+        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::MAC
+        } else {
+            Self::X86
+        }
+    }
+
+    pub fn pair_on(self, lanes: usize) -> Self {
+        let lanes = lanes.clamp(1, 2) as u32;
+        let share = |us: u32| shared_us(us, 2, lanes);
+        Self {
+            run_us: share(self.run_us),
+            replay_us: share(self.replay_us),
+            keep_us: share(self.keep_us),
+            restore_us: share(self.restore_us),
+        }
+    }
+
+    pub fn budget(self) -> u32 {
+        let spent = DRAW_US + self.run_us + self.keep_us + self.restore_us;
+        let free = frame_us(ConsoleKind::Nds.timing()).saturating_sub(spent);
+        (free / (self.replay_us + self.keep_us).max(1)).min(MAX_ROLLBACK_FRAMES)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CostKey {
+    pub games: [GameHash; 2],
+    pub players: u8,
+}
+
+#[derive(Debug, Default)]
+pub struct DsCosts {
+    known: HashMap<CostKey, DsCost>,
+}
+
+impl DsCosts {
+    pub fn note(&mut self, key: CostKey, cost: DsCost) {
+        self.known.insert(key, cost);
+    }
+
+    pub fn of(&self, key: Option<CostKey>) -> Option<DsCost> {
+        key.and_then(|key| self.known.get(&key).copied())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostMeter {
+    run_us: f64,
+    replay_us: f64,
+    runs: u32,
+    replays: u32,
+}
+
+impl CostMeter {
+    pub fn note(&mut self, spent: Duration, replayed: u32) {
+        let us = (spent.as_secs_f64() * 1e6).min(LONGEST_SAMPLE_US);
+        if replayed == 0 {
+            self.runs = self.runs.saturating_add(1);
+            track_high(&mut self.run_us, us, self.runs <= WARM_RUNS);
+        } else if self.runs > 0 {
+            self.replays = self.replays.saturating_add(1);
+            let each = (us - self.run_us).max(0.0) / f64::from(replayed);
+            track_high(&mut self.replay_us, each, self.replays <= WARM_REPLAYS);
+        }
+    }
+
+    pub fn cost(&self) -> Option<DsCost> {
+        if self.runs < MEASURED_FRAMES {
+            return None;
+        }
+        let run_us = self.run_us.round() as u32;
+        let replay_us = if self.replays >= MEASURED_REPLAYS {
+            self.replay_us.round() as u32
+        } else {
+            run_us * REPLAY_PER_RUN_PERCENT / 100
+        };
+        Some(DsCost {
+            run_us,
+            replay_us,
+            keep_us: 0,
+            restore_us: 0,
+        })
+    }
+}
+
+fn track_high(estimate: &mut f64, sample: f64, warming: bool) {
+    if *estimate <= 0.0 || (warming && sample < *estimate) {
+        *estimate = sample;
+        return;
+    }
+    if warming {
+        return;
+    }
+    let step = *estimate * HIGH_STEP;
+    if sample > *estimate {
+        *estimate += step * (1.0 - HIGH_SHARE) / HIGH_SHARE;
+    } else {
+        *estimate -= step;
+    }
+}
+
 fn frame_us_of(console: Option<Console>) -> u32 {
     frame_us(console.map_or(ConsoleKind::Gb, kind_of).timing())
 }
@@ -55,13 +206,17 @@ pub fn capacity(console: Option<Console>) -> usize {
     }
 }
 
-fn replay_frame_us(console: Option<Console>, units: u32, lanes: u32) -> u32 {
-    let alone = units * replay_us(console);
+fn shared_us(us: u32, units: u32, lanes: u32) -> u32 {
+    let alone = units * us;
     if lanes <= 1 {
         return alone;
     }
-    let split = units.div_ceil(lanes) * replay_us(console) * (100 + SPLIT_COST_PERCENT) / 100;
+    let split = units.div_ceil(lanes) * us * (100 + SPLIT_COST_PERCENT) / 100;
     split.min(alone)
+}
+
+fn replay_frame_us(console: Option<Console>, units: u32, lanes: u32) -> u32 {
+    shared_us(replay_us(console), units, lanes)
 }
 
 pub fn budget(console: Option<Console>, units: usize, lanes: usize) -> u32 {
@@ -92,7 +247,9 @@ pub fn delay_for(
     let Some(ms) = round_trip_ms else {
         return 0;
     };
-    let late = (ms * 1_000 / 2).div_ceil(frame_us_of(console)) + 1;
+    let nds = matches!(console, Some(Console::Nds { .. }));
+    let spare = u32::from(!nds || ms > SLOW_ROUND_TRIP_MS);
+    let late = (ms * 1_000 / 2).div_ceil(frame_us_of(console)) + spare;
     let floor = if ms > SLOW_ROUND_TRIP_MS {
         u32::from(SLOW_DELAY)
     } else {
@@ -118,6 +275,13 @@ pub fn delay_room(console: Option<Console>, choice: Option<u32>, spread_ms: Opti
         return 0;
     }
     MAX_JITTER_FRAMES - jitter_margin(console, choice, spread_ms)
+}
+
+pub fn delay_cap(console: Option<Console>, choice: Option<u32>) -> u32 {
+    if !matches!(console, Some(Console::Nds { .. })) || choice.is_some() {
+        return 0;
+    }
+    (SPELL_ROUND_TRIP_MS * 1_000 / 2).div_ceil(frame_us_of(console)) + 1 + MAX_JITTER_FRAMES
 }
 
 pub fn group_delay(
@@ -222,6 +386,9 @@ impl Links {
         round: u32,
         watchers: Vec<OnlineId>,
     ) {
+        if members.len() > capacity(Some(Console::Gba)) || watchers.len() > ROOM_MEMBERS {
+            return;
+        }
         let kept_watchers = members
             .first()
             .and_then(|first| self.group_of(*first))
@@ -477,6 +644,113 @@ mod tests {
     }
 
     #[test]
+    fn a_ds_pair_rolls_back_what_its_measured_frames_leave_room_for() {
+        let budget = |cost: DsCost, lanes| cost.pair_on(lanes).budget();
+        assert_eq!(budget(DsCost::MAC, 2), 2);
+        assert_eq!(budget(DsCost::MAC, 4), 2);
+        assert_eq!(budget(DsCost::MAC, 1), 1);
+        for lanes in 1..=4 {
+            assert_eq!(budget(DsCost::X86, lanes), 0);
+            assert_eq!(budget(DsCost::WEB, lanes), 0);
+            assert_eq!(budget(DsCost::PHONE, lanes), 0);
+        }
+        let busy = DsCost {
+            run_us: 13_000,
+            ..DsCost::MAC
+        };
+        assert_eq!(busy.budget(), 0);
+        let ds = Some(Console::Nds { code: *b"AMCE" });
+        assert_eq!(delay_for(ds, None, Some(145), budget(DsCost::X86, 2)), 6);
+        assert_eq!(delay_for(ds, None, Some(145), budget(DsCost::MAC, 2)), 4);
+    }
+
+    fn metered(run_ms: [f64; 2], replay: Option<(u32, f64)>, frames: u32) -> CostMeter {
+        let mut meter = CostMeter::default();
+        for frame in 0..frames {
+            let run = if frame % 10 == 0 {
+                run_ms[1]
+            } else {
+                run_ms[0]
+            };
+            match replay {
+                Some((depth, ms)) if frame % 4 == 3 => meter.note(
+                    Duration::from_secs_f64((run + f64::from(depth) * ms) / 1e3),
+                    depth,
+                ),
+                _ => meter.note(Duration::from_secs_f64(run / 1e3), 0),
+            }
+        }
+        meter
+    }
+
+    #[test]
+    fn a_ds_pair_budgets_from_its_slow_frames_once_it_has_timed_enough() {
+        assert_eq!(metered([3.5, 3.7], None, 60).cost(), None);
+        let mac = metered([3.5, 3.7], Some((2, 3.5)), 600).cost().unwrap();
+        assert!((3_400..=3_900).contains(&mac.run_us), "{mac:?}");
+        assert!((3_300..=3_600).contains(&mac.replay_us), "{mac:?}");
+        assert_eq!(mac.budget(), 2);
+        let unreplayed = metered([3.5, 3.7], None, 600).cost().unwrap();
+        assert_eq!(unreplayed.replay_us, unreplayed.run_us * 9 / 10);
+        assert_eq!(unreplayed.budget(), 2);
+        assert_eq!(
+            metered([8.7, 8.9], Some((2, 7.8)), 600)
+                .cost()
+                .unwrap()
+                .budget(),
+            0
+        );
+        assert_eq!(metered([13.0, 13.0], None, 600).cost().unwrap().budget(), 0);
+        let fast = metered([1.0, 1.2], Some((4, 1.0)), 600).cost().unwrap();
+        assert!(fast.budget() >= 8, "{fast:?}");
+    }
+
+    #[test]
+    fn a_heavy_games_cost_never_caps_another_games_first_round() {
+        let key = |game: u8| CostKey {
+            games: [[game; 20], [game; 20]],
+            players: 2,
+        };
+        let heavy = DsCost {
+            run_us: 9_000,
+            replay_us: 8_000,
+            keep_us: 0,
+            restore_us: 0,
+        };
+        let mut costs = DsCosts::default();
+        costs.note(key(1), heavy);
+        assert_eq!(costs.of(Some(key(1))).map(DsCost::budget), Some(0));
+        assert_eq!(costs.of(Some(key(2))), None);
+        assert_eq!(
+            costs.of(Some(CostKey {
+                players: 4,
+                ..key(1)
+            })),
+            None
+        );
+        assert_eq!(costs.of(None), None);
+        costs.note(key(2), DsCost::MAC.pair_on(2));
+        assert_eq!(costs.of(Some(key(2))).map(DsCost::budget), Some(2));
+        assert_eq!(costs.of(Some(key(1))).map(DsCost::budget), Some(0));
+    }
+
+    #[test]
+    fn a_ds_pair_measures_past_its_slow_first_frames_and_hour_long_pauses() {
+        let mut meter = CostMeter::default();
+        for _ in 0..20 {
+            meter.note(Duration::from_millis(60), 0);
+        }
+        for frame in 0..200 {
+            let ms = if frame % 10 == 0 { 3.7 } else { 3.5 };
+            meter.note(Duration::from_secs_f64(ms / 1e3), 0);
+        }
+        assert_eq!(meter.cost().unwrap().budget(), 2);
+        meter.note(Duration::from_secs(3_600), 0);
+        meter.note(Duration::from_secs(3_600), 3);
+        assert!(meter.cost().unwrap().budget() <= 2);
+    }
+
+    #[test]
     fn a_chosen_delay_wins_and_auto_covers_what_the_budget_cannot() {
         assert_eq!(delay_for(None, Some(3), Some(400), 0), 3);
         assert_eq!(delay_for(None, Some(9), None, 0), MAX_INPUT_DELAY);
@@ -512,6 +786,10 @@ mod tests {
             assert_eq!(jitter_margin(console, None, Some(90)), 0);
         }
         assert_eq!(delay_for(ds, None, Some(150), 0), 6);
+        assert_eq!(delay_for(ds, None, Some(100), 0), 3);
+        assert_eq!(delay_cap(ds, None), 21);
+        assert_eq!(delay_cap(ds, Some(4)), 0);
+        assert_eq!(delay_cap(Some(Console::Gba), None), 0);
         assert_eq!(
             delay_for(ds, None, Some(1_000), 0) + jitter_margin(ds, None, Some(1_000)),
             MAX_DS_INPUT_DELAY + MAX_JITTER_FRAMES
@@ -543,6 +821,17 @@ mod tests {
         let group = links.group_of(id(1)).unwrap();
         assert!(group.is_full());
         assert_eq!(group.sync(3), sync_for(Some(Console::Gba), 4, 3));
+    }
+
+    #[test]
+    fn a_group_bigger_than_any_console_links_is_ignored() {
+        let mut links = Links::default();
+        links.set(vec![id(1), id(2)], Some(Console::Gb));
+        let crowd: Vec<OnlineId> = (1..400_000).map(|n| OnlineId::new(n).unwrap()).collect();
+        links.set_group(crowd.clone(), Some(Console::Gba), 1, Vec::new());
+        links.set_group(vec![id(1), id(3)], Some(Console::Gba), 1, crowd);
+        links.set_group((1..6).map(id).collect(), Some(Console::Gba), 1, Vec::new());
+        assert_eq!(links.group_of(id(1)).unwrap().members(), [id(1), id(2)]);
     }
 
     #[test]

@@ -1,6 +1,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(not(target_arch = "wasm32"))]
+const APP_ID: &str = "io.github.zitronenjoghurt.citrine";
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     citrine_gb_app::game_report::log_ring::install(None, log::LevelFilter::Info);
     let native_options = eframe::NativeOptions {
@@ -9,8 +12,9 @@ fn main() {
             .with_maximized(true)
             .with_drag_and_drop(true)
             .with_title("Citrine")
-            .with_app_id("io.github.zitronenjoghurt.citrine")
+            .with_app_id(APP_ID)
             .with_icon(load_icon()),
+        persistence_path: Some(citrine_gb_app::app_state_file(APP_ID)),
         persist_window: true,
         wgpu_options: citrine_gb_app::wgpu_options(),
         ..Default::default()

@@ -168,6 +168,7 @@ impl Db {
                   AND NOT EXISTS (SELECT 1 FROM friendships WHERE a = accounts.id OR b = accounts.id)
                   AND NOT EXISTS (SELECT 1 FROM files WHERE owner = accounts.id)
                   AND NOT EXISTS (SELECT 1 FROM saves WHERE owner = accounts.id)
+                  AND NOT EXISTS (SELECT 1 FROM archive_access WHERE account = accounts.id)
                 ORDER BY id"#,
             before,
         )

@@ -99,6 +99,8 @@ impl Cart {
         rumbled
     }
 
+    pub const PLAIN_ROM_SKIP: usize = gpio::END;
+
     pub fn in_gpio(offset: usize) -> bool {
         (gpio::DATA..gpio::END).contains(&offset)
     }

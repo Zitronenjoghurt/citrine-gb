@@ -64,6 +64,10 @@ async fn token(State(fake): State<Arc<Fake>>, body: String) -> (StatusCode, Stri
     (StatusCode::OK, reply.to_string())
 }
 
+fn reserved_key(key: &str) -> bool {
+    key == "from" || key == "message_type" || key.starts_with("google") || key.starts_with("gcm")
+}
+
 async fn send(
     State(fake): State<Arc<Fake>>,
     headers: HeaderMap,
@@ -76,7 +80,17 @@ async fn send(
         .unwrap_or_default()
         .to_string();
     let gone = body["message"]["token"] == GONE;
+    let reserved = body["message"]["data"]
+        .as_object()
+        .is_some_and(|data| data.keys().any(|key| reserved_key(key)));
     let _ = fake.sent.send(Sent { auth, body });
+    if reserved {
+        let error = json!({ "error": { "code": 400, "status": "INVALID_ARGUMENT",
+            "message": "Invalid data payload key", "details": [
+            { "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError", "errorCode": "INVALID_ARGUMENT" }
+        ]}});
+        return (StatusCode::BAD_REQUEST, error.to_string());
+    }
     if gone {
         let error = json!({ "error": { "code": 404, "status": "NOT_FOUND", "details": [
             { "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError", "errorCode": "UNREGISTERED" }
@@ -140,6 +154,7 @@ fn config(dir: &Path, vars: &[(&str, String)]) -> Config {
     let mut map: HashMap<String, String> = HashMap::from([
         ("CITRINE_BIND".into(), "127.0.0.1".into()),
         ("CITRINE_PORT".into(), "0".into()),
+        ("CITRINE_STUN_PORT".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_MB".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_PERCENT".into(), "0".into()),
         ("CITRINE_IP_CONNECTIONS".into(), "100000".into()),
@@ -422,7 +437,7 @@ async fn a_chat_in_the_background_sends_one_v1_message_per_chat() {
         first.body,
         json!({ "message": {
             "token": "ben-phone",
-            "data": { "kind": "chat", "from": from, "name": "Ana", "count": "1" },
+            "data": { "kind": "chat", "sender": from, "name": "Ana", "count": "1" },
             "android": { "priority": "HIGH", "collapse_key": format!("chat-{from}") },
         }})
     );
@@ -512,7 +527,7 @@ async fn friend_requests_and_invites_are_pushed_once_each() {
     let request = firebase.next().await;
     assert_eq!(
         request.body["message"]["data"],
-        json!({ "kind": "friend_request", "from": cat_acc.online_id.to_string(), "name": "Cat" })
+        json!({ "kind": "friend_request", "sender": cat_acc.online_id.to_string(), "name": "Cat" })
     );
     ana.send(ClientMsg::Invite {
         to: ben_acc.online_id,
@@ -530,7 +545,7 @@ async fn friend_requests_and_invites_are_pushed_once_each() {
         invite.body["message"]["data"],
         json!({
             "kind": "invite",
-            "from": ana_acc.online_id.to_string(),
+            "sender": ana_acc.online_id.to_string(),
             "name": "Ana",
             "session": session.to_string(),
         }),

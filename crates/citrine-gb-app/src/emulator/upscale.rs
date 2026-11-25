@@ -1,14 +1,14 @@
 use super::gpu_clock::{GpuClock, GpuReading};
 use super::load::GpuTotals;
-use crate::app::ui_state::ds_3d::{Ds3d, SmoothEdges};
-use crate::media::recording::{Sharp, Ticket};
+use crate::app::ui_state::ds_3d::{DistantTextures, Ds3d, SmoothEdges, TextureFilter};
+use crate::media::recording::{ScreenRecorder, Sharp, Ticket};
 use citrine_gb::nds::machine::Nds;
 use citrine_gb::nds::video::{Composite, HEIGHT, Mix, WIDTH};
-use citrine_gb_nds_gpu::{Antialiasing, Renderer, Textures, Upscale};
+use citrine_gb_nds_gpu::{Antialiasing, Mipmaps, Renderer, Route, Textures, Upscale};
 use eframe::egui_wgpu::RenderState;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use std::sync::{Arc, OnceLock};
 use web_time::Instant;
 
 const LAYER_BYTES: u32 = 16;
@@ -60,7 +60,26 @@ struct Target {
 }
 
 impl Upscaler {
-    pub(crate) fn new(state: RenderState) -> Self {
+    pub(crate) fn new(state: RenderState) -> Option<Self> {
+        static ROUTE: OnceLock<Result<Route, String>> = OnceLock::new();
+        let Ok(route) = ROUTE.get_or_init(|| {
+            first_route(|route| citrine_gb_nds_gpu::probe(&state.adapter, &state.device, route))
+        }) else {
+            return None;
+        };
+        Self::on_route(state, *route)
+    }
+
+    fn on_route(state: RenderState, route: Route) -> Option<Self> {
+        let device = state.device.clone();
+        citrine_gb_nds_gpu::set_up(&device, || Self::build(state, route))
+            .inspect_err(|error| {
+                log::warn!("DS 3D draws on the CPU, its GPU set-up failed: {error}")
+            })
+            .ok()
+    }
+
+    fn build(state: RenderState, route: Route) -> Self {
         let device = &state.device;
         let shader = device.create_shader_module(wgpu::include_wgsl!("upscale.wgsl"));
         let entry = |binding, sample_type| wgpu::BindGroupLayoutEntry {
@@ -116,7 +135,7 @@ impl Upscaler {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let renderer = Renderer::new(device);
+        let renderer = Renderer::with_route(device, route);
         let clock = GpuClock::new(&state.device, &state.queue);
         Self {
             state,
@@ -159,7 +178,8 @@ impl Upscaler {
         let upscale = Upscale {
             scale,
             antialiasing: antialiasing(choice.smooth_edges),
-            textures: Textures::Nearest,
+            textures: textures(choice.texture_filter),
+            mipmaps: mipmaps(choice.distant_textures),
         };
         let device = &self.state.device;
         let queue = &self.state.queue;
@@ -386,6 +406,36 @@ impl Drop for Upscaler {
     }
 }
 
+fn stop_upscaling(upscaler: &mut Option<Upscaler>, recorder: &mut ScreenRecorder, frame: &[u8]) {
+    if let Some(mut upscaler) = upscaler.take() {
+        upscaler.wait_reads();
+        while let Some((ticket, sharp)) = upscaler.take_read() {
+            recorder.sharp(ticket, sharp);
+        }
+    }
+    recorder.fill_held(frame);
+}
+
+fn first_route(probe: impl Fn(Route) -> Result<(), String>) -> Result<Route, String> {
+    let mut failed = Vec::new();
+    for route in Route::ALL {
+        match probe(route) {
+            Ok(()) if failed.is_empty() => return Ok(route),
+            Ok(()) => {
+                log::warn!(
+                    "DS 3D draws on the {route:?} GPU route: {}",
+                    failed.join("; ")
+                );
+                return Ok(route);
+            }
+            Err(error) => failed.push(format!("{route:?} failed: {error}")),
+        }
+    }
+    let failed = failed.join("; ");
+    log::warn!("DS 3D draws on the CPU: {failed}");
+    Err(failed)
+}
+
 fn target<'a>(slot: &'a mut Option<Target>, state: &RenderState, scale: u32) -> &'a Target {
     if slot.as_ref().is_some_and(|target| target.scale == scale) {
         return slot.as_ref().expect("target");
@@ -417,6 +467,25 @@ fn target<'a>(slot: &'a mut Option<Target>, state: &RenderState, scale: u32) -> 
         None => renderer.register_native_texture(&state.device, &view, wgpu::FilterMode::Linear),
     };
     slot.insert(Target { scale, view, id })
+}
+
+fn textures(filter: TextureFilter) -> Textures {
+    match filter {
+        TextureFilter::Nearest => Textures::Nearest,
+        TextureFilter::Bilinear => Textures::Smooth,
+        TextureFilter::Bicubic => Textures::Bicubic,
+        TextureFilter::Xbr => Textures::Xbr,
+    }
+}
+
+fn mipmaps(distant: DistantTextures) -> Mipmaps {
+    match distant {
+        DistantTextures::Off => Mipmaps::Off,
+        DistantTextures::Trilinear => Mipmaps::Trilinear,
+        DistantTextures::Anisotropic2x => Mipmaps::Anisotropic2x,
+        DistantTextures::Anisotropic4x => Mipmaps::Anisotropic4x,
+        DistantTextures::Anisotropic16x => Mipmaps::Anisotropic16x,
+    }
 }
 
 fn antialiasing(edges: SmoothEdges) -> Antialiasing {
@@ -468,7 +537,7 @@ impl super::Emulator {
         let state = self
             .gpu
             .as_ref()
-            .filter(|_| self.ds_3d.upscaled())
+            .filter(|_| self.ds_3d.upscaled() && !self.gpu_3d_failed)
             .map(|(_, state)| state.clone());
         self.load.reading.upscaling = false;
         let nds = match linked {
@@ -481,20 +550,31 @@ impl super::Emulator {
                 }
             },
         };
+        if let Some(state) = state.as_ref().filter(|_| self.upscaler.is_none()) {
+            self.upscaler = Upscaler::new(state.clone());
+            self.gpu_3d_failed = self.upscaler.is_none();
+        }
+        let state = state.filter(|_| self.upscaler.is_some());
         nds.record_composite(state.is_some());
         let Some(state) = state else {
-            if let Some(mut upscaler) = self.upscaler.take() {
-                upscaler.wait_reads();
-                while let Some((ticket, sharp)) = upscaler.take_read() {
-                    self.screen_recorder.sharp(ticket, sharp);
-                }
-            }
-            self.screen_recorder.fill_held(nds.frame());
+            stop_upscaling(&mut self.upscaler, &mut self.screen_recorder, nds.frame());
             self.upscaled = None;
             return;
         };
-        let upscaler = self.upscaler.get_or_insert_with(|| Upscaler::new(state));
-        self.upscaled = upscaler.draw(nds, self.ds_3d);
+        let Some(upscaler) = self.upscaler.as_mut() else {
+            return;
+        };
+        let ds_3d = self.ds_3d;
+        match citrine_gb_nds_gpu::guarded(&state.device, || upscaler.draw(nds, ds_3d)) {
+            Ok(shown) => self.upscaled = shown,
+            Err(error) => {
+                log::warn!("DS 3D moved to the CPU after a GPU error: {error}");
+                self.gpu_3d_failed = true;
+                stop_upscaling(&mut self.upscaler, &mut self.screen_recorder, nds.frame());
+                self.upscaled = None;
+                return;
+            }
+        }
         match self.upscaled {
             Some(shown) => {
                 if let Some(ticket) = self.screen_recorder.take_held() {
@@ -626,13 +706,14 @@ pub(super) mod tests {
                 SmoothEdges::iter().map(move |smooth_edges| Ds3d {
                     resolution,
                     smooth_edges,
+                    ..Ds3d::default()
                 })
             })
             .collect()
     }
 
     fn clocked(state: &RenderState, bursts: bool) -> Upscaler {
-        let mut upscaler = Upscaler::new(state.clone());
+        let mut upscaler = Upscaler::new(state.clone()).expect("an upscaler");
         upscaler.clock.as_mut().expect("timing").burst(bursts);
         upscaler
     }
@@ -649,6 +730,7 @@ pub(super) mod tests {
             let choice = Ds3d {
                 resolution,
                 smooth_edges: SmoothEdges::default(),
+                ..Ds3d::default()
             };
             (upscaler, choice, GpuTotals::default())
         });
@@ -703,6 +785,15 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_default_3d_filters_textures_with_anisotropic_mipmaps() {
+        let choice = Ds3d::default();
+        assert_eq!(textures(choice.texture_filter), Textures::Bicubic);
+        assert_eq!(mipmaps(choice.distant_textures), Mipmaps::Anisotropic4x);
+        assert_eq!(textures(TextureFilter::Nearest), Textures::Nearest);
+        assert_eq!(mipmaps(DistantTextures::Off), Mipmaps::Off);
+    }
+
+    #[test]
     fn the_gpu_clock_times_upscaled_frames_at_every_resolution() {
         if let Some(state) = gpu() {
             clock_times_frames(&state, false);
@@ -743,8 +834,9 @@ pub(super) mod tests {
         let choice = Ds3d {
             resolution: Resolution::Double,
             smooth_edges: SmoothEdges::On,
+            ..Ds3d::default()
         };
-        let mut plain = Upscaler::new(state.clone());
+        let mut plain = Upscaler::new(state.clone()).expect("an upscaler");
         plain.draw(&nds, choice).expect("the cube is upscalable");
         let mut timed = clocked(&state, true);
         timed.draw(&nds, choice).expect("the cube is upscalable");
@@ -778,10 +870,11 @@ pub(super) mod tests {
         };
         let mut nds = console();
         nds.record_composite(true);
-        let mut upscaler = Upscaler::new(state);
+        let mut upscaler = Upscaler::new(state).expect("an upscaler");
         let choice = Ds3d {
             resolution: Resolution::Quadruple,
             smooth_edges: SmoothEdges::Off,
+            ..Ds3d::default()
         };
         let path = temp_file("ds-gpu.mp4");
         let mut recorder = ScreenRecorder::default();
@@ -795,6 +888,9 @@ pub(super) mod tests {
             width: WIDTH as u32,
             height: HEIGHT as u32 * 2,
             length_ms: None,
+            frame_times: false,
+            video: false,
+            replay: None,
             frame: crate::media::Frame {
                 width: WIDTH as u32,
                 height: HEIGHT as u32 * 2,
@@ -896,7 +992,7 @@ pub(super) mod tests {
             return;
         };
         let mut plain = console();
-        let mut upscaler = Upscaler::new(state);
+        let mut upscaler = Upscaler::new(state).expect("an upscaler");
         let mut watched = console();
         watched.record_composite(true);
         let mut choices = choices().into_iter().cycle();
@@ -922,10 +1018,11 @@ pub(super) mod tests {
         for _ in 0..FRAMES {
             nds.run_frame();
         }
-        let mut upscaler = Upscaler::new(state);
+        let mut upscaler = Upscaler::new(state).expect("an upscaler");
         let native = Ds3d {
             resolution: Resolution::Native,
             smooth_edges: SmoothEdges::Off,
+            ..Ds3d::default()
         };
         let upscaled = upscaler.draw(&nds, native).expect("the cube is upscalable");
         let off = off_screen(&upscaler, &nds, upscaled, 1);
@@ -936,11 +1033,60 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_gpu_route_that_loses_its_device_hands_the_3d_to_the_next_route() {
+        let Some(state) = gpu() else {
+            return;
+        };
+        let route = first_route(|route| {
+            let (device, _queue) = pollster::block_on(
+                state
+                    .adapter
+                    .request_device(&wgpu::DeviceDescriptor::default()),
+            )
+            .map_err(|error| error.to_string())?;
+            if route == Route::Compute {
+                device.destroy();
+            }
+            citrine_gb_nds_gpu::probe_on(&device, route)
+        });
+        assert_eq!(route, Ok(Route::Fragment));
+        let mut upscaler = Upscaler::on_route(state, Route::Fragment).expect("the fragment route");
+        assert_eq!(upscaler.renderer.route(), Route::Fragment);
+        let mut nds = console();
+        nds.record_composite(true);
+        for _ in 0..FRAMES {
+            nds.run_frame();
+        }
+        let native = Ds3d {
+            resolution: Resolution::Native,
+            smooth_edges: SmoothEdges::Off,
+            ..Ds3d::default()
+        };
+        let upscaled = upscaler.draw(&nds, native).expect("the cube is drawn");
+        let off = off_screen(&upscaler, &nds, upscaled, 1);
+        assert!(
+            off * 100 <= WIDTH * HEIGHT,
+            "{off} pixels differ from the CPU picture"
+        );
+    }
+
+    #[test]
+    fn a_lost_device_gives_no_upscaler_instead_of_a_crash() {
+        let Some(state) = gpu() else {
+            return;
+        };
+        state.device.destroy();
+        assert!(Upscaler::on_route(state.clone(), Route::Compute).is_none());
+        assert!(Upscaler::on_route(state, Route::Fragment).is_none());
+        assert!(first_route(|_| Err("lost".into())).is_err());
+    }
+
+    #[test]
     fn fades_keep_the_3d_upscaled() {
         let Some(state) = gpu() else {
             return;
         };
-        let mut upscaler = Upscaler::new(state);
+        let mut upscaler = Upscaler::new(state).expect("an upscaler");
         let fades: [&[(u32, u32)]; 5] = [
             &[(MASTER_BRIGHT, 1 << 14 | 9)],
             &[(MASTER_BRIGHT, 2 << 14 | 9)],
@@ -966,6 +1112,7 @@ pub(super) mod tests {
                 let choice = Ds3d {
                     resolution,
                     smooth_edges: SmoothEdges::Off,
+                    ..Ds3d::default()
                 };
                 let upscaled = upscaler
                     .draw(&nds, choice)

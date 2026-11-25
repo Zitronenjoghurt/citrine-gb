@@ -5,17 +5,17 @@ use crate::app::events::AppEvent;
 use crate::app::tabs::stats::Page;
 use crate::app::tabs::{Tab, playing};
 use crate::app::ui_state::hotkeys::HotkeyAction;
-use crate::app::ui_state::settings::{console_name, other_console, plays_on_both};
 use crate::app::widgets::avatar;
+use crate::app::widgets::settings::this_game;
 use crate::app::widgets::snapshots::{FailedStep, failed_message, named};
 use crate::app::widgets::text::one_line;
 use crate::icons;
 use crate::online::Seen;
 use crate::play::Stage;
-use citrine_gb::gb::GbModel;
 use citrine_gb_net::OnlineId;
 use egui::{Align2, CornerRadius, Frame, Id, Margin, Order, Rect, RichText, Sense, Ui, pos2, vec2};
 
+mod home;
 mod panel;
 
 const SHEET_MAX_WIDTH: f32 = 560.0;
@@ -45,18 +45,19 @@ enum MoreAction {
     AllStates,
     Screenshot,
     Record,
+    Clip,
     Hud,
     Reset,
-    PlayOn(GbModel),
     LinkGame,
     PlayTogether,
     Invite(OnlineId),
     BackToActions,
     GameInfo,
+    RomInfo,
     Achievements,
+    ThisGame,
     Cheats,
     Stats,
-    GameReport,
     FullScreen,
     BigScreen,
     CloseGame,
@@ -66,16 +67,17 @@ enum MoreAction {
 pub enum Tile {
     Screenshot,
     Record,
+    Clip,
     Hud,
     Reset,
-    PlayOn(GbModel),
     LinkGame,
     PlayTogether,
     GameInfo,
+    RomInfo,
     Achievements,
+    ThisGame,
     Cheats,
     Stats,
-    GameReport,
     FullScreen,
     BigScreen,
     CloseGame,
@@ -85,7 +87,7 @@ pub struct TileFacts {
     pub session: bool,
     pub alone: bool,
     pub has_rom: bool,
-    pub other_console: Option<GbModel>,
+    pub has_game: bool,
     pub joined: bool,
     pub recognised: bool,
     pub web: bool,
@@ -93,9 +95,12 @@ pub struct TileFacts {
 }
 
 pub fn tiles(facts: &TileFacts) -> Vec<Tile> {
-    let mut tiles = vec![Tile::Screenshot, Tile::Record, Tile::Hud];
+    let mut tiles = vec![Tile::Screenshot, Tile::Record, Tile::Clip, Tile::Hud];
     if facts.recognised {
         tiles.push(Tile::GameInfo);
+    }
+    if facts.has_rom {
+        tiles.push(Tile::RomInfo);
     }
     if !facts.session && facts.joined {
         tiles.push(Tile::PlayTogether);
@@ -103,19 +108,18 @@ pub fn tiles(facts: &TileFacts) -> Vec<Tile> {
     if !facts.session && facts.has_rom {
         tiles.push(Tile::Reset);
     }
-    if let Some(model) = facts.other_console.filter(|_| !facts.session) {
-        tiles.push(Tile::PlayOn(model));
-    }
     if facts.alone && facts.has_rom {
         tiles.push(Tile::LinkGame);
     }
     if facts.has_rom && !facts.web {
         tiles.push(Tile::Achievements);
     }
+    if facts.has_game {
+        tiles.push(Tile::ThisGame);
+    }
     if facts.has_rom {
         tiles.push(Tile::Cheats);
         tiles.push(Tile::Stats);
-        tiles.push(Tile::GameReport);
     }
     if facts.web {
         tiles.push(Tile::FullScreen);
@@ -129,21 +133,26 @@ pub fn tiles(facts: &TileFacts) -> Vec<Tile> {
     tiles
 }
 
+fn tile_locked(tile: Tile, hardcore: bool) -> bool {
+    hardcore && matches!(tile, Tile::LinkGame | Tile::PlayTogether | Tile::Cheats)
+}
+
 fn tile_face(tile: Tile, recording: bool) -> (&'static str, String) {
     match tile {
         Tile::Screenshot => (icons::CAMERA, "Screenshot".into()),
         Tile::Record if recording => (icons::STOP, "Stop recording".into()),
-        Tile::Record => (icons::RECORD, "Record video".into()),
+        Tile::Record => (icons::RECORD, "Record".into()),
+        Tile::Clip => (icons::SCISSORS, "Save a clip".into()),
         Tile::Hud => (icons::GAUGE, "HUD".into()),
-        Tile::Reset => (icons::ARROW_COUNTER_CLOCKWISE, "Reset".into()),
-        Tile::PlayOn(model) => (icons::SWAP, format!("Play on\n{}", console_name(model))),
-        Tile::LinkGame => (icons::LINK, "Link a game".into()),
+        Tile::Reset => (icons::POWER, "Reset".into()),
+        Tile::LinkGame => (icons::LINK_CABLE, "Link a game".into()),
         Tile::PlayTogether => (icons::USERS, "Play together".into()),
-        Tile::GameInfo => (icons::IDENTIFICATION_CARD, "Game info".into()),
+        Tile::GameInfo => (icons::INFO, "Game info".into()),
+        Tile::RomInfo => (icons::FILE_TEXT, "ROM info".into()),
         Tile::Achievements => (icons::TROPHY, "Achievements".into()),
+        Tile::ThisGame => (icons::GEAR_FINE, this_game::TITLE.into()),
         Tile::Cheats => (icons::MAGIC_WAND, "Cheats".into()),
         Tile::Stats => (icons::CHART_BAR, "Stats".into()),
-        Tile::GameReport => (icons::BUG, "Game report".into()),
         Tile::FullScreen => (icons::FRAME_CORNERS, "Full screen".into()),
         Tile::BigScreen => (icons::TELEVISION_SIMPLE, "Big screen".into()),
         Tile::CloseGame => (icons::X, "Close game".into()),
@@ -154,16 +163,17 @@ fn tile_action(tile: Tile) -> MoreAction {
     match tile {
         Tile::Screenshot => MoreAction::Screenshot,
         Tile::Record => MoreAction::Record,
+        Tile::Clip => MoreAction::Clip,
         Tile::Hud => MoreAction::Hud,
         Tile::Reset => MoreAction::Reset,
-        Tile::PlayOn(model) => MoreAction::PlayOn(model),
         Tile::LinkGame => MoreAction::LinkGame,
         Tile::PlayTogether => MoreAction::PlayTogether,
         Tile::GameInfo => MoreAction::GameInfo,
+        Tile::RomInfo => MoreAction::RomInfo,
         Tile::Achievements => MoreAction::Achievements,
+        Tile::ThisGame => MoreAction::ThisGame,
         Tile::Cheats => MoreAction::Cheats,
         Tile::Stats => MoreAction::Stats,
-        Tile::GameReport => MoreAction::GameReport,
         Tile::FullScreen => MoreAction::FullScreen,
         Tile::BigScreen => MoreAction::BigScreen,
         Tile::CloseGame => MoreAction::CloseGame,
@@ -183,7 +193,7 @@ impl Citrine {
     }
 
     pub(super) fn save_state_with_undo(&mut self) {
-        let Some(key) = self.emulator.rom_key().map(str::to_owned) else {
+        let Some(key) = self.emulator.saves_key() else {
             return;
         };
         let slot = self.emulator.next_free_slot(&key);
@@ -202,7 +212,7 @@ impl Citrine {
     }
 
     pub(in crate::app) fn undo_snapshot(&mut self, rom_key: &str, slot: usize) {
-        if self.emulator.rom_key() != Some(rom_key) {
+        if self.emulator.saves_key().as_deref() != Some(rom_key) {
             return;
         }
         match self.emulator.delete_snapshot(slot) {
@@ -216,16 +226,11 @@ impl Citrine {
 
     fn tile_facts(&self) -> TileFacts {
         let session = self.play.session().is_some();
-        let both = self
-            .emulator
-            .as_gb()
-            .is_some_and(|gb| plays_on_both(gb.cartridge.header.cgb_mode));
-        let has_rom = self.emulator.rom_key().is_some();
         TileFacts {
             session,
             alone: !session && !self.emulator.linked() && !self.emulator.partnered(),
-            has_rom,
-            other_console: (both && has_rom).then(|| other_console(self.emulator.console())),
+            has_rom: self.emulator.rom_key().is_some(),
+            has_game: self.emulator.has_game(),
             joined: self.ui.settings.online.is_joined(),
             recognised: self.game_info.recognised(),
             web: cfg!(target_arch = "wasm32"),
@@ -237,7 +242,7 @@ impl Citrine {
         if !self.mobile.nav.more_open() {
             return;
         }
-        if let Some(key) = self.emulator.rom_key().map(str::to_owned) {
+        if let Some(key) = self.emulator.saves_key() {
             self.ui.snapshots.sync(ctx, &self.emulator.store, &key);
         }
         let screen = super::sheet::area(ctx).unwrap_or(ctx.content_rect());
@@ -321,7 +326,7 @@ impl Citrine {
 
     fn grab_handle(&mut self, ui: &mut Ui) {
         let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::drag());
+            ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::DRAG);
         let bar = Rect::from_center_size(rect.center(), vec2(36.0, 4.0));
         ui.painter().rect_filled(
             bar,
@@ -418,7 +423,7 @@ impl Citrine {
             }
             if can_change
                 && kit::Row::new("Change game")
-                    .icon(icons::SIM_CARD)
+                    .icon(icons::CHANGE_GAME)
                     .show(ui)
                     .clicked()
             {
@@ -472,16 +477,36 @@ impl Citrine {
             if response.on_hover_text("Save the state now").clicked() {
                 action = Some(MoreAction::SaveNow);
             }
+            let hardcore = self.emulator.hardcore();
             for slot in slots.into_iter().take(SHOWN_STATES) {
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(width, picture.y + 22.0), Sense::click());
+                let sense = if hardcore {
+                    Sense::hover()
+                } else {
+                    Sense::click()
+                };
+                let (rect, response) = ui.allocate_exact_size(vec2(width, picture.y + 22.0), sense);
                 let frame = Rect::from_min_size(rect.min, picture);
-                egui::Image::new((slot.texture.id(), picture))
-                    .corner_radius(CornerRadius::same(8))
-                    .paint_at(ui, frame);
+                let image = egui::Image::new((slot.texture.id(), picture))
+                    .corner_radius(CornerRadius::same(8));
+                if hardcore {
+                    image
+                        .tint(egui::Color32::from_white_alpha(90))
+                        .paint_at(ui, frame);
+                    ui.painter().text(
+                        frame.center(),
+                        Align2::CENTER_CENTER,
+                        icons::LOCK,
+                        egui::FontId::proportional(22.0),
+                        ui.visuals().text_color(),
+                    );
+                } else {
+                    image.paint_at(ui, frame);
+                }
                 let when = crate::app::widgets::snapshots::relative_time(slot.saved_at);
                 caption(ui, rect, &when);
-                if response.on_hover_text(slot.display_name()).clicked() {
+                if hardcore {
+                    response.on_hover_text(crate::app::hardcore::OFF);
+                } else if response.on_hover_text(slot.display_name()).clicked() {
                     action = Some(MoreAction::Load(slot.slot));
                 }
             }
@@ -490,7 +515,8 @@ impl Citrine {
     }
 
     fn more_tiles(&mut self, ui: &mut Ui) -> Option<MoreAction> {
-        let recording = self.emulator.screen_recorder.is_recording();
+        let recording = self.emulator.is_recording();
+        let hardcore = self.emulator.hardcore();
         let tiles = tiles(&self.tile_facts());
         let mut action = None;
         let gap = 6.0;
@@ -501,7 +527,8 @@ impl Citrine {
                 ui.spacing_mut().item_spacing.x = gap;
                 for tile in row {
                     let (icon, label) = tile_face(*tile, recording);
-                    if action_tile(ui, vec2(width, TILE_HEIGHT), icon, &label) {
+                    let locked = tile_locked(*tile, hardcore);
+                    if action_tile(ui, vec2(width, TILE_HEIGHT), icon, &label, locked) {
                         action = Some(tile_action(*tile));
                     }
                 }
@@ -575,6 +602,10 @@ impl Citrine {
         match action {
             MoreAction::Close => self.leave_more(),
             MoreAction::BackToActions => self.mobile.more.friends = false,
+            MoreAction::PlayTogether if self.emulator.hardcore() => {
+                self.leave_more();
+                self.hardcore_refused("Play together is off in hardcore");
+            }
             MoreAction::PlayTogether => self.mobile.more.friends = true,
             MoreAction::Together(bar) => {
                 let leaving = bar == playing::BarAction::Leave;
@@ -621,13 +652,13 @@ impl Citrine {
                 self.emulator.fast_forward = false;
                 self.run_hotkey(HotkeyAction::ToggleRecording);
             }
+            MoreAction::Clip => {
+                self.leave_more();
+                self.run_hotkey(HotkeyAction::SaveClip);
+            }
             MoreAction::Reset => {
                 self.leave_more();
                 self.run_hotkey(HotkeyAction::SoftReset);
-            }
-            MoreAction::PlayOn(model) => {
-                self.leave_more();
-                self.ask_play_on(model);
             }
             MoreAction::LinkGame => {
                 self.leave_more();
@@ -641,9 +672,17 @@ impl Citrine {
                 self.leave_more();
                 self.mobile.open(Tab::GameInfo);
             }
+            MoreAction::RomInfo => {
+                self.leave_more();
+                self.mobile.open(Tab::RomInfo);
+            }
             MoreAction::Achievements => {
                 self.leave_more();
                 self.mobile.open(Tab::Achievements);
+            }
+            MoreAction::ThisGame => {
+                self.leave_more();
+                self.mobile.open(Tab::ThisGame);
             }
             MoreAction::Cheats => {
                 self.leave_more();
@@ -658,10 +697,6 @@ impl Citrine {
                     };
                 }
                 self.mobile.open(Tab::Stats);
-            }
-            MoreAction::GameReport => {
-                self.leave_more();
-                self.save_game_report();
             }
             MoreAction::FullScreen => {
                 self.leave_more();
@@ -715,11 +750,10 @@ impl Citrine {
             Some(partners) => format!("Load this state? You'll unlink from {partners}."),
             None => format!("Load {name}?"),
         };
-        let choice = crate::app::widgets::confirm::confirm_with_detail(
+        let choice = crate::app::widgets::confirm::confirm_losing_progress(
             ctx,
             "load_state_confirm",
             &question,
-            Some("Unsaved progress is lost."),
             "Load",
         );
         match choice {
@@ -728,11 +762,9 @@ impl Citrine {
                 crate::app::tabs::playing::unlink_group(&mut self.play, &mut self.emulator);
                 match self.emulator.load_snapshot(slot) {
                     Ok(_) => self.toasts.success(format!("Loaded {name}")),
-                    Err(err) => self.toasts.error(failed_message(
-                        FailedStep::Load,
-                        &format!("'{name}'"),
-                        &err,
-                    )),
+                    Err(err) => self
+                        .toasts
+                        .error(failed_message(FailedStep::Load, &name, &err)),
                 };
             }
             Some(false) => self.mobile.more.loading = None,
@@ -751,7 +783,7 @@ fn caption(ui: &Ui, rect: Rect, text: &str) {
         .galley(pos, galley, ui.visuals().weak_text_color());
 }
 
-fn action_tile(ui: &mut Ui, size: egui::Vec2, icon: &str, label: &str) -> bool {
+fn action_tile(ui: &mut Ui, size: egui::Vec2, icon: &str, label: &str, locked: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let visuals = ui.visuals();
@@ -772,6 +804,9 @@ fn action_tile(ui: &mut Ui, size: egui::Vec2, icon: &str, label: &str) -> bool {
             egui::FontId::proportional(20.0),
             visuals.strong_text_color(),
         );
+        if locked {
+            lock_badge(ui, circle + egui::vec2(14.0, 14.0));
+        }
         let mut job = egui::text::LayoutJob::simple(
             label.to_owned(),
             egui::FontId::proportional(12.0),
@@ -789,6 +824,19 @@ fn action_tile(ui: &mut Ui, size: egui::Vec2, icon: &str, label: &str) -> bool {
     response.clicked()
 }
 
+fn lock_badge(ui: &Ui, center: egui::Pos2) {
+    let visuals = ui.visuals();
+    ui.painter()
+        .circle_filled(center, 9.0, crate::app::mobile::kit::card_fill(visuals));
+    ui.painter().text(
+        center,
+        Align2::CENTER_CENTER,
+        icons::LOCK,
+        egui::FontId::proportional(12.0),
+        visuals.strong_text_color(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,7 +846,7 @@ mod tests {
             session: false,
             alone: true,
             has_rom: true,
-            other_console: None,
+            has_game: true,
             joined: true,
             recognised: false,
             web: false,
@@ -807,25 +855,44 @@ mod tests {
     }
 
     #[test]
+    fn hardcore_locks_link_play_together_and_cheats_and_keeps_their_icons() {
+        let locked: Vec<Tile> = tiles(&alone())
+            .into_iter()
+            .filter(|tile| tile_locked(*tile, true))
+            .collect();
+        assert_eq!(locked, [Tile::PlayTogether, Tile::LinkGame, Tile::Cheats]);
+        assert!(
+            tiles(&alone())
+                .iter()
+                .all(|tile| !tile_locked(*tile, false))
+        );
+        assert_eq!(tile_face(Tile::LinkGame, false).0, icons::LINK_CABLE);
+        assert_eq!(tile_face(Tile::Cheats, false).0, icons::MAGIC_WAND);
+    }
+
+    #[test]
     fn screenshot_is_the_first_tile() {
         assert_eq!(tiles(&alone())[0], Tile::Screenshot);
     }
 
     #[test]
-    fn playing_alone_offers_play_together_reset_link_achievements_cheats_stats_report_and_close() {
+    fn playing_alone_offers_play_together_reset_link_achievements_this_game_cheats_stats_and_close()
+    {
         assert_eq!(
             tiles(&alone()),
             [
                 Tile::Screenshot,
                 Tile::Record,
+                Tile::Clip,
                 Tile::Hud,
+                Tile::RomInfo,
                 Tile::PlayTogether,
                 Tile::Reset,
                 Tile::LinkGame,
                 Tile::Achievements,
+                Tile::ThisGame,
                 Tile::Cheats,
                 Tile::Stats,
-                Tile::GameReport,
                 Tile::BigScreen,
                 Tile::CloseGame,
             ]
@@ -837,13 +904,11 @@ mod tests {
         let tiles = tiles(&TileFacts {
             session: true,
             alone: false,
-            other_console: Some(GbModel::Cgb),
             ..alone()
         });
         for tile in [
             Tile::PlayTogether,
             Tile::Reset,
-            Tile::PlayOn(GbModel::Cgb),
             Tile::LinkGame,
             Tile::CloseGame,
         ] {
@@ -865,23 +930,33 @@ mod tests {
         let tiles = tiles(&TileFacts {
             recognised: true,
             web: true,
-            other_console: Some(GbModel::Dmg),
             ..alone()
         });
         assert!(tiles.contains(&Tile::GameInfo));
-        assert!(tiles.contains(&Tile::PlayOn(GbModel::Dmg)));
         assert_eq!(tiles.last(), Some(&Tile::CloseGame));
         assert!(tiles.contains(&Tile::FullScreen));
     }
 
     #[test]
-    fn a_friend_session_still_offers_the_game_report() {
+    fn a_friend_session_still_offers_this_game() {
         let tiles = tiles(&TileFacts {
             session: true,
             alone: false,
             ..alone()
         });
-        assert!(tiles.contains(&Tile::GameReport));
+        assert!(tiles.contains(&Tile::ThisGame));
+    }
+
+    #[test]
+    fn this_game_replaces_the_play_on_and_game_report_tiles() {
+        assert!(tiles(&alone()).contains(&Tile::ThisGame));
+        let without = tiles(&TileFacts {
+            has_rom: false,
+            has_game: false,
+            ..alone()
+        });
+        assert!(!without.contains(&Tile::ThisGame));
+        assert!(!without.contains(&Tile::Cheats));
     }
 
     #[test]

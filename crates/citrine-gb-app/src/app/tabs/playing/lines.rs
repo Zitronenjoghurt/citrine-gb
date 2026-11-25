@@ -3,7 +3,7 @@ use crate::app::widgets::avatar;
 use crate::icons;
 use crate::online::Online;
 use crate::play::{Ending, IncomingInvite, Play, PlaySession, Stage};
-use citrine_gb_net::{GameCard, Mode, OnlineId, Refusal};
+use citrine_gb_net::{GameCard, LinkPath, Mode, OnlineId, Refusal};
 use egui::Color32;
 
 const GOOD_MS: u32 = 80;
@@ -23,6 +23,20 @@ pub fn quality(ms: u32, dark: bool) -> (&'static str, Color32) {
         ("OK", ok)
     } else {
         ("Slow", slow)
+    }
+}
+
+pub fn path_mark(path: LinkPath) -> &'static str {
+    match path {
+        LinkPath::Direct => icons::ARROWS_HORIZONTAL,
+        LinkPath::Relay => icons::GLOBE_SIMPLE,
+    }
+}
+
+pub fn path_line(path: LinkPath) -> &'static str {
+    match path {
+        LinkPath::Direct => "Direct connection",
+        LinkPath::Relay => "Through the relay",
     }
 }
 

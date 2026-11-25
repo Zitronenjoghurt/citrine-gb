@@ -61,7 +61,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut egui::Ui) {
                 lines: app,
             },
             Group {
-                icon: icons::GAME_CONTROLLER,
+                icon: icons::CARTRIDGE,
                 title: "Games",
                 hint: "The console runs the game you play. Sessions and watched rooms run a friend's game. Helpers take parts of a frame off them, such as a DS game's 3D render or a linked console. JIT compilers turn a DS game's code into code for this device while it plays.",
                 lines: games,

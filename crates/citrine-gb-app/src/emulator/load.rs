@@ -10,7 +10,7 @@ pub enum GpuClockKind {
     SubmitToDone,
 }
 
-pub const GPU_PASSES: usize = 7;
+pub const GPU_PASSES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScreenMatch {
@@ -109,7 +109,11 @@ impl super::Emulator {
         } else {
             match self.clock.refresh_period() {
                 Some(period) if !self.clock.screen_matches(self.timing()) => {
-                    ScreenMatch::Unmatched(1.0 / period)
+                    ScreenMatch::Unmatched(
+                        self.display
+                            .monitor
+                            .map_or(1.0 / period, |monitor| monitor.hz),
+                    )
                 }
                 _ => ScreenMatch::Measuring,
             }
@@ -134,7 +138,7 @@ impl super::Emulator {
                 (true, true) => "gpu",
             },
             resolution: ds_only(self.ds_3d.resolution.to_string().to_lowercase()),
-            smooth_edges: ds_only(self.ds_3d.smooth_edges.to_string().to_lowercase()),
+            smooth_edges: ds_only(self.ds_3d.smooth_edges.log_name().to_owned()),
             #[cfg(feature = "nds")]
             jit: self.load.reading.jit.is_some(),
             #[cfg(not(feature = "nds"))]

@@ -114,6 +114,7 @@ pub(crate) struct Session {
     own: [u8; 4],
     peer: WalkerInfo,
     sent: u64,
+    until: u64,
     bad: u8,
     after: Option<After>,
     outbox: Option<(Vec<u8>, u64)>,
@@ -134,6 +135,7 @@ impl Session {
             own: [0; 4],
             peer: WalkerInfo::from_slice(&[]),
             sent: 0,
+            until: 0,
             bad: 0,
             after: None,
             outbox: None,
@@ -176,7 +178,7 @@ impl Session {
                 self.state = State::Advertising { due: None, quiet };
                 Some(packet::advertisement())
             }
-            None if now >= quiet + ADVERTISE_GAP && self.sent < ADVERTISEMENTS => {
+            None if now >= quiet + ADVERTISE_GAP && self.advertises_at(now) => {
                 let backoff = u64::from((rng.next() >> 5) & 0x0F) * ticks(BACKOFF_UNIT);
                 self.state = State::Advertising {
                     due: Some(quiet + ADVERTISE_GAP + backoff),
@@ -188,6 +190,10 @@ impl Session {
         }
     }
 
+    fn advertises_at(&self, now: u64) -> bool {
+        self.sent < ADVERTISEMENTS || now < self.until
+    }
+
     fn post(&mut self, packet: Packet, arrived: u64) {
         let wire = packet.encode();
         let ready = arrived + REPLY_DELAY + airtime(wire.len());
@@ -197,11 +203,16 @@ impl Session {
 
 impl Walker {
     pub fn connect(&mut self, now: u64) {
+        self.connect_until(now, now);
+    }
+
+    pub fn connect_until(&mut self, now: u64, until: u64) {
         let session = &mut self.session;
         session.own = self.rng.state().to_be_bytes();
         session.outbox = None;
         session.after = None;
         session.sent = 0;
+        session.until = until;
         session.bad = 0;
         session.advertise(now);
         self.connect_screen_started();
@@ -268,7 +279,7 @@ impl Walker {
     pub(crate) fn expire_session(&mut self, now: u64) {
         match self.session.state {
             State::Advertising { due: None, quiet }
-                if self.session.sent >= ADVERTISEMENTS && now >= quiet + ADVERTISE_GAP =>
+                if !self.session.advertises_at(now) && now >= quiet + ADVERTISE_GAP =>
             {
                 self.close(End::NoPeer)
             }
@@ -593,6 +604,43 @@ mod tests {
         }
         assert_eq!(walker.link(), Link::Idle);
         assert_eq!(walker.events(), vec![Event::Ended(End::NoPeer)]);
+    }
+
+    fn advertisements_until(walker: &mut Walker, end: u64) -> (u64, u64) {
+        let mut at = 1_000;
+        let mut sent = 0;
+        let mut last = at;
+        while at < end {
+            at += CYCLES_PER_SECOND / 10_000;
+            if walker.take(at).is_some() {
+                sent += 1;
+                last = at;
+            }
+        }
+        (sent, last)
+    }
+
+    #[test]
+    fn a_connect_with_a_deadline_advertises_until_it_passes() {
+        let mut walker = Walker::new(1);
+        let until = 1_000 + 30 * CYCLES_PER_SECOND;
+        walker.connect_until(1_000, until);
+        let (sent, last) = advertisements_until(&mut walker, 32 * CYCLES_PER_SECOND);
+        assert!(sent > 10 * ADVERTISEMENTS, "{sent} advertisements");
+        assert!(last >= until - ADVERTISE_GAP * 2, "last at {last}");
+        assert_eq!(walker.link(), Link::Idle);
+        assert_eq!(walker.events(), vec![Event::Ended(End::NoPeer)]);
+    }
+
+    #[test]
+    fn a_game_answering_late_in_the_window_connects() {
+        let mut walker = Walker::new(1);
+        walker.connect_until(1_000, 1_000 + 30 * CYCLES_PER_SECOND);
+        advertisements_until(&mut walker, 25 * CYCLES_PER_SECOND);
+        assert_eq!(walker.link(), Link::Advertising);
+        walker.send(&ASSERT_MASTER_WIRE, 25 * CYCLES_PER_SECOND);
+        assert_eq!(walker.link(), Link::Connected);
+        assert_eq!(walker.events(), vec![Event::Connected]);
     }
 
     #[test]

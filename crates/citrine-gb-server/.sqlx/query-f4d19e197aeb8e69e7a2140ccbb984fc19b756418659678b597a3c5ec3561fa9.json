@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO archive_access (account, game, granted_at)\n             SELECT id, NULL, ?2 FROM accounts WHERE id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f4d19e197aeb8e69e7a2140ccbb984fc19b756418659678b597a3c5ec3561fa9"
+}

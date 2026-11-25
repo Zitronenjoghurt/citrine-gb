@@ -428,7 +428,7 @@ int rc_hash_nintendo_ds(char hash[33], const rc_hash_iterator_t* iterator)
   arm7_size = header[0x3C] | (header[0x3D] << 8) | (header[0x3E] << 16) | (header[0x3F] << 24);
   icon_addr = header[0x68] | (header[0x69] << 8) | (header[0x6A] << 16) | (header[0x6B] << 24);
 
-  if (arm9_size + arm7_size > 16 * 1024 * 1024) {
+  if ((uint64_t)arm9_size + arm7_size > 16 * 1024 * 1024) {
     /* sanity check - code blocks are typically less than 1MB each - assume not a DS ROM */
     return rc_hash_iterator_error_formatted(iterator, "arm9 code size (%u) + arm7 code size (%u) exceeds 16MB", arm9_size, arm7_size);
   }

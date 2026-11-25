@@ -160,7 +160,10 @@ impl Cartridge {
     }
 
     #[cfg(feature = "persistence")]
-    pub(crate) fn restore_storage(&mut self, like: &Self, ram: &[u8]) {
+    pub(crate) fn restore_storage(&mut self, like: &Self, ram: &[u8]) -> GbResult<()> {
+        if !self.mbc.keep_sizes_of(&like.mbc) {
+            return Err(GbError::DamagedState);
+        }
         self.clocked = self.mbc.is_clocked();
         self.owes = self.clocked && self.mbc.advances_in_bulk();
         self.owed = 0;
@@ -171,6 +174,7 @@ impl Cartridge {
             bank[..chunk.len()].copy_from_slice(chunk);
         }
         self.map_rom();
+        Ok(())
     }
 
     pub fn rom_bytes(&self) -> Arc<[u8]> {
@@ -189,8 +193,14 @@ impl Cartridge {
     pub fn restore_rom(&mut self, rom: &Rom) -> GbResult<()> {
         let header = rom.header()?;
         let rom_banks = header.rom_banks.max(2);
+        let banks = rom_banks_of(rom, rom_banks)?;
+        let mut like = mbc::Mbc::try_from(&header)?;
+        like.set_multicart(is_mbc1_multicart(&banks));
+        if !self.mbc.keep_sizes_of(&like) {
+            self.mbc = like;
+        }
 
-        self.rom = rom_banks_of(rom, rom_banks)?;
+        self.rom = banks;
         self.patches = PatchedRom::default();
         self.ram = vec![[0; RAM_BANK_SIZE]; header.ram_banks.max(1)];
         self.clocked = self.mbc.is_clocked();
@@ -305,6 +315,11 @@ impl Cartridge {
         if self.owed > 0 {
             self.mbc.advance(std::mem::take(&mut self.owed));
         }
+    }
+
+    #[cfg(feature = "persistence")]
+    pub(crate) fn forget_unsaved(&mut self) {
+        self.sram_dirty = false;
     }
 
     pub(crate) fn clocked(&self) -> bool {
@@ -504,6 +519,26 @@ impl Cartridge {
     }
 
     #[cfg(feature = "persistence")]
+    pub fn put_state_sram_dump(&mut self, dump: crate::persistence::sram_dump::SramDump, now: u64) {
+        let Some(exact) = self.mbc.rtc().cloned() else {
+            return self.put_sram_dump(dump, now);
+        };
+        if !self.has_battery {
+            return;
+        };
+        let mut save = self.read_battery(dump.as_slice());
+        let behind = save
+            .clock
+            .take()
+            .map_or(0, |clock| clock.seconds_until(now));
+        self.put_battery(save, now);
+        if let Some(rtc) = self.mbc.rtc_mut() {
+            *rtc = exact;
+            rtc.advance_seconds(behind);
+        }
+    }
+
+    #[cfg(feature = "persistence")]
     pub fn battery_ram(&self) -> Vec<u8> {
         let mut data = self.ram.concat();
         data.truncate(self.header.ram_banks * RAM_BANK_SIZE);
@@ -626,7 +661,7 @@ fn is_mbc1_multicart(rom: &[u8]) -> bool {
 mod tests {
     use crate::ReadMemory;
     use crate::WriteMemory;
-    use crate::console::Console;
+    use crate::console::{Console, Rollback};
     use crate::gb::{GameBoy, GbModel};
     use crate::rom::Rom;
 
@@ -663,6 +698,16 @@ mod tests {
             gb.cartridge.write_naive(0x4000, bank);
             assert_eq!(gb.cartridge.read_naive(0xA000), 0x40 + bank);
         }
+    }
+
+    #[test]
+    fn a_battery_flush_leaves_the_check_hash_alone() {
+        let mut gb = loaded(&rom(0x03, 0x01, 0x02));
+        gb.cartridge.write_naive(0x0000, 0x0A);
+        gb.cartridge.write_naive(0xA000, 0x42);
+        let unsaved = gb.check_hash();
+        assert!(gb.battery(false, NOW).is_some());
+        assert_eq!(gb.check_hash(), unsaved);
     }
 
     #[test]
@@ -958,5 +1003,46 @@ mod tests {
             gb.cartridge.soft_reset();
             assert_rom_reads_match(&gb, *kind);
         }
+    }
+
+    fn snapshot_of(gb: &mut GameBoy, data: &[u8]) -> crate::error::GbResult<GameBoy> {
+        use crate::persistence::full_dump::FullDump;
+        let sram = gb.poll_sram_dump(true, NOW);
+        let bytes = gb.full_dump(sram).to_rmp().expect("the dump encodes");
+        let dump = FullDump::from_rmp(&bytes).expect("the dump decodes");
+        GameBoy::from_full_dump(dump, &Rom::new(data), NOW)
+    }
+
+    #[test]
+    fn a_state_with_damaged_bank_counts_takes_them_from_the_rom() {
+        let data = rom(0x03, 0x02, 0x03);
+        let base = loaded(&data);
+        let mut damaged = loaded(&data);
+        damaged.cartridge.write_naive(0x2000, 0x05);
+        let super::mbc::Mbc::Mbc1(mbc) = &mut damaged.cartridge.mbc else {
+            panic!("the cart is an MBC1");
+        };
+        mbc.rom_bank_count = usize::MAX;
+        mbc.ram_bank_count = usize::MAX;
+        let state = damaged.encode_state().expect("the state encodes");
+        let back = base.decode_state(&state).expect("the state decodes");
+        assert_eq!(back.cartridge.read_naive(0x6000), 5);
+        let back = snapshot_of(&mut damaged, &data).expect("the snapshot loads");
+        assert_eq!(back.cartridge.read_naive(0x6000), 5);
+    }
+
+    #[test]
+    fn a_state_with_another_mapper_is_refused_for_rollback_and_reset_in_a_snapshot() {
+        let data = rom(0x03, 0x02, 0x03);
+        let base = loaded(&data);
+        let mut damaged = loaded(&data);
+        damaged.cartridge.mbc = super::mbc::Mbc::None;
+        let state = damaged.encode_state().expect("the state encodes");
+        assert!(matches!(
+            base.decode_state(&state),
+            Err(crate::error::GbError::DamagedState)
+        ));
+        let back = snapshot_of(&mut damaged, &data).expect("the snapshot loads");
+        assert!(matches!(back.cartridge.mbc, super::mbc::Mbc::Mbc1(_)));
     }
 }

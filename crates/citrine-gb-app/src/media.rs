@@ -3,6 +3,7 @@ pub mod clipboard;
 mod native;
 pub mod playback;
 pub mod recording;
+pub mod render;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub mod reveal;
 #[cfg(target_arch = "wasm32")]
@@ -27,13 +28,15 @@ pub enum MediaKind {
     Screenshot,
     Recording,
     Print,
+    Replay,
 }
 
 impl MediaKind {
-    pub const ALL: [MediaKind; 3] = [
+    pub const ALL: [MediaKind; 4] = [
         MediaKind::Screenshot,
         MediaKind::Recording,
         MediaKind::Print,
+        MediaKind::Replay,
     ];
 
     pub fn folder(self) -> &'static str {
@@ -41,6 +44,7 @@ impl MediaKind {
             MediaKind::Screenshot => "screenshots",
             MediaKind::Recording => "recordings",
             MediaKind::Print => "prints",
+            MediaKind::Replay => "replays",
         }
     }
 
@@ -48,14 +52,22 @@ impl MediaKind {
         match self {
             MediaKind::Screenshot | MediaKind::Print => "png",
             MediaKind::Recording => "mp4",
+            MediaKind::Replay => "replay",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             MediaKind::Screenshot => "Screenshot",
-            MediaKind::Recording => "Recording",
+            MediaKind::Recording | MediaKind::Replay => "Recording",
             MediaKind::Print => "Print",
+        }
+    }
+
+    pub fn shelf(self) -> MediaKind {
+        match self {
+            MediaKind::Replay => MediaKind::Recording,
+            kind => kind,
         }
     }
 }
@@ -109,6 +121,10 @@ pub struct MediaInfo {
     pub width: u32,
     pub height: u32,
     pub length_ms: Option<u64>,
+    #[serde(default)]
+    pub frame_times: bool,
+    #[serde(default)]
+    pub video: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +159,9 @@ pub struct NewMedia {
     pub width: u32,
     pub height: u32,
     pub length_ms: Option<u64>,
+    pub frame_times: bool,
+    pub video: bool,
+    pub replay: Option<Box<citrine_gb_replay::Replay>>,
     pub frame: Frame,
 }
 
@@ -158,6 +177,9 @@ impl NewMedia {
             width: video.width as u32,
             height: video.height as u32,
             length_ms: None,
+            frame_times: false,
+            video: false,
+            replay: None,
             frame: Frame {
                 width: video.width as u32,
                 height: video.height as u32,
@@ -177,6 +199,8 @@ impl NewMedia {
             width: self.width,
             height: self.height,
             length_ms: self.length_ms,
+            frame_times: self.frame_times,
+            video: self.video,
         }
     }
 }
@@ -227,6 +251,7 @@ pub fn export(store: &MediaStore, id: &MediaId, files: &crate::utils::file_chann
     let filter = match kind {
         MediaKind::Screenshot | MediaKind::Print => "PNG image",
         MediaKind::Recording => "MP4 video",
+        MediaKind::Replay => "Citrine replay",
     };
     let saver = crate::utils::file_saver::FileSaver::new(id.file_name())
         .add_filter(filter, &[kind.extension()]);
@@ -370,12 +395,22 @@ pub fn encode_thumbnail(frame: &Frame) -> Option<Vec<u8>> {
     crate::utils::screenshot::encode_png(thumb.width as usize, thumb.height as usize, &thumb.rgba)
 }
 
+const MAX_PNG_PIXELS: u64 = 8192 * 8192;
+
 pub fn decode_png(bytes: &[u8]) -> Option<Frame> {
+    decode_png_within(bytes, MAX_PNG_PIXELS)
+}
+
+pub fn decode_png_within(bytes: &[u8], max_pixels: u64) -> Option<Frame> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(
         png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
     );
     let mut reader = decoder.read_info().ok()?;
+    let (width, height) = reader.info().size();
+    if u64::from(width) * u64::from(height) > max_pixels {
+        return None;
+    }
     let mut buf = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     buf.truncate(info.buffer_size());
@@ -413,15 +448,26 @@ pub fn format_size(bytes: u64) -> String {
     } else if value < KB * KB {
         format!("{:.0} KB", value / KB)
     } else if value < KB * KB * KB {
-        format!("{} MB", one_place(value / (KB * KB)))
+        format!("{:.1} MB", value / (KB * KB))
     } else {
-        format!("{} GB", one_place(value / (KB * KB * KB)))
+        format!("{:.1} GB", value / (KB * KB * KB))
     }
 }
 
-fn one_place(value: f64) -> String {
-    let text = format!("{value:.1}");
-    text.strip_suffix(".0").map(str::to_owned).unwrap_or(text)
+pub fn shown_size(bytes: u64) -> u64 {
+    let text = format_size(bytes);
+    let Some((number, unit)) = text.split_once(' ') else {
+        return bytes;
+    };
+    let scale = match unit {
+        "KB" => 1u64 << 10,
+        "MB" => 1 << 20,
+        "GB" => 1 << 30,
+        _ => 1,
+    };
+    number
+        .parse::<f64>()
+        .map_or(bytes, |value| (value * scale as f64).round() as u64)
 }
 
 pub fn format_length(length_ms: u64) -> String {
@@ -435,7 +481,7 @@ pub fn format_length(length_ms: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -521,11 +567,62 @@ mod tests {
         assert_eq!(png_size(&png), Some((2, 1)));
     }
 
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let body = [kind.as_slice(), data].concat();
+        [
+            (data.len() as u32).to_be_bytes().as_slice(),
+            &body,
+            &crc32(&body).to_be_bytes(),
+        ]
+        .concat()
+    }
+
+    pub(crate) fn png_claiming(width: u32, height: u32) -> Vec<u8> {
+        let ihdr = [
+            width.to_be_bytes().as_slice(),
+            &height.to_be_bytes(),
+            &[8, 6, 0, 0, 0],
+        ]
+        .concat();
+        [
+            b"\x89PNG\r\n\x1a\n".as_slice(),
+            &chunk(b"IHDR", &ihdr),
+            &chunk(b"IDAT", &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]),
+            &chunk(b"IEND", &[]),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn a_png_that_claims_a_huge_size_is_refused_before_any_memory_is_taken() {
+        assert!(decode_png(&png_claiming(4_000_000, 0x7fff_ffff)).is_none());
+        assert!(decode_png(&png_claiming(8193, 8192)).is_none());
+    }
+
     #[test]
     fn sizes_and_lengths_read_plainly() {
         assert_eq!(format_size(512), "512 B");
         assert_eq!(format_size(20 * 1024), "20 KB");
         assert_eq!(format_size(3 * 1024 * 1024 + 200 * 1024), "3.2 MB");
+        assert_eq!(format_size(2 * 1024 * 1024), "2.0 MB");
+        assert_eq!(format_size(3 << 30), "3.0 GB");
+        assert_eq!(shown_size(13_460_000), 13_421_773);
+        assert_eq!(shown_size(20 * 1024 + 100), 20 * 1024);
         assert_eq!(format_length(42_500), "0:42");
         assert_eq!(format_length(3_725_000), "1:02:05");
     }

@@ -16,9 +16,9 @@ const BITMAP_OBJ_VRAM: u32 = 0x4000;
 const IO_PAGE: u32 = 0x04;
 const EWRAM_PAGE: u32 = 0x02;
 pub(super) const IWRAM_PAGE: u32 = 0x03;
-const PLAIN_ROM_START: u32 = 0x0800_0000;
-const PLAIN_ROM_SPAN: u32 = 0x0500_0000;
-const ROM_MIRROR_MASK: u32 = 0x01FF_FFFF;
+pub(super) const PLAIN_ROM_START: u32 = 0x0800_0000;
+pub(super) const PLAIN_ROM_SPAN: u32 = 0x0500_0000;
+pub(super) const ROM_MIRROR_MASK: u32 = 0x01FF_FFFF;
 
 impl Bus {
     pub(crate) fn fetch_code(&mut self, addr: u32, width: Width) -> u32 {
@@ -151,22 +151,32 @@ impl Bus {
 
     #[cfg(any(jit, test))]
     #[inline(always)]
-    pub(crate) fn iwram_run(&mut self, addr: u32, width: Width, count: u32, room: u32) -> bool {
+    pub(crate) fn iwram_run(
+        &mut self,
+        addr: u32,
+        width: Width,
+        count: u32,
+        cycles: u32,
+        room: u32,
+    ) -> bool {
         let step = width.bytes() as u32;
         let end = addr.wrapping_add((count - 1) * step);
         if addr >> 24 != IWRAM_PAGE
             || end >> 24 != IWRAM_PAGE
-            || count >= room
-            || self.clock.now.saturating_add(count) > self.dma_check
+            || cycles < count
+            || cycles >= room
+            || self.clock.now.saturating_add(cycles) > self.dma_check
         {
             return false;
         }
         if self.wait.prefetch() {
-            self.prefetch.run(count - 1);
+            self.prefetch.run(cycles - 1);
+        } else {
+            self.prefetch.run(cycles - count);
         }
         self.prefetch.fetch_in_one(self.wait);
-        self.clock.sample = self.clock.now + count;
-        self.clock.now += count;
+        self.clock.sample = self.clock.now + cycles;
+        self.clock.now += cycles;
         for index in count.saturating_sub(2)..count {
             let at = addr.wrapping_add(index * step);
             let value = read_le(&self.iwram, at as usize % IWRAM_SIZE, width);
@@ -782,7 +792,7 @@ impl Bus {
 #[derive(Debug, Default, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(super) struct Clock {
-    now: u32,
+    pub(super) now: u32,
     timers: u32,
     video: u32,
     overflows: Overflows,
@@ -793,7 +803,7 @@ pub(super) struct Clock {
     #[cfg_attr(feature = "serde", serde(default))]
     serial: u32,
     #[cfg_attr(feature = "serde", serde(skip))]
-    sample: u32,
+    pub(super) sample: u32,
     #[cfg_attr(feature = "serde", serde(skip))]
     lead: u32,
     #[cfg_attr(feature = "serde", serde(skip))]

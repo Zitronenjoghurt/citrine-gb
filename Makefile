@@ -1,4 +1,4 @@
-.PHONY: bench bench-image bench-ir bench-wall bench-record bench-compare bench-flame web web-plain web-threaded web-threaded-check version test test-mooneye ledger ledger-check ledger-nds ledger-bios ledger-bios-check ledger-intro ledger-intro-check arm7tdmi build-tests lab lab-deps check fmt lint dev native up down build logs publish results significance release bundle-mac icons
+.PHONY: bench bench-image bench-ir bench-wall bench-record bench-compare bench-flame web web-plain web-threaded web-threaded-check version test test-mooneye ledger ledger-check ledger-nds ledger-bios ledger-bios-check ledger-intro ledger-intro-check arm7tdmi build-tests lab lab-deps check fmt lint dev native up down build logs publish publish-check results significance release bundle-mac icons
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 WEB_NIGHTLY := nightly-2026-11-01
 PUBLIC_URL ?= /
@@ -87,7 +87,7 @@ arm7tdmi:
 test:
 	cargo test --release -- --nocapture
 
-check: fmt lint test
+check: fmt lint test publish-check
 	rustup target add wasm32-unknown-unknown
 	cargo check -p citrine-gb --features debug
 	cargo check -p citrine-gb --features serde
@@ -136,9 +136,24 @@ build:
 logs:
 	docker compose -f crates/citrine-gb-server/docker/docker-compose.yml logs -f
 
+PUBLISH_CRATES := citrine-gb-blip citrine-gb-threads citrine-gb
+PUBLISH_TARGET_DIR := $(or $(CARGO_TARGET_DIR),$(CURDIR)/target)
+PUBLISH_CHECK_DIR := $(PUBLISH_TARGET_DIR)/publish-check
+
 publish:
 	cargo test -p citrine-gb --release
-	cd crates/citrine-gb && cargo publish
+	cargo publish $(addprefix -p ,$(PUBLISH_CRATES))
+
+publish-check:
+	cargo package --allow-dirty $(addprefix -p ,$(PUBLISH_CRATES))
+	rm -rf $(PUBLISH_CHECK_DIR)/crates
+	mkdir -p $(PUBLISH_CHECK_DIR)/crates
+	for c in $(PUBLISH_CRATES); do tar -xzf $(PUBLISH_TARGET_DIR)/package/$$c-$(VERSION).crate -C $(PUBLISH_CHECK_DIR)/crates || exit 1; done
+	printf '[workspace]\nmembers = ["citrine-gb-$(VERSION)"]\nresolver = "3"\n\n[patch.crates-io]\n' > $(PUBLISH_CHECK_DIR)/crates/Cargo.toml
+	for c in $(filter-out citrine-gb,$(PUBLISH_CRATES)); do echo "$$c = { path = \"$$c-$(VERSION)\" }" >> $(PUBLISH_CHECK_DIR)/crates/Cargo.toml; done
+	cd $(PUBLISH_CHECK_DIR)/crates && CARGO_TARGET_DIR=$(PUBLISH_CHECK_DIR)/target cargo build -q -p citrine-gb
+	cd $(PUBLISH_CHECK_DIR)/crates && CARGO_TARGET_DIR=$(PUBLISH_CHECK_DIR)/target cargo build -q -p citrine-gb --features gba
+	cd $(PUBLISH_CHECK_DIR)/crates && CARGO_TARGET_DIR=$(PUBLISH_CHECK_DIR)/target cargo build -q -p citrine-gb --features nds
 
 icons:
 	./scripts/gen-icns.sh

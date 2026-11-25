@@ -67,7 +67,9 @@ pub struct Files {
 #[cfg(not(target_arch = "wasm32"))]
 impl Files {
     fn hash_of(&self, path: &std::path::Path) -> Option<GameHash> {
-        let meta = std::fs::metadata(path).ok()?;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return self.zipped_hash_of(path);
+        };
         let (size, changed) = (meta.len(), meta.modified().ok()?);
         if size == 0 || size > MAX_OWN_GAME_BYTES {
             return None;
@@ -80,6 +82,24 @@ impl Files {
         self.index.keep(path, size, changed, hash);
         Some(hash)
     }
+
+    fn zipped_hash_of(&self, path: &std::path::Path) -> Option<GameHash> {
+        let (zip, _) = crate::utils::zip_games::split_entry(path)?;
+        let changed = std::fs::metadata(zip).ok()?.modified().ok()?;
+        crate::utils::zip_games::with_entry(path, |size, entry| {
+            if size == 0 || size > MAX_OWN_GAME_BYTES {
+                return Ok(None);
+            }
+            if let Some(hash) = self.index.known(path, size, changed) {
+                return Ok(Some(hash));
+            }
+            let hash = citrine_gb::rom::id::game_sha1_from(entry, size)?;
+            self.index.keep(path, size, changed, hash);
+            Ok(Some(hash))
+        })
+        .ok()
+        .flatten()
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -88,7 +108,7 @@ impl Shelf for Files {
         Homebrew.find(hash).or_else(|| {
             self.paths.iter().find_map(|path| {
                 (self.hash_of(path)? == *hash)
-                    .then(|| std::fs::read(path).ok().map(Arc::from))
+                    .then(|| crate::utils::zip_games::read_game(path).ok())
                     .flatten()
             })
         })
@@ -107,7 +127,11 @@ impl Shelf for Files {
 fn ds_code(path: &std::path::Path) -> Option<[u8; 4]> {
     use std::io::Read;
     let mut head = [0; 0x10];
-    std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+    match std::fs::File::open(path) {
+        Ok(mut file) => file.read_exact(&mut head).ok()?,
+        Err(_) => crate::utils::zip_games::with_entry(path, |_, entry| entry.read_exact(&mut head))
+            .ok()?,
+    }
     head[0x0C..].try_into().ok()
 }
 
@@ -299,6 +323,29 @@ mod tests {
             Some(&vec![0; used][..])
         );
         assert!(files(&Arc::default()).find(&hash).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_zipped_game_is_found_by_its_hash_and_its_ds_code() {
+        let full = include_bytes!("../../fixtures/nds/blocksds-console-both-screens.nds");
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("pack.zip");
+        let packed = crate::utils::zip_games::tests::zip_of(
+            &[("roms/game.nds", full)],
+            zip::CompressionMethod::Deflated,
+        );
+        std::fs::write(&zip, packed).unwrap();
+        let hash = super::super::sha1_of(full).unwrap();
+        let files = Files {
+            paths: vec![zip.join("roms").join("game.nds")],
+            index: Arc::default(),
+        };
+        assert_eq!(files.find(&hash).as_deref(), Some(&full[..]));
+        assert_eq!(files.find(&hash).as_deref(), Some(&full[..]));
+        let code: [u8; 4] = full[0x0C..0x10].try_into().unwrap();
+        assert!(files.holds_ds_game(code));
+        assert!(!files.holds_ds_game(*b"ZZZZ"));
     }
 
     #[test]

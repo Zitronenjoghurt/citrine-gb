@@ -28,9 +28,11 @@
 	<string>public.app-category.games</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Citrine finds your phones and tablets on this network to use them as second screens.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Citrine lets DS games hear your microphone.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>MIT licensed. https://github.com/Zitronenjoghurt/citrine-gb</string>
+	<string>Copyright (C) 2026 Zitronenjoghurt. GPL-3.0-or-later. https://github.com/Zitronenjoghurt/citrine-gb</string>
 </dict>
 </plist>

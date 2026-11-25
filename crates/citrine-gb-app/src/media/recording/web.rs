@@ -138,6 +138,22 @@ pub struct Output {
     pub size: u64,
 }
 
+impl Output {
+    pub async fn pack(
+        self,
+        mut replay: citrine_gb_replay::Replay,
+    ) -> Result<(Vec<u8>, Self), (String, Self)> {
+        let Ok(buffer) = JsFuture::from(self.blob.array_buffer()).await else {
+            return Err(("the video can't be read".to_string(), self));
+        };
+        replay.video = Some(js_sys::Uint8Array::new(&buffer).to_vec());
+        match replay.write() {
+            Ok(bytes) => Ok((bytes, self)),
+            Err(err) => Err((err.to_string(), self)),
+        }
+    }
+}
+
 struct State {
     layout: Mp4Layout,
     error: Option<String>,
@@ -326,6 +342,10 @@ impl Worker {
         let timestamp = self.audio_frames as f64 * 1_000_000.0 / self.sample_rate.max(1) as f64;
         self.recorder.sound(samples, timestamp.round());
         self.audio_frames += (samples.len() / CHANNELS) as u64;
+    }
+
+    pub(crate) fn pictures_waiting(&self) -> usize {
+        self.recorder.backlog() as usize
     }
 
     pub fn failed_or_full(&self) -> Option<StopReason> {

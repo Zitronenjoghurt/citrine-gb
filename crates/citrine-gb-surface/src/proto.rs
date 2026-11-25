@@ -1,26 +1,14 @@
 use crate::mode::{Mode, ScreenShape};
-use crate::pairing::Code;
-use crate::proof::{Nonce, Proof};
 use crate::touch::ScreenTouch;
+use citrine_gb_net::{CheckCommit, CheckNonce};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const SURFACE_VERSION: u16 = 2;
+pub const SURFACE_VERSION: u16 = 5;
 pub const MAX_NAME_CHARS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SurfaceId(pub u32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Resume(pub [u8; 16]);
-
-impl Resume {
-    pub fn random() -> Self {
-        let mut bytes = [0; 16];
-        let _ = getrandom::getrandom(&mut bytes);
-        Self(bytes)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SurfaceKind {
@@ -34,6 +22,16 @@ pub struct Icon {
     pub width: u16,
     pub height: u16,
     pub rgba: Vec<u8>,
+}
+
+impl Icon {
+    pub const MAX_SIDE: u16 = 256;
+
+    pub fn is_whole(&self) -> bool {
+        self.width <= Self::MAX_SIDE
+            && self.height <= Self::MAX_SIDE
+            && self.rgba.len() == usize::from(self.width) * usize::from(self.height) * 4
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +64,7 @@ pub enum Bye {
     Declined,
     NoGame,
     NoAnswer,
+    TooManyAsks,
 }
 
 impl Bye {
@@ -78,6 +77,7 @@ impl Bye {
             Self::Declined => "The other device said not now",
             Self::NoGame => "No game is running on the other device",
             Self::NoAnswer => "The other device didn't answer",
+            Self::TooManyAsks => "Too many tries. Wait 10 minutes",
         }
     }
 }
@@ -91,41 +91,78 @@ pub enum Action {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostMsg {
-    Welcome {
-        id: SurfaceId,
-        resume: Resume,
-        host: String,
-    },
+    Welcome { id: SurfaceId, host: String },
     Game(Option<GameCard>),
     Mode(Mode),
     Frame(Frame),
     Bye(Bye),
     Asking,
-    Challenge {
-        nonce: Nonce,
-        host: u64,
-    },
+    Opened { reply: Vec<u8>, pake: Vec<u8> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Entry {
+    Own,
+    Code,
+    Resume(SurfaceId),
+    Asked(CheckCommit),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hello {
+    pub version: u16,
+    pub name: String,
+    pub kind: SurfaceKind,
+    empty_v2_fields: [u8; 2],
+    pub entry: Entry,
+    pub handshake: Vec<u8>,
+    pub pake: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+enum Front {
+    Hello { version: u16, name: String },
+}
+
+const PROLOGUE: &[u8] = b"citrine screen link v5";
+
+impl Hello {
+    pub fn new(name: String, kind: SurfaceKind, entry: Entry) -> Self {
+        Self {
+            version: SURFACE_VERSION,
+            name,
+            kind,
+            empty_v2_fields: [0; 2],
+            entry,
+            handshake: Vec::new(),
+            pake: Vec::new(),
+        }
+    }
+
+    pub fn front(bytes: &[u8]) -> Option<(u16, String)> {
+        let Front::Hello { version, name } = postcard::from_bytes(bytes).ok()?;
+        Some((version, name))
+    }
+
+    pub fn prologue(&self) -> Vec<u8> {
+        let mut prologue = PROLOGUE.to_vec();
+        let said = (self.version, &self.name, self.kind, self.entry, &self.pake);
+        prologue.extend(postcard::to_stdvec(&said).unwrap_or_default());
+        prologue
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SurfaceMsg {
-    Hello {
-        version: u16,
-        name: String,
-        kind: SurfaceKind,
-        code: Option<Code>,
-        resume: Option<Resume>,
-    },
+    Hello(Hello),
     SetMode(Mode),
     Touch(Option<ScreenTouch>),
     Buttons(u16),
-    Ack {
-        screen: u8,
-        seq: u32,
-    },
+    Ack { screen: u8, seq: u32 },
     Action(Action),
     Leave,
-    Proof(Option<Proof>),
+    Ready,
+    Check(CheckNonce),
 }
 
 pub trait Wire: Serialize + DeserializeOwned {
@@ -144,6 +181,18 @@ impl Wire for SurfaceMsg {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_icon_is_whole_only_when_its_pixels_match_its_size() {
+        let icon = |width, height, len| Icon {
+            width,
+            height,
+            rgba: vec![0; len],
+        };
+        assert!(icon(32, 32, 32 * 32 * 4).is_whole());
+        assert!(!icon(32, 32, 7).is_whole());
+        assert!(!icon(1024, 1, 1024 * 4).is_whole());
+    }
     use crate::mode::{Preset, View};
 
     #[test]
@@ -151,7 +200,6 @@ mod tests {
         let host = [
             HostMsg::Welcome {
                 id: SurfaceId(3),
-                resume: Resume([7; 16]),
                 host: "Clara's PC".into(),
             },
             HostMsg::Game(Some(GameCard {
@@ -184,23 +232,22 @@ mod tests {
             HostMsg::Bye(Bye::Removed),
             HostMsg::Bye(Bye::Declined),
             HostMsg::Asking,
-            HostMsg::Challenge {
-                nonce: [3; 16],
-                host: 9,
+            HostMsg::Opened {
+                reply: vec![3; 48],
+                pake: vec![5; 33],
             },
             HostMsg::Bye(Bye::NoAnswer),
+            HostMsg::Bye(Bye::TooManyAsks),
         ];
         for msg in host {
             assert_eq!(HostMsg::decode(&msg.encode()), Some(msg));
         }
         let surface = [
-            SurfaceMsg::Hello {
-                version: SURFACE_VERSION,
-                name: "Pixel 8".into(),
-                kind: SurfaceKind::Device,
-                code: Code::parse("482 913"),
-                resume: None,
-            },
+            SurfaceMsg::Hello(Hello::new(
+                "Pixel 8".into(),
+                SurfaceKind::Device,
+                Entry::Resume(SurfaceId(4)),
+            )),
             SurfaceMsg::SetMode(Mode::Preset(Preset::GameInfo)),
             SurfaceMsg::Touch(Some(ScreenTouch {
                 screen: 1,
@@ -212,8 +259,13 @@ mod tests {
             SurfaceMsg::Ack { screen: 1, seq: 9 },
             SurfaceMsg::Action(Action::SaveState),
             SurfaceMsg::Leave,
-            SurfaceMsg::Proof(Some([5; 32])),
-            SurfaceMsg::Proof(None),
+            SurfaceMsg::Ready,
+            SurfaceMsg::Check(CheckNonce::from_bytes([6; 32])),
+            SurfaceMsg::Hello(Hello::new(
+                "Pixel 8".into(),
+                SurfaceKind::Device,
+                Entry::Asked(CheckNonce::from_bytes([6; 32]).commit()),
+            )),
         ];
         for msg in surface {
             assert_eq!(SurfaceMsg::decode(&msg.encode()), Some(msg));
@@ -222,26 +274,81 @@ mod tests {
 
     #[test]
     fn a_hello_starts_with_its_version_so_any_host_can_refuse_it() {
-        let hello = SurfaceMsg::Hello {
-            version: 1,
-            name: "Old phone".into(),
-            kind: SurfaceKind::Device,
-            code: None,
-            resume: None,
-        };
-        assert_eq!(hello.encode()[..2], [0, 1]);
+        let hello = SurfaceMsg::Hello(Hello::new(
+            "Pixel 8".into(),
+            SurfaceKind::Device,
+            Entry::Own,
+        ));
+        assert_eq!(hello.encode()[..2], [0, 5]);
         let bye = HostMsg::Bye(Bye::NeedsUpdate).encode();
         assert_eq!(bye, [4, 2]);
+    }
+
+    #[derive(Debug, Deserialize)]
+    enum HelloOf0_12 {
+        Hello {
+            version: u16,
+            name: String,
+            kind: SurfaceKind,
+            code: Option<crate::pairing::Code>,
+            resume: Option<[u8; 16]>,
+        },
+    }
+
+    #[test]
+    fn a_0_12_host_reads_the_hello_far_enough_to_refuse_it() {
+        let mut hello = Hello::new("Pixel 8".into(), SurfaceKind::Device, Entry::Code);
+        hello.handshake = vec![7; 32];
+        let bytes = SurfaceMsg::Hello(hello).encode();
+        let HelloOf0_12::Hello {
+            version,
+            name,
+            kind,
+            code,
+            resume,
+        } = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(version, 5);
+        assert_eq!(name, "Pixel 8");
+        assert_eq!((kind, code, resume), (SurfaceKind::Device, None, None));
+    }
+
+    #[test]
+    fn the_front_of_any_hello_names_its_version_and_device() {
+        let commit = CheckNonce::from_bytes([1; 32]).commit();
+        let new = SurfaceMsg::Hello(Hello::new(
+            "Mac".into(),
+            SurfaceKind::Window,
+            Entry::Asked(commit),
+        ));
+        assert_eq!(Hello::front(&new.encode()), Some((5, "Mac".into())));
+        let of_0_12 = [0, 2, 7, b'P', b'i', b'x', b'e', b'l', b' ', b'8', 2, 0, 0];
+        assert_eq!(Hello::front(&of_0_12), Some((2, "Pixel 8".into())));
+        assert_eq!(Hello::front(&SurfaceMsg::Ready.encode()), None);
+    }
+
+    #[test]
+    fn the_prologue_holds_all_the_hello_says_but_the_handshake() {
+        let hello = Hello::new("Pixel 8".into(), SurfaceKind::Device, Entry::Own);
+        let mut renamed = hello.clone();
+        renamed.name = "Pixel 9".into();
+        let mut asked = hello.clone();
+        asked.entry = Entry::Asked(CheckNonce::from_bytes([1; 32]).commit());
+        let mut recommitted = hello.clone();
+        recommitted.entry = Entry::Asked(CheckNonce::from_bytes([2; 32]).commit());
+        let mut shaken = hello.clone();
+        shaken.handshake = vec![1; 32];
+        let mut paked = hello.clone();
+        paked.pake = vec![2; 33];
+        assert_ne!(hello.prologue(), renamed.prologue());
+        assert_ne!(hello.prologue(), asked.prologue());
+        assert_ne!(asked.prologue(), recommitted.prologue());
+        assert_ne!(hello.prologue(), paked.prologue());
+        assert_eq!(hello.prologue(), shaken.prologue());
     }
 
     #[test]
     fn junk_does_not_decode() {
         assert_eq!(HostMsg::decode(&[250, 1, 2]), None);
         assert_eq!(SurfaceMsg::decode(&[]), None);
-    }
-
-    #[test]
-    fn resume_tokens_differ() {
-        assert_ne!(Resume::random(), Resume::random());
     }
 }

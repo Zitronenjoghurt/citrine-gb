@@ -176,8 +176,8 @@ mod tests {
     const KEY: &str = "CRASHGAME";
 
     fn store(name: &str) -> (SaveStore, std::path::PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("citrine-crash-test-{}-{name}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-crash-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         (SaveStore::at(root.clone()), root)
     }

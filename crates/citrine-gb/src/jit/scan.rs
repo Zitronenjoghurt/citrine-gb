@@ -171,6 +171,39 @@ impl Transfer {
         };
         width | u32::from(self.signed) << 2
     }
+
+    pub fn pc_literal(self, pc: u32) -> Option<u32> {
+        let Offset::Immediate(imm) = self.offset else {
+            return None;
+        };
+        let literal = self.load()
+            && self.rn == PC
+            && self.width == Width::Word
+            && !self.signed
+            && self.pre()
+            && !self.writeback();
+        if !literal {
+            return None;
+        }
+        Some(if self.up() {
+            pc.wrapping_add(imm)
+        } else {
+            pc.wrapping_sub(imm)
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Literal {
+    pub index: u32,
+    pub addr: u32,
+    pub word: u32,
+}
+
+impl Literal {
+    pub fn key(self) -> [u32; 2] {
+        [self.index, self.word]
+    }
 }
 
 pub struct Plan<'a> {
@@ -179,6 +212,16 @@ pub struct Plan<'a> {
     pub words: &'a [u32],
     pub ops: &'a [Op],
     pub fetch: &'a [[u32; 2]],
+    pub literals: &'a [Literal],
+}
+
+impl Plan<'_> {
+    pub fn literal(&self, index: usize) -> Option<Literal> {
+        self.literals
+            .iter()
+            .find(|literal| literal.index as usize == index)
+            .copied()
+    }
 }
 
 fn reg(op: u32, at: u32) -> u32 {

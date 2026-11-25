@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\" FROM accounts\n                WHERE last_seen < ?1 AND banned = 0\n                  AND NOT EXISTS (SELECT 1 FROM friendships WHERE a = accounts.id OR b = accounts.id)\n                  AND NOT EXISTS (SELECT 1 FROM files WHERE owner = accounts.id)\n                  AND NOT EXISTS (SELECT 1 FROM saves WHERE owner = accounts.id)\n                  AND NOT EXISTS (SELECT 1 FROM archive_access WHERE account = accounts.id)\n                ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "09fd7da2e44b4e37a2a671e6bee44f02ce4693713260793a3deaf78576499157"
+}

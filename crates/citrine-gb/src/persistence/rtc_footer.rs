@@ -386,6 +386,40 @@ mod tests {
         assert_eq!(read_clock(&mut later), [1, 2, 3, 4, 0x40]);
     }
 
+    fn ticking_cart() -> GameBoy {
+        let mut gb = rtc_cart();
+        set_clock(&mut gb, [1, 2, 3, 4, 0]);
+        read_clock(&mut gb);
+        gb.run_cycles(3 * RTC_CYCLES_PER_SECOND + 12_345);
+        gb
+    }
+
+    #[test]
+    fn a_save_state_keeps_the_clock_to_the_cycle() {
+        let mut gb = ticking_cart();
+        let state = gb.dump_full(NOW).expect("state");
+
+        let back = GameBoy::from_dump(&state, &Rom::new(&rtc_rom(0x10, 0x02)), NOW).expect("load");
+        assert_eq!(back.cartridge.rtc(), gb.cartridge.rtc());
+        assert_eq!(back.check_hash(), gb.check_hash());
+    }
+
+    #[test]
+    fn a_save_state_loaded_later_catches_up_and_keeps_the_part_second() {
+        let mut gb = ticking_cart();
+        let state = gb.dump_full(NOW).expect("state");
+
+        let mut back = GameBoy::from_dump(&state, &Rom::new(&rtc_rom(0x10, 0x02)), NOW + 3 * HOUR)
+            .expect("load");
+        let rtc = back.cartridge.rtc().expect("clock").clone();
+        assert_eq!(
+            rtc.sub_second_cycles,
+            gb.cartridge.rtc().expect("clock").sub_second_cycles
+        );
+        assert_eq!(rtc.latched, gb.cartridge.rtc().expect("clock").latched);
+        assert_eq!(read_clock(&mut back), [4, 2, 6, 4, 0]);
+    }
+
     #[test]
     fn a_save_without_a_footer_still_loads() {
         let mut old = vec![0u8; RAM_BANK_SIZE];

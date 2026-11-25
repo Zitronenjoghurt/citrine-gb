@@ -179,6 +179,7 @@ pub struct QueueReader {
     fade_frames: usize,
     playing: bool,
     started: bool,
+    after_pause: bool,
     fade_in: f32,
     blend: Vec<[f32; 2]>,
     blend_pos: usize,
@@ -194,6 +195,10 @@ impl QueueReader {
             return;
         }
         let frames = out.len() / channels;
+        let paused = self.stats.paused.load(Ordering::Relaxed);
+        if paused && self.started {
+            self.after_pause = true;
+        }
 
         if !self.playing {
             let start = if self.started && self.stats.quick_resume.load(Ordering::Relaxed) {
@@ -203,7 +208,7 @@ impl QueueReader {
             };
             if self.queued_frames() < start {
                 out.fill(0.0);
-                if self.started && !self.stats.paused.load(Ordering::Relaxed) {
+                if self.started && !paused && !self.after_pause {
                     self.stats.add_underrun(frames, false);
                 }
                 self.stats
@@ -213,6 +218,7 @@ impl QueueReader {
             }
             self.playing = true;
             self.started = true;
+            self.after_pause = false;
             self.fade_in = 0.0;
             self.stats.playing.store(true, Ordering::Relaxed);
         }
@@ -375,6 +381,7 @@ pub fn audio_queue(config: QueueConfig) -> (QueueWriter, QueueReader) {
         fade_frames,
         playing: false,
         started: false,
+        after_pause: false,
         fade_in: 0.0,
         blend: vec![[0.0; 2]; fade_frames],
         blend_pos: fade_frames,
@@ -540,6 +547,38 @@ mod tests {
         }
         assert_eq!(writer.stats().underruns(), 0);
         assert_eq!(writer.stats().underrun_frames(), 0);
+    }
+
+    #[test]
+    fn refilling_the_queue_after_a_pause_is_not_an_underrun() {
+        let (mut writer, mut reader) = queue(4000);
+        let mut out = vec![0.0; 960];
+        writer.write(&constant(4000, 0.5));
+        reader.read(&mut out, 2);
+        writer.set_paused(true);
+        while writer.is_playing() {
+            reader.read(&mut out, 2);
+        }
+        reader.read(&mut out, 2);
+        writer.set_paused(false);
+        for _ in 0..4 {
+            writer.write(&constant(800, 0.5));
+            reader.read(&mut out, 2);
+        }
+        assert!(!writer.is_playing(), "the queue fills to its target first");
+        writer.write(&constant(1600, 0.5));
+        reader.read(&mut out, 2);
+        assert!(writer.is_playing());
+        assert_eq!(writer.stats().underruns(), 0);
+        assert_eq!(writer.stats().underrun_frames(), 0);
+        while writer.is_playing() {
+            reader.read(&mut out, 2);
+        }
+        reader.read(&mut out, 2);
+        assert!(
+            writer.stats().underruns() > 0,
+            "running dry while playing still counts"
+        );
     }
 
     #[test]

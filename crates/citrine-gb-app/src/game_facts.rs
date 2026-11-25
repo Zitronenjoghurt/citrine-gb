@@ -5,10 +5,11 @@ mod wiki;
 use crate::covers::System;
 use crate::covers::net::{Answer, Net};
 use citrine_gb::console::ConsoleKind;
+use citrine_gb_threads::Spawner;
 pub use facts::Facts;
 use facts::{Field, Sheet};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 pub use store::{Found, InfoStore};
 
 const SHEET_FRESH: u64 = 30 * 24 * 60 * 60;
@@ -30,14 +31,107 @@ pub struct Info {
 }
 
 enum Load {
+    Reading(Receiver<Option<(u64, Sheet)>>),
     Loading {
         replies: Vec<(Field, Receiver<Answer>)>,
-        sheet: Sheet,
+        dats: Vec<(Field, Vec<u8>)>,
         failed: bool,
+        stale: Option<Sheet>,
+    },
+    Parsing {
+        reply: Receiver<Option<Sheet>>,
         stale: Option<Sheet>,
     },
     Ready(Sheet),
     Failed,
+}
+
+impl Load {
+    fn is_pending(&self) -> bool {
+        matches!(
+            self,
+            Load::Reading(_) | Load::Loading { .. } | Load::Parsing { .. }
+        )
+    }
+
+    fn next(
+        self,
+        system: System,
+        net: &mut dyn Net,
+        store: &InfoStore,
+        spawner: &Spawner,
+        now: u64,
+    ) -> Self {
+        match self {
+            Load::Reading(reply) => match reply.try_recv() {
+                Err(TryRecvError::Empty) => Load::Reading(reply),
+                Ok(Some((fetched, sheet))) if now.saturating_sub(fetched) < SHEET_FRESH => {
+                    Load::Ready(sheet)
+                }
+                stored => Load::Loading {
+                    replies: Field::ALL
+                        .iter()
+                        .map(|&field| (field, net.get(metadat_url(field, system))))
+                        .collect(),
+                    dats: Vec::new(),
+                    failed: false,
+                    stale: stored.ok().flatten().map(|(_, sheet)| sheet),
+                },
+            },
+            Load::Loading {
+                mut replies,
+                mut dats,
+                mut failed,
+                stale,
+            } => {
+                replies.retain(|(field, reply)| match reply.try_recv() {
+                    Ok(Ok(dat)) => {
+                        dats.push((*field, dat));
+                        false
+                    }
+                    Ok(Err(err)) if err.contains("404") => false,
+                    Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                        failed = true;
+                        false
+                    }
+                    Err(TryRecvError::Empty) => true,
+                });
+                if !replies.is_empty() {
+                    return Load::Loading {
+                        replies,
+                        dats,
+                        failed,
+                        stale,
+                    };
+                }
+                if failed || dats.is_empty() {
+                    return stale.map_or(Load::Failed, Load::Ready);
+                }
+                let (done, reply) = channel();
+                let store = store.clone();
+                spawner.run("game facts parse", move || {
+                    let mut sheet = Sheet::default();
+                    for (field, dat) in &dats {
+                        sheet.read(*field, &String::from_utf8_lossy(dat));
+                    }
+                    let sheet = Some(sheet).filter(|sheet| !sheet.is_empty());
+                    if let Some(sheet) = &sheet
+                        && let Err(err) = store.put_sheet(system, now, sheet)
+                    {
+                        log::warn!("could not keep game facts: {err}");
+                    }
+                    let _ = done.send(sheet);
+                });
+                Load::Parsing { reply, stale }
+            }
+            Load::Parsing { reply, stale } => match reply.try_recv() {
+                Err(TryRecvError::Empty) => Load::Parsing { reply, stale },
+                Ok(Some(sheet)) => Load::Ready(sheet),
+                _ => stale.map_or(Load::Failed, Load::Ready),
+            },
+            done => done,
+        }
+    }
 }
 
 enum Step {
@@ -55,8 +149,10 @@ enum Next {
 pub struct Finder {
     net: Box<dyn Net>,
     sheets: HashMap<System, Load>,
+    asked: Vec<System>,
     asks: Vec<(Ask, Step)>,
     found: HashMap<String, Found>,
+    revision: u64,
 }
 
 impl Finder {
@@ -64,31 +160,22 @@ impl Finder {
         Self {
             net,
             sheets: HashMap::new(),
+            asked: Vec::new(),
             asks: Vec::new(),
             found: HashMap::new(),
+            revision: 0,
         }
     }
 
-    pub fn want_facts(&mut self, store: &InfoStore, console: ConsoleKind, now: u64) {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn want_facts(&mut self, console: ConsoleKind) {
         for &system in systems(console) {
-            if self.sheets.contains_key(&system) {
-                continue;
+            if !self.sheets.contains_key(&system) && !self.asked.contains(&system) {
+                self.asked.push(system);
             }
-            let load = match store.sheet(system) {
-                Some((fetched, sheet)) if now.saturating_sub(fetched) < SHEET_FRESH => {
-                    Load::Ready(sheet)
-                }
-                stored => Load::Loading {
-                    replies: Field::ALL
-                        .iter()
-                        .map(|&field| (field, self.net.get(metadat_url(field, system))))
-                        .collect(),
-                    sheet: Sheet::default(),
-                    failed: false,
-                    stale: stored.map(|(_, sheet)| sheet),
-                },
-            };
-            self.sheets.insert(system, load);
         }
     }
 
@@ -101,7 +188,7 @@ impl Finder {
             return;
         }
         if let Some(console) = ask.console {
-            self.want_facts(store, console, now);
+            self.want_facts(console);
         }
         let found = match self.found.get(&ask.rom_key) {
             Some(found) => Some(found.clone()),
@@ -120,14 +207,23 @@ impl Finder {
 
     pub fn is_busy(&self) -> bool {
         !self.asks.is_empty()
-            || self
-                .sheets
-                .values()
-                .any(|load| matches!(load, Load::Loading { .. }))
+            || !self.asked.is_empty()
+            || self.sheets.values().any(Load::is_pending)
     }
 
-    pub fn poll(&mut self, store: &InfoStore, now: u64) -> bool {
-        let mut changed = self.poll_sheets(store, now);
+    pub fn poll(&mut self, store: &InfoStore, spawner: &Spawner, now: u64) -> bool {
+        for system in std::mem::take(&mut self.asked) {
+            if self.sheets.contains_key(&system) {
+                continue;
+            }
+            let (done, reply) = channel();
+            let store = store.clone();
+            spawner.run("game facts read", move || {
+                let _ = done.send(store.sheet(system));
+            });
+            self.sheets.insert(system, Load::Reading(reply));
+        }
+        let mut changed = self.poll_sheets(store, spawner, now);
         for (ask, step) in std::mem::take(&mut self.asks) {
             match self.advance(&ask, step) {
                 Next::Wait(step) => self.asks.push((ask, step)),
@@ -151,6 +247,9 @@ impl Finder {
                 }
             }
         }
+        if changed {
+            self.revision += 1;
+        }
         changed
     }
 
@@ -173,6 +272,7 @@ impl Finder {
         if let Some(found) = found {
             facts.fill(&found.facts);
         }
+        facts.genre = facts.genre.as_deref().map(facts::genre_name);
         Info {
             facts,
             page: found
@@ -181,44 +281,14 @@ impl Finder {
         }
     }
 
-    fn poll_sheets(&mut self, store: &InfoStore, now: u64) -> bool {
+    fn poll_sheets(&mut self, store: &InfoStore, spawner: &Spawner, now: u64) -> bool {
         let mut changed = false;
         for (system, load) in &mut self.sheets {
-            let Load::Loading {
-                replies,
-                sheet,
-                failed,
-                stale,
-            } = load
-            else {
-                continue;
-            };
-            replies.retain(|(field, reply)| match reply.try_recv() {
-                Ok(Ok(dat)) => {
-                    sheet.read(*field, &String::from_utf8_lossy(&dat));
-                    false
-                }
-                Ok(Err(err)) if err.contains("404") => false,
-                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
-                    *failed = true;
-                    false
-                }
-                Err(TryRecvError::Empty) => true,
-            });
-            if !replies.is_empty() {
-                continue;
+            if load.is_pending() {
+                let taken = std::mem::replace(load, Load::Failed);
+                *load = taken.next(*system, self.net.as_mut(), store, spawner, now);
+                changed |= !load.is_pending();
             }
-            *load = if !*failed && !sheet.is_empty() {
-                if let Err(err) = store.put_sheet(*system, now, sheet) {
-                    log::warn!("could not keep game facts: {err}");
-                }
-                Load::Ready(std::mem::take(sheet))
-            } else if let Some(stale) = stale.take() {
-                Load::Ready(stale)
-            } else {
-                Load::Failed
-            };
-            changed = true;
         }
         changed
     }
@@ -326,6 +396,7 @@ pub fn how_long_to_beat_url(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::covers::net::fake::Fake;
+    use citrine_gb_threads::{Mode, Threads};
 
     const NOW: u64 = 1_800_000_000;
     const DAY: u64 = 24 * 60 * 60;
@@ -343,6 +414,14 @@ mod tests {
             .collect()
     }
 
+    fn step(finder: &mut Finder, store: &InfoStore) {
+        let threads = Threads::new(Mode::Inline);
+        let spawner = threads.spawner();
+        finder.poll(store, &spawner, NOW);
+        threads.run_side_jobs();
+        finder.poll(store, &spawner, NOW);
+    }
+
     fn settle(
         finder: &mut Finder,
         store: &InfoStore,
@@ -351,7 +430,7 @@ mod tests {
     ) {
         for _ in 0..8 {
             net.answer(files);
-            finder.poll(store, NOW);
+            step(finder, store);
         }
     }
 
@@ -409,7 +488,8 @@ mod tests {
         let store = InfoStore::at(dir.path().to_path_buf());
         let net = Fake::default();
         let mut finder = Finder::new(Box::new(net.clone()));
-        finder.want_facts(&store, ConsoleKind::Gb, NOW);
+        finder.want_facts(ConsoleKind::Gb);
+        step(&mut finder, &store);
         assert_eq!(net.urls().len(), 10);
         let genre = "game (\n\tcomment \"Tetris DX (World)\"\n\tgenre \"Puzzle\"\n\trom ( crc 6E30394C )\n)\n";
         settle(&mut finder, &store, &net, &served(&[(GBC, genre)]));
@@ -449,19 +529,70 @@ mod tests {
         let net = Fake::default();
         let mut finder = Finder::new(Box::new(net.clone()));
         finder.want_page(&store, castlevania(), NOW);
+        step(&mut finder, &store);
         net.fail("offline");
-        finder.poll(&store, NOW);
+        step(&mut finder, &store);
+        assert!(!finder.is_busy());
         assert_eq!(store.found(KEY), None);
         assert_eq!(store.sheet(System::Gba), None);
         let asked = net.urls().len();
-        finder.want_facts(&store, ConsoleKind::Gba, NOW);
+        finder.want_facts(ConsoleKind::Gba);
         finder.want_page(&store, castlevania(), NOW);
+        step(&mut finder, &store);
         assert_eq!(net.urls().len(), asked);
 
         let net = Fake::default();
         let mut finder = Finder::new(Box::new(net.clone()));
         finder.want_page(&store, castlevania(), NOW);
         assert!(net.urls().contains(&SEARCH.to_owned()));
+    }
+
+    #[test]
+    fn sheets_are_parsed_off_the_ui_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = InfoStore::at(dir.path().to_path_buf());
+        let threads = Threads::new(Mode::Threads);
+        let spawner = threads.spawner();
+        let files = served(&[(GBA, DEVELOPER)]);
+        let konami = |finder: &Finder| {
+            finder
+                .facts(Some(ConsoleKind::Gba), Some(0x35_53_61_83))
+                .and_then(|facts| facts.developer.clone())
+        };
+        for _ in 0..2 {
+            let net = Fake::default();
+            let mut finder = Finder::new(Box::new(net.clone()));
+            finder.want_facts(ConsoleKind::Gba);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while finder.is_busy() && std::time::Instant::now() < deadline {
+                net.answer(&files);
+                finder.poll(&store, &spawner, NOW);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(konami(&finder).as_deref(), Some("Konami"));
+        }
+        assert_eq!(facts::parses_here(), 0);
+        assert!(store.sheet(System::Gba).is_some());
+        assert_eq!(facts::parses_here(), 1);
+    }
+
+    #[test]
+    fn a_page_kept_with_the_wikidata_genre_shows_the_libretro_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = InfoStore::at(dir.path().to_path_buf());
+        let found = Found {
+            fetched: NOW,
+            facts: Facts {
+                genre: Some("Role-playing video game".to_owned()),
+                ..Facts::default()
+            },
+            ..Found::default()
+        };
+        store.put_found(KEY, &found).unwrap();
+        let mut finder = Finder::new(Box::new(Fake::default()));
+        finder.want_page(&store, castlevania(), NOW);
+        let genre = finder.info(&castlevania()).facts.genre;
+        assert_eq!(genre.as_deref(), Some("Role-playing (RPG)"));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::app::big_screen::scroll::Following;
 use crate::app::mobile::walker as phone_look;
 use crate::app::widgets::text::one_line;
 use crate::icons;
-use crate::walker::Hold;
+use crate::walker::{KeptCard, KeptWhy, Place, StepsFrom, Summary};
 use citrine_gb_pkm::Gen;
 use citrine_gb_pkm::pkm::text;
 use citrine_gb_walker::{
@@ -32,15 +32,38 @@ const TILE_RADIUS: u8 = 12;
 const DESK_MAX_SCALE: f32 = 1.75;
 const PHONE_MAX_SCALE: f32 = 3.5;
 const SLOTS: usize = 3;
-const WEEK: usize = 7;
 const QUARTERS_PER_SECOND: f64 = 4.0;
-const OPEN_PRESSES: usize = 16;
+const IN_GAME: &str = "Count steps walked in HeartGold";
 
 #[derive(Default)]
 pub struct WalkerPane {
     lcd: Option<(Lcd, TextureHandle)>,
     names: HashMap<Vec<u8>, TextureHandle>,
-    shown_pass: Option<u64>,
+    pub nearby: Vec<NearbyRow>,
+    pub nearby_actions: Vec<NearbyAction>,
+    pub holder_away: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearbyRow {
+    pub key: citrine_gb_net::PeerKey,
+    pub name: String,
+    pub state: NearbyState,
+    pub remembered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NearbyState {
+    Offers,
+    UsesCloud,
+    Here,
+    Away,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NearbyAction {
+    MoveHere(citrine_gb_net::PeerKey),
+    Forget(citrine_gb_net::PeerKey),
 }
 
 struct Entry {
@@ -62,6 +85,12 @@ struct View {
     costs: [u16; 2],
 }
 
+enum StepsRow<'a> {
+    From(String),
+    InGame(&'a mut bool),
+    Hidden,
+}
+
 impl View {
     fn read(walker: &mut Walker, phase: u32) -> Self {
         let pokemon = walker.walking_pokemon().map(|summary| {
@@ -81,11 +110,7 @@ impl View {
         };
         let caught = entries(|shelf| matches!(shelf, Shelf::Caught(_) | Shelf::EventPokemon));
         let items = entries(|shelf| matches!(shelf, Shelf::Item(_) | Shelf::EventItem));
-        let today = walker.today_steps();
-        let mut week: Vec<u32> = walker.history().into_iter().take(WEEK - 1).collect();
-        week.resize(WEEK - 1, 0);
-        week.reverse();
-        week.push(today);
+        let week = crate::walker::summary::week(walker);
         let costs = walker.rules().app_costs;
         Self {
             lcd: walker.lcd(phase),
@@ -106,28 +131,17 @@ impl View {
 enum Action {
     Press(Button),
     Open(App),
-    UseHere,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeptAction {
+    Use,
+    Close,
 }
 
 pub fn show(viewer: &mut TabViewer<'_>, ui: &mut Ui) {
     let phone = viewer.ui.settings.layout.is_touch(ui.ctx());
     let phase = (ui.input(|i| i.time) * QUARTERS_PER_SECOND) as u32;
-    let pass = ui.ctx().cumulative_pass_nr();
-    let pane = &mut viewer.ui.walker;
-    if pane.shown_pass.is_none_or(|shown| shown + 1 < pass) {
-        viewer.emulator.take_walker();
-    }
-    pane.shown_pass = Some(pass);
-    let held = match viewer.emulator.walker_hold() {
-        Hold::Elsewhere(device) => Some(device.clone()),
-        _ => None,
-    };
-    let Some(walker) = viewer.emulator.shown_walker() else {
-        return;
-    };
-    let view = View::read(walker, phase);
-    let pane = &mut viewer.ui.walker;
-    let mut action = None;
     let margin = if phone {
         Margin::ZERO
     } else {
@@ -138,53 +152,196 @@ pub fn show(viewer: &mut TabViewer<'_>, ui: &mut Ui) {
             bottom: 16,
         }
     };
-    egui::ScrollArea::vertical()
-        .id_salt("walker_pane")
-        .auto_shrink([false, false])
-        .show_following(ui, |ui| {
-            egui::Frame::new().inner_margin(margin).show(ui, |ui| {
-                let used = held
-                    .as_deref()
-                    .is_some_and(|device| held_card(ui, device, phone));
-                let mine = ui
-                    .add_enabled_ui(held.is_none(), |ui| body(ui, pane, &view, phone))
-                    .inner;
-                action = mine.or(used.then_some(Action::UseHere));
-            });
+    let place = viewer.emulator.walker_place();
+    let game = viewer.emulator.walker_game();
+    let kept = viewer.emulator.walker_kept();
+    let mut kept_used = None;
+    if let Some(top) = Top::away(&place, game, viewer.ui.walker.holder_away) {
+        let summary = viewer.emulator.walker_summary();
+        let pane = &mut viewer.ui.walker;
+        let mut used = None;
+        scrolled(ui, margin, |ui| {
+            kept_used = kept.as_ref().and_then(|kept| kept_card(ui, kept, phone));
+            used = held_card(ui, &top, phone);
+            nearby_card(ui, pane, phone);
+            if let Some(summary) = &summary {
+                elsewhere(ui, pane, summary, top.steps.as_deref(), phone);
+            }
         });
+        match used {
+            Some(TopAction::Connect) => viewer.emulator.borrow_walker(viewer.online),
+            Some(TopAction::MoveHere) => viewer.emulator.take_walker(),
+            None => {}
+        }
+        use_kept(viewer, kept_used);
+        return;
+    }
+    let borrowed = match &place {
+        Place::Borrowed { from } => Some(Top::line(format!("Borrowed from {from}"), from)),
+        _ => None,
+    };
+    let steps_from = viewer.emulator.walker_steps_from();
+    let Some(walker) = viewer.emulator.shown_walker() else {
+        return;
+    };
+    let view = View::read(walker, phase);
+    let pane = &mut viewer.ui.walker;
+    let settings = &mut viewer.ui.settings;
+    let mut action = None;
+    let mut in_game = settings.walker.in_game;
+    scrolled(ui, margin, |ui| {
+        kept_used = kept.as_ref().and_then(|kept| kept_card(ui, kept, phone));
+        if let Some(top) = &borrowed {
+            held_card(ui, top, phone);
+        }
+        nearby_card(ui, pane, phone);
+        let steps = match steps_from {
+            StepsFrom::Phone => StepsRow::From("This phone".to_owned()),
+            StepsFrom::Game | StepsFrom::Nothing => StepsRow::InGame(&mut in_game),
+        };
+        action = body(ui, pane, &view, steps, phone);
+    });
+    if in_game != settings.walker.in_game {
+        settings.walker.in_game = in_game;
+        settings.dirty = true;
+    }
     match action {
         Some(Action::Press(button)) => viewer.emulator.press_walker(button),
-        Some(Action::Open(app)) => open(viewer.emulator, app),
-        Some(Action::UseHere) => viewer.emulator.take_walker(),
+        Some(Action::Open(app)) => viewer.emulator.open_walker(app),
+        None => {}
+    }
+    use_kept(viewer, kept_used);
+}
+
+fn use_kept(viewer: &mut TabViewer<'_>, used: Option<KeptAction>) {
+    match used {
+        Some(KeptAction::Use) => viewer.emulator.use_kept_walker(),
+        Some(KeptAction::Close) => viewer.emulator.close_kept_walker(),
         None => {}
     }
 }
 
-fn open(emulator: &mut crate::emulator::Emulator, app: App) {
-    for _ in 0..OPEN_PRESSES {
-        let Some(walker) = emulator.walker_mut() else {
-            return;
-        };
-        if walker.asleep() {
-            emulator.press_walker(Button::Middle);
-            continue;
+fn kept_reason(why: &KeptWhy) -> String {
+    match why {
+        KeptWhy::Replaced { by } => format!("Replaced by {by}'s walker"),
+        KeptWhy::ChangedHere {
+            holder: Some(holder),
+        } => format!("Changed here while {holder} had it"),
+        KeptWhy::ChangedHere { holder: None } => {
+            "Changed here while another device had it".to_owned()
         }
-        let press = match (walker.screen(), app) {
-            (Screen::Collected { .. }, _) => Button::Middle,
-            (Screen::Home, App::Connect) => Button::Middle,
-            (Screen::Home, _) => Button::Right,
-            (Screen::Menu { app: shown, .. }, wanted) if shown == wanted => {
-                emulator.press_walker(Button::Middle);
-                return;
-            }
-            (Screen::Menu { .. }, _) => Button::Right,
-            _ => return,
-        };
-        emulator.press_walker(press);
+        KeptWhy::Imported => "Replaced by an import".to_owned(),
+        KeptWhy::SwappedOut => "Swapped out here".to_owned(),
     }
 }
 
-fn body(ui: &mut Ui, pane: &mut WalkerPane, view: &View, phone: bool) -> Option<Action> {
+fn kept_card(ui: &mut Ui, kept: &KeptCard, phone: bool) -> Option<KeptAction> {
+    let line = format!("Kept copy, {} steps", format_steps(kept.steps));
+    let reason = kept_reason(&kept.why);
+    let used = card(ui, phone, |ui| {
+        ui.horizontal(|ui| {
+            ui.set_min_height(ROW + 4.0);
+            ui.label(egui::RichText::new(icons::ARCHIVE).size(18.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut used = None;
+                let close = egui::Button::new(egui::RichText::new(icons::X).size(18.0))
+                    .frame(false)
+                    .min_size(Vec2::splat(ROW));
+                if ui.add(close).on_hover_text("Close").clicked() {
+                    used = Some(KeptAction::Close);
+                }
+                let use_it = kept.can_use
+                    && if phone {
+                        phone_look::action(ui, "Use it", true)
+                    } else {
+                        ui.button("Use it").clicked()
+                    };
+                if use_it {
+                    used = Some(KeptAction::Use);
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.vertical(|ui| {
+                        ui.add(egui::Label::new(line.as_str()).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(reason).weak()).truncate());
+                    });
+                });
+                used
+            })
+            .inner
+        })
+        .inner
+    });
+    ui.add_space(GAP);
+    used
+}
+
+fn scrolled(ui: &mut Ui, margin: Margin, body: impl FnOnce(&mut Ui)) {
+    egui::ScrollArea::vertical()
+        .id_salt("walker_pane")
+        .auto_shrink([false, false])
+        .show_following(ui, |ui| {
+            egui::Frame::new().inner_margin(margin).show(ui, body);
+        });
+}
+
+fn elsewhere(
+    ui: &mut Ui,
+    pane: &mut WalkerPane,
+    summary: &Summary,
+    device: Option<&str>,
+    phone: bool,
+) {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let steps = match (summary.steps_from, device) {
+        (StepsFrom::Phone, Some(device)) => StepsRow::From(device.to_owned()),
+        (StepsFrom::Phone, None) => StepsRow::From("This phone".to_owned()),
+        (StepsFrom::Game, Some(device)) => StepsRow::From(format!("HeartGold on {device}")),
+        (StepsFrom::Game, None) => StepsRow::From("HeartGold".to_owned()),
+        (StepsFrom::Nothing, _) => StepsRow::Hidden,
+    };
+    let walk = Walk {
+        pokemon: summary.pokemon.as_ref(),
+        route: &summary.route,
+        steps: summary.walk_steps,
+        hint: None,
+    };
+    walk_card(ui, &walk, steps, phone);
+    ui.add_space(GAP);
+    card(ui, phone, |ui| {
+        ui.spacing_mut().item_spacing.x = 28.0;
+        ui.columns(2, |cols| {
+            shelf_count(&mut cols[0], pane, "Caught", summary.caught, "Pokémon");
+            let items = if summary.items == 1 { "item" } else { "items" };
+            shelf_count(&mut cols[1], pane, "Items", summary.items, items);
+        });
+    });
+    ui.add_space(GAP);
+    card(ui, phone, |ui| week_chart(ui, &summary.week));
+}
+
+fn shelf_count(ui: &mut Ui, pane: &mut WalkerPane, title: &str, count: u8, unit: &str) {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.add_space((ROW - HEAD) / 2.0);
+    pair(ui, HEAD, (title, 12.5, false), ("", 12.5, false));
+    if count == 0 {
+        pixel_row(ui, pane, Some(&pixel_text("Empty")), None);
+    } else {
+        pair(
+            ui,
+            ROW,
+            (&format!("{count} {unit}"), 14.0, true),
+            ("", 14.0, false),
+        );
+    }
+}
+
+fn body(
+    ui: &mut Ui,
+    pane: &mut WalkerPane,
+    view: &View,
+    steps: StepsRow<'_>,
+    phone: bool,
+) -> Option<Action> {
     ui.spacing_mut().item_spacing.y = 0.0;
     let mut action = None;
     let full = ui.available_width();
@@ -226,7 +383,13 @@ fn body(ui: &mut Ui, pane: &mut WalkerPane, view: &View, phone: bool) -> Option<
         });
     }
     ui.add_space(GAP);
-    walk_card(ui, view, phone);
+    let walk = Walk {
+        pokemon: view.pokemon.as_ref(),
+        route: &view.route,
+        steps: view.walk_steps,
+        hint: Some(SEND_HINT),
+    };
+    walk_card(ui, &walk, steps, phone);
     ui.add_space(GAP);
     card(ui, phone, |ui| {
         ui.spacing_mut().item_spacing.x = 28.0;
@@ -527,25 +690,178 @@ fn card<R>(ui: &mut Ui, phone: bool, body: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
-fn held_card(ui: &mut Ui, device: &str, phone: bool) -> bool {
+struct Top {
+    line: String,
+    sub: Option<String>,
+    icon_of: String,
+    steps: Option<String>,
+    connect: bool,
+    move_here: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TopAction {
+    Connect,
+    MoveHere,
+}
+
+impl Top {
+    fn line(line: String, icon_of: &str) -> Self {
+        Self {
+            line,
+            sub: None,
+            icon_of: icon_of.to_owned(),
+            steps: Some(icon_of.to_owned()),
+            connect: false,
+            move_here: false,
+        }
+    }
+
+    fn away(place: &Place, game: Option<&str>, holder_away: bool) -> Option<Self> {
+        let playing = game.is_some();
+        let top = match place {
+            Place::Here | Place::Borrowed { .. } => return None,
+            Place::Getting { from } => Self::line(format!("Getting it from {from}"), from),
+            Place::On { device } if holder_away => Self {
+                sub: Some("Not nearby".to_owned()),
+                ..Self::line(format!("On {device}"), device)
+            },
+            Place::Away { device } => Self {
+                sub: Some("Cloud saves are off on this device".to_owned()),
+                ..Self::line(format!("On {device}"), device)
+            },
+            Place::On { device } => Self {
+                connect: playing,
+                move_here: true,
+                ..Self::line(format!("On {device}"), device)
+            },
+            Place::Using { device, game, home } => Self {
+                move_here: true,
+                steps: home.clone(),
+                sub: Some(format!("Using it for {game}")),
+                ..Self::line(device.clone(), device)
+            },
+            Place::GoingBack { to } => Self::line(format!("Going back to {to}"), to),
+            Place::ComingBack { from } => Self {
+                steps: None,
+                ..Self::line(format!("Coming back from {from}"), from)
+            },
+        };
+        Some(top)
+    }
+}
+
+fn nearby_card(ui: &mut Ui, pane: &mut WalkerPane, phone: bool) {
+    if pane.nearby.is_empty() {
+        return;
+    }
+    let mut actions = Vec::new();
+    card(ui, phone, |ui| {
+        ui.add_space((ROW - HEAD) / 2.0);
+        pair(ui, HEAD, ("Nearby", 12.5, false), ("", 12.5, false));
+        for row in &pane.nearby {
+            ui.push_id(row.key.0, |ui| {
+                if let Some(action) = nearby_row(ui, row, phone) {
+                    actions.push(action);
+                }
+            });
+        }
+    });
+    ui.add_space(GAP);
+    pane.nearby_actions.extend(actions);
+}
+
+fn nearby_row(ui: &mut Ui, row: &NearbyRow, phone: bool) -> Option<NearbyAction> {
+    let sub = match row.state {
+        NearbyState::UsesCloud => Some("Uses Cloud saves"),
+        NearbyState::Away => Some("Not nearby"),
+        NearbyState::Offers | NearbyState::Here => None,
+    };
+    ui.horizontal(|ui| {
+        ui.set_min_height(ROW + 4.0);
+        let icon = if citrine_gb_net::is_phone(&row.name) {
+            icons::DEVICE_MOBILE
+        } else {
+            icons::DESKTOP
+        };
+        ui.label(egui::RichText::new(icon).size(18.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let button = |ui: &mut Ui, label: &str, primary: bool| {
+                if phone {
+                    phone_look::action(ui, label, primary)
+                } else {
+                    ui.button(label).clicked()
+                }
+            };
+            let mut used = None;
+            if row.state == NearbyState::Offers && button(ui, "Move here", true) {
+                used = Some(NearbyAction::MoveHere(row.key));
+            }
+            if row.remembered && button(ui, "Forget", false) {
+                used = Some(NearbyAction::Forget(row.key));
+            }
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| match sub {
+                    Some(sub) => {
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(row.name.as_str()).truncate());
+                            ui.add(egui::Label::new(egui::RichText::new(sub).weak()).truncate());
+                        });
+                    }
+                    None => {
+                        ui.add(egui::Label::new(row.name.as_str()).truncate());
+                    }
+                },
+            );
+            used
+        })
+        .inner
+    })
+    .inner
+}
+
+fn held_card(ui: &mut Ui, top: &Top, phone: bool) -> Option<TopAction> {
     let used = card(ui, phone, |ui| {
         ui.horizontal(|ui| {
             ui.set_min_height(ROW + 4.0);
-            let icon = if citrine_gb_net::is_phone(device) {
+            let icon = if citrine_gb_net::is_phone(&top.icon_of) {
                 icons::DEVICE_MOBILE
             } else {
                 icons::DESKTOP
             };
             ui.label(egui::RichText::new(icon).size(18.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let used = if phone {
-                    phone_look::use_here(ui)
-                } else {
-                    ui.button("Use here").clicked()
+                let mut used = None;
+                let button = |ui: &mut Ui, label: &str, primary: bool| {
+                    if phone {
+                        phone_look::action(ui, label, primary)
+                    } else {
+                        ui.button(label).clicked()
+                    }
                 };
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(egui::Label::new(format!("In use on {device}")).truncate());
-                });
+                if top.move_here && button(ui, "Move here", !top.connect) {
+                    used = Some(TopAction::MoveHere);
+                }
+                if top.connect && button(ui, "Connect", true) {
+                    used = Some(TopAction::Connect);
+                }
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| match &top.sub {
+                        Some(sub) => {
+                            ui.vertical(|ui| {
+                                ui.add(egui::Label::new(top.line.as_str()).truncate());
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(sub).weak()).truncate(),
+                                );
+                            });
+                        }
+                        None => {
+                            ui.add(egui::Label::new(top.line.as_str()).truncate());
+                        }
+                    },
+                );
                 used
             })
             .inner
@@ -556,35 +872,73 @@ fn held_card(ui: &mut Ui, device: &str, phone: bool) -> bool {
     used
 }
 
-fn walk_card(ui: &mut Ui, view: &View, phone: bool) {
-    card(ui, phone, |ui| match &view.pokemon {
-        Some((name, level)) => {
-            pair(
-                ui,
-                ROW,
-                (name, 16.0, true),
-                (&format!("Lv {level}"), 14.0, false),
-            );
-            pair(ui, ROW, ("Route", 14.0, false), (&view.route, 14.0, true));
-            let steps = format_steps(view.walk_steps);
-            pair(
-                ui,
-                ROW,
-                ("Steps since sent out", 14.0, false),
-                (&steps, 14.0, true),
-            );
+struct Walk<'a> {
+    pokemon: Option<&'a (String, u8)>,
+    route: &'a str,
+    steps: u32,
+    hint: Option<&'a str>,
+}
+
+const SEND_HINT: &str = "Send one from HeartGold or SoulSilver";
+
+fn walk_card(ui: &mut Ui, walk: &Walk<'_>, steps: StepsRow<'_>, phone: bool) {
+    card(ui, phone, |ui| {
+        match walk.pokemon {
+            Some((name, level)) => {
+                pair(
+                    ui,
+                    ROW,
+                    (name, 16.0, true),
+                    (&format!("Lv {level}"), 14.0, false),
+                );
+                pair(ui, ROW, ("Route", 14.0, false), (walk.route, 14.0, true));
+                let count = format_steps(walk.steps);
+                pair(
+                    ui,
+                    ROW,
+                    ("Steps since sent out", 14.0, false),
+                    (&count, 14.0, true),
+                );
+            }
+            None => {
+                pair(
+                    ui,
+                    ROW,
+                    ("No Pokémon on a walk", 16.0, true),
+                    ("", 14.0, false),
+                );
+                if let Some(hint) = walk.hint {
+                    pair(ui, ROW, (hint, 14.0, false), ("", 14.0, false));
+                }
+            }
         }
-        None => {
-            pair(
-                ui,
-                ROW,
-                ("No Pokémon on a walk", 16.0, true),
-                ("", 14.0, false),
-            );
-            let hint = "Send one from HeartGold or SoulSilver";
-            pair(ui, ROW, (hint, 14.0, false), ("", 14.0, false));
-        }
+        steps_row(ui, steps, phone);
     });
+}
+
+fn steps_row(ui: &mut Ui, steps: StepsRow<'_>, phone: bool) {
+    match steps {
+        StepsRow::From(source) => {
+            pair(ui, ROW, ("Steps from", 14.0, false), (&source, 14.0, true));
+        }
+        StepsRow::InGame(on) => {
+            ui.horizontal(|ui| {
+                ui.set_min_height(ROW);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if phone {
+                        crate::app::mobile::kit::switch(ui, on);
+                    } else {
+                        ui.add(crate::app::widgets::check::Check::new(on, ""));
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let text = egui::RichText::new(IN_GAME).size(14.0);
+                        ui.add(egui::Label::new(text).truncate());
+                    });
+                });
+            });
+        }
+        StepsRow::Hidden => {}
+    }
 }
 
 fn shelf_list(ui: &mut Ui, pane: &mut WalkerPane, title: &str, entries: &[Entry]) {
@@ -781,6 +1135,56 @@ mod tests {
     }
 
     #[test]
+    fn going_back_offers_no_connect_or_move() {
+        let game = Some("HeartGold");
+        let back = Top::away(&Place::GoingBack { to: "Phone".into() }, game, false).unwrap();
+        assert!(!back.connect && !back.move_here);
+        let on = Top::away(
+            &Place::On {
+                device: "Phone".into(),
+            },
+            game,
+            false,
+        )
+        .unwrap();
+        assert!(on.connect && on.move_here);
+    }
+
+    #[test]
+    fn a_holder_out_of_reach_offers_no_connect_or_move() {
+        let on = Top::away(
+            &Place::On {
+                device: "Phone".into(),
+            },
+            Some("HeartGold"),
+            true,
+        )
+        .unwrap();
+        assert!(!on.connect && !on.move_here);
+        assert_eq!(
+            (on.line.as_str(), on.sub.as_deref()),
+            ("On Phone", Some("Not nearby"))
+        );
+    }
+
+    #[test]
+    fn a_walker_out_of_reach_with_cloud_saves_off_offers_nothing() {
+        let away = Top::away(
+            &Place::Away {
+                device: "Phone".into(),
+            },
+            Some("HeartGold"),
+            false,
+        )
+        .unwrap();
+        assert!(!away.connect && !away.move_here);
+        assert_eq!(
+            (away.line.as_str(), away.sub.as_deref()),
+            ("On Phone", Some("Cloud saves are off on this device"))
+        );
+    }
+
+    #[test]
     fn an_unpaired_walker_only_offers_connect() {
         let mut walker = Walker::new(1);
         let view = View::read(&mut walker, 0);
@@ -789,7 +1193,7 @@ mod tests {
         assert_eq!(ready[1], ("Connect first".to_owned(), false));
         assert_eq!(ready[2], ("Game or friend".to_owned(), true));
         assert!(view.pokemon.is_none());
-        assert_eq!(view.week.len(), WEEK);
+        assert_eq!(view.week.len(), crate::walker::summary::WEEK);
     }
 
     #[test]

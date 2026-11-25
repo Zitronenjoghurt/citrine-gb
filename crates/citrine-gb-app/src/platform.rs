@@ -6,6 +6,7 @@
 pub mod android;
 #[cfg(any(target_os = "android", test))]
 pub mod ime;
+pub mod monitor;
 pub mod push;
 #[cfg(target_os = "macos")]
 pub mod vsync;
@@ -34,6 +35,16 @@ pub fn immersive(on: bool) {
 pub fn immersive(_on: bool) {}
 
 #[cfg(target_os = "android")]
+pub fn hold_orientation(landscape: Option<bool>) -> bool {
+    android::hold_orientation(landscape)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn hold_orientation(_landscape: Option<bool>) -> bool {
+    false
+}
+
+#[cfg(target_os = "android")]
 pub fn is_tv() -> bool {
     android::is_tv()
 }
@@ -41,6 +52,18 @@ pub fn is_tv() -> bool {
 #[cfg(not(target_os = "android"))]
 pub fn is_tv() -> bool {
     false
+}
+
+pub const CAN_QUIT: bool = !cfg!(target_arch = "wasm32");
+
+#[cfg(target_os = "android")]
+pub fn quit(_ctx: &egui::Context) {
+    android::lifecycle::leave();
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn quit(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
 }
 
 #[cfg(target_os = "android")]

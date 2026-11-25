@@ -127,6 +127,10 @@ pub(super) fn apply(
             }
         }
         Act::PlayReplay => {
+            if let ItemKey::Media(id) = key {
+                viewer.ui.media.play = Some(id.clone());
+                return;
+            }
             let (Source::Chat(friend), ItemKey::Chat(id)) = (source, key) else {
                 return;
             };

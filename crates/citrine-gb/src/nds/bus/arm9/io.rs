@@ -45,6 +45,7 @@ const THREE_D_LAST: u32 = REGISTERS_LAST as u32;
 const GEOMETRY_FIRST: u32 = geometry::FIRST as u32;
 const GEOMETRY_LAST: u32 = geometry::LAST as u32;
 const GXFIFO_LAST: u32 = GEOMETRY_FIRST + geometry::GXFIFO_END as u32 - 1;
+const GXFIFO_CHUNK: usize = 128;
 
 pub(super) struct Arm9Io<'a> {
     pub(super) shared: &'a Shared,
@@ -141,19 +142,28 @@ impl Arm9Bus<'_> {
         if !into_fifo || !from_main_ram {
             return false;
         }
+        let mut words = [0; GXFIFO_CHUNK];
         let mut source = run.source;
+        let mut left = run.units as usize;
         let mut stall = 0;
         let mut raised = false;
         let mut level = false;
-        for _ in 0..run.units {
-            let value = self
-                .shared
-                .main_ram
-                .read((source & !3) as usize, Width::Word);
-            stall += self.own.three_d.write_packed(value);
-            level = self.own.three_d.irq();
-            raised |= level;
-            source = source.wrapping_add(run.source_step);
+        while left > 0 {
+            let chunk = &mut words[..left.min(GXFIFO_CHUNK)];
+            let ram = &self.shared.main_ram;
+            if run.source_step != 4 || !ram.read_words(source as usize, chunk) {
+                let mut at = source;
+                for value in chunk.iter_mut() {
+                    *value = ram.read((at & !3) as usize, Width::Word);
+                    at = at.wrapping_add(run.source_step);
+                }
+            }
+            let write = self.own.three_d.write_packed_words(chunk, &self.shared.lcd);
+            stall += write.stall;
+            raised |= write.raised;
+            level = write.level;
+            source = source.wrapping_add(run.source_step.wrapping_mul(chunk.len() as u32));
+            left -= chunk.len();
         }
         self.own.attention = true;
         self.own.stall += stall * 2;
@@ -182,7 +192,10 @@ impl Arm9Bus<'_> {
                     .write_vcount((value >> 16) as u16, (mask >> 16) as u16);
             }
             DISP3DCNT | THREE_D_FIRST..=THREE_D_LAST | GEOMETRY_FIRST..=GEOMETRY_LAST => {
-                let stall = self.own.three_d.write(word as usize, value, mask);
+                let stall = self
+                    .own
+                    .three_d
+                    .write(word as usize, value, mask, &self.shared.lcd);
                 self.own.stall += stall * 2;
                 self.own.pending = true;
                 self.shared.irq[0].hold(Irq::GEOMETRY_FIFO, self.own.three_d.irq());

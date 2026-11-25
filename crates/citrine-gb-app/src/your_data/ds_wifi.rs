@@ -1,6 +1,5 @@
-use super::{Change, Files, Kind, Part, Tally};
+use super::{Change, Files, Part, Store, Tally};
 use crate::ds_wifi::Identity;
-use crate::icons;
 use crate::storage::SettingsStore;
 use std::io;
 
@@ -24,20 +23,14 @@ impl DsWifiPart<'_> {
 }
 
 impl Part for DsWifiPart<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "DS wifi connection",
-            icon: icons::WIFI_HIGH,
-            units: ("", ""),
-            nouns: ("DS wifi connection", "DS wifi connections"),
-        }
+    fn kind(&self) -> Store {
+        Store::DsWifi
     }
 
     fn tally(&mut self) -> Tally {
-        self.mine().map_or_else(Tally::default, |identity| Tally {
-            count: 1,
-            bytes: identity.to_bytes().len() as u64,
-        })
+        Tally {
+            count: usize::from(self.mine().is_some()),
+        }
     }
 
     fn export(&mut self, out: &mut Files) {

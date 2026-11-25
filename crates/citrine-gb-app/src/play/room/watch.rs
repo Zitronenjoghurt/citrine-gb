@@ -2,6 +2,7 @@ use super::Room;
 use super::group::is_group_round;
 use crate::play::Picture;
 use crate::play::engine::{GROUP_UNITS, Rollback, Setup, Ticks};
+use crate::play::messages::keep;
 use crate::play::pace::Pace;
 use crate::play::seen::Still;
 use crate::play::shelf::{Finder, Look};
@@ -19,6 +20,27 @@ struct WatchFrom {
     members: Vec<OnlineId>,
     games: Vec<(u8, GameHash)>,
     cable: Vec<u8>,
+}
+
+impl WatchFrom {
+    fn checked(
+        frame: u32,
+        members: Vec<OnlineId>,
+        games: Vec<(u8, GameHash)>,
+        cable: Vec<u8>,
+    ) -> Option<Self> {
+        let fits = members.len() <= GROUP_UNITS
+            && games.len() <= GROUP_UNITS
+            && games
+                .iter()
+                .all(|(unit, _)| usize::from(*unit) < GROUP_UNITS);
+        fits.then_some(Self {
+            frame,
+            members,
+            games,
+            cable,
+        })
+    }
 }
 
 pub(in crate::play) struct GroupWatch {
@@ -105,8 +127,11 @@ impl GroupWatch {
             from.members.len(),
             lanes,
         );
+        let Some(&player) = Player::ALL.get(local) else {
+            return;
+        };
         let Ok(mut r) = Rollback::group(
-            Player::ALL[local],
+            player,
             start,
             games,
             Default::default(),
@@ -155,6 +180,9 @@ impl GroupWatch {
             cable: None,
             saves: false,
             round_trip_ms: 0,
+            spread_ms: 0,
+            aim: None,
+            rise_aim: None,
             now,
         });
     }
@@ -273,26 +301,20 @@ impl Room {
                 cable,
                 ..
             } if from == watch.authority => {
-                watch.from = Some(WatchFrom {
-                    frame,
-                    members,
-                    games,
-                    cable,
-                });
+                if let Some(checked) = WatchFrom::checked(frame, members, games, cable) {
+                    watch.from = Some(checked);
+                }
             }
             PlayMsg::Resync { unit, data, .. }
-                if from == watch.authority && watch.engine.is_none() =>
+                if from == watch.authority
+                    && watch.engine.is_none()
+                    && usize::from(unit) < GROUP_UNITS =>
             {
                 watch.states.retain(|(u, _)| *u != unit);
                 watch.states.push((unit, data));
             }
             msg if watch.engine.is_some() => watch.deliver(from, msg),
-            msg => {
-                watch.early.push((from, msg));
-                if watch.early.len() > KEPT_EARLY {
-                    watch.early.remove(0);
-                }
-            }
+            msg => keep(&mut watch.early, from, msg, KEPT_EARLY),
         }
         None
     }
@@ -470,5 +492,24 @@ impl Room {
             self.links.set_watchers(me, watchers);
             self.sent.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u64) -> OnlineId {
+        OnlineId::new(n).unwrap()
+    }
+
+    #[test]
+    fn a_watch_start_names_at_most_one_player_per_unit() {
+        let hash: GameHash = [0; 20];
+        let four: Vec<OnlineId> = (1..=4).map(id).collect();
+        assert!(WatchFrom::checked(0, four.clone(), vec![(3, hash)], Vec::new()).is_some());
+        let five: Vec<OnlineId> = (1..=5).map(id).collect();
+        assert!(WatchFrom::checked(0, five, Vec::new(), Vec::new()).is_none());
+        assert!(WatchFrom::checked(0, four, vec![(4, hash)], Vec::new()).is_none());
     }
 }

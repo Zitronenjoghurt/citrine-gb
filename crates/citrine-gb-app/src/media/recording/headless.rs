@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 const RATE: u32 = 48_000;
 
 pub(crate) fn temp_file(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("citrine-recording-{}", std::process::id()));
+    let dir =
+        crate::storage::scratch_dir().join(format!("citrine-recording-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(name)
 }
@@ -26,6 +27,9 @@ fn new_media(gb: &GameBoy) -> NewMedia {
         width: 160,
         height: 144,
         length_ms: None,
+        frame_times: false,
+        video: false,
+        replay: None,
         frame: Frame {
             width: 160,
             height: 144,
@@ -339,7 +343,7 @@ fn a_new_sound_rate_ends_the_recording() {
 #[ignore = "downloads Cisco's codec, run with --ignored"]
 fn cisco_s_downloaded_codec_records_an_mp4() {
     use super::codec::{self, Codec, Status};
-    let dir = std::env::temp_dir().join(format!("citrine-cisco-{}", std::process::id()));
+    let dir = crate::storage::scratch_dir().join(format!("citrine-cisco-{}", std::process::id()));
     let binary = codec::binary_for(std::env::consts::OS, std::env::consts::ARCH)
         .expect("Cisco has no build for this system");
     let codec = Codec::new(dir.clone(), Some(binary));

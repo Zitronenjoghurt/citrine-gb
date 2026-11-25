@@ -1,12 +1,15 @@
 use super::{Sheet, pick};
 use crate::app::Citrine;
 use crate::app::mobile::kit::{self, Row, SwitchRow};
+use crate::app::mobile::sheet;
+use crate::app::ui_state::settings_tree::GroupId;
 use crate::app::widgets::settings::online::{
-    self, ALLOW, ANDROID_SETTINGS, CLOUD_HINT, DELAY_HINT, FRIEND_REQUESTS, INVITES, MESSAGES,
-    SYNC_HINT, TYPING, TYPING_HINT, cloud_problems, no_storage, storage,
+    self, ALLOW, ANDROID_SETTINGS, DELAY_HINT, DIRECT_HINT, FRIEND_REQUESTS, INVITES, MESSAGES,
+    TYPING, TYPING_DEFAULT, TYPING_HINT, TYPING_TEXT, storage,
 };
 use crate::app::widgets::settings::page::{Heading, Page};
 use crate::icons;
+use citrine_gb_net::MAX_TYPING_CHARS;
 use egui::{Context, Ui};
 use web_time::Instant;
 
@@ -40,6 +43,16 @@ impl Citrine {
                 dirty |= list.switch(
                     SwitchRow::new(TYPING, &mut s.online.typing_indicators).info(TYPING_HINT),
                 );
+                let text = match s.online.typing_text.trim() {
+                    "" => TYPING_DEFAULT,
+                    text => text,
+                };
+                let row = Row::new(TYPING_TEXT)
+                    .value(text)
+                    .enabled(s.online.typing_indicators);
+                if list.row(row).clicked() {
+                    open = Some(Sheet::TypingText);
+                }
             })
         });
         if crate::platform::push::available() {
@@ -49,57 +62,54 @@ impl Citrine {
                 })
             });
         }
-        page.section(
-            Heading::new(icons::GAME_CONTROLLER, "Play together"),
-            |ui| {
-                kit::list(ui, |list| {
-                    let row = Row::new("Input delay")
-                        .info(DELAY_HINT)
-                        .value(s.online.input_delay.to_string());
-                    if list.row(row).clicked() {
-                        open = Some(Sheet::InputDelay);
-                    }
-                })
-            },
-        );
-        page.section(Heading::new(icons::CLOUD, "Cloud"), |ui| {
+        page.section(Heading::new(icons::USERS, "Play together"), |ui| {
             kit::list(ui, |list| {
-                dirty |= list.switch(
-                    SwitchRow::new("Cloud saves", &mut s.online.cloud_saves).info(CLOUD_HINT),
-                );
-                let cloud = s.online.cloud_saves;
-                let mut sync = cloud && s.online.sync_settings;
-                if list.switch(
-                    SwitchRow::new("Sync settings", &mut sync)
-                        .info(SYNC_HINT)
-                        .enabled(cloud),
-                ) {
-                    s.online.sync_settings = sync;
-                    dirty = true;
+                let row = Row::new("Input delay")
+                    .info(DELAY_HINT)
+                    .value(s.online.input_delay.to_string());
+                if list.row(row).clicked() {
+                    open = Some(Sheet::InputDelay);
                 }
+                dirty |= list.switch(
+                    SwitchRow::new("Direct connection", &mut s.online.direct).info(DIRECT_HINT),
+                );
             })
         });
         s.dirty |= dirty;
-        for text in no_storage(s, client)
-            .into_iter()
-            .chain(cloud_problems(s, client))
-        {
-            page.note(text);
-        }
         if storage::has_storage(client) {
-            page.section(Heading::new(icons::HARD_DRIVES, "Storage"), |ui| {
-                storage::storage_list(ui, client, form, now)
-            });
+            page.section(
+                Heading::new(GroupId::Storage.icon(), GroupId::Storage.title()),
+                |ui| storage::storage_list(ui, client, form, now),
+            );
         }
         page.end();
         self.open_sheet(open);
     }
 
-    pub(super) fn online_sheet(&mut self, ctx: &Context) -> bool {
+    pub(super) fn online_sheet(&mut self, ctx: &Context, open: Sheet) -> bool {
         let s = &mut self.ui.settings;
-        let (changed, done) = pick(ctx, "Input delay", None, &mut s.online.input_delay);
+        if open != Sheet::TypingText {
+            let (changed, done) = pick(ctx, "Input delay", None, &mut s.online.input_delay);
+            s.dirty |= changed;
+            return done;
+        }
+        let mut changed = false;
+        let shown = sheet::show(ctx, super::sheet_id(), TYPING_TEXT, |ui| {
+            kit::list(ui, |list| {
+                list.custom(|ui| {
+                    kit::padded(ui, |ui| {
+                        let field = egui::TextEdit::singleline(&mut s.online.typing_text)
+                            .hint_text(TYPING_DEFAULT)
+                            .char_limit(MAX_TYPING_CHARS);
+                        changed = kit::field(ui, field).changed();
+                    });
+                });
+            });
+            ui.add_space(10.0);
+            kit::primary_button(ui, "Done")
+        });
         s.dirty |= changed;
-        done
+        shown.inner || shown.closed
     }
 }
 

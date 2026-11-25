@@ -20,6 +20,10 @@ pub enum GbError {
     #[cfg(feature = "gba")]
     #[error("This snapshot is from an older version of Citrine")]
     OlderState,
+    #[error("This snapshot is damaged")]
+    DamagedState,
+    #[error("This snapshot belongs to another game")]
+    OtherGame,
     #[cfg(feature = "gba")]
     #[error("This isn't a Game Boy Advance game")]
     NotGba,

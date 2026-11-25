@@ -1,7 +1,7 @@
 use super::chart::ACCENT;
 use super::{
-    PAGE_SIZE, Page, Range, Sort, StatsUi, capitalized, count, date_text, facts, heading,
-    last_played, nonzero_facts, play_chart, play_time, sessions, tiles,
+    PAGE_SIZE, Page, Range, Sort, StatsUi, View, capitalized, count, date_text, facts, heading,
+    last_played, play_time, sessions, snapshots, tiles, time_played, together,
 };
 use crate::app::widgets::field::row_field;
 use crate::icons;
@@ -89,17 +89,7 @@ pub(super) fn game_row(ui: &mut Ui, game: &GameTotals, top: u64, today: Date) ->
                     });
                 },
             );
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!(
-                        "Last played {} · {}",
-                        last_played(game.last_played, today),
-                        sessions(game.sessions)
-                    ))
-                    .weak(),
-                )
-                .truncate(),
-            );
+            ui.add(egui::Label::new(RichText::new(played_line(game, today)).weak()).truncate());
             let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 3.0), Sense::hover());
             ui.painter()
                 .rect_filled(bar, CornerRadius::same(2), ui.visuals().faint_bg_color);
@@ -142,54 +132,62 @@ pub(super) fn game_tiles(ui: &mut Ui, game: &GameTotals) {
 
 pub(super) fn game_facts(ui: &mut Ui, game: &GameTotals, today: Date) {
     let average = game.play_ms.checked_div(game.sessions).unwrap_or(0);
-    facts(
-        ui,
-        &[
-            ("First played", date_text(game.first_played, today)),
-            (
-                "Last played",
-                capitalized(&last_played(game.last_played, today)),
-            ),
-            ("Average session", play_time(average)),
-        ],
-    );
-    nonzero_facts(
-        ui,
-        &[
-            ("Snapshots made", game.snapshots, count(game.snapshots)),
-            ("Snapshots loaded", game.loads, count(game.loads)),
-            (
-                "Time online with friends",
-                game.together_ms,
-                play_time(game.together_ms),
-            ),
-        ],
-    );
+    let mut rows = Vec::new();
+    if game.first_played > 0 {
+        rows.push(("First played", date_text(game.first_played, today)));
+    }
+    if game.last_played > 0 {
+        rows.push((
+            "Last played",
+            capitalized(&last_played(game.last_played, today)),
+        ));
+    }
+    rows.push(("Average session", play_time(average)));
+    facts(ui, &rows);
+}
+
+pub(super) fn played_line(game: &GameTotals, today: Date) -> String {
+    if game.last_played == 0 {
+        return "Not played yet".to_owned();
+    }
+    format!(
+        "Last played {} · {}",
+        last_played(game.last_played, today),
+        sessions(game.sessions)
+    )
 }
 
 pub(super) fn game_page(
     ui: &mut Ui,
     state: &mut StatsUi,
     range: &mut Range,
+    view: &View,
     game: &GameTotals,
-    today: Date,
 ) {
     if ui
         .button(format!("{}  All games", icons::ARROW_LEFT))
         .clicked()
     {
         state.page = Page::Overview;
+        state.picked = None;
     }
     ui.add_space(6.0);
     ui.add(egui::Label::new(RichText::new(&game.name).heading()).truncate());
     ui.add_space(6.0);
     game_tiles(ui, game);
-    ui.add_space(12.0);
-    play_chart(ui, range, &game.rom, &game.days, today);
-    ui.add_space(12.0);
+    time_played(
+        ui,
+        state,
+        range,
+        view,
+        &game.rom,
+        &game.days,
+        Some(&game.rom),
+    );
     heading(ui, icons::LIST_NUMBERS, "Details");
-    game_facts(ui, game, today);
-    super::cable::section(ui, &game.cable);
+    game_facts(ui, game, view.today);
+    together(ui, game.together_ms, 0, &game.cable);
+    snapshots(ui, game.snapshots, game.loads);
     pokemon(ui, game);
 }
 
@@ -197,7 +195,6 @@ pub(super) fn pokemon(ui: &mut Ui, game: &GameTotals) {
     let Some((_, latest)) = game.progress.iter().next_back() else {
         return;
     };
-    ui.add_space(12.0);
     heading(ui, icons::TROPHY, "Game progress");
     tiles(
         ui,

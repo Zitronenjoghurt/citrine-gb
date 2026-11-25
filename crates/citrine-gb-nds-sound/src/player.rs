@@ -219,10 +219,6 @@ impl Player {
             && self.voices.iter().all(Option::is_none)
     }
 
-    pub fn sample_rate(&self) -> u32 {
-        self.output.sample_rate()
-    }
-
     pub fn set_sample_rate(&mut self, rate: u32) {
         if rate != self.output.sample_rate() {
             self.output.set_sample_rate(rate);

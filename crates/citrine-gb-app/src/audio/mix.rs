@@ -1,4 +1,4 @@
-use super::pacer::SlowSound;
+use super::pacer::{FastForwardSound, SlowSound};
 use std::collections::VecDeque;
 
 const SMOOTHING: f32 = 0.002;
@@ -18,6 +18,7 @@ pub struct SoundLevels {
     pub mine: f32,
     pub friend: f32,
     pub slow: SlowSound,
+    pub fast: FastForwardSound,
 }
 
 #[derive(Default)]
@@ -77,6 +78,7 @@ mod tests {
             mine: 1.0,
             friend: level(0.5, false),
             slow: SlowSound::default(),
+            fast: FastForwardSound::default(),
         };
         let out = mixed(levels, &[0.2, -0.2, 0.9, -0.9], &[0.4, 0.4, 0.8, -0.8]);
         assert_near(out, &[0.3, -0.1, 1.0, -1.0]);
@@ -88,6 +90,7 @@ mod tests {
             mine: level(0.8, false),
             friend: level(0.5, true),
             slow: SlowSound::default(),
+            fast: FastForwardSound::default(),
         };
         let out = mixed(levels, &[0.5, -0.5], &[0.4, 0.4]);
         assert_near(out, &[0.5 * 0.64, -0.5 * 0.64]);
@@ -99,6 +102,7 @@ mod tests {
             mine: level(0.8, true),
             friend: level(0.5, false),
             slow: SlowSound::default(),
+            fast: FastForwardSound::default(),
         };
         let out = mixed(levels, &[0.5, -0.5], &[0.4, -0.8]);
         assert_near(out, &[0.1, -0.2]);
@@ -110,6 +114,7 @@ mod tests {
             mine: 1.0,
             friend: level(0.5, false),
             slow: SlowSound::default(),
+            fast: FastForwardSound::default(),
         };
         let out = mixed(levels, &[0.25, -0.25], &[]);
         assert_near(out, &[0.25, -0.25]);
@@ -121,6 +126,7 @@ mod tests {
             mine: 1.0,
             friend: level(0.5, false),
             slow: SlowSound::default(),
+            fast: FastForwardSound::default(),
         };
         let out = mixed(levels, &[], &[0.4, -0.4]);
         assert_near(out, &[0.1, -0.1]);
@@ -133,6 +139,7 @@ mod tests {
             mine: 1.0,
             friend: 0.0,
             slow: SlowSound::default(),
+            fast: FastForwardSound::default(),
         };
         mixer.mix(loud, &mut vec![0.5, 0.5], &mut Vec::new());
         let mut out = vec![0.5; 4_000];

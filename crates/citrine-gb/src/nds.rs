@@ -14,6 +14,7 @@ pub mod ir;
 pub mod lcd;
 pub mod machine;
 pub mod math;
+pub mod mic;
 mod ram;
 pub mod render;
 pub mod rtc;

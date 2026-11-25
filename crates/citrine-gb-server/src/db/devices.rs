@@ -1,6 +1,8 @@
 use super::{Db, Result};
 use sqlx::SqliteConnection;
 
+pub const DEVICES_PER_ACCOUNT: i64 = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRow {
     pub id: i64,
@@ -50,6 +52,14 @@ impl Db {
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();
+        sqlx::query!(
+            "DELETE FROM devices WHERE account_id = ?1 AND id NOT IN
+               (SELECT id FROM devices WHERE account_id = ?1 ORDER BY last_seen DESC, id DESC LIMIT ?2)",
+            account,
+            DEVICES_PER_ACCOUNT,
+        )
+        .execute(&mut *tx)
+        .await?;
         copy_chats(&mut tx, account, id).await?;
         tx.commit().await?;
         Ok(id)
@@ -250,6 +260,38 @@ mod tests {
             db.known_device(me, &[7; 32], "Pixel", 30).await.unwrap(),
             KnownDevice::Unknown
         );
+    }
+
+    #[tokio::test]
+    async fn an_account_keeps_only_its_most_recent_devices() {
+        let (_dir, db) = db().await;
+        let me = account(&db, 1, "me").await.id;
+        let friend = account(&db, 2, "friend").await.id;
+        let theirs = db.add_device(friend, &[0xff; 32], "Mac", 1).await.unwrap();
+        db.insert_message(friend, me, Some(theirs), 2, None, &sealed(1))
+            .await
+            .unwrap();
+        let first = db.add_device(me, &[0; 32], "first", 3).await.unwrap();
+        let second = db.add_device(me, &[1; 32], "second", 4).await.unwrap();
+        db.device_seen(first, 500).await.unwrap();
+        let mut last = 0;
+        for n in 2..=DEVICES_PER_ACCOUNT as u8 {
+            last = db
+                .add_device(me, &[n; 32], "more", 10 + n as u64)
+                .await
+                .unwrap();
+        }
+        let list = db.devices_of(me).await.unwrap();
+        assert_eq!(list.len(), DEVICES_PER_ACCOUNT as usize);
+        assert!(list.iter().any(|d| d.id == first));
+        assert!(list.iter().any(|d| d.id == last));
+        assert!(!list.iter().any(|d| d.id == second));
+        assert_eq!(
+            db.known_device(me, &[1; 32], "second", 600).await.unwrap(),
+            KnownDevice::Unknown
+        );
+        assert_eq!(db.pending_messages(last, 0, 10).await.unwrap().len(), 1);
+        assert!(db.pending_messages(second, 0, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

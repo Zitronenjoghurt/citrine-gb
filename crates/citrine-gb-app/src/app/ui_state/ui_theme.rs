@@ -8,6 +8,7 @@ use strum_macros::EnumIter;
 )]
 pub enum UiTheme {
     #[default]
+    System,
     Dark,
     Light,
     CatppuccinLatte,
@@ -19,10 +20,22 @@ pub enum UiTheme {
 pub const BRAND: egui::Color32 = egui::Color32::from_rgb(0xF2, 0xCE, 0x44);
 pub const BRAND_DARK: egui::Color32 = egui::Color32::from_rgb(0xF5, 0xAD, 0x33);
 pub const ON_BRAND: egui::Color32 = egui::Color32::from_rgb(0x2B, 0x22, 0x07);
+pub const BRAND_LOCKED: egui::Color32 = egui::Color32::from_rgb(0xDA, 0x95, 0x0B);
 pub const BRAND_MARK: egui::Color32 = egui::Color32::from_rgb(0x8C, 0x5F, 0x00);
+pub const BRAND_EDGE: egui::Color32 = egui::Color32::from_rgb(0xB0, 0x78, 0x00);
 pub const DANGER: egui::Color32 = egui::Color32::from_rgb(0xC6, 0x28, 0x28);
 pub const DANGER_DARK: egui::Color32 = egui::Color32::from_rgb(0xD3, 0x2F, 0x2F);
 pub const ON_DANGER: egui::Color32 = egui::Color32::WHITE;
+
+#[cfg(feature = "nds")]
+pub const METER: egui::Color32 = egui::Color32::from_rgb(0x2E, 0x8B, 0x57);
+#[cfg(feature = "nds")]
+pub const METER_DARK: egui::Color32 = egui::Color32::from_rgb(0x4C, 0xC4, 0x6A);
+
+#[cfg(feature = "nds")]
+pub fn meter(visuals: &egui::Visuals) -> egui::Color32 {
+    if visuals.dark_mode { METER_DARK } else { METER }
+}
 
 pub fn brand(visuals: &egui::Visuals) -> egui::Color32 {
     if visuals.dark_mode { BRAND_DARK } else { BRAND }
@@ -36,12 +49,20 @@ pub fn danger(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
+pub fn danger_text(visuals: &egui::Visuals) -> egui::Color32 {
+    visuals.error_fg_color
+}
+
 pub fn brand_mark(visuals: &egui::Visuals) -> egui::Color32 {
     if visuals.dark_mode {
         BRAND_DARK
     } else {
         BRAND_MARK
     }
+}
+
+pub fn own_value(visuals: &egui::Visuals) -> egui::Color32 {
+    brand_mark(visuals)
 }
 
 pub fn ink_on(fill: egui::Color32) -> egui::Color32 {
@@ -69,10 +90,7 @@ pub fn paint_focus_ring(ctx: &egui::Context) {
     };
     let style = ctx.style();
     let active = &style.visuals.widgets.active;
-    let stroke = egui::Stroke::new(
-        style.visuals.selection.stroke.width,
-        focus_ring(&style.visuals),
-    );
+    let stroke = focus_ring_stroke(ctx);
     ctx.layer_painter(response.layer_id)
         .with_clip_rect(response.interact_rect.expand(active.expansion))
         .rect_stroke(
@@ -81,6 +99,18 @@ pub fn paint_focus_ring(ctx: &egui::Context) {
             stroke,
             egui::StrokeKind::Inside,
         );
+}
+
+pub fn focus_ring_stroke(ctx: &egui::Context) -> egui::Stroke {
+    let style = ctx.style();
+    egui::Stroke::new(
+        whole_pixels(style.visuals.selection.stroke.width, ctx.pixels_per_point()),
+        focus_ring(&style.visuals),
+    )
+}
+
+fn whole_pixels(width: f32, pixels_per_point: f32) -> f32 {
+    (width * pixels_per_point).ceil().max(1.0) / pixels_per_point
 }
 
 fn branded(visuals: &mut egui::Visuals) {
@@ -100,18 +130,42 @@ fn branded(visuals: &mut egui::Visuals) {
 impl UiTheme {
     pub fn apply(&self, ctx: &egui::Context) {
         self.apply_base(ctx);
-        ctx.style_mut(|style| branded(&mut style.visuals));
+        ctx.all_styles_mut(|style| branded(&mut style.visuals));
     }
 
     fn apply_base(&self, ctx: &egui::Context) {
         self.set_base(ctx);
-        ctx.style_mut(|style| readable_weak(&mut style.visuals));
+        ctx.all_styles_mut(|style| readable_weak(&mut style.visuals));
+    }
+
+    pub fn resolve(self, ctx: &egui::Context) -> Self {
+        match (self, ctx.theme()) {
+            (Self::System, egui::Theme::Light) => Self::Light,
+            (Self::System, egui::Theme::Dark) => Self::Dark,
+            (theme, _) => theme,
+        }
+    }
+
+    fn is_dark(self) -> bool {
+        !matches!(self, Self::Light | Self::CatppuccinLatte)
     }
 
     fn set_base(&self, ctx: &egui::Context) {
+        if *self == Self::System {
+            ctx.set_theme(egui::ThemePreference::System);
+            ctx.set_visuals_of(egui::Theme::Dark, dark());
+            ctx.set_visuals_of(egui::Theme::Light, light());
+            return;
+        }
+        ctx.set_theme(if self.is_dark() {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
         match self {
+            Self::System => {}
             Self::Dark => ctx.set_visuals(dark()),
-            Self::Light => ctx.set_visuals(egui::Visuals::light()),
+            Self::Light => ctx.set_visuals(light()),
             Self::CatppuccinLatte => catppuccin_egui::set_theme(ctx, catppuccin_egui::LATTE),
             Self::CatppuccinFrappe => catppuccin_egui::set_theme(ctx, catppuccin_egui::FRAPPE),
             Self::CatppuccinMacchiato => {
@@ -123,7 +177,7 @@ impl UiTheme {
 
     pub fn code_colours(&self) -> CodeColours {
         match self {
-            Self::Dark => CodeColours(CODE_DARK),
+            Self::System | Self::Dark => CodeColours(CODE_DARK),
             Self::Light => CodeColours(CODE_LIGHT),
             Self::CatppuccinLatte => catppuccin_code(catppuccin_egui::LATTE),
             Self::CatppuccinFrappe => catppuccin_code(catppuccin_egui::FRAPPE),
@@ -203,6 +257,14 @@ fn catppuccin_code(theme: catppuccin_egui::Theme) -> CodeColours {
 }
 
 const DARK_ERROR: egui::Color32 = egui::Color32::from_rgb(255, 150, 150);
+const LIGHT_ERROR: egui::Color32 = egui::Color32::from_rgb(190, 20, 20);
+
+fn light() -> egui::Visuals {
+    egui::Visuals {
+        error_fg_color: LIGHT_ERROR,
+        ..egui::Visuals::light()
+    }
+}
 
 fn dark() -> egui::Visuals {
     let mut visuals = egui::Visuals {
@@ -216,6 +278,7 @@ fn dark() -> egui::Visuals {
 const DARK_TEXT: Color32 = Color32::from_gray(170);
 const WEAK_CONTRAST: f32 = 4.5;
 const EDGE_CONTRAST: f32 = 3.0;
+pub(crate) const TRACK_CONTRAST: f32 = 1.5;
 
 fn luminance(c: Color32) -> f32 {
     let channel = |v: u8| {
@@ -229,12 +292,23 @@ fn luminance(c: Color32) -> f32 {
     0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
 }
 
-pub fn box_edge(visuals: &egui::Visuals) -> Color32 {
+pub fn box_edge(visuals: &egui::Visuals, fill: Color32) -> Color32 {
     let ground = visuals.panel_fill;
     let ink = visuals.text_color();
     (0..=100)
         .map(|step| ground.lerp_to_gamma(ink, step as f32 / 100.0))
-        .find(|edge| contrast(*edge, ground) >= EDGE_CONTRAST)
+        .find(|edge| {
+            contrast(*edge, ground) >= EDGE_CONTRAST && contrast(*edge, fill) >= EDGE_CONTRAST
+        })
+        .unwrap_or(ink)
+}
+
+pub fn track(visuals: &egui::Visuals) -> Color32 {
+    let ground = visuals.panel_fill;
+    let ink = visuals.text_color();
+    (0..=100)
+        .map(|step| ground.lerp_to_gamma(ink, step as f32 / 100.0))
+        .find(|track| contrast(*track, ground) >= TRACK_CONTRAST)
         .unwrap_or(ink)
 }
 
@@ -310,8 +384,13 @@ fn stripe(visuals: &egui::Visuals) -> Color32 {
     }
 }
 
-fn text_grounds(visuals: &egui::Visuals) -> [Color32; 3] {
-    [visuals.panel_fill, visuals.window_fill, stripe(visuals)]
+fn text_grounds(visuals: &egui::Visuals) -> [Color32; 4] {
+    [
+        visuals.panel_fill,
+        visuals.window_fill,
+        stripe(visuals),
+        crate::app::mobile::kit::card_fill(visuals),
+    ]
 }
 
 fn readable_weak(visuals: &mut egui::Visuals) {
@@ -329,6 +408,7 @@ fn readable_weak(visuals: &mut egui::Visuals) {
 impl Display for UiTheme {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            UiTheme::System => write!(f, "Same as system"),
             UiTheme::Dark => write!(f, "Dark"),
             UiTheme::Light => write!(f, "Light"),
             UiTheme::CatppuccinLatte => write!(f, "Catppuccin Latte"),
@@ -342,8 +422,9 @@ impl Display for UiTheme {
 #[cfg(test)]
 mod tests {
     use super::{
-        BRAND, BRAND_DARK, BRAND_MARK, DARK_ERROR, ON_BRAND, ON_DANGER, UiTheme, brand, contrast,
-        danger, dark, focus_ring, hover_fill, pc_fill, text_grounds, weak_on,
+        BRAND, BRAND_DARK, BRAND_LOCKED, BRAND_MARK, DARK_ERROR, LIGHT_ERROR, ON_BRAND, ON_DANGER,
+        UiTheme, brand, contrast, danger, dark, focus_ring, hover_fill, light, pc_fill,
+        text_grounds, weak_on, whole_pixels,
     };
     use citrine_gb::debug::code::{InstrClass, OperandKind};
     use egui::Color32;
@@ -359,6 +440,20 @@ mod tests {
             visuals.widgets.hovered.weak_bg_fill,
         ] {
             assert!(contrast(DARK_ERROR, fill) >= 4.5, "{fill:?}");
+        }
+    }
+
+    #[test]
+    fn red_text_reads_on_light_buttons_and_cards() {
+        let visuals = light();
+        assert_eq!(visuals.error_fg_color, LIGHT_ERROR);
+        for fill in [
+            visuals.panel_fill,
+            visuals.widgets.inactive.weak_bg_fill,
+            visuals.widgets.hovered.weak_bg_fill,
+            crate::app::mobile::kit::card_fill(&visuals),
+        ] {
+            assert!(contrast(LIGHT_ERROR, fill) >= 4.5, "{fill:?}");
         }
     }
 
@@ -544,5 +639,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn same_as_system_follows_the_system_theme_and_a_picked_theme_does_not() {
+        let cases = [
+            (UiTheme::System, egui::Theme::Light, false),
+            (UiTheme::System, egui::Theme::Dark, true),
+            (UiTheme::Dark, egui::Theme::Light, true),
+            (UiTheme::Light, egui::Theme::Dark, false),
+        ];
+        for (theme, system, dark) in cases {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                system_theme: Some(system),
+                ..Default::default()
+            };
+            let _ = ctx.run(input.clone(), |_| {});
+            theme.apply(&ctx);
+            let _ = ctx.run(input, |_| {});
+            let visuals = ctx.style().visuals.clone();
+            assert_eq!(visuals.dark_mode, dark, "{theme} on a {system:?} system");
+            assert_eq!(visuals.selection.bg_fill, brand(&visuals), "{theme}");
+            assert_eq!(theme.resolve(&ctx).is_dark(), dark, "{theme}");
+            assert_ne!(theme.resolve(&ctx), UiTheme::System);
+        }
+    }
+
+    #[test]
+    fn the_focus_ring_fills_whole_pixels_at_every_scale() {
+        for pixels_per_point in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let pixels = whole_pixels(1.0, pixels_per_point) * pixels_per_point;
+            assert!(
+                (pixels - pixels.round()).abs() < 1e-4 && pixels >= pixels_per_point - 1e-4,
+                "{pixels_per_point}: {pixels} px"
+            );
+        }
+    }
+
+    fn oklch(color: Color32) -> (f32, f32, f32) {
+        let linear = |c: u8| {
+            let c = f32::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let [r, g, b, _] = color.to_array().map(linear);
+        let l = (0.412_221 * r + 0.536_333 * g + 0.051_446 * b).cbrt();
+        let m = (0.211_903 * r + 0.680_7 * g + 0.107_397 * b).cbrt();
+        let s = (0.088_302 * r + 0.281_719 * g + 0.629_979 * b).cbrt();
+        let lightness = 0.210_454 * l + 0.793_618 * m - 0.004_072 * s;
+        let a = 1.977_998 * l - 2.428_592 * m + 0.450_594 * s;
+        let b = 0.025_904 * l + 0.782_772 * m - 0.808_676 * s;
+        (lightness, a.hypot(b), b.atan2(a).to_degrees())
+    }
+
+    #[test]
+    fn a_locked_switch_keeps_the_amber() {
+        let (brand_l, brand_c, brand_h) = oklch(BRAND_DARK);
+        let (l, c, h) = oklch(BRAND_LOCKED);
+        assert!(l < brand_l - 0.05, "locked reads dimmer: {l} vs {brand_l}");
+        assert!((h - brand_h).abs() < 2.0, "same hue: {h} vs {brand_h}");
+        assert!(c > brand_c * 0.9, "no grey-brown: chroma {c} vs {brand_c}");
     }
 }

@@ -1,5 +1,5 @@
 use super::bar::{BarSwitch, Switch, bar_switches, change_entry, switch_ui};
-use super::lines::quality;
+use super::lines::{path_line, path_mark, quality};
 use super::room::{
     LinkEntry, Person, RoomFacts, Status, asks_line, member_menu, status, status_text, wait_line,
 };
@@ -8,10 +8,10 @@ use super::{BarAction, STRIP_AVATAR, watching};
 use crate::app::mobile::kit;
 use crate::app::ui_state::ui_theme;
 use crate::app::widgets::action::{action_height, main_button};
-use crate::app::widgets::avatar;
+use crate::app::widgets::{avatar, info_mark};
 use crate::icons;
 use crate::play::{PlaySession, Stage};
-use citrine_gb_net::OnlineId;
+use citrine_gb_net::{LinkPath, OnlineId};
 use egui::{Align2, Color32, FontId, Label, Rect, RichText, Sense, Stroke, Ui, vec2};
 
 pub const PHONE_AVATAR: f32 = 30.0;
@@ -145,10 +145,23 @@ pub fn person_line(ui: &Ui, person: &Person) -> egui::text::LayoutJob {
         if !job.text.is_empty() {
             job.append(" \u{b7} ", 0.0, format(weak));
         }
+        if let Some(path) = person.path {
+            job.append(&format!("{} ", path_mark(path)), 0.0, format(weak));
+        }
         job.append(word, 0.0, format(color));
         job.append(&format!(" {ms} ms"), 0.0, format(weak));
     }
     job
+}
+
+fn line_words(person: &Person, path: LinkPath, dark: bool) -> String {
+    let mut parts: Vec<String> = person.game.iter().cloned().collect();
+    parts.push(path_line(path).into());
+    if let Some(ms) = person.ms {
+        let (word, _) = quality(u32::from(ms), dark);
+        parts.push(format!("{word} {ms} ms"));
+    }
+    parts.join(" \u{b7} ")
 }
 
 fn hover_line(person: &Person) -> String {
@@ -158,9 +171,12 @@ fn hover_line(person: &Person) -> String {
     if person.reconnecting {
         return format!("{} is reconnecting", person.short());
     }
-    match person.ms {
-        Some(ms) => format!("{} \u{b7} {ms} ms", person.name),
-        None => person.name.clone(),
+    match (person.ms, person.path) {
+        (Some(ms), Some(path)) => {
+            format!("{} \u{b7} {} \u{b7} {ms} ms", person.name, path_line(path))
+        }
+        (Some(ms), None) => format!("{} \u{b7} {ms} ms", person.name),
+        (None, _) => person.name.clone(),
     }
 }
 
@@ -228,7 +244,7 @@ fn chunk(
                 rect.center().y,
             ),
             Align2::CENTER_CENTER,
-            icons::PLUGS_CONNECTED,
+            icons::LINK_CABLE,
             FontId::proportional(plug_width(size)),
             ui.visuals().text_color(),
         );
@@ -748,13 +764,13 @@ fn cards(ui: &mut Ui, facts: &RoomFacts, phone: bool) -> Option<RoomAction> {
         if phone || line_fits(ui, &line, single.is_some()) {
             card_row(ui, phone).show(
                 ui,
-                |ui| card_line(ui, icons::PLUGS, &line, phone),
+                |ui| card_line(ui, icons::LINK_CABLE, &line, phone),
                 |ui| ask_buttons(ui, &mut top, false),
             );
         } else {
             let text = ui
                 .horizontal(|ui| {
-                    ui.label(icons::PLUGS);
+                    ui.label(icons::LINK_CABLE);
                     ui.add(Label::new(line).truncate()).rect.left()
                 })
                 .inner;
@@ -836,7 +852,7 @@ fn line_fits(ui: &Ui, line: &str, link: bool) -> bool {
         } else {
             0.0
         };
-    let text = width(icons::PLUGS, egui::TextStyle::Body)
+    let text = width(icons::LINK_CABLE, egui::TextStyle::Body)
         + spacing.item_spacing.x
         + width(line, egui::TextStyle::Body);
     text + spacing.item_spacing.x * 2.0 + buttons <= ui.available_width()
@@ -855,8 +871,29 @@ pub fn header_ui(ui: &mut Ui, person: &Person, size: f32, touch: bool) {
                     .insert(egui::TextStyle::Small, FontId::proportional(13.0));
             }
             let line = person_line(ui, person);
-            if !line.text.is_empty() {
-                ui.add(Label::new(line).truncate());
+            if line.text.is_empty() {
+                return;
+            }
+            match person.path.filter(|_| !person.reconnecting) {
+                Some(path) => {
+                    let width = ui
+                        .fonts_mut(|fonts| fonts.layout_job(line.clone()))
+                        .size()
+                        .x;
+                    let hint = if width > ui.available_width() {
+                        line_words(person, path, ui.visuals().dark_mode)
+                    } else {
+                        path_line(path).to_owned()
+                    };
+                    let label = Label::new(line)
+                        .truncate()
+                        .show_tooltip_when_elided(false)
+                        .sense(Sense::click());
+                    info_mark::hint_beside(&ui.add(label), &hint);
+                }
+                None => {
+                    ui.add(Label::new(line).truncate());
+                }
             }
         });
     });
@@ -864,16 +901,18 @@ pub fn header_ui(ui: &mut Ui, person: &Person, size: f32, touch: bool) {
 
 fn link_label(entry: &LinkEntry) -> (&'static str, String, Option<String>) {
     match entry {
-        LinkEntry::Link => (icons::PLUGS, "Link".into(), None),
-        LinkEntry::Play { game, with } => (icons::PLUGS, format!("Play {game} with {with}"), None),
-        LinkEntry::Needs(game) => (icons::PLUGS, format!("Needs {game}"), None),
+        LinkEntry::Link => (icons::LINK_CABLE, "Link".into(), None),
+        LinkEntry::Play { game, with } => {
+            (icons::LINK_CABLE, format!("Play {game} with {with}"), None)
+        }
+        LinkEntry::Needs(game) => (icons::LINK_CABLE, format!("Needs {game}"), None),
         LinkEntry::Join(with) => (
-            icons::PLUGS,
+            icons::LINK_CABLE,
             "Join their link".into(),
             Some(format!("with {with}")),
         ),
         LinkEntry::Next(with) => (
-            icons::PLUGS,
+            icons::LINK_CABLE,
             "Next to link".into(),
             Some(format!("with {with}")),
         ),
@@ -988,7 +1027,7 @@ mod tests {
         GroupFacts, LinkEntry, Waiting, WatchFacts, member_menu, note_for, status,
     };
     use super::*;
-    use citrine_gb_net::{Console, ErrorCode, FriendState};
+    use citrine_gb_net::{Console, ErrorCode, FriendState, LinkPath};
     use egui::{Pos2, Shape, epaint::ClippedShape};
 
     fn id(n: u64) -> OnlineId {
@@ -1016,6 +1055,11 @@ mod tests {
             away: false,
             paused: false,
             ms: (n != 1).then_some(if n == 4 { 214 } else { 38 }),
+            path: (n != 1).then_some(if n == 3 {
+                LinkPath::Direct
+            } else {
+                LinkPath::Relay
+            }),
             playing: true,
             game: Some("Snake".into()),
             console: Some(Console::Gb),
@@ -1250,7 +1294,7 @@ mod tests {
                 );
             }
             assert!(
-                has(&texts, icons::PLUGS_CONNECTED),
+                has(&texts, icons::LINK_CABLE),
                 "{zoom}: the cable mark shows"
             );
             assert!(has(&texts, icons::USER_PLUS), "{zoom}: invite shows");
@@ -1274,10 +1318,7 @@ mod tests {
                     "{zoom}: {name} shows"
                 );
             }
-            let marks = texts
-                .iter()
-                .filter(|(t, _)| t == icons::PLUGS_CONNECTED)
-                .count();
+            let marks = texts.iter().filter(|(t, _)| t == icons::LINK_CABLE).count();
             assert_eq!(marks, 2, "{zoom}: one cable mark per link group");
             assert!(
                 !texts.iter().any(|(t, _)| t.starts_with('+')),
@@ -1298,7 +1339,7 @@ mod tests {
                 "{name} shows in my link"
             );
         }
-        assert!(has(&texts, icons::PLUGS_CONNECTED), "my cable mark shows");
+        assert!(has(&texts, icons::LINK_CABLE), "my cable mark shows");
         assert!(
             texts.iter().any(|(t, _)| t.starts_with('+')),
             "the others fold behind a count"
@@ -1877,5 +1918,37 @@ mod tests {
             .find(|t| t.starts_with("Linked with"))
             .expect("no link line");
         assert!(line.ends_with(" link \u{b7} 38 ms"), "{line}");
+    }
+
+    #[test]
+    fn each_row_marks_whether_its_link_goes_direct_or_through_the_relay() {
+        let direct = person(3, Some(0));
+        let relay = person(2, Some(0));
+        let line = person_line_of(&direct);
+        assert!(line.contains(icons::ARROWS_HORIZONTAL), "{line}");
+        let line = person_line_of(&relay);
+        assert!(line.contains(icons::GLOBE_SIMPLE), "{line}");
+        assert!(!person_line_of(&person(1, Some(0))).contains(icons::GLOBE_SIMPLE));
+        let hover = hover_line(&direct);
+        assert!(hover.contains("\u{b7} Direct connection \u{b7}"), "{hover}");
+        assert!(hover_line(&relay).contains("Through the relay"));
+    }
+
+    #[test]
+    fn a_cut_room_line_hint_spells_out_the_whole_line() {
+        let mut direct = person(3, Some(0));
+        direct.game = Some("Link's Awakening DX".into());
+        let words = line_words(&direct, LinkPath::Direct, false);
+        assert!(
+            words.starts_with("Link's Awakening DX \u{b7} Direct connection \u{b7} "),
+            "{words}"
+        );
+        assert!(words.ends_with(" ms"), "{words}");
+    }
+
+    fn person_line_of(person: &Person) -> String {
+        let mut line = String::new();
+        frame(1.5, 400.0, |ui| line = person_line(ui, person).text);
+        line
     }
 }

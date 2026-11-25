@@ -1,4 +1,4 @@
-use crate::app::ui_state::hotkeys::Hotkeys;
+use crate::app::ui_state::hotkeys::{Hotkeys, QuickLoadKey};
 use crate::app::ui_state::keybinds::KeyBindings;
 use crate::app::widgets::settings::form::Form;
 use crate::app::widgets::tab_bar::tab_bar;
@@ -9,7 +9,6 @@ use strum_macros::EnumIter;
 
 mod changelog;
 mod features;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
 mod licenses;
 mod tail;
 mod welcome;
@@ -22,7 +21,6 @@ pub enum InfoTab {
     Welcome,
     Features,
     Changelog,
-    #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
     Licenses,
 }
 
@@ -31,6 +29,7 @@ pub enum Controls<'a> {
     Desktop {
         bindings: &'a KeyBindings,
         hotkeys: &'a Hotkeys,
+        quick_load: QuickLoadKey,
     },
 }
 
@@ -40,7 +39,6 @@ impl InfoTab {
             Self::Welcome => welcome::build(controls),
             Self::Features => features::build(),
             Self::Changelog => changelog::build(),
-            #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
             Self::Licenses => licenses::build(),
         };
         markdown.replace('→', crate::icons::ARROW_RIGHT)
@@ -53,7 +51,6 @@ impl Display for InfoTab {
             Self::Welcome => write!(f, "Welcome"),
             Self::Features => write!(f, "Features & plans"),
             Self::Changelog => write!(f, "Changelog"),
-            #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
             Self::Licenses => write!(f, "Licences"),
         }
     }
@@ -353,6 +350,7 @@ mod tests {
             Controls::Desktop {
                 bindings: &bindings,
                 hotkeys: &hotkeys,
+                quick_load: QuickLoadKey::Hold,
             },
         ] {
             for tab in InfoTab::iter() {
@@ -534,12 +532,13 @@ mod tests {
         bindings.unbind_key(Key::Space);
         bindings.bind_key(Key::K, GbButton::Start);
         let mut hotkeys = Hotkeys::default();
-        hotkeys.unbind(Hotkey::plain(Key::F5));
+        hotkeys.unbind(&Hotkey::plain(Key::F5));
         hotkeys.bind(Hotkey::ctrl(Key::P), HotkeyAction::TogglePause);
 
         let about = welcome(&Controls::Desktop {
             bindings: &bindings,
             hotkeys: &hotkeys,
+            quick_load: QuickLoadKey::Hold,
         });
         assert!(about.contains("| Start | K |"), "{about}");
         assert!(about.contains("| Pause / resume | Ctrl+P |"), "{about}");
@@ -547,6 +546,14 @@ mod tests {
         assert!(!about.contains("F5"));
         assert!(!about.contains("(default)"));
         assert!(about.contains("Tabs, panels and windows"));
+
+        let pressed = welcome(&Controls::Desktop {
+            bindings: &bindings,
+            hotkeys: &hotkeys,
+            quick_load: QuickLoadKey::Press,
+        });
+        assert!(pressed.contains("| Quick load | F9 |"), "{pressed}");
+        assert!(!pressed.contains("hold quick load"), "{pressed}");
     }
 
     #[test]
@@ -555,6 +562,7 @@ mod tests {
         let about = welcome(&Controls::Desktop {
             bindings: &KeyBindings::default(),
             hotkeys: &Hotkeys::default(),
+            quick_load: QuickLoadKey::Hold,
         });
         for target in BindingTarget::buttons() {
             let name = target.button_name().expect("a button");
@@ -570,6 +578,7 @@ mod tests {
         let about = welcome(&Controls::Desktop {
             bindings: &KeyBindings::default(),
             hotkeys: &Hotkeys::default(),
+            quick_load: QuickLoadKey::Hold,
         });
         assert!(about.contains("| L | 1 |"), "{about}");
         assert!(about.contains("| R | 3 |"), "{about}");
@@ -597,6 +606,7 @@ mod tests {
                         let controls = Controls::Desktop {
                             bindings: &bindings,
                             hotkeys: &hotkeys,
+                            quick_load: QuickLoadKey::Hold,
                         };
                         InfoPanel::new(&mut state, &mut cache, controls).ui(ui);
                     });
@@ -645,6 +655,7 @@ mod tests {
                     let controls = Controls::Desktop {
                         bindings: &bindings,
                         hotkeys: &hotkeys,
+                        quick_load: QuickLoadKey::Hold,
                     };
                     size = egui::ScrollArea::vertical()
                         .vertical_scroll_offset(offset)
@@ -688,6 +699,7 @@ mod tests {
         let about = welcome(&Controls::Desktop {
             bindings: &bindings,
             hotkeys: &Hotkeys::default(),
+            quick_load: QuickLoadKey::Hold,
         });
         assert!(about.contains("| Select | Nothing bound |"), "{about}");
     }

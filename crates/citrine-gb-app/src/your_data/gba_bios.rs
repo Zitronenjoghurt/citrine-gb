@@ -1,5 +1,4 @@
-use super::{Change, Files, Kind, Part, Tally};
-use crate::icons;
+use super::{Change, Files, Kind, Part, Store, Tally};
 use crate::storage::SettingsStore;
 use citrine_gb::gba::bios::Bios;
 use std::io;
@@ -25,22 +24,23 @@ impl GbaBios<'_> {
 }
 
 impl Part for GbaBios<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
+    fn kind(&self) -> Store {
+        Store::SystemFiles
+    }
+
+    fn file_row(&self) -> Option<Kind> {
+        Some(Kind {
             name: "GBA BIOS",
-            icon: icons::CPU,
-            units: ("", ""),
             nouns: ("GBA BIOS", "GBA BIOS files"),
-        }
+            store: crate::storage::kinds::Kind::SystemFiles,
+            system_file: Some(crate::app::system_files::SystemFile::GbaBios),
+        })
     }
 
     fn tally(&mut self) -> Tally {
-        self.bios
-            .as_ref()
-            .map_or_else(Tally::default, |bios| Tally {
-                count: 1,
-                bytes: bios.image().len() as u64,
-            })
+        Tally {
+            count: usize::from(self.bios.is_some()),
+        }
     }
 
     fn export(&mut self, out: &mut Files) {

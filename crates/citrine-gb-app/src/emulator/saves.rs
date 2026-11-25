@@ -23,7 +23,7 @@ impl Emulator {
         if let Some(link) = &mut self.seat.core_mut().link {
             link.flush_save(&self.store, &mut self.writes)?;
         }
-        let Some(key) = self.rom_key.clone() else {
+        let Some(key) = self.saves_key() else {
             return Ok(());
         };
         let Some(save) = self.seat.core_mut().machine.battery(false, now_unix()) else {
@@ -69,7 +69,7 @@ impl Emulator {
     }
 
     pub fn rename_battery(&mut self, name: &str) -> GbResult<()> {
-        if let Some(key) = self.rom_key.clone() {
+        if let Some(key) = self.saves_key() {
             self.writes.settle();
             self.store
                 .set_battery_name(&key, name, &self.default_battery_name())?;
@@ -146,7 +146,9 @@ impl Emulator {
         let Some(key) = self.rom_key.clone() else {
             return Ok(SaveImport::NoRom);
         };
+        self.divert = None;
         let now = now_unix();
+        self.seat.core_mut().clear_rewind();
         match (ram, clock) {
             (Some(ram), None) => {
                 self.writes.send(Write::BatteryFile {
@@ -198,7 +200,9 @@ impl Emulator {
     }
 
     pub fn restart(&mut self) {
-        self.seat.core_mut().machine.soft_reset();
+        self.seat.core_mut().feed(citrine_gb_replay::Input::Reset);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.achievements_reset();
         self.running = true;
         self.started_at = Some(web_time::Instant::now());
     }
@@ -233,7 +237,7 @@ impl Emulator {
                 .rom_path
                 .as_deref()
                 .map(SaveStore::legacy_save_path)
-                .filter(|p| p.is_file()),
+                .filter(|p| SaveStore::is_legacy_save_file(p)),
         }
     }
 }

@@ -26,7 +26,7 @@ impl Way {
     pub fn hint(self, kind: MediaKind) -> &'static str {
         match (self, kind) {
             (Self::Copy, MediaKind::Screenshot | MediaKind::Print) => "Copy picture",
-            (Self::Copy, MediaKind::Recording) => "Copy file",
+            (Self::Copy, MediaKind::Recording | MediaKind::Replay) => "Copy file",
             (Self::Share, _) => "Share",
         }
     }
@@ -37,8 +37,12 @@ pub fn pick(kind: MediaKind, shares: bool, copies_images: bool) -> Option<Way> {
         _ if shares => Some(Way::Share),
         MediaKind::Screenshot | MediaKind::Print if copies_images => Some(Way::Copy),
         MediaKind::Screenshot | MediaKind::Print => None,
-        MediaKind::Recording if cfg!(any(target_arch = "wasm32", target_os = "android")) => None,
-        MediaKind::Recording => Some(Way::Copy),
+        MediaKind::Recording | MediaKind::Replay
+            if cfg!(any(target_arch = "wasm32", target_os = "android")) =>
+        {
+            None
+        }
+        MediaKind::Recording | MediaKind::Replay => Some(Way::Copy),
     }
 }
 
@@ -117,7 +121,7 @@ mod platform {
                         })
                     })
                 }),
-            MediaKind::Recording => {
+            MediaKind::Recording | MediaKind::Replay => {
                 with_clipboard(|clipboard| clipboard.set().file_list(&[path.as_path()]))
             }
         };
@@ -158,6 +162,7 @@ mod platform {
         match kind {
             MediaKind::Screenshot | MediaKind::Print => "image/png",
             MediaKind::Recording => "video/mp4",
+            MediaKind::Replay => "application/octet-stream",
         }
     }
 

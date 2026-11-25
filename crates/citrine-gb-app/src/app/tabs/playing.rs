@@ -31,7 +31,7 @@ pub use confirms::switch_lines;
 pub use confirms::{join_confirm, relink_confirm, stop_confirm, switch_confirm};
 pub use lines::{
     ending_line, failed_line, friend_tab_line, full_name, game_title, invite_line, member_name,
-    play_subtitle, quality, screen_note, short_name,
+    path_line, path_mark, play_subtitle, quality, screen_note, short_name,
 };
 pub use picker::{Pick, picker};
 #[cfg(test)]
@@ -79,6 +79,7 @@ pub struct PlayingUi {
     pub room_draft: String,
     pub join_looking: Option<IncomingInvite>,
     pub opened_invite: Option<crate::app::push::OpenedInvite>,
+    pub hardcore_refused: bool,
     pick_shown: bool,
     fits: HashMap<(SessionId, Option<GameHash>), Fit>,
     shelf_paths: Option<Vec<std::path::PathBuf>>,
@@ -86,6 +87,10 @@ pub struct PlayingUi {
 }
 
 impl PlayingUi {
+    pub fn shelf(&self, recent: &RecentRoms) -> Box<dyn crate::play::shelf::Shelf> {
+        shelf_from(recent, &self.shelf_index)
+    }
+
     pub fn handed_back(&mut self, friend: OnlineId, name: &str) {
         self.ended = ending_line(name, "", Ending::Dropped, true).map(|line| Ended {
             friend,
@@ -173,7 +178,10 @@ pub fn fit(open_matches: bool, on_shelf: bool, sharing: bool, game_open: bool) -
 
 pub fn play_button(play: &Play, online: &Online, friend: OnlineId) -> Option<PlayButton> {
     let person = online.friend(friend)?;
-    if !online.is_connected() || matches!(seen(person.presence), Seen::Offline { .. }) {
+    if !online.is_connected()
+        || online.key_changed(friend)
+        || matches!(seen(person.presence), Seen::Offline { .. })
+    {
         return None;
     }
     if play.invites().iter().any(|i| i.from == friend) {
@@ -474,8 +482,9 @@ mod tests {
                     ui.set_max_width(width);
                     let tail = Tail {
                         full: "Good \u{b7} 42 ms".into(),
-                        short: "Good".into(),
-                        hover: Some("42 ms".into()),
+                        short: "42 ms".into(),
+                        hover: None,
+                        short_hover: Some("Good".into()),
                     };
                     bar_line(ui, name, Some(title), tail);
                     right = ui.min_rect().right();

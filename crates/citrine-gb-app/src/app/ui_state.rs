@@ -13,10 +13,14 @@ pub mod ds_user;
 pub mod games;
 pub mod hotkeys;
 pub mod keybinds;
+pub mod layout_picks;
 pub mod library;
 pub mod palette;
+pub mod per_game;
 pub mod recent;
+pub mod screen_layouts;
 pub mod settings;
+pub mod settings_tree;
 pub mod synced;
 pub mod touch;
 pub mod ui_theme;
@@ -35,6 +39,8 @@ pub struct UiState {
     pub registers: RegistersState,
     #[serde(skip_serializing)]
     pub settings: Settings,
+    #[serde(skip, default)]
+    pub settings_list_open: bool,
     #[serde(skip, default)]
     pub snapshots: SnapshotsState,
     #[serde(skip, default)]
@@ -74,9 +80,29 @@ pub struct UiState {
     pub toast_area: Option<egui::Rect>,
     #[serde(skip, default)]
     pub toast_spare: Option<egui::Rect>,
+    #[serde(skip, default)]
+    pub layout_edit: Option<crate::app::layout_edit::LayoutEdit>,
+    #[serde(skip, default)]
+    pub(crate) layout_applied: Option<crate::app::layout_picks::LayoutApplied>,
+    #[serde(skip, default)]
+    pub(crate) layout_sheet: Option<crate::app::layout_sheet::LayoutSheet>,
+    #[serde(skip, default)]
+    pub(crate) layout_turn: Option<crate::app::layout_sheet::LayoutTurn>,
+    #[serde(skip, default)]
+    pub(crate) orientation_held: bool,
+    #[serde(skip, default)]
+    pub screen_marks: Vec<(crate::app::ui_state::screen_layouts::Item, egui::Vec2)>,
     #[cfg(test)]
     #[serde(skip, default)]
     pub touch_bounds: Option<egui::Rect>,
+    #[cfg(test)]
+    #[serde(skip, default)]
+    pub replay_room: Option<(f32, egui::Rect)>,
+    #[serde(skip, default)]
+    pub clip: Option<crate::app::clip::ClipView>,
+    #[cfg(all(test, feature = "nds"))]
+    #[serde(skip, default)]
+    pub touch_targets: Vec<egui::Rect>,
     #[cfg(feature = "nds")]
     #[serde(skip, default)]
     pub walker: crate::app::tabs::walker::WalkerPane,
@@ -90,10 +116,6 @@ pub struct UiState {
     #[serde(skip, default)]
     pub toolbar_reach: f32,
     #[serde(skip, default)]
-    pub toolbar_core: f32,
-    #[serde(skip, default)]
-    pub core_in_more: usize,
-    #[serde(skip, default)]
     pub tab_fit: crate::app::tabs::TabFit,
     #[serde(skip, default)]
     pub join: crate::app::widgets::settings::online::JoinForm,
@@ -105,6 +127,8 @@ pub struct UiState {
     pub linked: crate::app::tabs::linked::LinkUi,
     #[serde(skip, default)]
     pub your_data: crate::app::widgets::settings::your_data::YourDataUi,
+    #[serde(skip, default)]
+    pub storage: crate::app::widgets::settings::storage::StorageUi,
     #[serde(skip, default)]
     pub viewer: crate::app::viewer::ViewerState,
     #[serde(skip, default)]

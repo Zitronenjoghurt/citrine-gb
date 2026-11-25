@@ -6,6 +6,8 @@ use crate::icons;
 use crate::media::playback::{self};
 use egui::{Align, Layout, Rect, RichText, Ui, vec2};
 
+const SEEK_STEP: f64 = 5.0;
+
 pub(super) fn top_bar(ui: &mut Ui, rect: Rect, facts: &Facts, mobile: bool, acts: &mut Vec<Act>) {
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().panel_fill.gamma_multiply(0.92));
@@ -160,6 +162,11 @@ pub(super) fn controls(
                     );
                     if seek.changed() {
                         acts.push(Act::Seek(at as f64));
+                    }
+                    crate::app::big_screen::offer_steps(ui.ctx(), &seek);
+                    if let Some(step) = crate::app::big_screen::take_step(&seek) {
+                        let to = position + f64::from(step) * SEEK_STEP;
+                        acts.push(Act::Seek(to.clamp(0.0, length.max(0.0))));
                     }
                 });
             });

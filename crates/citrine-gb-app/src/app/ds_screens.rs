@@ -1,8 +1,9 @@
 use super::Citrine;
 use crate::app::tabs::Tab;
 use crate::app::ui_state::ds_screens::ScreensAction;
-use crate::app::ui_state::settings::SettingsTab;
-use crate::app::widgets::screens_menu;
+use crate::app::ui_state::layout_picks::Place;
+use crate::app::ui_state::screen_layouts::LayoutConsole;
+use crate::app::ui_state::settings_tree::SettingsTab;
 use egui_dock::SurfaceIndex;
 
 impl Citrine {
@@ -10,30 +11,50 @@ impl Citrine {
         if !self.emulator.two_screens() {
             return;
         }
-        let context = self.emulator.screen_context;
-        self.ui.settings.ds_screens.apply(context, action);
-        self.emulator.ds_screens = self.ui.settings.ds_screens;
-        self.ui.settings.dirty = true;
+        if action == ScreensAction::SeparateTabs {
+            let context = self.emulator.screen_context;
+            let settings = &mut self.ui.settings;
+            settings.ds_screens.apply(context, action);
+            self.emulator.ds_screens = settings
+                .ds_screens
+                .with_placements_of(&self.emulator.ds_screens);
+            settings.dirty = true;
+            return;
+        }
+        if self.editing_layout() {
+            return;
+        }
+        let place = self.layout_place();
+        self.ui
+            .settings
+            .act_on_layout(LayoutConsole::Ds, place, action);
+        self.ui.layout_applied = None;
+        self.show_layout_pick(place);
     }
 
     pub(super) fn screens_chip(&self) -> Option<String> {
-        self.emulator.two_screens().then(|| {
-            let placement = self
-                .ui
-                .settings
-                .ds_screens
-                .placement(self.emulator.screen_context)
-                .with_away(self.emulator.lent_screen());
-            screens_menu::chip_label(placement, self.emulator.screen_tabs())
+        (self.emulator.has_game() && !self.emulator.linked()).then(|| {
+            self.ui.layout_chip_label(
+                LayoutConsole::of(self.emulator.played_kind()),
+                self.ui.layout_applied_place().unwrap_or(Place::Window),
+                self.emulator.screen_tabs(),
+                self.emulator.lent_screen(),
+            )
         })
     }
 
     pub(super) fn open_screen_settings(&mut self, phone: bool) {
+        let tab = if self.emulator.two_screens() {
+            SettingsTab::Ds
+        } else {
+            SettingsTab::Screen
+        };
         if phone {
-            self.mobile.nav.open_settings(SettingsTab::Style);
+            self.mobile.nav.open_settings(tab);
             return;
         }
-        self.ui.settings.current_tab = SettingsTab::Style;
+        self.ui.settings.current_tab = tab;
+        self.ui.settings_list_open = false;
         self.open_tab(Tab::Settings);
     }
 

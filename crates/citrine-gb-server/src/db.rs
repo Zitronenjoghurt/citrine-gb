@@ -3,9 +3,12 @@ use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{ConnectOptions, Connection, SqliteConnection, SqlitePool};
 use std::path::Path;
+use std::time::Duration;
 
 mod accounts;
+mod archive;
 mod devices;
+mod ds_profiles;
 mod files;
 mod friends;
 mod gts;
@@ -17,6 +20,7 @@ mod saves;
 mod security;
 mod settings;
 
+pub use archive::ArchiveRow;
 pub use devices::KnownDevice;
 pub use gts::{GtsListing, GtsRow};
 pub use gts_sims::SimRow;
@@ -167,6 +171,8 @@ async fn migrate(conn: &mut SqliteConnection) -> Result<()> {
     Ok(())
 }
 
+const BUSY_WAIT: Duration = Duration::from_secs(15);
+
 pub struct Db {
     pool: SqlitePool,
 }
@@ -179,12 +185,17 @@ impl Db {
             .auto_vacuum(SqliteAutoVacuum::Incremental)
             .journal_mode(SqliteJournalMode::Wal)
             .foreign_keys(true)
-            .synchronous(SqliteSynchronous::Normal);
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(BUSY_WAIT);
         let mut conn = options.connect().await?;
         migrate(&mut conn).await?;
         let pool = SqlitePool::connect_with(options).await?;
         conn.close().await?;
         Ok(Self { pool })
+    }
+
+    pub async fn close(&self) {
+        self.pool.close().await;
     }
 
     pub async fn reclaim(&self) -> Result<u64> {
@@ -865,5 +876,28 @@ INSERT INTO admin_recovery_codes (id, hash) VALUES (1, '$argon2id$one'), (2, '$a
         for &id in &ids[20..] {
             assert!(db.account(id).await.unwrap().unwrap().banned);
         }
+    }
+
+    #[tokio::test]
+    async fn a_sign_up_waits_out_a_write_lock_held_past_five_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let db = Db::open(&path).await.unwrap();
+        let other = raw(&path).await;
+        let mut conn = other.acquire().await.unwrap();
+        sqlx::raw_sql("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let holder = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            sqlx::raw_sql("COMMIT").execute(&mut *conn).await.unwrap();
+        });
+        let row = db
+            .create_account(&[7; 32], &PublicKey([7; 32]), "Mia", 10)
+            .await
+            .unwrap();
+        holder.await.unwrap();
+        assert_eq!(row.display_name, "Mia");
     }
 }

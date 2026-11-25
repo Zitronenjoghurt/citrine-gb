@@ -62,7 +62,7 @@ pub(super) fn local_copy<'a>(viewer: &'a TabViewer, share: &Share) -> Option<&'a
         ShareKind::Replay => return None,
     };
     viewer.media.items().iter().find(|item| {
-        item.info.kind == kind
+        (item.info.kind == kind || (kind == MediaKind::Recording && item.info.video))
             && item.info.created_at == share.created_at
             && item.info.game == share.game
     })
@@ -193,15 +193,24 @@ pub(super) fn pump(viewer: &mut TabViewer, ctx: &Context, source: Source) {
     let Some(key) = viewer.ui.viewer.shown.as_ref().map(|s| s.key.clone()) else {
         return;
     };
+    let mut still = None;
+    let video;
     let (kind, share) = match (source, &key) {
         (Source::Media, ItemKey::Media(id)) => match media_item(viewer, id) {
-            Some(item) => (item.info.kind, None),
+            Some(item) => {
+                still = item.thumbnail.clone();
+                video = item.info.video;
+                (item.info.kind, None)
+            }
             None => return,
         },
         (Source::Chat(friend), ItemKey::Chat(id)) => match chat_entry(viewer, friend, *id) {
             Some((entry, share)) => {
-                let local = !entry.mine && local_copy(viewer, share).is_none();
+                let copy = local_copy(viewer, share);
+                video = copy.is_some_and(|item| item.info.video);
+                let local = !entry.mine && copy.is_none();
                 let kind = match share.kind {
+                    ShareKind::Recording if video => MediaKind::Replay,
                     ShareKind::Recording => MediaKind::Recording,
                     _ => MediaKind::Screenshot,
                 };
@@ -232,6 +241,19 @@ pub(super) fn pump(viewer: &mut TabViewer, ctx: &Context, source: Source) {
             viewer.ui.viewer.muted,
             viewer.ui.viewer.volume,
         ),
+        MediaKind::Replay if video => match citrine_gb_replay::Replay::video(&pending) {
+            Ok(Some(mp4)) => open_clip(shown, mp4, viewer.ui.viewer.muted, viewer.ui.viewer.volume),
+            Ok(None) | Err(_) => {
+                shown.status = Status::Note("This recording can't be played".into())
+            }
+        },
+        MediaKind::Replay => match still {
+            Some(frame) => {
+                shown.texture = Some(texture_of(ctx, "viewer", &frame));
+                shown.status = Status::Ready;
+            }
+            None => shown.status = Status::Note("This recording has no picture yet".into()),
+        },
     }
     if let Some(shown) = viewer.ui.viewer.shown.as_mut() {
         shown.bytes = Some(pending);

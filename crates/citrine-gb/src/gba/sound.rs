@@ -380,6 +380,11 @@ impl Sound {
         }
     }
 
+    pub(crate) fn clamp_loaded(&mut self) {
+        self.psg_cycles %= PSG_CYCLES;
+        self.sample_cycles = self.sample_cycles.min(BASE_SAMPLE_CYCLES - 1);
+    }
+
     pub fn copy_state_from(&mut self, source: &Sound) {
         let Sound {
             registers,
@@ -478,6 +483,28 @@ mod tests {
     use super::*;
     use crate::gba::bus::Bus;
     use crate::gba::timer::START_DELAY;
+
+    #[test]
+    fn loaded_sound_counters_past_a_sample_are_cut_to_fit() {
+        let mut sound = Sound {
+            psg_cycles: u32::MAX,
+            sample_cycles: u32::MAX,
+            ..Sound::default()
+        };
+        sound.clamp_loaded();
+        assert!(sound.psg_cycles < PSG_CYCLES && sound.sample_cycles < BASE_SAMPLE_CYCLES);
+        sound.step(4 * BASE_SAMPLE_CYCLES + 3);
+    }
+
+    #[test]
+    fn real_sound_counters_are_unchanged_by_the_load_clamp() {
+        let mut sound = Sound::default();
+        sound.step(3 * BASE_SAMPLE_CYCLES + 77);
+        sound.psg_cycles %= PSG_CYCLES;
+        let before = (sound.psg_cycles, sound.sample_cycles);
+        sound.clamp_loaded();
+        assert_eq!((sound.psg_cycles, sound.sample_cycles), before);
+    }
 
     const SOUND1CNT_L: u32 = 0x0400_0060;
     const SOUND1CNT_H: u32 = 0x0400_0062;

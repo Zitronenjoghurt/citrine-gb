@@ -3,21 +3,34 @@ mod backend;
 mod battery;
 pub mod cloud;
 mod crash;
+mod folders;
+pub mod kinds;
 #[cfg(any(target_arch = "wasm32", test))]
 mod mirror;
 mod names;
+pub mod salvage;
 mod snapshots;
 mod writes;
 
-pub(crate) use backend::Backend;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) use backend::TestDirs;
+use backend::Backend;
 #[cfg(target_arch = "wasm32")]
 pub use backend::open_saves;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) use backend::{TestDirs, scratch_dir};
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub use backend::{cache_dir, data_dir};
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
+use backend::{cache_dir, data_dir};
+pub use battery::BatteryFiles;
 use citrine_gb::console::{ConsoleKind, VideoSpec};
 pub use crash::CrashSave;
+pub use folders::Folders;
+use kinds::Folder;
+#[cfg(not(target_arch = "wasm32"))]
+use kinds::{Root, RootFile};
+pub(crate) use snapshots::list_stamp;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) use snapshots::timed_name;
 pub use writes::{Outcome, Write, Writes, Written};
 
 pub fn thumb_size(console: Option<ConsoleKind>) -> [usize; 2] {
@@ -45,6 +58,14 @@ fn snapshot_name(slot: usize) -> String {
     format!("slot{slot}.name")
 }
 
+fn snapshot_filed(slot: usize) -> String {
+    format!("slot{slot}.filed")
+}
+
+fn snapshot_progress(slot: usize) -> String {
+    format!("slot{slot}.ra")
+}
+
 fn autosave_blob(id: usize) -> String {
     format!("auto{id}.snap")
 }
@@ -62,16 +83,24 @@ fn autosave_cloud(id: usize) -> String {
 }
 
 pub const BORROWED: &str = "borrowed-";
+
 #[cfg(not(target_arch = "wasm32"))]
-pub const CODECS: &str = "codecs";
+fn root(root: Root) -> std::path::PathBuf {
+    match root {
+        Root::Data => data_dir(),
+        Root::Cache => cache_dir(),
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-pub const MEDIA_TEMP: &str = "media-temp";
+pub fn folder(folder: Folder) -> std::path::PathBuf {
+    root(folder.root()).join(folder.name())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-pub const EXPORT: &str = "export";
-#[cfg(not(target_arch = "wasm32"))]
-pub const UPDATES: &str = "updates";
-#[cfg(not(target_arch = "wasm32"))]
-pub const REPORTS: &str = "reports";
+pub fn root_file(file: RootFile) -> std::path::PathBuf {
+    root(file.root()).join(file.name())
+}
 
 pub const MAX_SAVE_NAME: usize = 60;
 
@@ -81,6 +110,7 @@ pub struct SnapshotInfo {
     pub thumbnail: Vec<u8>,
     pub name: Option<String>,
     pub console: Option<ConsoleKind>,
+    pub filed: bool,
 }
 
 impl SnapshotInfo {
@@ -134,7 +164,6 @@ pub fn default_slot_name(slot: usize) -> String {
     format!("Slot {}", slot + 1)
 }
 
-const SETTINGS_NAMESPACE: &str = "settings";
 const SETTINGS: &str = "settings.json";
 #[cfg(feature = "gba")]
 const GBA_BIOS: &str = "gba-bios.bin";
@@ -142,138 +171,136 @@ const GBA_BIOS: &str = "gba-bios.bin";
 const DS_WIFI: &str = "nds-wifi.bin";
 #[cfg(feature = "gba")]
 const GBA_BIOS_NAME: &str = "gba-bios-name.txt";
+#[cfg(not(target_arch = "wasm32"))]
+const LAN_KEYRING: &str = "lan-keys.dat";
 
-pub struct SettingsStore {
-    backend: Backend,
+fn unreadable_copy() -> String {
+    format!("settings-{}.unreadable.json", env!("CARGO_PKG_VERSION"))
 }
 
-impl Default for SettingsStore {
-    fn default() -> Self {
-        Self {
-            backend: Backend::settings(),
-        }
-    }
+#[derive(Default)]
+pub struct SettingsStore {
+    backend: Folders,
 }
 
 impl SettingsStore {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn at(root: std::path::PathBuf) -> Self {
         Self {
-            backend: Backend::at(root),
+            backend: Folders::at(root),
         }
     }
 
-    pub fn load<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
-        let raw = self.backend.read(SETTINGS_NAMESPACE, SETTINGS)?;
-        match serde_json::from_slice(&raw) {
-            Ok(value) => Some(value),
-            Err(err) => {
-                log::error!("Ignoring unreadable settings: {err}");
-                None
+    pub fn load<T: serde::de::DeserializeOwned + Default>(&self) -> Option<T> {
+        let raw = self.backend.read(Folder::Settings, SETTINGS)?;
+        let err = match serde_json::from_slice(&raw) {
+            Ok(value) => return Some(value),
+            Err(err) => err,
+        };
+        log::error!("Settings did not load whole: {err}");
+        self.keep_unreadable(&raw);
+        match salvage::salvage::<T>(salvage::parse(&raw), None) {
+            Some(salvaged) => {
+                log::error!("Settings kept without {:?}", salvaged.dropped);
+                Some(salvaged.value)
             }
+            None => Some(T::default()),
         }
+    }
+
+    fn keep_unreadable(&self, raw: &[u8]) {
+        let name = unreadable_copy();
+        if self.backend.exists(Folder::Settings, &name) {
+            return;
+        }
+        if let Err(err) = self.backend.write(Folder::Settings, &name, raw) {
+            log::error!("Could not keep the unreadable settings: {err}");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unreadable(&self) -> Option<Vec<u8>> {
+        self.backend.read(Folder::Settings, &unreadable_copy())
     }
 
     pub fn store<T: serde::Serialize>(&self, value: &T) -> std::io::Result<()> {
         let raw = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
-        self.backend.write(SETTINGS_NAMESPACE, SETTINGS, &raw)
+        self.backend.write(Folder::Settings, SETTINGS, &raw)
     }
 
     pub fn location(&self) -> String {
         self.backend.location()
     }
 
-    #[cfg(feature = "nds")]
-    pub fn ds_file(&self, file: crate::app::ds_firmware::DsFile) -> Option<(Vec<u8>, String)> {
-        let (image_key, name_key) = file.store_keys();
-        let image = self.backend.read(SETTINGS_NAMESPACE, image_key)?;
+    pub fn kept_file(&self, (image_key, name_key): (&str, &str)) -> Option<(Vec<u8>, String)> {
+        let image = self.backend.read(Folder::Settings, image_key)?;
         let name = self
             .backend
-            .read(SETTINGS_NAMESPACE, name_key)
+            .read(Folder::Settings, name_key)
             .and_then(|name| String::from_utf8(name).ok())
             .unwrap_or_else(|| image_key.to_owned());
         Some((image, name))
     }
 
-    #[cfg(feature = "nds")]
-    pub fn store_ds_file(
+    pub fn store_kept_file(
         &self,
-        file: crate::app::ds_firmware::DsFile,
+        (image_key, name_key): (&str, &str),
         value: Option<(&[u8], &str)>,
     ) -> std::io::Result<()> {
-        let (image_key, name_key) = file.store_keys();
         match value {
             Some((image, name)) => {
-                self.backend.write(SETTINGS_NAMESPACE, image_key, image)?;
+                self.backend.write(Folder::Settings, image_key, image)?;
                 self.backend
-                    .write(SETTINGS_NAMESPACE, name_key, name.as_bytes())
+                    .write(Folder::Settings, name_key, name.as_bytes())
             }
             None => {
-                self.backend.delete(SETTINGS_NAMESPACE, name_key)?;
-                self.backend.delete(SETTINGS_NAMESPACE, image_key)
+                self.backend.delete(Folder::Settings, name_key)?;
+                self.backend.delete(Folder::Settings, image_key)
             }
         }
     }
 
     #[cfg(ds_wifi)]
     pub fn ds_wifi(&self) -> Option<crate::ds_wifi::Identity> {
-        crate::ds_wifi::Identity::from_bytes(&self.backend.read(SETTINGS_NAMESPACE, DS_WIFI)?)
+        crate::ds_wifi::Identity::from_bytes(&self.backend.read(Folder::Settings, DS_WIFI)?)
     }
 
     #[cfg(ds_wifi)]
     pub fn store_ds_wifi(&self, identity: &crate::ds_wifi::Identity) -> std::io::Result<()> {
         self.backend
-            .write(SETTINGS_NAMESPACE, DS_WIFI, &identity.to_bytes())
+            .write(Folder::Settings, DS_WIFI, &identity.to_bytes())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn lan_keyring(&self) -> Option<Vec<u8>> {
+        self.backend.read(Folder::Settings, LAN_KEYRING)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn store_lan_keyring(&self, bytes: &[u8]) -> std::io::Result<()> {
+        self.backend.write(Folder::Settings, LAN_KEYRING, bytes)
     }
 
     #[cfg(feature = "gba")]
     pub fn gba_bios(&self) -> Option<(Vec<u8>, String)> {
-        let image = self.backend.read(SETTINGS_NAMESPACE, GBA_BIOS)?;
-        let name = self
-            .backend
-            .read(SETTINGS_NAMESPACE, GBA_BIOS_NAME)
-            .and_then(|name| String::from_utf8(name).ok())
-            .unwrap_or_else(|| GBA_BIOS.to_owned());
-        Some((image, name))
+        self.kept_file((GBA_BIOS, GBA_BIOS_NAME))
     }
 
     #[cfg(feature = "gba")]
     pub fn store_gba_bios(&self, bios: Option<(&[u8], &str)>) -> std::io::Result<()> {
-        match bios {
-            Some((image, name)) => {
-                self.backend.write(SETTINGS_NAMESPACE, GBA_BIOS, image)?;
-                self.backend
-                    .write(SETTINGS_NAMESPACE, GBA_BIOS_NAME, name.as_bytes())
-            }
-            None => {
-                self.backend.delete(SETTINGS_NAMESPACE, GBA_BIOS_NAME)?;
-                self.backend.delete(SETTINGS_NAMESPACE, GBA_BIOS)
-            }
-        }
+        self.store_kept_file((GBA_BIOS, GBA_BIOS_NAME), bios)
     }
 }
 
-const SPECIES_NAMES: &str = "species-names";
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SaveStore {
     backend: Backend,
-    cache: Backend,
+    cache: Folders,
     #[expect(
         clippy::disallowed_types,
         reason = "clones of a SaveStore on side jobs share one set of written keys"
     )]
     touched: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
-}
-
-impl Default for SaveStore {
-    fn default() -> Self {
-        Self {
-            backend: Backend::default(),
-            cache: Backend::cache(),
-            touched: Default::default(),
-        }
-    }
 }
 
 impl SaveStore {
@@ -332,10 +359,6 @@ impl SaveStore {
         self.backend.read(rom_key, name)
     }
 
-    pub fn file_size(&self, rom_key: &str, name: &str) -> u64 {
-        self.backend.size(rom_key, name)
-    }
-
     pub fn put_file(&self, rom_key: &str, name: &str, data: &[u8]) -> std::io::Result<()> {
         self.write(rom_key, name, data)
     }
@@ -352,10 +375,7 @@ impl SaveStore {
     }
 
     pub fn clear_cache(&self) -> std::io::Result<()> {
-        for namespace in self.cache.namespaces() {
-            self.cache.clear(&namespace)?;
-        }
-        Ok(())
+        self.cache.clear_cache()
     }
 
     pub fn covers(&self) -> crate::covers::CoverStore {
@@ -369,28 +389,29 @@ impl SaveStore {
     pub fn species_names(&self, generation: u8) -> Option<Vec<String>> {
         let raw = self
             .cache
-            .read(SPECIES_NAMES, &format!("gen{generation}"))?;
+            .read(Folder::SpeciesNames, &format!("gen{generation}"))?;
         let text = String::from_utf8(raw).ok()?;
         Some(text.split('\n').map(str::to_owned).collect())
     }
 
     pub fn put_species_names(&self, generation: u8, names: &[String]) -> std::io::Result<()> {
         self.cache.write(
-            SPECIES_NAMES,
+            Folder::SpeciesNames,
             &format!("gen{generation}"),
             names.join("\n").as_bytes(),
         )
     }
 
     pub fn move_cache_out(&self) {
-        for namespace in crate::covers::NAMESPACES {
+        for folder in crate::covers::FOLDERS {
+            let namespace = folder.name();
             let names = self.backend.list(namespace);
             if names.is_empty() {
                 continue;
             }
             for name in &names {
                 if let Some(data) = self.backend.read(namespace, name)
-                    && let Err(err) = self.cache.write(namespace, name, &data)
+                    && let Err(err) = self.cache.write(folder, name, &data)
                 {
                     log::warn!("couldn't move {namespace}/{name} to the cache: {err}");
                 }
@@ -414,21 +435,82 @@ pub fn is_save_key(name: &str) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub fn tidy_folders() {
+    let (data, cache) = (data_dir(), cache_dir());
+    move_out_of_data(&data, &cache);
+    move_index_into_its_folder(&cache);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn move_index_into_its_folder(cache: &std::path::Path) {
+    let old = cache.join(crate::rom_ids::FILE);
+    if !old.is_file() {
+        return;
+    }
+    let new = cache.join(Folder::RomIds.name()).join(crate::rom_ids::FILE);
+    let moved = std::fs::create_dir_all(cache.join(Folder::RomIds.name()))
+        .and_then(|()| std::fs::rename(&old, &new));
+    if let Err(err) = moved {
+        log::info!("the game list index builds again, it couldn't move: {err}");
+        let _ = std::fs::remove_file(&old);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn app_state_file(app_id: &str) -> std::path::PathBuf {
+    let file = root_file(RootFile::AppState);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one look into eframe's own folder, to move app.ron out of it"
+    )]
+    let old = eframe::storage_dir(app_id).map(|dir| dir.join(RootFile::AppState.name()));
+    if let Some(old) = old {
+        move_once(&old, &file);
+        if let Some(dir) = old.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+    file
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn move_once(old: &std::path::Path, file: &std::path::Path) {
+    if !old.is_file() || file.exists() {
+        return;
+    }
+    let moved = file
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::rename(old, file).or_else(|_| copy_then_remove(old, file)));
+    if let Err(err) = moved {
+        log::warn!("couldn't move the window layout to the data folder: {err}");
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_then_remove(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::copy(from, to)?;
+    std::fs::remove_file(from)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn move_out_of_data(data: &std::path::Path, cache: &std::path::Path) {
-    let codecs = data.join(CODECS);
+    let codecs = data.join(Folder::Codecs.name());
     if codecs.is_dir() {
         let moved = std::fs::create_dir_all(cache)
-            .and_then(|()| std::fs::rename(&codecs, cache.join(CODECS)));
+            .and_then(|()| std::fs::rename(&codecs, cache.join(Folder::Codecs.name())));
         if let Err(err) = moved {
             log::info!("the video codec downloads again, it couldn't move to the cache: {err}");
         }
     }
     for old in [
         codecs,
-        data.join("media").join(".library").join("temp"),
-        data.join(EXPORT),
-        data.join(UPDATES),
-        data.join(REPORTS),
+        data.join(Folder::Media.name())
+            .join(".library")
+            .join("temp"),
+        data.join(Folder::Export.name()),
+        data.join(Folder::Updates.name()),
+        data.join(Folder::Reports.name()),
     ] {
         match std::fs::remove_dir_all(&old) {
             Ok(()) => log::info!("removed {} from the data folder", old.display()),
@@ -467,6 +549,22 @@ pub(crate) fn decompress(data: &[u8]) -> Option<Vec<u8>> {
     let mut reader = brotli::Decompressor::new(data, 4096);
     std::io::Read::read_to_end(&mut reader, &mut out).ok()?;
     Some(out)
+}
+
+pub(crate) fn decompress_at_most(data: &[u8], limit: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let reader = brotli::Decompressor::new(data, 4096);
+    std::io::Read::read_to_end(&mut std::io::Read::take(reader, limit as u64 + 1), &mut out)
+        .ok()?;
+    (out.len() <= limit).then_some(out)
+}
+
+#[cfg(feature = "nds")]
+pub fn now_unix_ms() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub fn now_unix() -> u64 {
@@ -522,9 +620,19 @@ mod tests {
 
     const KEY: &str = "ABC123";
 
+    #[test]
+    fn a_picture_that_unpacks_past_its_size_is_dropped() {
+        let packed = compress(&[7; 4097]);
+        assert_eq!(decompress_at_most(&packed, 4096), None);
+        assert_eq!(
+            decompress_at_most(&packed, 4097).map(|out| out.len()),
+            Some(4097)
+        );
+    }
+
     fn store(name: &str) -> (SaveStore, std::path::PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("citrine-store-test-{}-{name}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-store-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(root.with_file_name(format!(
             "citrine-store-test-{}-{name}-cache",
@@ -534,7 +642,7 @@ mod tests {
     }
 
     fn settings_store(name: &str) -> SettingsStore {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::storage::scratch_dir().join(format!(
             "citrine-settings-test-{}-{name}",
             std::process::id()
         ));
@@ -557,11 +665,20 @@ mod tests {
     }
 
     #[test]
-    fn settings_that_cannot_be_read_fall_back_to_none() {
+    fn settings_that_cannot_be_read_load_as_defaults_and_keep_a_copy() {
         let store = settings_store("unreadable");
         store.store(&"a string").expect("store");
 
-        assert!(store.load::<Vec<String>>().is_none());
+        assert_eq!(store.load::<Vec<String>>(), Some(Vec::new()));
+        assert_eq!(store.unreadable().as_deref(), Some(&b"\"a string\""[..]));
+
+        store.store(&"later").expect("store");
+        store.load::<Vec<String>>();
+        assert_eq!(
+            store.unreadable().as_deref(),
+            Some(&b"\"a string\""[..]),
+            "the first copy stays"
+        );
     }
 
     #[test]
@@ -705,6 +822,87 @@ mod tests {
     }
 
     #[test]
+    fn a_zipped_game_imports_the_save_next_to_its_zip_once() {
+        use crate::utils::zip_games::tests::zip_of;
+        use zip::CompressionMethod::Deflated;
+        let (store, root) = store("legacy-zip");
+        let dir = root.join("roms");
+        std::fs::create_dir_all(&dir).expect("rom dir");
+        let pack = dir.join("pack.zip");
+        std::fs::write(
+            &pack,
+            zip_of(&[("inner/game.gb", b"g"), ("b.gb", b"b")], Deflated),
+        )
+        .expect("zip");
+        std::fs::write(dir.join("game.sav"), b"game-save").expect("sav");
+        std::fs::write(dir.join("pack.sav"), b"pack-save").expect("sav");
+        let game = pack.join("inner").join("game.gb");
+        assert!(SaveStore::has_legacy_save(&game));
+        assert_eq!(SaveStore::legacy_save_path(&game), dir.join("game.sav"));
+        assert!(
+            store.import_legacy_save_if_new(KEY, &game),
+            "first import runs"
+        );
+        assert_eq!(store.load_battery(KEY).as_deref(), Some(&b"game-save"[..]));
+        store.store_battery(KEY, b"newer").expect("newer");
+        assert!(!store.import_legacy_save_if_new(KEY, &game), "only once");
+        assert_eq!(store.load_battery(KEY).as_deref(), Some(&b"newer"[..]));
+
+        let other = "other-key";
+        assert!(
+            !store.import_legacy_save_if_new(other, &pack.join("b.gb")),
+            "a zip of several games never hands its own .sav to one of them"
+        );
+
+        let solo = dir.join("solo.zip");
+        std::fs::write(&solo, zip_of(&[("tetris.gb", b"t")], Deflated)).expect("zip");
+        std::fs::write(dir.join("solo.sav"), b"solo-save").expect("sav");
+        let tetris = solo.join("tetris.gb");
+        assert!(SaveStore::has_legacy_save(&tetris));
+        assert!(store.import_legacy_save_if_new(other, &tetris));
+        assert_eq!(
+            store.load_battery(other).as_deref(),
+            Some(&b"solo-save"[..])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_oversized_or_linked_legacy_save_is_not_imported() {
+        let (store, root) = store("legacy-guard");
+        let rom_dir = root.join("roms");
+        std::fs::create_dir_all(&rom_dir).expect("rom dir");
+        let rom = rom_dir.join("big.gb");
+        std::fs::write(&rom, b"rom").expect("rom");
+        let big = std::fs::File::create(rom_dir.join("big.sav")).expect("sav");
+        big.set_len(battery::MAX_LEGACY_SAVE_BYTES + 1)
+            .expect("sparse");
+        assert!(!SaveStore::has_legacy_save(&rom));
+        assert!(!store.import_legacy_save(KEY, &rom));
+        assert!(store.load_battery(KEY).is_none());
+
+        #[cfg(unix)]
+        {
+            let private = root.join("private.sav");
+            std::fs::write(&private, b"private").expect("private");
+            let linked = rom_dir.join("linked.gb");
+            std::fs::write(&linked, b"rom").expect("rom");
+            std::os::unix::fs::symlink(&private, rom_dir.join("linked.sav")).expect("link");
+            assert!(!SaveStore::has_legacy_save(&linked));
+            assert!(!store.import_legacy_save(KEY, &linked));
+            assert!(store.load_battery(KEY).is_none());
+        }
+
+        let fine = rom_dir.join("fine.gb");
+        std::fs::write(&fine, b"rom").expect("rom");
+        std::fs::write(rom_dir.join("fine.sav"), b"real-save").expect("sav");
+        assert!(SaveStore::has_legacy_save(&fine));
+        assert!(store.import_legacy_save(KEY, &fine));
+        assert_eq!(store.load_battery(KEY).as_deref(), Some(&b"real-save"[..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn snapshot_round_trips_with_metadata() {
         let (store, root) = store("snapshot");
         assert!(store.snapshot_info(KEY, 0).is_none());
@@ -751,6 +949,48 @@ mod tests {
 
         store.delete_snapshot(KEY, 1).expect("delete");
         assert_eq!(store.next_free_slot(KEY), 1, "reuses the gap");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_moved_snapshot_takes_the_next_free_slot_and_keeps_its_name() {
+        let (store, root) = store("move-snapshot");
+        let other = "OTHER";
+        store
+            .store_snapshot(KEY, 0, b"mine", &frame(), ConsoleKind::Gb)
+            .expect("store");
+        store
+            .store_snapshot(other, 0, b"theirs", &frame(), ConsoleKind::Gb)
+            .expect("store");
+        store.set_snapshot_name(other, 0, "Gym").expect("name");
+        assert_eq!(store.move_snapshot(other, 0, KEY).expect("moved"), 1);
+        assert_eq!(store.load_snapshot(KEY, 1), Some(b"theirs".to_vec()));
+        assert_eq!(store.snapshot_name(KEY, 1).as_deref(), Some("Gym"));
+        assert_eq!(store.load_snapshot(KEY, 0), Some(b"mine".to_vec()));
+        assert!(store.used_slots(other).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_moved_autosave_keeps_its_time_among_the_others() {
+        let (store, root) = store("move-autosave");
+        let other = "OTHER";
+        let thumb = compress(&frame());
+        store
+            .store_autosave_at(KEY, b"old", &thumb, ConsoleKind::Gb, 100, 4)
+            .expect("store");
+        store
+            .store_autosave_at(other, b"theirs", &thumb, ConsoleKind::Gb, 200, 4)
+            .expect("store");
+        store
+            .store_autosave_at(KEY, b"new", &thumb, ConsoleKind::Gb, 300, 4)
+            .expect("store");
+        let moved = store.move_autosave(other, 0, KEY).expect("moved");
+        let ids = store.autosave_ids(KEY);
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[1], moved);
+        assert_eq!(store.load_autosave(KEY, moved), Some(b"theirs".to_vec()));
+        assert!(store.autosave_ids(other).is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1132,7 +1372,7 @@ mod tests {
         assert!(!root.join("cover-names").exists());
         assert_eq!(store.covers().art(KEY).as_deref(), Some(&b"art"[..]));
         assert_eq!(
-            store.cache.read("cover-names", "GB").as_deref(),
+            store.cache.read(Folder::CoverNames, "GB").as_deref(),
             Some(&b"names"[..])
         );
         store.move_cache_out();
@@ -1171,16 +1411,24 @@ mod tests {
         store.covers().put_art(KEY, b"art").unwrap();
         store
             .cache
-            .write(CODECS, "libopenh264.so", b"codec")
+            .write(Folder::Codecs, "libopenh264.so", b"codec")
             .unwrap();
         store
             .cache
-            .write(MEDIA_TEMP, "recording.mp4.part", b"half")
+            .write(Folder::MediaTemp, "recording.mp4.part", b"half")
             .unwrap();
+        let cache = root.with_file_name(format!(
+            "citrine-store-test-{}-clear-cache-cache",
+            std::process::id()
+        ));
+        std::fs::write(cache.join("loose.bin"), b"left over").unwrap();
+        std::fs::create_dir_all(cache.join("old-folder")).unwrap();
+        std::fs::write(cache.join("old-folder").join("file"), b"left over").unwrap();
         store.clear_cache().unwrap();
-        assert!(store.cache.namespaces().is_empty());
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
         assert_eq!(store.covers().art(KEY), None);
         let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(cache);
     }
 
     #[test]
@@ -1189,11 +1437,11 @@ mod tests {
         let (data, cache) = (dir.path().join("data"), dir.path().join("cache"));
         let temp = data.join("media").join(".library").join("temp");
         for folder in [
-            data.join(CODECS),
+            data.join(Folder::Codecs.name()),
             temp.clone(),
-            data.join(EXPORT).join("3"),
-            data.join(UPDATES),
-            data.join(REPORTS),
+            data.join(Folder::Export.name()).join("3"),
+            data.join(Folder::Updates.name()),
+            data.join(Folder::Reports.name()),
         ] {
             std::fs::create_dir_all(&folder).unwrap();
             std::fs::write(folder.join("file"), b"x").unwrap();
@@ -1201,17 +1449,62 @@ mod tests {
         std::fs::create_dir_all(data.join("saves")).unwrap();
         move_out_of_data(&data, &cache);
         assert_eq!(
-            std::fs::read(cache.join(CODECS).join("file")).unwrap(),
+            std::fs::read(cache.join(Folder::Codecs.name()).join("file")).unwrap(),
             b"x"
         );
-        for gone in [CODECS, EXPORT, UPDATES, REPORTS] {
-            assert!(!data.join(gone).exists(), "{gone}");
+        for gone in [
+            Folder::Codecs,
+            Folder::Export,
+            Folder::Updates,
+            Folder::Reports,
+        ] {
+            assert!(!data.join(gone.name()).exists(), "{gone:?}");
         }
         assert!(!temp.exists());
         assert!(data.join("media").join(".library").exists());
         assert!(data.join("saves").exists());
         move_out_of_data(&data, &cache);
-        assert!(cache.join(CODECS).join("file").exists());
+        assert!(cache.join(Folder::Codecs.name()).join("file").exists());
+    }
+
+    #[test]
+    fn the_game_list_index_moves_into_its_folder_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path();
+        std::fs::write(cache.join(crate::rom_ids::FILE), b"[]").unwrap();
+        move_index_into_its_folder(cache);
+        let moved = cache.join(Folder::RomIds.name()).join(crate::rom_ids::FILE);
+        assert_eq!(std::fs::read(&moved).unwrap(), b"[]");
+        assert!(!cache.join(crate::rom_ids::FILE).exists());
+        assert_eq!(
+            kinds::claim(
+                Root::Cache,
+                &format!("{}/{}", Folder::RomIds.name(), crate::rom_ids::FILE)
+            ),
+            kinds::Kind::GameListIndex
+        );
+        move_index_into_its_folder(cache);
+        assert_eq!(std::fs::read(&moved).unwrap(), b"[]");
+    }
+
+    #[test]
+    fn the_window_layout_moves_to_the_data_folder_and_never_over_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("eframe").join(RootFile::AppState.name());
+        let file = dir.path().join("data").join(RootFile::AppState.name());
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"old layout").unwrap();
+        move_once(&old, &file);
+        assert_eq!(std::fs::read(&file).unwrap(), b"old layout");
+        assert!(!old.exists());
+        std::fs::write(&old, b"older layout").unwrap();
+        std::fs::write(&file, b"new layout").unwrap();
+        move_once(&old, &file);
+        assert_eq!(std::fs::read(&file).unwrap(), b"new layout");
+        assert_eq!(
+            kinds::claim(Root::Data, RootFile::AppState.name()),
+            kinds::Kind::Settings
+        );
     }
 
     #[test]

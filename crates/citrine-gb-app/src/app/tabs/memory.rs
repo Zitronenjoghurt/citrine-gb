@@ -6,7 +6,7 @@ use citrine_gb::debug::memory::MemoryBlock;
 use egui::Ui;
 
 pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
-    let running = viewer.emulator.is_running();
+    let editable = !viewer.emulator.is_running() && !viewer.emulator.hardcore();
     let machine = viewer.emulator.debug_mut();
     let state = &mut viewer.ui.memory;
     let mut blocks = Vec::new();
@@ -25,7 +25,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     } else {
         view
     };
-    let action = view.editable(!running).show(ui);
+    let action = view.editable(editable).show(ui);
     match action {
         Some(MemoryAction::Poke(at, byte)) => machine.poke(at, &[byte]),
         Some(MemoryAction::Watch(watch)) => machine.breakpoints().watch(watch),

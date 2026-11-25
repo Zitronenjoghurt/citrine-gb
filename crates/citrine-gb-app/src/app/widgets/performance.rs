@@ -1,18 +1,17 @@
 use crate::app::tabs::ds_files::explorer::thousands;
 use crate::app::ui_state::settings::{MATCH_SCREEN_LABEL, match_screen_line};
-use crate::app::widgets::action::wide_button;
+use crate::app::widgets::check::checkbox;
 use crate::app::widgets::frame_graph::FrameGraph;
 use crate::app::widgets::info_mark::{info_mark, info_mark_width};
 use crate::app::widgets::section::{section, section_note, section_with_hint};
-use crate::app::widgets::text::faint;
 use crate::app::widgets::threads_debug::{REFRESH, millis};
 use crate::emulator::load::{GpuClockKind, LoadReading, ScreenMatch};
 use crate::frame_log::readout::{WINDOW, rate_gap};
 use crate::frame_log::{Budget, FrameSample, Readout};
 use crate::icons;
 use egui::{
-    Align, Button, CollapsingHeader, CornerRadius, Grid, Label, Layout, Response, RichText, Sense,
-    Stroke, Ui, Vec2, Widget, pos2, vec2,
+    Align, CollapsingHeader, CornerRadius, Grid, Label, Layout, Response, RichText, Sense, Stroke,
+    Ui, Vec2, Widget, pos2, vec2,
 };
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -26,11 +25,8 @@ pub const APP_HINT: &str = "Time the main thread spends on each screen refresh: 
 pub const GPU_STAMPS_HINT: &str = "Time the GPU spent each frame drawing the 3D scene at the chosen resolution and fitting it into the screen, read from the GPU's own clock. The GPU draws 3D only above Native resolution, once per game frame, so the mark is one game frame.";
 pub const GPU_SUBMIT_HINT: &str = "Time from handing each frame's 3D scene to the GPU until the app saw it finished, at the chosen resolution. This GPU has no clock the app can read, so the time includes waiting behind other drawing and can run up to one screen refresh long. The GPU draws 3D only above Native resolution. The GPU draws the 3D once per game frame, so the mark is one game frame.";
 pub const JIT_HINT: &str = "The JIT turns the game's ARM code into code for this device's CPU, in blocks of up to 128 instructions. Compiled is the share of instructions in the last half second that ran from those blocks; the rest ran one at a time. Compiling is the time spent making blocks for each second of play.";
-pub const RECORD_HINT: &str = "Records the times of every frame, with the game and its 3D and JIT settings, to a CSV file you can share.";
-#[cfg(target_os = "android")]
-pub const STOP_RECORDING: &str = "Stop and share";
-#[cfg(not(target_os = "android"))]
-pub const STOP_RECORDING: &str = "Stop and save";
+pub const FRAME_TIMES: &str = "Performance data in recordings";
+pub const FRAME_TIMES_HINT: &str = "Saves, for every frame of each recording, how long the game, the display, the app, the 3D GPU, the JIT and the sound took, and which frames were dropped or shown twice, with the game and its 3D and JIT settings. Export it from the recording's menu in Media.";
 
 pub const PAUSED: &str = "Game paused";
 pub const BEFORE_PAUSE: &str = "From before the game paused";
@@ -421,8 +417,7 @@ struct Facts {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceAction {
-    StartRecording,
-    StopRecording,
+    FrameTimes(bool),
 }
 
 pub struct Timings {
@@ -437,7 +432,7 @@ pub struct PerformanceWidget<'a> {
     pub readout: Option<Readout>,
     pub load: LoadView,
     pub samples: &'a VecDeque<FrameSample>,
-    pub recording: Option<(Duration, usize)>,
+    pub frame_times: bool,
     pub screen_match: Option<ScreenMatch>,
 }
 
@@ -557,8 +552,11 @@ impl PerformanceWidget<'_> {
                         }
                     });
                 }
-                section_with_hint(ui, icons::RECORD, "Record", RECORD_HINT, |ui| {
-                    action = record_ui(ui, self.recording);
+                section_with_hint(ui, icons::RECORD, "Record", FRAME_TIMES_HINT, |ui| {
+                    let mut on = self.frame_times;
+                    if checkbox(ui, &mut on, FRAME_TIMES).changed() {
+                        action = Some(PerformanceAction::FrameTimes(on));
+                    }
                 });
             })
             .response;
@@ -702,30 +700,6 @@ fn label_width(ui: &Ui, parts: &[Part]) -> f32 {
                 + info_mark_width(ui)
         })
         .fold(LABEL_WIDTH, f32::max)
-}
-
-fn record_ui(ui: &mut Ui, recording: Option<(Duration, usize)>) -> Option<PerformanceAction> {
-    match recording {
-        None => wide_button(ui, Button::new(format!("{} Start", icons::RECORD)))
-            .clicked()
-            .then_some(PerformanceAction::StartRecording),
-        Some((length, frames)) => {
-            let stop =
-                wide_button(ui, Button::new(format!("{} {STOP_RECORDING}", icons::STOP))).clicked();
-            ui.label(faint(recorded(length, frames)));
-            stop.then_some(PerformanceAction::StopRecording)
-        }
-    }
-}
-
-pub fn recorded(length: Duration, frames: usize) -> String {
-    let secs = length.as_secs();
-    format!(
-        "{}:{:02}, {} frames",
-        secs / 60,
-        secs % 60,
-        thousands(frames)
-    )
 }
 
 fn label_cell(ui: &mut Ui, size: Vec2, label: &str, hint: Option<&str>) {
@@ -1021,7 +995,7 @@ mod tests {
                 paused: false,
             },
             samples,
-            recording: Some((Duration::from_secs(3599), 215_940)),
+            frame_times: true,
             screen_match: Some(ScreenMatch::Shared),
         }
     }
@@ -1206,7 +1180,7 @@ mod tests {
             "More",
             "Compiles on",
             "1,234,567",
-            STOP_RECORDING,
+            FRAME_TIMES,
         ] {
             assert!(
                 texts.iter().any(|(text, _, _)| text.ends_with(name)),

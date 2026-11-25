@@ -9,6 +9,8 @@ pub enum ReplayError {
     Unreadable,
     #[error("load {0} first")]
     OtherGame(String),
+    #[error("replays are off in hardcore")]
+    Hardcore,
 }
 
 pub struct ReplayPlayer {

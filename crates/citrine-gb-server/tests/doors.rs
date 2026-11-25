@@ -20,6 +20,7 @@ async fn server(dir: &Path) -> Running {
     let map: HashMap<String, String> = HashMap::from([
         ("CITRINE_BIND".into(), "127.0.0.1".into()),
         ("CITRINE_PORT".into(), "0".into()),
+        ("CITRINE_STUN_PORT".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_MB".into(), "0".into()),
         ("CITRINE_DISK_FLOOR_PERCENT".into(), "0".into()),
         ("CITRINE_IP_CONNECTIONS".into(), "100000".into()),
@@ -283,4 +284,66 @@ async fn a_dial_to_no_door_counts_as_a_wrong_code() {
     let mut guess = dial(running.addr).await;
     say(&mut guess, Control::Dial(DoorKey([1; 16]))).await;
     assert_eq!(heard(&mut guess).await, Some(Control::Limit));
+}
+
+#[tokio::test]
+async fn a_surface_that_stops_reading_is_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let running = server(dir.path()).await;
+    let (host, reply) = open(running.addr, code("515151")).await;
+    assert_eq!(reply, Some(Control::Opened));
+    let mut phone = dial(running.addr).await;
+    say(&mut phone, Control::Join(code("515151"))).await;
+    assert_eq!(heard(&mut phone).await, Some(Control::Joined));
+    let (mut to_server, mut from_server) = host.split();
+    let frame = Message::Binary(vec![7; citrine_gb_surface::relay::MAX_MESSAGE_BYTES].into());
+    let let_go = async {
+        while let Some(Ok(message)) = from_server.next().await {
+            if let Message::Text(text) = message
+                && Control::parse(&text) == Some(Control::Gone)
+            {
+                return true;
+            }
+        }
+        false
+    };
+    let stream = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if to_server.send(frame.clone()).await.is_err() {
+                return false;
+            }
+        }
+    };
+    let gone = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::select! {
+            gone = let_go => gone,
+            gone = stream => gone,
+        }
+    })
+    .await;
+    assert_eq!(gone, Ok(true));
+    let mut host = to_server.reunite(from_server).unwrap();
+    let mut next_phone = dial(running.addr).await;
+    say(&mut next_phone, Control::Join(code("515151"))).await;
+    assert_eq!(heard(&mut next_phone).await, Some(Control::Joined));
+    assert_eq!(heard(&mut host).await, Some(Control::Joined));
+    drop(phone);
+}
+
+#[tokio::test]
+async fn a_connection_that_says_nothing_is_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let running = server(dir.path()).await;
+    let mut quiet = dial(running.addr).await;
+    let closed = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match quiet.next().await {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok());
 }

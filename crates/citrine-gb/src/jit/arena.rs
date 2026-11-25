@@ -26,6 +26,7 @@ pub unsafe fn call<const V5: bool, B: JitBus>(
 
 struct Chunk {
     base: *mut u8,
+    view: *mut u8,
     sealed: AtomicBool,
 }
 
@@ -34,9 +35,10 @@ unsafe impl Sync for Chunk {}
 
 impl Chunk {
     fn map() -> Option<Self> {
-        let base = unsafe { os::map(CHUNK_BYTES) }?;
+        let (base, view) = unsafe { os::map(CHUNK_BYTES) }?;
         Some(Self {
             base,
+            view,
             sealed: AtomicBool::new(false),
         })
     }
@@ -44,7 +46,7 @@ impl Chunk {
 
 impl Drop for Chunk {
     fn drop(&mut self) {
-        unsafe { os::unmap(self.base, CHUNK_BYTES) };
+        unsafe { os::unmap(self.base, self.view, CHUNK_BYTES) };
     }
 }
 
@@ -152,7 +154,7 @@ impl Arena {
                 self.allocated += CHUNK_BYTES;
                 self.targets.clear();
                 if let Some(prelude) = prelude {
-                    unsafe { os::write(chunk.base, &prelude.bytes) }?;
+                    unsafe { os::write(chunk.base, chunk.view, &prelude.bytes) }?;
                     self.used = prelude.bytes.len();
                     let base = chunk.base as usize;
                     self.targets = prelude.targets.iter().map(|&at| base + at).collect();
@@ -162,6 +164,7 @@ impl Arena {
         };
         let start = self.used.next_multiple_of(ALIGN);
         let at = unsafe { chunk.base.add(start) };
+        let view = unsafe { chunk.view.add(start) };
         for link in &code.links {
             let site = link.offset as usize;
             let target = *self.targets.get((link.helper & !LINK) as usize)?;
@@ -171,7 +174,7 @@ impl Arena {
                 target,
             )?;
         }
-        unsafe { os::write(at, &code.bytes) }?;
+        unsafe { os::write(at, view, &code.bytes) }?;
         self.used = start + code.bytes.len();
         Some(Code {
             entry: at as usize,
@@ -188,7 +191,11 @@ mod os {
         unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
     }
 
-    pub unsafe fn map(len: usize) -> Option<*mut u8> {
+    pub unsafe fn map(len: usize) -> Option<(*mut u8, *mut u8)> {
+        #[cfg(target_os = "linux")]
+        if let Some(twin) = unsafe { twin(len) } {
+            return Some(twin);
+        }
         let base = unsafe {
             libc::mmap(
                 ptr::null_mut(),
@@ -199,14 +206,48 @@ mod os {
                 0,
             )
         };
-        (base != libc::MAP_FAILED).then_some(base.cast())
+        (base != libc::MAP_FAILED).then_some((base.cast(), base.cast()))
     }
 
-    pub unsafe fn unmap(base: *mut u8, len: usize) {
+    #[cfg(target_os = "linux")]
+    unsafe fn twin(len: usize) -> Option<(*mut u8, *mut u8)> {
+        let fd = unsafe { libc::memfd_create(c"citrine-jit".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        let share =
+            |protect| unsafe { libc::mmap(ptr::null_mut(), len, protect, libc::MAP_SHARED, fd, 0) };
+        let mut twin = None;
+        if unsafe { libc::ftruncate(fd, len as libc::off_t) } == 0 {
+            let view = share(libc::PROT_READ | libc::PROT_WRITE);
+            let base = share(libc::PROT_READ | libc::PROT_EXEC);
+            if view != libc::MAP_FAILED && base != libc::MAP_FAILED {
+                twin = Some((base.cast(), view.cast()));
+            } else {
+                for mapped in [view, base] {
+                    if mapped != libc::MAP_FAILED {
+                        unsafe { libc::munmap(mapped, len) };
+                    }
+                }
+            }
+        }
+        unsafe { libc::close(fd) };
+        twin
+    }
+
+    pub unsafe fn unmap(base: *mut u8, view: *mut u8, len: usize) {
         unsafe { libc::munmap(base.cast(), len) };
+        if view != base {
+            unsafe { libc::munmap(view.cast(), len) };
+        }
     }
 
-    pub unsafe fn write(at: *mut u8, bytes: &[u8]) -> Option<()> {
+    pub unsafe fn write(at: *mut u8, view: *mut u8, bytes: &[u8]) -> Option<()> {
+        if view != at {
+            unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), view, bytes.len()) };
+            unsafe { flush(view, at, bytes.len()) };
+            return Some(());
+        }
         let page = page();
         let first = at as usize & !(page - 1);
         let end = (at as usize + bytes.len()).next_multiple_of(page);
@@ -218,24 +259,25 @@ mod os {
         if !protect(libc::PROT_READ | libc::PROT_EXEC) {
             return None;
         }
-        unsafe { flush(at, bytes.len()) };
+        unsafe { flush(at, at, bytes.len()) };
         Some(())
     }
 
     #[cfg(target_arch = "aarch64")]
-    unsafe fn flush(at: *mut u8, len: usize) {
+    unsafe fn flush(view: *mut u8, at: *mut u8, len: usize) {
         use std::arch::asm;
         let ctr: u64;
         unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr) };
         let data_line = 4usize << ((ctr >> 16) & 0xF);
         let code_line = 4usize << (ctr & 0xF);
-        let end = at as usize + len;
-        let mut line = at as usize & !(data_line - 1);
+        let end = view as usize + len;
+        let mut line = view as usize & !(data_line - 1);
         while line < end {
             unsafe { asm!("dc cvau, {}", in(reg) line) };
             line += data_line;
         }
         unsafe { asm!("dsb ish") };
+        let end = at as usize + len;
         let mut line = at as usize & !(code_line - 1);
         while line < end {
             unsafe { asm!("ic ivau, {}", in(reg) line) };
@@ -245,7 +287,7 @@ mod os {
     }
 
     #[cfg(not(target_arch = "aarch64"))]
-    unsafe fn flush(_at: *mut u8, _len: usize) {}
+    unsafe fn flush(_view: *mut u8, _at: *mut u8, _len: usize) {}
 }
 
 #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
@@ -257,7 +299,7 @@ mod os {
         fn sys_icache_invalidate(start: *mut c_void, len: usize);
     }
 
-    pub unsafe fn map(len: usize) -> Option<*mut u8> {
+    pub unsafe fn map(len: usize) -> Option<(*mut u8, *mut u8)> {
         let base = unsafe {
             libc::mmap(
                 ptr::null_mut(),
@@ -268,14 +310,14 @@ mod os {
                 0,
             )
         };
-        (base != libc::MAP_FAILED).then_some(base.cast())
+        (base != libc::MAP_FAILED).then_some((base.cast(), base.cast()))
     }
 
-    pub unsafe fn unmap(base: *mut u8, len: usize) {
+    pub unsafe fn unmap(base: *mut u8, _view: *mut u8, len: usize) {
         unsafe { libc::munmap(base.cast(), len) };
     }
 
-    pub unsafe fn write(at: *mut u8, bytes: &[u8]) -> Option<()> {
+    pub unsafe fn write(at: *mut u8, _view: *mut u8, bytes: &[u8]) -> Option<()> {
         unsafe {
             libc::pthread_jit_write_protect_np(0);
             ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
@@ -303,17 +345,17 @@ mod os {
         info.dwPageSize as usize
     }
 
-    pub unsafe fn map(len: usize) -> Option<*mut u8> {
+    pub unsafe fn map(len: usize) -> Option<(*mut u8, *mut u8)> {
         let base =
             unsafe { VirtualAlloc(ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY) };
-        (!base.is_null()).then_some(base.cast())
+        (!base.is_null()).then_some((base.cast(), base.cast()))
     }
 
-    pub unsafe fn unmap(base: *mut u8, _len: usize) {
+    pub unsafe fn unmap(base: *mut u8, _view: *mut u8, _len: usize) {
         unsafe { VirtualFree(base.cast(), 0, MEM_RELEASE) };
     }
 
-    pub unsafe fn write(at: *mut u8, bytes: &[u8]) -> Option<()> {
+    pub unsafe fn write(at: *mut u8, _view: *mut u8, bytes: &[u8]) -> Option<()> {
         let page = page();
         let first = at as usize & !(page - 1);
         let end = (at as usize + bytes.len()).next_multiple_of(page);

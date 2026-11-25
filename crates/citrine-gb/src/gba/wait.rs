@@ -2,7 +2,7 @@ use super::region::Region;
 
 const FIRST_ACCESS_WAITS: [u32; 4] = [4, 3, 2, 8];
 const WAITCNT_MASK: u16 = 0x5FFF;
-const PREFETCH: u16 = 1 << 14;
+pub(crate) const PREFETCH: u16 = 1 << 14;
 const ROM_PAGE: u32 = 0x2_0000;
 pub(crate) const EWRAM_CYCLES: u32 = 3;
 
@@ -35,9 +35,9 @@ pub enum Access {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "WaitBits", into = "WaitBits"))]
 pub struct WaitControl {
-    bits: u16,
-    sequential_halves: u32,
-    first_halves: u32,
+    pub(crate) bits: u16,
+    pub(crate) sequential_halves: u32,
+    pub(crate) first_halves: u32,
 }
 
 #[cfg(feature = "serde")]

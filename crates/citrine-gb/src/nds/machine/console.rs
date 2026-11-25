@@ -59,6 +59,14 @@ impl Console for Nds {
         Nds::set_touch(self, touch);
     }
 
+    fn set_mic(&mut self, samples: &[i16]) {
+        Nds::set_mic(self, samples);
+    }
+
+    fn mic_in_use(&self) -> bool {
+        Nds::mic_in_use(self)
+    }
+
     fn soft_reset(&mut self) {
         Nds::soft_reset(self);
     }

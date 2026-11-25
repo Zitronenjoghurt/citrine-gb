@@ -1,13 +1,15 @@
+use crate::app::ui_state::recent::copies::RomCopies;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::app::ui_state::recent::{RecentRom, RecentRoms};
 use crate::app::ui_state::settings::Settings;
-use crate::icons;
 use crate::media::{MediaId, MediaInfo, MediaStore};
 use crate::online::Online;
 use crate::online::chat::history::{decode_history, encode_history, merge_history};
 use crate::progress::Counter;
 use crate::stats::{Book, GameRecord, Stats};
 use crate::storage::SaveStore;
+use crate::storage::kinds::{Folder, Kind as Store, Section, Usage, other_data};
+use crate::storage::salvage::salvage;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -16,6 +18,8 @@ pub const FILE_EXTENSION: &str = "zip";
 const MANIFEST: &str = "citrine-data.json";
 const FORMAT: u64 = 1;
 const MAX_FILE_BYTES: u64 = 1 << 30;
+const MAX_ENTRY_BYTES: u64 = 64 << 20;
+const MAX_MANIFEST_BYTES: u64 = 64 << 10;
 pub const STEP_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
 
 const SAVES: &str = "saves/";
@@ -35,6 +39,9 @@ const KEPT_SETTINGS: &[&str] = &[
     "current_tab",
     "game_names",
     "achievements",
+    "ds_online",
+    "discord",
+    "check_updates",
 ];
 
 pub type Files = BTreeMap<String, Vec<u8>>;
@@ -42,16 +49,34 @@ pub type Files = BTreeMap<String, Vec<u8>>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Kind {
     pub name: &'static str,
-    pub icon: &'static str,
-    pub units: (&'static str, &'static str),
     pub nouns: (&'static str, &'static str),
+    pub store: Store,
+    pub system_file: Option<crate::app::system_files::SystemFile>,
 }
 
 impl Kind {
-    pub fn unit(&self, n: usize) -> String {
-        match self.units {
-            ("", "") => n.to_string(),
-            units => counted(n, units),
+    pub fn of(kind: Store) -> Self {
+        let nouns = match kind {
+            Store::Saves => ("save", "saves"),
+            Store::States => ("save state", "save states"),
+            Store::Screenshots => ("screenshot", "screenshots"),
+            Store::Recordings => ("recording", "recordings"),
+            Store::Settings => ("setting", "settings"),
+            Store::GameNames => ("game name", "game names"),
+            Store::RecentGames => ("recent game", "recent games"),
+            Store::SystemFiles => ("BIOS or boot ROM file", "BIOS and boot ROM files"),
+            Store::DsWifi => ("DS wifi connection", "DS wifi connections"),
+            Store::Stats => ("game's play time", "games' play time"),
+            Store::Chats => ("chat message", "chat messages"),
+            Store::Pokewalker => ("Pokéwalker save", "Pokéwalker saves"),
+            Store::GameCopies => ("game copy", "game copies"),
+            _ => ("file", "files"),
+        };
+        Self {
+            name: kind.name(),
+            nouns,
+            store: kind,
+            system_file: None,
         }
     }
 
@@ -67,7 +92,6 @@ fn counted(n: usize, (one, many): (&str, &str)) -> String {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tally {
     pub count: usize,
-    pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,7 +101,10 @@ pub struct Change {
 }
 
 pub trait Part {
-    fn kind(&self) -> Kind;
+    fn kind(&self) -> Store;
+    fn file_row(&self) -> Option<Kind> {
+        None
+    }
     fn tally(&mut self) -> Tally;
     fn export(&mut self, out: &mut Files);
     fn plan(&mut self, files: &Files) -> Change;
@@ -88,11 +115,13 @@ pub trait Part {
 pub struct Parts<'a> {
     pub saves: &'a SaveStore,
     pub media: &'a mut MediaStore,
+    pub rom_copies: &'a RomCopies,
     pub online: &'a mut Online,
     pub settings: &'a mut Settings,
     pub stats: &'a mut Stats,
     #[cfg(not(target_arch = "wasm32"))]
     pub recent: &'a mut RecentRoms,
+    pub boot_roms: boot_roms::BootRoms<'a>,
     #[cfg(feature = "gba")]
     pub gba_bios: gba_bios::GbaBios<'a>,
     #[cfg(feature = "nds")]
@@ -105,14 +134,19 @@ pub struct Parts<'a> {
 
 impl Parts<'_> {
     pub fn each(&mut self, mut visit: impl FnMut(&mut dyn Part)) {
-        visit(&mut Saves(self.saves));
-        visit(&mut Media(&mut *self.media));
+        visit(&mut Saves(self.saves, Store::Saves));
+        visit(&mut Saves(self.saves, Store::States));
+        visit(&mut Media(&mut *self.media, Store::Screenshots));
+        visit(&mut Media(&mut *self.media, Store::Recordings));
         visit(&mut StatsPart(&mut *self.stats));
         visit(&mut Chats(&mut *self.online));
         visit(&mut SettingsPart(&mut *self.settings));
         #[cfg(not(target_arch = "wasm32"))]
         visit(&mut Recent(&mut *self.recent));
         visit(&mut GameNames(&mut *self.settings));
+        for file in <crate::app::boot_rom::BootRom as strum::IntoEnumIterator>::iter() {
+            visit(&mut self.boot_roms.part(file));
+        }
         #[cfg(feature = "gba")]
         visit(&mut self.gba_bios);
         #[cfg(feature = "nds")]
@@ -123,12 +157,29 @@ impl Parts<'_> {
         visit(&mut walker::WalkerPart(&mut *self.walker));
         #[cfg(ds_wifi)]
         visit(&mut self.ds_wifi);
+        visit(&mut GameCopies(self.rom_copies));
+        visit(&mut OtherData);
     }
 
-    pub fn tallies(&mut self) -> Vec<(Kind, Tally)> {
-        let mut rows = Vec::new();
-        self.each(|part| rows.push((part.kind(), part.tally())));
-        rows
+    pub fn tallies(&mut self, usage: &Usage) -> Vec<(Kind, Tally)> {
+        let mut counts: BTreeMap<Store, usize> = BTreeMap::new();
+        let mut files = Vec::new();
+        self.each(|part| {
+            let tally = part.tally();
+            *counts.entry(part.kind()).or_default() += tally.count;
+            files.extend(part.file_row().map(|row| (row, tally)));
+        });
+        crate::storage::kinds::listed(Section::Data, usage)
+            .flat_map(|kind| {
+                if kind == Store::SystemFiles {
+                    return files.clone();
+                }
+                let tally = Tally {
+                    count: counts.get(&kind).copied().unwrap_or(0),
+                };
+                vec![(Kind::of(kind), tally)]
+            })
+            .collect()
     }
 
     pub fn export(&mut self) -> Files {
@@ -138,16 +189,28 @@ impl Parts<'_> {
     }
 
     pub fn plan(&mut self, files: &Files) -> Vec<(Kind, Change)> {
-        let mut changes = Vec::new();
-        self.each(|part| changes.push((part.kind(), part.plan(files))));
+        let mut changes: Vec<(Store, Change)> = Vec::new();
+        self.each(|part| {
+            let change = part.plan(files);
+            match changes.iter_mut().find(|(kind, _)| *kind == part.kind()) {
+                Some((_, total)) => {
+                    total.added += change.added;
+                    total.replaced += change.replaced;
+                }
+                None => changes.push((part.kind(), change)),
+            }
+        });
         changes
+            .into_iter()
+            .map(|(kind, change)| (Kind::of(kind), change))
+            .collect()
     }
 
     pub fn import(&mut self, files: &Files) -> io::Result<()> {
         let mut result = Ok(());
         self.each(|part| {
             if let Err(err) = part.import(files) {
-                log::error!("Could not import the {}: {err}", part.kind().name);
+                log::error!("Could not import the {}: {err}", part.kind().name());
                 result = Err(err);
             }
         });
@@ -158,7 +221,7 @@ impl Parts<'_> {
         let mut result = Ok(());
         self.each(|part| {
             if let Err(err) = part.delete_all() {
-                log::error!("Could not delete the {}: {err}", part.kind().name);
+                log::error!("Could not delete the {}: {err}", part.kind().name());
                 result = Err(err);
             }
         });
@@ -297,9 +360,14 @@ impl Unpacker {
         let mut zip =
             zip::ZipArchive::new(io::Cursor::new(bytes)).map_err(|_| ReadError::NotZip)?;
         let manifest: Value = {
-            let mut file = zip.by_name(MANIFEST).map_err(|_| ReadError::NotOurs)?;
+            let file = zip.by_name(MANIFEST).map_err(|_| ReadError::NotOurs)?;
             let mut raw = Vec::new();
-            file.read_to_end(&mut raw).map_err(|_| ReadError::NotOurs)?;
+            file.take(MAX_MANIFEST_BYTES + 1)
+                .read_to_end(&mut raw)
+                .map_err(|_| ReadError::NotOurs)?;
+            if raw.len() as u64 > MAX_MANIFEST_BYTES {
+                return Err(ReadError::NotOurs);
+            }
             serde_json::from_slice(&raw).map_err(|_| ReadError::NotOurs)?
         };
         let format = manifest["format"].as_u64().ok_or(ReadError::NotOurs)?;
@@ -341,12 +409,19 @@ impl Unpacker {
             self.counter.add(file.size());
             return Ok(true);
         }
-        self.total = self.total.saturating_add(file.size());
-        if self.total > MAX_FILE_BYTES {
+        let room = entry_cap(&name).min(MAX_FILE_BYTES - self.total);
+        if file.size() > room {
             return Err(ReadError::TooLarge);
         }
         let mut raw = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut raw).map_err(|_| ReadError::NotZip)?;
+        file.by_ref()
+            .take(room + 1)
+            .read_to_end(&mut raw)
+            .map_err(|_| ReadError::NotZip)?;
+        if raw.len() as u64 > room {
+            return Err(ReadError::TooLarge);
+        }
+        self.total += raw.len() as u64;
         self.counter.add(raw.len() as u64);
         self.files.insert(name, raw);
         Ok(true)
@@ -357,6 +432,16 @@ impl Unpacker {
     }
 }
 
+fn entry_cap(path: &str) -> u64 {
+    let media =
+        path.starts_with(MEDIA) && !path.ends_with(INFO_SUFFIX) && !path.ends_with(THUMB_SUFFIX);
+    if media {
+        MAX_FILE_BYTES
+    } else {
+        MAX_ENTRY_BYTES
+    }
+}
+
 pub fn file_name(now: u64) -> String {
     format!(
         "citrine-data-{}.{FILE_EXTENSION}",
@@ -364,7 +449,11 @@ pub fn file_name(now: u64) -> String {
     )
 }
 
-struct Saves<'a>(&'a SaveStore);
+struct Saves<'a>(&'a SaveStore, Store);
+
+fn save_kind(name: &str) -> Store {
+    Folder::Saves.kind_of(name)
+}
 
 type SaveItem = (String, String);
 type Incoming<'f> = (SaveItem, Vec<(&'f str, &'f [u8])>, Option<Vec<String>>);
@@ -380,7 +469,7 @@ fn saved_at(meta: Option<&[u8]>) -> u64 {
         .map_or(0, u64::from_le_bytes)
 }
 
-fn file_items(files: &Files) -> BTreeMap<SaveItem, Vec<(&str, &[u8])>> {
+fn file_items(files: &Files, kind: Store) -> BTreeMap<SaveItem, Vec<(&str, &[u8])>> {
     let mut items: BTreeMap<SaveItem, Vec<(&str, &[u8])>> = BTreeMap::new();
     for (path, bytes) in files.range(SAVES.to_owned()..) {
         let Some(rest) = path.strip_prefix(SAVES) else {
@@ -389,7 +478,10 @@ fn file_items(files: &Files) -> BTreeMap<SaveItem, Vec<(&str, &[u8])>> {
         let Some((rom, name)) = rest.split_once('/') else {
             continue;
         };
-        if !crate::storage::is_save_key(rom) || !crate::storage::is_user_file(name) {
+        if !crate::storage::is_save_key(rom)
+            || !crate::storage::is_user_file(name)
+            || save_kind(name) != kind
+        {
             continue;
         }
         items
@@ -401,9 +493,15 @@ fn file_items(files: &Files) -> BTreeMap<SaveItem, Vec<(&str, &[u8])>> {
 }
 
 impl Saves<'_> {
+    fn files(&self) -> Vec<(String, String)> {
+        let mut files = self.0.files();
+        files.retain(|(_, name)| save_kind(name) == self.1);
+        files
+    }
+
     fn local_items(&self) -> BTreeMap<SaveItem, Vec<String>> {
         let mut items: BTreeMap<SaveItem, Vec<String>> = BTreeMap::new();
-        for (rom, name) in self.0.files() {
+        for (rom, name) in self.files() {
             items.entry(save_item(&rom, &name)).or_default().push(name);
         }
         items
@@ -415,7 +513,7 @@ impl Saves<'_> {
 
     fn incoming<'f>(&self, files: &'f Files) -> Vec<Incoming<'f>> {
         let mut local = self.local_items();
-        file_items(files)
+        file_items(files, self.1)
             .into_iter()
             .filter_map(|(item, theirs)| {
                 let mine = local.remove(&item);
@@ -437,28 +535,18 @@ impl Saves<'_> {
 }
 
 impl Part for Saves<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Saves",
-            icon: icons::FLOPPY_DISK,
-            units: ("", ""),
-            nouns: ("save", "saves"),
-        }
+    fn kind(&self) -> Store {
+        self.1
     }
 
     fn tally(&mut self) -> Tally {
-        let files = self.0.files();
         Tally {
             count: self.local_items().len(),
-            bytes: files
-                .iter()
-                .map(|(rom, name)| self.0.file_size(rom, name))
-                .sum(),
         }
     }
 
     fn export(&mut self, out: &mut Files) {
-        for (rom, name) in self.0.files() {
+        for (rom, name) in self.files() {
             if let Some(bytes) = self.0.read_file(&rom, &name) {
                 out.insert(format!("{SAVES}{rom}/{name}"), bytes);
             }
@@ -489,11 +577,21 @@ impl Part for Saves<'_> {
     }
 
     fn delete_all(&mut self) -> io::Result<()> {
-        self.0.delete_every_game()
+        if self.1 == Store::Saves {
+            return self.0.delete_every_game();
+        }
+        for (rom, name) in self.files() {
+            self.0.remove_file(&rom, &name)?;
+        }
+        Ok(())
     }
 }
 
-struct Media<'a>(&'a mut MediaStore);
+struct Media<'a>(&'a mut MediaStore, Store);
+
+fn media_kind(info: &MediaInfo) -> Store {
+    Folder::Media.kind_of(info.kind.folder())
+}
 
 struct IncomingMedia<'f> {
     id: MediaId,
@@ -519,6 +617,9 @@ impl Media<'_> {
             else {
                 continue;
             };
+            if media_kind(&info) != self.1 {
+                continue;
+            }
             let mine = self.0.items().iter().find(|item| item.id == id);
             if mine.is_some_and(|mine| mine.info.created_at >= info.created_at) {
                 continue;
@@ -538,26 +639,29 @@ impl Media<'_> {
 }
 
 impl Part for Media<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Media",
-            icon: icons::IMAGES,
-            units: ("", ""),
-            nouns: ("media file", "media files"),
-        }
+    fn kind(&self) -> Store {
+        self.1
     }
 
     fn tally(&mut self) -> Tally {
         self.0.refresh();
-        let items = self.0.items();
-        Tally {
-            count: items.len(),
-            bytes: items.iter().map(|item| item.info.bytes).sum(),
-        }
+        let count = self
+            .0
+            .items()
+            .iter()
+            .filter(|item| media_kind(&item.info) == self.1)
+            .count();
+        Tally { count }
     }
 
     fn export(&mut self, out: &mut Files) {
-        for item in self.0.items() {
+        let kind = self.1;
+        for item in self
+            .0
+            .items()
+            .iter()
+            .filter(|item| media_kind(&item.info) == kind)
+        {
             let path = format!("{MEDIA}{}", item.id.as_str());
             if let Ok(info) = serde_json::to_vec_pretty(&item.info) {
                 out.insert(format!("{path}{INFO_SUFFIX}"), info);
@@ -631,13 +735,8 @@ impl Chats<'_> {
 }
 
 impl Part for Chats<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Chats",
-            icon: icons::CHAT_CIRCLE,
-            units: ("message", "messages"),
-            nouns: ("chat message", "chat messages"),
-        }
+    fn kind(&self) -> Store {
+        Store::Chats
     }
 
     fn tally(&mut self) -> Tally {
@@ -649,7 +748,6 @@ impl Part for Chats<'_> {
                 .flat_map(|history| history.into_values())
                 .map(|chat| chat.entries.len())
                 .sum(),
-            bytes: files.iter().map(|(_, raw)| raw.len() as u64).sum(),
         }
     }
 
@@ -726,13 +824,8 @@ fn file_settings(files: &Files) -> Option<serde_json::Map<String, Value>> {
 }
 
 impl Part for SettingsPart<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Settings",
-            icon: icons::GEAR,
-            units: ("changed", "changed"),
-            nouns: ("setting", "settings"),
-        }
+    fn kind(&self) -> Store {
+        Store::Settings
     }
 
     fn tally(&mut self) -> Tally {
@@ -740,7 +833,6 @@ impl Part for SettingsPart<'_> {
         let defaults = settings_json(&Settings::default());
         Tally {
             count: differences(&mine, &defaults),
-            bytes: serde_json::to_vec(&mine).map_or(0, |raw| raw.len() as u64),
         }
     }
 
@@ -754,9 +846,7 @@ impl Part for SettingsPart<'_> {
         let Some(theirs) = file_settings(files) else {
             return Change::default();
         };
-        let mut merged = settings_json(self.0);
-        merged.extend(theirs);
-        let Ok(adopted) = serde_json::from_value::<Settings>(Value::Object(merged)) else {
+        let Some(adopted) = adopt(Value::Object(settings_json(self.0)), theirs) else {
             return Change::default();
         };
         Change {
@@ -769,12 +859,10 @@ impl Part for SettingsPart<'_> {
         let Some(theirs) = file_settings(files) else {
             return Ok(());
         };
-        let Ok(Value::Object(mut merged)) = serde_json::to_value(&*self.0) else {
-            return Err(io::Error::other("settings unreadable"));
-        };
-        merged.extend(theirs);
-        let mut adopted: Settings =
-            serde_json::from_value(Value::Object(merged)).map_err(io::Error::other)?;
+        let mine = serde_json::to_value(&*self.0).map_err(io::Error::other)?;
+        let mut adopted =
+            adopt(mine, theirs).ok_or_else(|| io::Error::other("settings unreadable"))?;
+        adopted.cheats.turn_off_unknown(&self.0.cheats);
         adopted.sanitize();
         adopted.dirty = true;
         *self.0 = adopted;
@@ -792,6 +880,14 @@ impl Part for SettingsPart<'_> {
         };
         Ok(())
     }
+}
+
+fn adopt(mine: Value, theirs: serde_json::Map<String, Value>) -> Option<Settings> {
+    let Value::Object(mut merged) = mine.clone() else {
+        return None;
+    };
+    merged.extend(theirs);
+    salvage::<Settings>(Value::Object(merged), Some(&mine)).map(|kept| kept.value)
 }
 
 struct GameNames<'a>(&'a mut Settings);
@@ -816,21 +912,13 @@ impl GameNames<'_> {
 }
 
 impl Part for GameNames<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Game names",
-            icon: icons::TAG,
-            units: ("", ""),
-            nouns: ("game name", "game names"),
-        }
+    fn kind(&self) -> Store {
+        Store::GameNames
     }
 
     fn tally(&mut self) -> Tally {
         let names: BTreeMap<&str, &str> = self.0.game_names.iter().collect();
-        Tally {
-            count: names.len(),
-            bytes: serde_json::to_vec(&names).map_or(0, |raw| raw.len() as u64),
-        }
+        Tally { count: names.len() }
     }
 
     fn export(&mut self, out: &mut Files) {
@@ -894,13 +982,8 @@ impl StatsPart<'_> {
 }
 
 impl Part for StatsPart<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Stats",
-            icon: icons::CHART_BAR,
-            units: ("game", "games"),
-            nouns: ("game's play time", "games' play time"),
-        }
+    fn kind(&self) -> Store {
+        Store::Stats
     }
 
     fn tally(&mut self) -> Tally {
@@ -910,7 +993,6 @@ impl Part for StatsPart<'_> {
         }
         Tally {
             count: Self::games(book).len(),
-            bytes: serde_json::to_vec(&Self::portable(book)).map_or(0, |raw| raw.len() as u64),
         }
     }
 
@@ -960,30 +1042,37 @@ impl Part for StatsPart<'_> {
 struct Recent<'a>(&'a mut RecentRoms);
 
 #[cfg(not(target_arch = "wasm32"))]
+fn network_path(path: &std::path::Path) -> bool {
+    path.as_os_str()
+        .to_string_lossy()
+        .chars()
+        .take_while(|c| matches!(c, '/' | '\\'))
+        .nth(1)
+        .is_some()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl Recent<'_> {
     fn theirs(files: &Files) -> Vec<RecentRom> {
         files
             .get(RECENT)
-            .and_then(|raw| serde_json::from_slice(raw).ok())
+            .and_then(|raw| serde_json::from_slice::<Vec<RecentRom>>(raw).ok())
             .unwrap_or_default()
+            .into_iter()
+            .filter(|rom| !network_path(&rom.path))
+            .collect()
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Part for Recent<'_> {
-    fn kind(&self) -> Kind {
-        Kind {
-            name: "Recent games",
-            icon: icons::CLOCK_USER,
-            units: ("", ""),
-            nouns: ("recent game", "recent games"),
-        }
+    fn kind(&self) -> Store {
+        Store::RecentGames
     }
 
     fn tally(&mut self) -> Tally {
         Tally {
             count: self.0.entries().len(),
-            bytes: serde_json::to_vec(self.0.entries()).map_or(0, |raw| raw.len() as u64),
         }
     }
 
@@ -1010,12 +1099,103 @@ impl Part for Recent<'_> {
     }
 }
 
+struct GameCopies<'a>(&'a RomCopies);
+
+impl Part for GameCopies<'_> {
+    fn kind(&self) -> Store {
+        Store::GameCopies
+    }
+
+    fn tally(&mut self) -> Tally {
+        Tally {
+            count: self.0.count(),
+        }
+    }
+
+    fn export(&mut self, _: &mut Files) {}
+
+    fn plan(&mut self, _: &Files) -> Change {
+        Change::default()
+    }
+
+    fn import(&mut self, _: &Files) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn delete_all(&mut self) -> io::Result<()> {
+        self.0.clear();
+        Ok(())
+    }
+}
+
+const OTHER_FILES: &str = "other/";
+
+struct OtherData;
+
+impl OtherData {
+    fn theirs(files: &Files) -> Vec<(&str, &[u8])> {
+        files
+            .range(OTHER_FILES.to_owned()..)
+            .map_while(|(path, bytes)| Some((path.strip_prefix(OTHER_FILES)?, bytes.as_slice())))
+            .filter(|(path, _)| other_data::is_other(path))
+            .collect()
+    }
+}
+
+impl Part for OtherData {
+    fn kind(&self) -> Store {
+        Store::OtherData
+    }
+
+    fn tally(&mut self) -> Tally {
+        Tally {
+            count: other_data::list().len(),
+        }
+    }
+
+    fn export(&mut self, out: &mut Files) {
+        for path in other_data::list() {
+            if let Some(bytes) = other_data::read(&path) {
+                out.insert(format!("{OTHER_FILES}{path}"), bytes);
+            }
+        }
+    }
+
+    fn plan(&mut self, files: &Files) -> Change {
+        let mut change = Change::default();
+        for (path, bytes) in Self::theirs(files) {
+            match other_data::read(path) {
+                None => change.added += 1,
+                Some(mine) if mine != bytes => change.replaced += 1,
+                Some(_) => {}
+            }
+        }
+        change
+    }
+
+    fn import(&mut self, files: &Files) -> io::Result<()> {
+        for (path, bytes) in Self::theirs(files) {
+            other_data::write(path, bytes)?;
+        }
+        Ok(())
+    }
+
+    fn delete_all(&mut self) -> io::Result<()> {
+        for path in other_data::list() {
+            other_data::delete(&path)?;
+        }
+        Ok(())
+    }
+}
+
+pub mod boot_roms;
 #[cfg(feature = "nds")]
 pub mod ds_files;
 #[cfg(ds_wifi)]
 pub mod ds_wifi;
 #[cfg(feature = "gba")]
 pub mod gba_bios;
+pub mod kept_file;
 #[cfg(feature = "nds")]
 mod walker;
 
@@ -1038,10 +1218,16 @@ mod tests {
         root: PathBuf,
         saves: SaveStore,
         media: MediaStore,
+        rom_copies: RomCopies,
         online: Online,
         settings: Settings,
         stats: Stats,
         recent: RecentRoms,
+        boot: (
+            crate::storage::SettingsStore,
+            citrine_gb::machine::Firmware,
+            [String; 2],
+        ),
         #[cfg(feature = "gba")]
         bios: (
             crate::storage::SettingsStore,
@@ -1058,7 +1244,7 @@ mod tests {
 
     impl Home {
         fn new(name: &str) -> Self {
-            let root = std::env::temp_dir()
+            let root = crate::storage::scratch_dir()
                 .join(format!("citrine-your-data-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let mut online = Online::default();
@@ -1066,10 +1252,16 @@ mod tests {
             Self {
                 saves: SaveStore::at(root.join("saves")),
                 media: MediaStore::at(root.join("media")),
+                rom_copies: RomCopies::at(root.join("roms")),
                 online,
                 settings: Settings::default(),
                 stats: Stats::open(crate::stats::StatsStore::in_dir(root.join("stats"))),
                 recent: RecentRoms::default(),
+                boot: (
+                    crate::storage::SettingsStore::at(root.join("settings")),
+                    Default::default(),
+                    Default::default(),
+                ),
                 #[cfg(feature = "gba")]
                 bios: (
                     crate::storage::SettingsStore::at(root.join("settings")),
@@ -1092,10 +1284,17 @@ mod tests {
             Parts {
                 saves: &self.saves,
                 media: &mut self.media,
+                rom_copies: &self.rom_copies,
                 online: &mut self.online,
                 settings: &mut self.settings,
                 stats: &mut self.stats,
                 recent: &mut self.recent,
+                boot_roms: boot_roms::BootRoms {
+                    store: &self.boot.0,
+                    gb: &mut self.boot.1.gb_boot_rom,
+                    gbc: &mut self.boot.1.gbc_boot_rom,
+                    names: &mut self.boot.2,
+                },
                 #[cfg(feature = "gba")]
                 gba_bios: gba_bios::GbaBios {
                     store: &self.bios.0,
@@ -1145,6 +1344,9 @@ mod tests {
             self.recent
                 .record(Path::new("/roms/silver.gbc"), "Pokémon Silver", None);
             sign_in(&mut self.settings);
+            self.boot.1.gb_boot_rom = Some((0..0x100).map(|n| n as u8).collect());
+            self.boot.1.gbc_boot_rom = Some((0..0x900).map(|n| (n * 3) as u8).collect());
+            self.boot.2 = ["dmg_boot.bin".to_owned(), "cgb_boot.bin".to_owned()];
             #[cfg(feature = "gba")]
             {
                 self.bios.1 = Some(
@@ -1195,6 +1397,7 @@ mod tests {
                 relay_key: None,
                 device: None,
                 others: Vec::new(),
+                friend_keys: Default::default(),
             },
         );
     }
@@ -1249,6 +1452,9 @@ mod tests {
             width: 160,
             height: 144,
             length_ms: (kind == MediaKind::Recording).then_some(4000),
+            frame_times: false,
+            video: false,
+            replay: None,
             frame: frame(),
         }
     }
@@ -1263,6 +1469,7 @@ mod tests {
                 body: Body::Text(format!("message {id}")),
                 delivery: Delivery::Received,
                 change: crate::online::chat::Change::Kept,
+                reply: None,
             });
         }
         History::from([(OnlineId::new(7).unwrap(), chat)])
@@ -1270,7 +1477,7 @@ mod tests {
 
     fn counts(home: &mut Home) -> Vec<(&'static str, usize)> {
         home.parts()
-            .tallies()
+            .tallies(&Usage::new())
             .into_iter()
             .map(|(kind, tally)| (kind.name, tally.count))
             .collect()
@@ -1299,30 +1506,32 @@ mod tests {
         home.fill();
         let before = export(&mut home);
         let counted = counts(&mut home);
-        assert_eq!(
-            counted,
-            [
-                ("Saves", 4),
-                ("Media", 2),
-                ("Stats", 1),
-                ("Chats", 2),
-                ("Settings", 2),
-                ("Recent games", 1),
-                ("Game names", 1),
-                #[cfg(feature = "gba")]
-                ("GBA BIOS", 1),
-                #[cfg(feature = "nds")]
-                ("DS ARM9 BIOS", 1),
-                #[cfg(feature = "nds")]
-                ("DS ARM7 BIOS", 1),
-                #[cfg(feature = "nds")]
-                ("DS firmware", 1),
-                #[cfg(feature = "nds")]
-                ("Pokéwalker", 1),
-                #[cfg(ds_wifi)]
-                ("DS wifi connection", 1),
-            ]
-        );
+        let mut wanted = vec![
+            ("Saves", 2),
+            ("Save states", 2),
+            ("Screenshots", 1),
+            ("Recordings", 1),
+            ("Settings", 2),
+            ("Game names", 1),
+            ("Recent games", 1),
+            ("GB boot ROM", 1),
+            ("GBC boot ROM", 1),
+        ];
+        if cfg!(feature = "gba") {
+            wanted.push(("GBA BIOS", 1));
+        }
+        if cfg!(feature = "nds") {
+            wanted.extend([("DS ARM9 BIOS", 1), ("DS ARM7 BIOS", 1), ("DS firmware", 1)]);
+        }
+        if cfg!(ds_wifi) {
+            wanted.push(("DS wifi connection", 1));
+        }
+        wanted.extend([("Stats", 1), ("Chats", 2)]);
+        if cfg!(feature = "nds") {
+            wanted.push(("Pokéwalker", 1));
+        }
+        wanted.push(("Game copies", 0));
+        assert_eq!(counted, wanted);
 
         let file = through_zip(&before);
         assert_eq!(file, before, "the zip holds every file as it was");
@@ -1333,9 +1542,20 @@ mod tests {
             counts(&mut home)
         );
         assert!(home.settings.online.joined.is_some(), "the account stays");
+        for file in <crate::app::boot_rom::BootRom as strum::IntoEnumIterator>::iter() {
+            assert_eq!(
+                home.boot.0.kept_file(file.store_keys()),
+                None,
+                "{file:?} stayed"
+            );
+        }
         #[cfg(feature = "nds")]
         for file in <crate::app::ds_firmware::DsFile as strum::IntoEnumIterator>::iter() {
-            assert_eq!(home.bios.0.ds_file(file), None, "{file:?} stayed");
+            assert_eq!(
+                home.bios.0.kept_file(file.store_keys()),
+                None,
+                "{file:?} stayed"
+            );
         }
         let plan = home.parts().plan(&file);
         assert!(
@@ -1362,7 +1582,7 @@ mod tests {
         assert_eq!(
             home.bios
                 .0
-                .ds_file(crate::app::ds_firmware::DsFile::Firmware),
+                .kept_file(crate::app::ds_firmware::DsFile::Firmware.store_keys()),
             Some((
                 before["ds-firmware/firmware.bin"].clone(),
                 "firmware.bin".to_owned()
@@ -1440,8 +1660,9 @@ mod tests {
             .map(|(kind, change)| (kind.name, change))
             .collect();
         let of = |name: &str| plan.iter().find(|(n, _)| *n == name).unwrap().1;
+        assert_eq!(of("Saves"), Change::default());
         assert_eq!(
-            of("Saves"),
+            of("Save states"),
             Change {
                 added: 1,
                 replaced: 1
@@ -1490,6 +1711,70 @@ mod tests {
     }
 
     #[test]
+    fn an_import_keeps_this_devices_network_settings() {
+        let mut other = Home::new("network-file");
+        other.settings.ds_online.service = crate::app::ui_state::ds_online::OnlineService::Other;
+        other.settings.ds_online.dns = Some("203.0.113.9".into());
+        other.settings.discord.enabled = true;
+        other.settings.check_updates = false;
+        let files = through_zip(&export(&mut other));
+
+        let mut home = Home::new("network");
+        home.parts().import(&files).unwrap();
+        assert_eq!(home.settings.ds_online, Default::default());
+        assert_eq!(
+            home.settings.discord.enabled,
+            Settings::default().discord.enabled
+        );
+        assert!(home.settings.check_updates);
+    }
+
+    #[test]
+    fn imported_cheats_arrive_turned_off() {
+        let cheat = |code: &str, on| crate::cheats::SavedCheat {
+            name: code.to_owned(),
+            code: code.to_owned(),
+            on,
+        };
+        let mut other = Home::new("cheats-file");
+        other.settings.cheats.add(GAME, cheat("01FF16D0", true));
+        other.settings.cheats.add(GAME, cheat("01FF17D0", true));
+        let files = through_zip(&export(&mut other));
+
+        let mut home = Home::new("cheats");
+        home.settings.cheats.add(GAME, cheat("01FF16D0", true));
+        home.parts().import(&files).unwrap();
+        let list = home.settings.cheats.list(GAME);
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().find(|c| c.code == "01FF16D0").unwrap().on);
+        assert!(!list.iter().find(|c| c.code == "01FF17D0").unwrap().on);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn network_paths_in_recent_games_are_dropped() {
+        let mut other = Home::new("recent-file");
+        for path in [
+            "//evil.example/share/a.gb",
+            r"\\evil.example\share\b.gb",
+            "/roms/c.gb",
+        ] {
+            other.recent.record(Path::new(path), "Game", None);
+        }
+        let files = through_zip(&export(&mut other));
+
+        let mut home = Home::new("recent");
+        home.parts().import(&files).unwrap();
+        let paths: Vec<_> = home
+            .recent
+            .entries()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        assert_eq!(paths, [PathBuf::from("/roms/c.gb")]);
+    }
+
+    #[test]
     fn a_file_that_isnt_an_export_is_refused() {
         assert_eq!(unpack(b"not a zip"), Err(ReadError::NotZip));
         let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
@@ -1498,6 +1783,38 @@ mod tests {
         zip.write_all(b"hi").unwrap();
         let bytes = zip.finish().unwrap().into_inner();
         assert_eq!(unpack(&bytes), Err(ReadError::NotOurs));
+    }
+
+    #[test]
+    fn a_huge_manifest_is_refused_before_it_is_read() {
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let manifest = |pad: u64| {
+            let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+            zip.start_file(MANIFEST, deflated).unwrap();
+            zip.write_all(br#"{"format":1}"#).unwrap();
+            zip.write_all(&vec![b' '; pad as usize]).unwrap();
+            zip.finish().unwrap().into_inner()
+        };
+        assert_eq!(unpack(&manifest(0)), Ok(Files::new()));
+        let huge = manifest(MAX_MANIFEST_BYTES);
+        assert!(huge.len() < 4096, "{} bytes", huge.len());
+        assert_eq!(unpack(&huge), Err(ReadError::NotOurs));
+    }
+
+    #[test]
+    fn an_entry_past_its_cap_is_refused() {
+        let mut files = Files::new();
+        files.insert(
+            SETTINGS.to_owned(),
+            vec![b' '; MAX_ENTRY_BYTES as usize + 1],
+        );
+        let bytes = pack(&files).unwrap();
+        files.clear();
+        assert_eq!(unpack(&bytes), Err(ReadError::TooLarge));
+        assert_eq!(entry_cap("media/screenshots/a.png"), MAX_FILE_BYTES);
+        assert_eq!(entry_cap("media/screenshots/a.png.json"), MAX_ENTRY_BYTES);
+        assert_eq!(entry_cap("saves/game/battery.sav"), MAX_ENTRY_BYTES);
     }
 
     #[test]

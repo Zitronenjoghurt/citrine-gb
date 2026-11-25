@@ -55,11 +55,22 @@ fn compress(data: &[u8], _quality: u32) -> GbResult<Vec<u8>> {
     Ok(data.to_vec())
 }
 
+pub const STATE_LIMIT: usize = 64 << 20;
+
+#[cfg(feature = "brotli")]
+pub(crate) fn unbrotli(data: &[u8], limit: usize) -> GbResult<Vec<u8>> {
+    let mut out = Vec::new();
+    let reader = brotli::Decompressor::new(data, 4096);
+    std::io::Read::read_to_end(&mut std::io::Read::take(reader, limit as u64 + 1), &mut out)?;
+    if out.len() > limit {
+        return Err(crate::error::GbError::DamagedState);
+    }
+    Ok(out)
+}
+
 #[cfg(feature = "brotli")]
 fn decompress(data: &[u8]) -> GbResult<Vec<u8>> {
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut brotli::Decompressor::new(data, 4096), &mut out)?;
-    Ok(out)
+    unbrotli(data, STATE_LIMIT)
 }
 
 #[cfg(not(feature = "brotli"))]
@@ -75,6 +86,14 @@ struct GbStateKind {
 #[derive(serde::Deserialize)]
 struct GbModelOnly {
     model: GbModel,
+}
+
+pub fn check_game(saved: u64, rom: &[u8]) -> GbResult<()> {
+    match saved {
+        0 => Ok(()),
+        saved if saved == crate::utils::digest::game_key(rom) => Ok(()),
+        _ => Err(crate::error::GbError::OtherGame),
+    }
 }
 
 pub fn is_gba_state(state: &[u8]) -> bool {
@@ -172,6 +191,53 @@ mod tests {
         let mut gb = GameBoy::new_empty(GbModel::Dmg);
         gb.load_rom(&rom).expect("load");
         gb
+    }
+
+    #[cfg(feature = "brotli")]
+    #[test]
+    fn a_state_that_unpacks_past_the_limit_is_refused() {
+        use crate::error::GbError;
+        let packed = compress(&[0; 4097], SAVE_QUALITY).expect("packed");
+        assert!(matches!(
+            unbrotli(&packed, 4096),
+            Err(GbError::DamagedState)
+        ));
+        assert_eq!(unbrotli(&packed, 4097).expect("unpacked").len(), 4097);
+    }
+
+    #[test]
+    fn a_game_boy_snapshot_loads_only_into_its_own_game() {
+        use crate::console::Rollback;
+        use crate::error::GbError;
+        let mut gb = loaded();
+        let mut other = test_rom();
+        other[0x0134] = b'X';
+        let dump = gb.dump_full(0).expect("dump");
+        let refused = GameBoy::from_dump(&dump, &Rom::new(&other), 0);
+        assert!(matches!(refused, Err(GbError::OtherGame)));
+        assert!(GameBoy::from_dump(&dump, &Rom::new(&test_rom()), 0).is_ok());
+
+        #[derive(serde::Serialize)]
+        struct Unkeyed<'a> {
+            gb: &'a GameBoy,
+            sram: Option<crate::persistence::sram_dump::SramDump>,
+        }
+        let old = rmp_serde::to_vec_named(&Unkeyed {
+            gb: &gb,
+            sram: None,
+        })
+        .expect("old dump");
+        let old = compress(&old, SAVE_QUALITY).expect("packed");
+        assert!(GameBoy::from_dump(&old, &Rom::new(&other), 0).is_ok());
+
+        let mut elsewhere = GameBoy::new_empty(GbModel::Dmg);
+        elsewhere.load_rom(&Rom::new(&other)).expect("load");
+        let state = gb.encode_state().expect("rollback state");
+        assert!(matches!(
+            elsewhere.decode_state(&state),
+            Err(GbError::OtherGame)
+        ));
+        assert!(gb.decode_state(&state).is_ok());
     }
 
     #[test]

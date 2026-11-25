@@ -1,16 +1,18 @@
 use crate::app::ds_firmware::DsFile;
 use crate::app::events::AppEventQueue;
-use crate::app::gba_bios::BiosChoice;
+use crate::app::system_files::SystemFile;
 use crate::app::ui_state::ds_user::{
     COLORS, CUSTOM_TIME, ClockPart, DsLanguage, DsUser, NICKNAME_CHARS, SYSTEM_TIME, clock_text,
     days_in, parse_clock,
 };
 use crate::app::ui_state::settings::Settings;
+use crate::app::ui_state::settings_tree::Surface;
+use crate::app::ui_state::settings_tree::rows::RowId;
 use crate::app::widgets::field::row_field;
 use crate::app::widgets::generic_select::GenericSelect;
-use crate::app::widgets::reset_slider::{RESET_GAP, reset_button, reset_width};
+use crate::app::widgets::reset_slider::{RESET_GAP, reset_width, with_reset};
+use crate::app::widgets::settings::file_row::file_row;
 use crate::app::widgets::settings::form::Form;
-use crate::app::widgets::settings::page::{Heading, Page};
 use egui::{Color32, Response, Sense, Stroke, StrokeKind, TextEdit, Ui, Widget, vec2};
 use std::fmt::Display;
 
@@ -22,7 +24,7 @@ pub const WIFI_HINT: &str =
 #[cfg(ds_wifi)]
 pub const DNS_HINT: &str = "Your DS games look up Nintendo's servers here.";
 #[cfg(ds_wifi)]
-pub const DIRECT_HINT: &str = "DS games go online from this device instead of through your relay. No account needed, but other players see your internet address.";
+pub const DIRECT_HINT: &str = "DS games connect straight to the online service you picked, and other players can see your internet address.";
 pub const IN_GAME_HINT: &str =
     "Every step you walk in HeartGold or SoulSilver counts on your Pokéwalker.";
 #[cfg(target_os = "android")]
@@ -50,10 +52,11 @@ const SWATCH_COLUMNS: usize = 8;
 pub struct DsState<'a> {
     pub account: Option<&'a str>,
     pub files: [Option<&'a str>; 3],
+    pub mic: Option<crate::audio::mic::MicTest>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
-struct Month(u8);
+struct Month(u8, bool);
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ClockChoice {
@@ -122,87 +125,94 @@ pub fn clock_field(
 
 impl Display for Month {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(MONTHS[usize::from(self.0 - 1)])
+        let name = MONTHS[usize::from(self.0 - 1)];
+        f.write_str(if self.1 { name } else { &name[..3] })
     }
 }
 
-pub fn show(
-    page: &mut Page,
+pub fn user_row(form: &mut Form, s: &mut Settings, state: DsState, row: RowId) {
+    let keep = s.ds_user.keep_firmware_settings && state.files[2].is_some();
+    match row {
+        RowId::Clock => clock_rows(form, s),
+        _ => user_rows(form, s, state.account, !keep, row),
+    }
+}
+
+pub fn system_row(
+    form: &mut Form,
     s: &mut Settings,
     state: DsState,
     events: &mut Option<&mut AppEventQueue>,
+    row: RowId,
 ) {
-    page.section(
-        Heading::new(crate::icons::DEVICE_MOBILE, "Nintendo DS").hint(HEADING_HINT),
-        |ui| {
-            Form::show(ui, "ds", |form| {
-                let keep = s.ds_user.keep_firmware_settings && state.files[2].is_some();
-                user_rows(form, s, state.account, !keep);
-                clock_rows(form, s);
-                for file in [DsFile::Arm9Bios, DsFile::Arm7Bios, DsFile::Firmware] {
-                    let find = file == DsFile::Arm7Bios && std::mem::take(&mut s.find_ds_bios);
-                    file_row(form, file, state.files[file.index()], events, find);
-                }
-                if state.files[2].is_some() {
-                    s.dirty |= form.toggle_with_hint(
-                        "Keep its own settings",
-                        KEEP_HINT,
-                        &mut s.ds_user.keep_firmware_settings,
-                    );
-                }
-                #[cfg(ds_wifi)]
-                wifi_rows(form, s);
-            });
-        },
-    );
+    match row {
+        RowId::Arm9Bios | RowId::Arm7Bios | RowId::Firmware => {
+            let file = match row {
+                RowId::Arm9Bios => DsFile::Arm9Bios,
+                RowId::Arm7Bios => DsFile::Arm7Bios,
+                _ => DsFile::Firmware,
+            };
+            file_row(
+                form,
+                SystemFile::Ds(file),
+                state.files[file.index()],
+                events,
+            );
+        }
+        RowId::KeepFirmware if state.files[2].is_some() => {
+            s.dirty |=
+                form.toggle_with_hint(label(row), KEEP_HINT, &mut s.ds_user.keep_firmware_settings);
+        }
+        #[cfg(ds_wifi)]
+        RowId::OnlineService | RowId::DsDirect | RowId::Dns => wifi_row(form, s, row),
+        _ => {}
+    }
 }
 
-pub fn walker(page: &mut Page, s: &mut Settings) {
-    page.section(
-        Heading::new(crate::icons::PERSON_SIMPLE_WALK, "Pokéwalker"),
-        |ui| {
-            Form::show(ui, "walker", |form| {
-                s.dirty |=
-                    form.toggle_with_hint("Steps in-game", IN_GAME_HINT, &mut s.walker.in_game);
-                #[cfg(target_os = "android")]
-                {
-                    let was = s.walker.phone;
-                    s.dirty |=
-                        form.toggle_with_hint("Phone steps", PHONE_HINT, &mut s.walker.phone);
-                    if s.walker.phone && !was {
-                        s.walker_asked = true;
-                    }
-                    if s.walker.phone && crate::platform::android::steps::denied() {
-                        form.hint(PHONE_DENIED);
-                    }
-                }
-            });
-        },
-    );
+pub fn walker_row(form: &mut Form, s: &mut Settings, row: RowId) {
+    if row == RowId::StepsInGame {
+        s.dirty |= form.toggle_with_hint(label(row), IN_GAME_HINT, &mut s.walker.in_game);
+    }
+    #[cfg(target_os = "android")]
+    if row == RowId::PhoneSteps {
+        let was = s.walker.phone;
+        s.dirty |= form.toggle_with_hint(label(row), PHONE_HINT, &mut s.walker.phone);
+        if s.walker.phone && !was {
+            s.walker_asked = true;
+        }
+        if s.walker.phone && crate::platform::android::steps::denied() {
+            form.hint(PHONE_DENIED);
+        }
+    }
+}
+
+fn label(row: RowId) -> &'static str {
+    row.label(Surface::Desktop)
 }
 
 #[cfg(ds_wifi)]
-fn wifi_rows(form: &mut Form, s: &mut Settings) {
+fn wifi_row(form: &mut Form, s: &mut Settings, row: RowId) {
     use crate::app::ui_state::ds_online::OnlineService;
-    let find = std::mem::take(&mut s.find_ds_direct);
     let online = &mut s.ds_online;
     let mut dirty = false;
-    form.row_with_hint("Online service", WIFI_HINT, |ui| {
-        let mut service = online.service;
-        if GenericSelect::from_enum(&mut service, "enum_select_ds_wifi")
-            .default_value(OnlineService::None)
-            .ui(ui)
-            .changed()
-        {
-            online.set_service(service);
-            dirty = true;
-        }
-    });
-    if online.service != OnlineService::None {
-        dirty |= form.toggle_found("Direct connection", DIRECT_HINT, &mut online.direct, find);
+    if row == RowId::OnlineService {
+        form.row_with_hint(label(row), WIFI_HINT, |ui| {
+            let mut service = online.service;
+            if GenericSelect::from_enum(&mut service, "enum_select_ds_wifi")
+                .default_value(OnlineService::None)
+                .ui(ui)
+                .changed()
+            {
+                online.set_service(service);
+                dirty = true;
+            }
+        });
     }
-    if online.dns_needed() {
-        form.row_with_hint("DNS server", DNS_HINT, |ui| {
+    if row == RowId::DsDirect && online.service != OnlineService::None {
+        dirty |= form.toggle_with_hint(label(row), DIRECT_HINT, &mut online.direct);
+    }
+    if row == RowId::Dns && online.dns_needed() {
+        form.row_with_hint(label(row), DNS_HINT, |ui| {
             let preset = online.service.preset_dns().unwrap_or_default();
             let kaeru = OnlineService::Kaeru.preset_dns().unwrap_or_default();
             let mut text = online.dns.clone().unwrap_or_default();
@@ -228,121 +238,134 @@ fn wifi_rows(form: &mut Form, s: &mut Settings) {
     s.dirty |= dirty;
 }
 
-fn user_rows(form: &mut Form, s: &mut Settings, account: Option<&str>, enabled: bool) {
+fn user_rows(form: &mut Form, s: &mut Settings, account: Option<&str>, enabled: bool, row: RowId) {
     let user = &mut s.ds_user;
     let mut dirty = false;
-    form.row("Nickname", |ui| {
-        let mut text = user.nickname.clone().unwrap_or_default();
-        let hint = user.nickname(account);
-        let reset = ui
-            .add_enabled_ui(enabled, |ui| {
-                with_reset(ui, user.nickname.is_some(), &hint, |ui| {
-                    let field = row_field(ui, &mut text)
-                        .hint_text(&hint)
-                        .char_limit(NICKNAME_CHARS)
-                        .desired_width(f32::INFINITY);
-                    if ui.add(field).changed() {
-                        user.set_nickname(&text);
-                        dirty = true;
-                    }
-                })
-            })
-            .inner;
-        if reset {
-            user.nickname = None;
-            dirty = true;
-        }
-    });
-    form.row("Birthday", |ui| {
-        let spacing = ui.spacing();
-        let chrome = 2.0 * spacing.button_padding.x + spacing.icon_width + spacing.icon_spacing;
-        let gap = spacing.item_spacing.x;
-        let font = egui::TextStyle::Button.resolve(ui.style());
-        let text_width = |ui: &Ui, text: String| {
-            ui.fonts_mut(|fonts| {
-                fonts
-                    .layout_no_wrap(text, font.clone(), Color32::WHITE)
-                    .size()
-                    .x
-            })
-        };
-        let day_width = text_width(ui, "31".to_owned()) + chrome;
-        let month_width = text_width(ui, Month(user.birthday.0).to_string()) + chrome;
-        let default = DsUser::default().birthday;
-        let reset = ui
-            .add_enabled_ui(enabled, |ui| {
-                let shown = format!("{} {}", Month(default.0), default.1);
-                with_reset(ui, user.birthday != default, shown, |ui| {
-                    ui.horizontal(|ui| {
-                        let (mut month, mut day) = (Month(user.birthday.0), user.birthday.1);
-                        let months = (1..=12).map(Month);
-                        let days = 1..=days_in(month.0);
-                        let size = vec2(
-                            (ui.available_width() - gap - day_width).max(0.0),
-                            ui.spacing().interact_size.y,
-                        );
-                        let changed = ui
-                            .allocate_ui(size, |ui| {
-                                GenericSelect::new(&mut month, months, "enum_select_ds_month")
-                                    .ui(ui)
-                                    .changed()
-                            })
-                            .inner
-                            | GenericSelect::new(&mut day, days, "enum_select_ds_day")
-                                .ui(ui)
-                                .changed();
-                        if changed {
-                            user.set_birthday(month.0, day);
+    if row == RowId::Nickname {
+        form.row(label(row), |ui| {
+            let mut text = user.nickname.clone().unwrap_or_default();
+            let hint = user.nickname(account);
+            let reset = ui
+                .add_enabled_ui(enabled, |ui| {
+                    with_reset(ui, user.nickname.is_some(), &hint, |ui| {
+                        let field = row_field(ui, &mut text)
+                            .hint_text(&hint)
+                            .char_limit(NICKNAME_CHARS)
+                            .desired_width(f32::INFINITY);
+                        if ui.add(field).changed() {
+                            user.set_nickname(&text);
                             dirty = true;
                         }
-                    });
+                    })
                 })
-            })
-            .inner;
-        if reset {
-            user.birthday = default;
-            dirty = true;
-        }
-        super::form::need(
-            ui,
-            month_width + gap + day_width + RESET_GAP + reset_width(ui),
-        );
-    });
-    form.row("Language", |ui| {
-        let app = DsLanguage::of_app();
-        let mut language = user.language();
-        let changed = ui
-            .add_enabled_ui(enabled, |ui| {
-                GenericSelect::from_enum(&mut language, "enum_select_ds_language")
-                    .default_value(app)
-                    .ui(ui)
-                    .changed()
-            })
-            .inner;
-        if changed {
-            user.language = (language != app).then_some(language);
-            dirty = true;
-        }
-    });
-    form.row("Colour", |ui| {
-        let default = DsUser::default().favorite_color;
-        let reset = ui
-            .add_enabled_ui(enabled, |ui| {
-                let shown = COLORS[usize::from(default)].1;
-                with_reset(ui, user.favorite_color != default, shown, |ui| {
-                    let side = ui.spacing().interact_size.y;
-                    if let Some(color) = swatches(ui, user.favorite_color, SWATCH_COLUMNS, side) {
-                        user.favorite_color = color;
-                        dirty = true;
-                    }
+                .inner;
+            if reset {
+                user.nickname = None;
+                dirty = true;
+            }
+        });
+    }
+    if row == RowId::Birthday {
+        form.row(label(row), |ui| {
+            let spacing = ui.spacing();
+            let chrome = 2.0 * spacing.button_padding.x + spacing.icon_width + spacing.icon_spacing;
+            let gap = spacing.item_spacing.x;
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let text_width = |ui: &Ui, text: String| {
+                ui.fonts_mut(|fonts| {
+                    fonts
+                        .layout_no_wrap(text, font.clone(), Color32::WHITE)
+                        .size()
+                        .x
                 })
-            })
-            .inner;
-        if reset {
-            user.favorite_color = default;
-            dirty = true;
-        }
-    });
+            };
+            let day_width = text_width(ui, "31".to_owned()) + chrome;
+            let month_width = text_width(ui, Month(user.birthday.0, false).to_string()) + chrome;
+            let whole = text_width(ui, Month(user.birthday.0, true).to_string()) + chrome;
+            let full =
+                ui.available_width() - RESET_GAP - reset_width(ui) - gap - day_width >= whole;
+            let default = DsUser::default().birthday;
+            let reset = ui
+                .add_enabled_ui(enabled, |ui| {
+                    let shown = format!("{} {}", Month(default.0, full), default.1);
+                    with_reset(ui, user.birthday != default, shown, |ui| {
+                        ui.horizontal(|ui| {
+                            let (mut month, mut day) =
+                                (Month(user.birthday.0, full), user.birthday.1);
+                            let months = (1..=12).map(|month| Month(month, full));
+                            let days = 1..=days_in(month.0);
+                            let size = vec2(
+                                (ui.available_width() - gap - day_width).max(0.0),
+                                ui.spacing().interact_size.y,
+                            );
+                            let changed = ui
+                                .allocate_ui(size, |ui| {
+                                    GenericSelect::new(&mut month, months, "enum_select_ds_month")
+                                        .ui(ui)
+                                        .changed()
+                                })
+                                .inner
+                                | GenericSelect::new(&mut day, days, "enum_select_ds_day")
+                                    .ui(ui)
+                                    .changed();
+                            if changed {
+                                user.set_birthday(month.0, day);
+                                dirty = true;
+                            }
+                        });
+                    })
+                })
+                .inner;
+            if reset {
+                user.birthday = default;
+                dirty = true;
+            }
+            super::form::select_need(
+                ui,
+                month_width + gap + day_width + RESET_GAP + reset_width(ui),
+            );
+        });
+    }
+    if row == RowId::Language {
+        form.row(label(row), |ui| {
+            let app = DsLanguage::of_app();
+            let mut language = user.language();
+            let changed = ui
+                .add_enabled_ui(enabled, |ui| {
+                    GenericSelect::from_enum(&mut language, "enum_select_ds_language")
+                        .default_value(app)
+                        .ui(ui)
+                        .changed()
+                })
+                .inner;
+            if changed {
+                user.language = (language != app).then_some(language);
+                dirty = true;
+            }
+        });
+    }
+    if row == RowId::Colour {
+        form.row(label(row), |ui| {
+            let default = DsUser::default().favorite_color;
+            let reset = ui
+                .add_enabled_ui(enabled, |ui| {
+                    let shown = COLORS[usize::from(default)].1;
+                    with_reset(ui, user.favorite_color != default, shown, |ui| {
+                        let side = ui.spacing().interact_size.y;
+                        if let Some(color) = swatches(ui, user.favorite_color, SWATCH_COLUMNS, side)
+                        {
+                            user.favorite_color = color;
+                            dirty = true;
+                        }
+                    })
+                })
+                .inner;
+            if reset {
+                user.favorite_color = default;
+                dirty = true;
+            }
+        });
+    }
     s.dirty |= dirty;
 }
 
@@ -350,7 +373,7 @@ fn clock_rows(form: &mut Form, s: &mut Settings) {
     let now = crate::storage::now_unix();
     let user = &mut s.ds_user;
     let mut dirty = false;
-    form.row("Clock", |ui| {
+    form.row(label(RowId::Clock), |ui| {
         let mut choice = ClockChoice::of(user.clock);
         if GenericSelect::new(&mut choice, ClockChoice::ALL, "enum_select_ds_clock")
             .default_value(ClockChoice::System)
@@ -386,30 +409,6 @@ fn clock_rows(form: &mut Form, s: &mut Settings) {
         }
     }
     s.dirty |= dirty;
-}
-
-fn with_reset(
-    ui: &mut Ui,
-    changed: bool,
-    default: impl Display,
-    add: impl FnOnce(&mut Ui),
-) -> bool {
-    let spacing = ui.spacing().item_spacing;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = RESET_GAP;
-        let width = (ui.available_width() - reset_width(ui) - RESET_GAP).max(0.0);
-        let size = vec2(width, ui.spacing().interact_size.y);
-        ui.allocate_ui_with_layout(
-            size,
-            egui::Layout::top_down_justified(egui::Align::Min),
-            |ui| {
-                ui.spacing_mut().item_spacing = spacing;
-                add(ui);
-            },
-        );
-        reset_button(ui, changed, default).clicked()
-    })
-    .inner
 }
 
 pub fn swatches(ui: &mut Ui, selected: u8, per_row: usize, max_side: f32) -> Option<u8> {
@@ -470,47 +469,4 @@ fn swatch_rows(ui: &mut Ui, selected: u8, per_row: usize, max_side: f32) -> Opti
         });
     }
     picked.filter(|&index| index != selected)
-}
-
-fn file_row(
-    form: &mut Form,
-    file: DsFile,
-    name: Option<&str>,
-    events: &mut Option<&mut AppEventQueue>,
-    find: bool,
-) {
-    let label = file.label();
-    let row = |ui: &mut Ui| {
-        let mut choice = BiosChoice::current(name);
-        let id = match file {
-            DsFile::Arm9Bios => "enum_select_ds_arm9_bios",
-            DsFile::Arm7Bios => "enum_select_ds_arm7_bios",
-            DsFile::Firmware => "enum_select_ds_firmware",
-        };
-        let response = GenericSelect::new(&mut choice, BiosChoice::all(name), id)
-            .default_value(BiosChoice::BuiltIn)
-            .middle_ellipsis()
-            .ui(ui);
-        if find {
-            response.scroll_to_me(Some(egui::Align::Center));
-            response.request_focus();
-        }
-        if let Some(name) = name {
-            response.clone().on_hover_text(name);
-        }
-        if response.changed()
-            && let Some(events) = events.as_deref_mut()
-        {
-            match choice {
-                BiosChoice::BuiltIn => events.remove_ds_file(file),
-                BiosChoice::Pick { .. } => events.pick_ds_file(file),
-                BiosChoice::File(_) => {}
-            }
-        }
-    };
-    if file == DsFile::Arm9Bios {
-        form.row_with_hint(label, FILES_HINT, row);
-    } else {
-        form.row(label, row);
-    }
 }

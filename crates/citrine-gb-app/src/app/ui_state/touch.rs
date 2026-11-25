@@ -32,7 +32,7 @@ pub enum HiddenButtons {
 }
 
 impl HiddenButtons {
-    pub const NOTE: &str = "Auto hides the on-screen buttons when you press a controller button or a key, and shows them again when you tap beside the game.";
+    pub const NOTE: &str = "Whether the on-screen buttons show while the menus are hidden. Auto hides them when you press a controller button or a key, and shows them again when you tap beside the game.";
 }
 
 impl Display for HiddenButtons {
@@ -58,6 +58,8 @@ pub struct TouchSettings {
     pub mirrored: bool,
     pub ui_scale: f32,
     pub scaling: ScalingMode,
+    #[serde(default)]
+    pub opacity_rechecked: bool,
 }
 
 impl Default for TouchSettings {
@@ -72,17 +74,26 @@ impl Default for TouchSettings {
             mirrored: false,
             ui_scale: 1.0,
             scaling: ScalingMode::Fit,
+            opacity_rechecked: true,
         }
     }
 }
 
 impl TouchSettings {
-    pub const DEFAULT_OPACITY: f32 = 0.75;
+    pub const DEFAULT_OPACITY: f32 = 0.5;
+    const OLD_DEFAULT_OPACITY: f32 = 0.75;
     pub const MIN_OPACITY: f32 = 0.15;
     pub const MIN_SCALE: f32 = 0.6;
     pub const MAX_SCALE: f32 = 1.6;
     pub const MIN_UI_SCALE: f32 = 0.6;
     pub const MAX_UI_SCALE: f32 = 2.0;
+
+    pub fn recheck_opacity(&mut self) {
+        if !self.opacity_rechecked && (self.opacity - Self::OLD_DEFAULT_OPACITY).abs() < 0.001 {
+            self.opacity = Self::DEFAULT_OPACITY;
+        }
+        self.opacity_rechecked = true;
+    }
 
     pub fn clamped_opacity(&self) -> f32 {
         self.opacity.clamp(Self::MIN_OPACITY, 1.0)
@@ -94,5 +105,23 @@ impl TouchSettings {
 
     pub fn clamped_ui_scale(&self) -> f32 {
         self.ui_scale.clamp(Self::MIN_UI_SCALE, Self::MAX_UI_SCALE)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TouchSettings;
+
+    #[test]
+    fn the_old_default_opacity_moves_to_the_new_one_once_and_a_chosen_one_stays() {
+        let mut old: TouchSettings = serde_json::from_str(r#"{"opacity":0.75}"#).unwrap();
+        old.recheck_opacity();
+        assert_eq!(old.opacity, TouchSettings::DEFAULT_OPACITY);
+        old.opacity = 0.75;
+        old.recheck_opacity();
+        assert_eq!(old.opacity, 0.75);
+        let mut chosen: TouchSettings = serde_json::from_str(r#"{"opacity":0.9}"#).unwrap();
+        chosen.recheck_opacity();
+        assert_eq!(chosen.opacity, 0.9);
     }
 }

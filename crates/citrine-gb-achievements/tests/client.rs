@@ -1,7 +1,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use citrine_gb_achievements::{
-    Client, Console, Event, GroupKind, Memory, NoMemory, Request, Response, SignInError, hash_rom,
+    Client, Console, Event, GroupKind, Load, Memory, NoMemory, Request, Response, SignInError,
+    hash_rom,
 };
 
 const LOGIN: &str = r#"{"Success":true,"User":"User","Token":"ApiToken","Score":12345,"SoftcoreScore":123,"Messages":2,"Permissions":1,"AccountType":"Registered"}"#;
@@ -327,16 +328,88 @@ fn loading_a_game_while_signed_out_asks_nothing() {
     client.load_game(Console::GameBoy, b"citrine test rom", &mut NoMemory);
     assert!(client.take_requests().is_empty());
     assert!(client.take_events().is_empty());
+    assert_eq!(client.load(), &Load::Idle);
 }
 
 #[test]
-fn a_game_without_a_set_says_so() {
+fn a_set_is_loading_until_the_server_answers() {
+    let mut ram = Ram(vec![0; 0x10000]);
+    let mut client = signed_in();
+    assert_eq!(client.load(), &Load::Idle);
+    client.load_game(Console::GameBoy, b"citrine test rom", &mut ram);
+    assert_eq!(client.load(), &Load::Loading);
+    let set = one_request(&mut client, "r=achievementsets");
+    answer(&mut client, set, 200, &game_set(), &mut ram);
+    assert_eq!(client.load(), &Load::Loading);
+    let session = one_request(&mut client, "r=startsession");
+    answer(&mut client, session, 200, NO_UNLOCKS, &mut ram);
+    assert_eq!(client.load(), &Load::Loaded);
+    client.unload_game();
+    assert_eq!(client.load(), &Load::Idle);
+}
+
+#[test]
+fn a_network_failure_while_loading_is_unreachable() {
+    let mut ram = Ram(vec![0; 0x10000]);
+    let mut client = signed_in();
+    client.load_game(Console::GameBoy, b"citrine test rom", &mut ram);
+    let set = one_request(&mut client, "r=achievementsets");
+    client.complete(set.id, Response::network_error(), &mut ram);
+    assert_eq!(client.load(), &Load::Unreachable);
+    assert!(!client.runs_frames());
+}
+
+#[test]
+fn a_server_error_while_loading_keeps_its_message() {
+    let mut ram = Ram(vec![0; 0x10000]);
+    let mut client = signed_in();
+    client.load_game(Console::GameBoy, b"citrine test rom", &mut ram);
+    let set = one_request(&mut client, "r=achievementsets");
+    answer(
+        &mut client,
+        set,
+        500,
+        r#"{"Success":false,"Error":"Database is down"}"#,
+        &mut ram,
+    );
+    assert_eq!(client.load(), &Load::Failed("Database is down".to_owned()));
+}
+
+#[test]
+fn a_retry_after_a_failure_loads_the_set() {
+    let mut ram = Ram(vec![0; 0x10000]);
+    let mut client = signed_in();
+    client.load_game(Console::GameBoy, b"citrine test rom", &mut ram);
+    let set = one_request(&mut client, "r=achievementsets");
+    client.complete(set.id, Response::network_error(), &mut ram);
+    client.load_game(Console::GameBoy, b"citrine test rom", &mut ram);
+    assert_eq!(client.load(), &Load::Loading);
+    let set = one_request(&mut client, "r=achievementsets");
+    answer(&mut client, set, 200, &game_set(), &mut ram);
+    let session = one_request(&mut client, "r=startsession");
+    answer(&mut client, session, 200, NO_UNLOCKS, &mut ram);
+    assert_eq!(client.load(), &Load::Loaded);
+}
+
+#[test]
+fn a_file_retroachievements_does_not_know_is_an_unknown_game() {
     let mut ram = Ram(vec![0; 0x10000]);
     let mut client = signed_in();
     client.load_game(Console::GameBoyColor, b"homebrew", &mut ram);
     let set = one_request(&mut client, "r=achievementsets");
     answer(&mut client, set, 404, NOT_FOUND, &mut ram);
-    assert_eq!(client.take_events(), vec![Event::NoSet]);
+    assert_eq!(client.load(), &Load::UnknownGame);
+}
+
+#[test]
+fn a_known_game_without_a_set_says_so() {
+    let mut ram = Ram(vec![0; 0x10000]);
+    let mut client = signed_in();
+    client.load_game(Console::GameBoy, b"citrine test rom", &mut ram);
+    let set = one_request(&mut client, "r=achievementsets");
+    let no_sets = r#"{"Success":true,"GameId":1234,"Title":"Sample Game","ConsoleId":4,"ImageIconUrl":"http://server/Images/112233.png","RichPresenceGameId":1234,"RichPresencePatch":"","Sets":[]}"#;
+    answer(&mut client, set, 200, no_sets, &mut ram);
+    assert_eq!(client.load(), &Load::NoSet);
 }
 
 #[test]

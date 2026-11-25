@@ -4,6 +4,8 @@ use egui::{Rect, Response, Sense, Stroke, TextStyle, Ui, Widget, WidgetText, pos
 pub struct Check<'a> {
     on: &'a mut bool,
     text: WidgetText,
+    spoken: Option<String>,
+    locked: bool,
 }
 
 impl<'a> Check<'a> {
@@ -11,7 +13,19 @@ impl<'a> Check<'a> {
         Self {
             on,
             text: text.into(),
+            spoken: None,
+            locked: false,
         }
+    }
+
+    pub fn spoken(mut self, name: impl Into<String>) -> Self {
+        self.spoken = Some(name.into());
+        self
+    }
+
+    pub fn locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
     }
 }
 
@@ -19,17 +33,47 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool, text: impl Into<WidgetText>) -> Resp
     ui.add(Check::new(on, text))
 }
 
+pub fn hanging_box(ui: &mut Ui, slot: Rect, enabled: bool, on: &mut bool) -> Response {
+    let id = ui.next_auto_id().with("hanging_box");
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(slot));
+    if !enabled {
+        child.disable();
+    }
+    let mut response = child.interact(slot, id, Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let checked = *on;
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, "")
+    });
+    let (_, big) = child.spacing().icon_rectangles(slot);
+    paint_box(&child, big, &response, checked);
+    response
+}
+
 pub fn paint_box(ui: &Ui, rect: Rect, response: &Response, on: bool) {
+    paint_box_in(ui, rect, response, on, false);
+}
+
+fn paint_box_in(ui: &Ui, rect: Rect, response: &Response, on: bool, locked: bool) {
     let visuals = ui.style().interact(response);
     let spacing = ui.spacing();
     let share = spacing.icon_width_inner / spacing.icon_width.max(1.0);
     let small = Rect::from_center_size(rect.center(), rect.size() * share);
-    let (fill, stroke) = if on {
+    let outlined = on && locked;
+    let (fill, stroke) = if outlined {
+        (
+            egui::Color32::TRANSPARENT,
+            Stroke::new(1.0_f32, ui_theme::BRAND_LOCKED),
+        )
+    } else if on {
         (ui_theme::brand(ui.visuals()), Stroke::NONE)
     } else {
         (
             visuals.bg_fill,
-            Stroke::new(1.0_f32, ui_theme::box_edge(ui.visuals())),
+            Stroke::new(1.0_f32, ui_theme::box_edge(ui.visuals(), visuals.bg_fill)),
         )
     };
     ui.painter().rect(
@@ -46,7 +90,14 @@ pub fn paint_box(ui: &Ui, rect: Rect, response: &Response, on: bool) {
                 pos2(small.center().x, small.bottom()),
                 pos2(small.right(), small.top()),
             ],
-            Stroke::new(2.0_f32, ui_theme::ink_on(fill)),
+            Stroke::new(
+                2.0_f32,
+                if outlined {
+                    ui_theme::BRAND_LOCKED
+                } else {
+                    ui_theme::ink_on(fill)
+                },
+            ),
         );
     }
 }
@@ -72,25 +123,33 @@ impl Widget for Check<'_> {
         }
         super::settings::form::need(ui, size.x);
         let size = size.max(egui::Vec2::splat(interact_height));
-        let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
-        if response.clicked() {
+        let sense = if self.locked {
+            Sense::hover()
+        } else {
+            Sense::click()
+        };
+        let (rect, mut response) = ui.allocate_exact_size(size, sense);
+        if !self.locked && response.clicked() {
             *self.on = !*self.on;
             response.mark_changed();
         }
         let on = *self.on;
-        let label = galley
-            .as_ref()
-            .map(|g| g.text().to_owned())
-            .unwrap_or_default();
+        let label = self.spoken.unwrap_or_else(|| {
+            galley
+                .as_ref()
+                .map(|g| g.text().to_owned())
+                .unwrap_or_default()
+        });
+        let enabled = ui.is_enabled() && !self.locked;
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), on, &label)
+            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, &label)
         });
         if !ui.is_rect_visible(rect) {
             return response;
         }
         let visuals = ui.style().interact(&response);
         let (_, big) = ui.spacing().icon_rectangles(rect);
-        paint_box(ui, big, &response, on);
+        paint_box_in(ui, big, &response, on, self.locked);
         if let Some(galley) = galley {
             let pos = pos2(
                 big.right() + icon_spacing,
@@ -126,6 +185,52 @@ mod tests {
         .into_iter()
         .map(|clipped| clipped.shape)
         .collect()
+    }
+
+    #[test]
+    fn a_locked_tick_is_an_amber_outline_in_both_themes() {
+        use crate::app::ui_state::ui_theme::BRAND_LOCKED;
+        for theme in [UiTheme::Light, UiTheme::Dark] {
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                ..Default::default()
+            };
+            let mut on = true;
+            let shapes: Vec<Shape> = ctx
+                .run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.add(Check::new(&mut on, "Steam Deck").locked(true));
+                    });
+                })
+                .shapes
+                .into_iter()
+                .map(|clipped| clipped.shape)
+                .collect();
+            assert!(
+                shapes.iter().any(|s| matches!(
+                    s,
+                    Shape::Rect(r) if r.fill == egui::Color32::TRANSPARENT
+                        && r.stroke.color == BRAND_LOCKED
+                )),
+                "{theme:?}: no amber outline"
+            );
+            assert!(
+                shapes.iter().any(|s| matches!(
+                    s,
+                    Shape::Path(p) if p.stroke.color == egui::epaint::ColorMode::Solid(BRAND_LOCKED)
+                )),
+                "{theme:?}: no amber tick"
+            );
+            assert!(
+                !shapes.iter().any(|s| matches!(
+                    s,
+                    Shape::Rect(r) if [BRAND_LOCKED, BRAND, BRAND_DARK].contains(&r.fill)
+                )),
+                "{theme:?}: the locked box is filled like a live one"
+            );
+        }
     }
 
     #[test]

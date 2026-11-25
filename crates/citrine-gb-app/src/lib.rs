@@ -3,6 +3,7 @@ mod app;
 mod audio;
 mod autosave;
 mod cheats;
+mod combo;
 mod controller_debug;
 mod covers;
 #[cfg(all(feature = "dev-route", target_arch = "wasm32"))]
@@ -16,10 +17,13 @@ mod emulator;
 mod frame_log;
 mod game_facts;
 mod game_info;
-pub mod game_name;
+pub use homebrew::names as game_name;
 pub mod game_report;
 mod held;
 mod homebrew;
+pub mod icons;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lan;
 mod local_link;
 mod media;
 pub mod online;
@@ -49,8 +53,9 @@ pub mod walker;
 mod your_data;
 
 pub use app::Citrine;
-pub use egui_phosphor::regular as icons;
 #[cfg(not(target_arch = "wasm32"))]
 pub use platform::wgpu_options;
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::app_state_file;
 #[cfg(target_arch = "wasm32")]
 pub use storage::open_saves;

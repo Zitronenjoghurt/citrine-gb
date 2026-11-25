@@ -10,6 +10,19 @@ use web_time::Duration;
 const UNZIP_LOAD: &str = "unzip";
 const FRAME_BUDGET: Duration = Duration::from_millis(8);
 
+#[cfg(test)]
+thread_local! {
+    static FRAME_BYTES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn unpack_frame(unzip: Unzip) -> Step {
+    #[cfg(test)]
+    if let Some(bytes) = FRAME_BYTES.get() {
+        return unzip.step(bytes);
+    }
+    unzip.run_for(FRAME_BUDGET)
+}
+
 pub(super) enum RomFor {
     Load,
     Link,
@@ -21,6 +34,7 @@ pub(super) struct ZipOpen {
     name: String,
     #[cfg(not(target_arch = "wasm32"))]
     path: Option<std::path::PathBuf>,
+    seen: Option<crate::rom_ids::Seen>,
     to: RomFor,
     stage: Stage,
 }
@@ -64,6 +78,7 @@ impl Citrine {
             name: file.name,
             #[cfg(not(target_arch = "wasm32"))]
             path: file.path,
+            seen: file.seen,
             to,
             stage: Stage::Choose(Arc::default(), Vec::new()),
         };
@@ -129,7 +144,7 @@ impl Citrine {
             Stage::Unpack(..) if self.toasts.dismissed(UNZIP_LOAD) => {
                 self.toasts.load_done(UNZIP_LOAD);
             }
-            Stage::Unpack(unzip, game) => match unzip.run_for(FRAME_BUDGET) {
+            Stage::Unpack(unzip, game) => match unpack_frame(unzip) {
                 Step::Working(unzip) => {
                     let now = web_time::Instant::now();
                     let text = format!("Unpacking '{}'", game.file_name());
@@ -148,7 +163,7 @@ impl Citrine {
                         data,
                         #[cfg(not(target_arch = "wasm32"))]
                         path: open.path.map(|zip| zip.join(&game.entry)),
-                        seen: None,
+                        seen: open.seen.map(|seen| seen.inside(&game.entry)),
                     };
                     self.take_rom(file, open.to);
                 }
@@ -161,8 +176,8 @@ impl Citrine {
         let Some((zip, entry)) = zip_games::split_entry(path) else {
             return false;
         };
-        match crate::rom_ids::read_shared(&zip) {
-            Ok(data) => {
+        match crate::rom_ids::read_stamped(&zip) {
+            Ok((data, stamp)) => {
                 let name = zip
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -170,8 +185,8 @@ impl Citrine {
                 let file = PickedFile {
                     name,
                     data,
+                    seen: stamp.map(|stamp| crate::rom_ids::Seen::at(&zip, stamp)),
                     path: Some(zip),
-                    seen: None,
                 };
                 self.open_zip(file, RomFor::Load, Some(&entry));
             }
@@ -249,9 +264,14 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.frame_dt(events, 1.0 / 60.0)
+        }
+
+        fn frame_dt(&mut self, events: Vec<egui::Event>, dt: f32) -> egui::FullOutput {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
                 events,
+                predicted_dt: dt,
                 ..Default::default()
             };
             let app = &mut self.app;
@@ -476,6 +496,7 @@ mod tests {
     #[test]
     fn closing_the_unpacking_toast_stops_the_unpack() {
         let mut zipped = Zipped::new("stop");
+        super::FRAME_BYTES.set(Some(1 << 20));
         let pattern: Vec<u8> = (0..4096u32)
             .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
             .collect();
@@ -487,8 +508,8 @@ mod tests {
         assert!(zipped.app.zip.is_some(), "still unpacking");
         std::thread::sleep(std::time::Duration::from_millis(450));
         let mut close = None;
-        for _ in 0..5 {
-            let output = zipped.frame(Vec::new());
+        for _ in 0..10 {
+            let output = zipped.frame_dt(Vec::new(), 0.1);
             close = text_rect(&output, crate::icons::X);
             if close.is_some() {
                 break;
@@ -552,6 +573,41 @@ mod tests {
         zipped.settle();
         assert_eq!(zipped.opened(), opened);
         assert_eq!(zipped.app.ui.recent.entries()[0].path, path);
+    }
+
+    #[cfg(feature = "gba")]
+    #[test]
+    fn a_zipped_gba_game_keeps_its_ids_for_the_next_load() {
+        use crate::rom_ids::{RomIds, Seen, Stamp};
+        use std::time::{Duration, SystemTime};
+        let mut zipped = Zipped::new("ids");
+        let store = zipped.dir.path().join("rom-ids.json");
+        zipped.app.rom_ids = RomIds::at(store.clone());
+        let data = crate::app::files::tests::fixture();
+        let zip = zip_of(
+            &[("save-sram.gba", &data), ("other.gba", b"other")],
+            CompressionMethod::Deflated,
+        );
+        let zip = zipped.write("pack.zip", &zip);
+        let age = SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&zip)
+            .unwrap()
+            .set_modified(age)
+            .unwrap();
+        let game = zip.join("save-sram.gba");
+        zipped.app.load_recent(game.clone());
+        zipped.settle();
+        zipped.app.threads.run_side_jobs();
+        let ids = citrine_gb::rom::id::RomId::with_game_sha1(&data);
+        assert_eq!(zipped.opened().1, ids.0.sha256_hex_string());
+
+        let stamp = Stamp::of(&zip).unwrap();
+        let mut kept = RomIds::at(store);
+        assert_eq!(kept.known(&Seen::at(&game, stamp)), Some(ids));
+        assert_eq!(kept.known(&Seen::at(&zip, stamp)), None);
+        assert_eq!(kept.known(&Seen::at(zip.join("other.gba"), stamp)), None);
     }
 
     #[test]

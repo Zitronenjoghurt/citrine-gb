@@ -14,6 +14,7 @@ const SAVE_INDEX_INFO: &[u8] = b"save index";
 const SCREEN_DOOR_INFO: &[u8] = b"screen door";
 const SCREEN_TAG_INFO: &[u8] = b"screen tag key";
 const SCREEN_PROOF_INFO: &[u8] = b"screen proof key";
+const WALKER_PSK_INFO: &[u8] = b"walker lan psk";
 pub const NONCE_BYTES: usize = 24;
 pub const SEAL_OVERHEAD: usize = 16;
 const PLAYING_BYTES: usize = 21;
@@ -60,6 +61,7 @@ pub struct PublicKey(pub [u8; 32]);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sealed {
     pub nonce: [u8; NONCE_BYTES],
+    #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
 }
 
@@ -116,6 +118,10 @@ impl Keys {
 
     pub fn screen_proof(&self, device: u64) -> [u8; 32] {
         self.screen_key(device, SCREEN_PROOF_INFO)
+    }
+
+    pub fn walker_psk(&self, listener: u64) -> [u8; 32] {
+        self.screen_key(listener, WALKER_PSK_INFO)
     }
 
     pub fn auth_key(&self) -> &AuthKey {
@@ -179,6 +185,15 @@ impl PeerSealer {
         self.seal_with_nonce(plaintext, nonce)
     }
 
+    pub fn open(&self, sealed: &Sealed) -> Result<Vec<u8>, OpenError> {
+        self.0
+            .decrypt(
+                Nonce::from_slice(&sealed.nonce),
+                sealed.ciphertext.as_slice(),
+            )
+            .map_err(|_| OpenError)
+    }
+
     fn seal_with_nonce(&self, plaintext: &[u8], nonce: [u8; NONCE_BYTES]) -> Sealed {
         let ciphertext = self
             .0
@@ -202,6 +217,17 @@ mod tests {
 
     fn id(seed: u8) -> RelayId {
         RelayId::from_bytes([seed; 32])
+    }
+
+    #[test]
+    fn walker_psk_is_the_listeners_on_both_sides() {
+        let mac = id(7).keys();
+        let phone = id(7).keys();
+        assert_eq!(mac.walker_psk(3), phone.walker_psk(3));
+        assert_ne!(mac.walker_psk(3), mac.walker_psk(4));
+        assert_ne!(mac.walker_psk(3), id(8).keys().walker_psk(3));
+        assert_ne!(mac.walker_psk(3), mac.screen_proof(3));
+        assert_ne!(mac.walker_psk(3), mac.screen_tag_key(3));
     }
 
     #[test]

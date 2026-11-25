@@ -1,17 +1,29 @@
 use super::kit;
 use super::nav::Place;
+use super::sheet;
 use crate::app::Citrine;
 use crate::app::events::GamesAction;
+use crate::app::system_files::{FileChoice, SystemFile};
+use crate::app::tabs::games::library::recent_marks;
 use crate::app::tabs::{Tab, playing, stats};
 use crate::app::ui_state::recent::RecentRom;
 use crate::app::ui_state::settings;
 use crate::app::widgets::action::main_button;
+use crate::app::widgets::game_tile::{self, Tag};
 use crate::icons;
-use egui::{Align, CornerRadius, Layout, RichText, Ui, vec2};
+use egui::{Align, Context, CornerRadius, Id, Layout, RichText, Ui, vec2};
 
 const THUMB_WIDTH: f32 = 128.0;
 
 const SEARCH_FROM: usize = 8;
+
+pub const FILES_TITLE: &str = "BIOS and boot ROMs";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FilesView {
+    List,
+    File(SystemFile),
+}
 
 #[derive(Default)]
 pub struct GamesSearch {
@@ -25,7 +37,7 @@ pub struct RecentGame {
     pub detail: String,
     pub gone: bool,
     pub path: std::path::PathBuf,
-    pub console: Option<&'static str>,
+    pub console: Option<citrine_gb::console::ConsoleKind>,
 }
 
 pub fn recent_games(
@@ -33,6 +45,7 @@ pub fn recent_games(
     playing: (Option<&std::path::Path>, Option<&str>),
     today: jiff::civil::Date,
     gone: impl Fn(&std::path::Path) -> bool,
+    known: impl Fn(&std::path::Path) -> Option<citrine_gb::console::ConsoleKind>,
 ) -> Vec<RecentGame> {
     entries
         .iter()
@@ -43,20 +56,27 @@ pub fn recent_games(
         })
         .map(|entry| {
             let gone = gone(&entry.path);
+            let kind = known(&entry.path).or(entry.console).or_else(|| {
+                entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(crate::app::ui_state::library::scan::console_of)
+            });
             RecentGame {
                 name: entry.display_name(),
                 detail: if gone {
                     "File missing".to_owned()
                 } else {
                     let played = stats::last_played(entry.last_played, today);
-                    match entry.console {
+                    match kind {
                         Some(kind) => format!("{}, {played}", settings::kind_name(kind)),
                         None => stats::capitalized(&played),
                     }
                 },
                 gone,
                 path: entry.path.clone(),
-                console: entry.console.map(settings::kind_name),
+                console: kind,
             }
         })
         .collect()
@@ -73,7 +93,7 @@ impl Citrine {
                 if !open_row
                     && ui
                         .add(kit::header_button(icons::FOLDER_OPEN, side))
-                        .on_hover_text("Open a ROM")
+                        .on_hover_text(crate::app::mobile::OPEN_ROM)
                         .clicked()
                 {
                     action = Some(GamesAction::Open);
@@ -109,9 +129,14 @@ impl Citrine {
             let playing = None;
             let playing = (playing, self.emulator.rom_key());
             let copies = &self.files.rom_copies;
-            let recent = recent_games(self.ui.recent.entries(), playing, today, |path| {
-                copies.is_gone(path)
-            });
+            let library = &self.ui.library;
+            let recent = recent_games(
+                self.ui.recent.entries(),
+                playing,
+                today,
+                |path| library.recent_gone(copies, path),
+                |path| library.find(path.to_str()?)?.console,
+            );
             let lowered = search.to_lowercase();
             let recent: Vec<RecentGame> = recent
                 .into_iter()
@@ -124,14 +149,18 @@ impl Citrine {
                     self.recent_shelf(ui, &recent)
                 } else {
                     let covers = self.box_covers(ui.ctx(), &recent);
+                    let marks = recent_marks(&self.ui.library, &self.online, &recent);
                     let rows = recent
                         .iter()
                         .zip(covers)
-                        .map(|(game, cover)| {
+                        .zip(marks)
+                        .map(|((game, cover), (tag, archive))| {
                             let row = kit::Row::new(&game.name)
-                                .icon(icons::GAME_CONTROLLER)
+                                .icon(settings::kind_icon_or_cart(game.console))
                                 .cover(cover)
                                 .picture(self.recent_picture(ui.ctx(), &game.path))
+                                .badge(game_tile::archive_badge(tag, archive))
+                                .faded(tag == Some(Tag::ArchiveOffline))
                                 .detail(&game.detail)
                                 .no_chevron();
                             if game.gone { row.value("Remove") } else { row }
@@ -162,7 +191,7 @@ impl Citrine {
                 let mut rows = Vec::new();
                 let mut actions = Vec::new();
                 if first_time {
-                    rows.push(kit::Row::new("Open a ROM").icon(icons::FOLDER_OPEN));
+                    rows.push(kit::Row::new(crate::app::mobile::OPEN_ROM).icon(icons::FOLDER_OPEN));
                     actions.push(GamesAction::Open);
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -186,7 +215,18 @@ impl Citrine {
                     );
                     actions.push(GamesAction::Folders);
                 }
-                rows.push(kit::Row::new(Tab::Homebrew.label()).icon(icons::JOYSTICK));
+                let kept = SystemFile::all()
+                    .into_iter()
+                    .filter(|file| self.emulator.system_file_name(*file).is_some())
+                    .count();
+                let files = kit::Row::new(FILES_TITLE).icon(icons::CPU);
+                rows.push(if kept == 0 {
+                    files
+                } else {
+                    files.value(kept.to_string())
+                });
+                actions.push(GamesAction::Files);
+                rows.push(kit::Row::new(Tab::Homebrew.label()).icon(icons::HOMEBREW));
                 actions.push(GamesAction::Homebrew);
                 rows.push(kit::Row::new(Tab::SecondScreens.title()).icon(icons::DEVICES));
                 actions.push(GamesAction::SecondScreens);
@@ -196,12 +236,49 @@ impl Citrine {
             }
         });
         self.library_sheets(ui.ctx());
+        self.files_sheet(ui.ctx());
         self.apply_games(action);
+    }
+
+    fn files_sheet(&mut self, ctx: &Context) {
+        match self.mobile.files_sheet {
+            Some(FilesView::List) => {
+                let files = SystemFile::all();
+                let rows = files
+                    .iter()
+                    .map(|&file| {
+                        let name = self.emulator.system_file_name(file);
+                        kit::Row::new(file.noun())
+                            .icon(file.icon())
+                            .value(FileChoice::current(file, name).to_string())
+                    })
+                    .collect();
+                let shown = sheet::show(ctx, Id::new("system_files"), FILES_TITLE, |ui| {
+                    kit::rows(ui, rows)
+                });
+                if let Some(index) = shown.inner {
+                    self.mobile.files_sheet = Some(FilesView::File(files[index]));
+                } else if shown.closed {
+                    self.mobile.files_sheet = None;
+                }
+            }
+            Some(FilesView::File(file)) => {
+                let back = self.file_sheet(ctx, file);
+                if back {
+                    self.mobile.files_sheet = Some(FilesView::List);
+                }
+            }
+            None => {}
+        }
     }
 
     pub(in crate::app) fn apply_games(&mut self, action: Option<GamesAction>) {
         match action {
             Some(GamesAction::Open) => self.pick_rom(),
+            Some(GamesAction::Files) => {
+                self.mobile.files_sheet = Some(FilesView::List);
+                self.release_touch();
+            }
             Some(GamesAction::Resume) => self.resume_game(),
             Some(GamesAction::Search) => {
                 let search = &mut self.mobile.games_search;
@@ -228,10 +305,17 @@ impl Citrine {
                 self.release_touch();
             }
             Some(GamesAction::Remove(path)) => self.ui.recent.remove(&path),
+            Some(GamesAction::Recent(path)) if self.ui.library.is_offline_archive(&path) => {
+                self.ui.games.open_info(path.to_string_lossy().into_owned());
+            }
             #[cfg(not(target_arch = "wasm32"))]
             Some(GamesAction::Recent(path)) => {
                 self.try_start_audio();
                 self.load_recent(path);
+            }
+            #[cfg(target_arch = "wasm32")]
+            Some(GamesAction::Recent(path)) if self.ui.library.is_archive_row(&path) => {
+                self.play_library(path.to_string_lossy().into_owned());
             }
             #[cfg(target_arch = "wasm32")]
             Some(GamesAction::Recent(path)) => {
@@ -252,12 +336,14 @@ impl Citrine {
             Some(GamesAction::RemoveFolder(tree)) => self.remove_folder(tree),
             Some(GamesAction::Play(path)) => self.play_library(path),
             Some(GamesAction::RemoveGame(path)) => self.remove_from_library(&path),
+            Some(GamesAction::CancelDownload(path)) => self.cancel_archive(&path),
+            Some(GamesAction::DeleteDownload(path)) => self.delete_archive_download(&path),
             Some(GamesAction::RemoveMissing) => self.remove_missing(),
             Some(GamesAction::Undo) => self.undo_library(),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             Some(GamesAction::ShowInFolder(path)) => {
-                let path = std::path::Path::new(&path);
-                if let Err(err) = crate::media::reveal::reveal(&self.files.spawner, path) {
+                let path = crate::utils::zip_games::file_on_disk(std::path::Path::new(&path));
+                if let Err(err) = crate::media::reveal::reveal(&self.files.spawner, &path) {
                     log::warn!("couldn't show {}: {err}", path.display());
                 }
             }
@@ -449,7 +535,7 @@ impl Citrine {
         };
         ui.add_space(8.0);
         let row = kit::Row::new(Tab::Walker.title())
-            .icon(icons::PERSON_SIMPLE_WALK)
+            .icon(icons::POKEWALKER)
             .detail(&detail);
         kit::rows(ui, vec![row]).is_some()
     }
@@ -547,9 +633,13 @@ mod tests {
         std::fs::write(&second, b"rom").unwrap();
         let entries = [entry(first.clone(), "First"), entry(second, "Second")];
         let today = jiff::civil::date(2026, 11, 2);
-        let games = recent_games(&entries, (Some(&first), None), today, |path| {
-            !path.is_file()
-        });
+        let games = recent_games(
+            &entries,
+            (Some(&first), None),
+            today,
+            |path| !path.is_file(),
+            |_| None,
+        );
         assert_eq!(games.len(), 1);
         assert_eq!(games[0].name, "Second");
         assert!(!games[0].gone);
@@ -564,16 +654,67 @@ mod tests {
             (None, None),
             jiff::civil::date(2026, 11, 2),
             |path| !path.is_file(),
+            |_| None,
         );
         assert!(games[0].gone);
         assert_eq!(games[0].detail, "File missing");
     }
 
     #[test]
+    fn a_missing_file_still_names_its_console_from_the_file_name() {
+        let entries = [entry(PathBuf::from("/gone/tobu.gbc"), "Tobu")];
+        let games = recent_games(
+            &entries,
+            (None, None),
+            jiff::civil::date(2026, 11, 2),
+            |_| true,
+            |_| None,
+        );
+        assert_eq!(games[0].detail, "File missing");
+        assert_eq!(
+            games[0].console,
+            Some(citrine_gb::console::ConsoleKind::Gbc)
+        );
+    }
+
+    #[test]
+    fn a_missing_file_takes_the_console_the_library_identified() {
+        let entries = [entry(PathBuf::from("/gone/jetpak.gb"), "Super JetPak DX")];
+        let games = recent_games(
+            &entries,
+            (None, None),
+            jiff::civil::date(2026, 11, 2),
+            |_| true,
+            |_| Some(citrine_gb::console::ConsoleKind::Gbc),
+        );
+        assert_eq!(
+            games[0].console,
+            Some(citrine_gb::console::ConsoleKind::Gbc)
+        );
+    }
+
+    #[test]
+    fn the_cover_and_the_library_tile_read_one_console() {
+        let mut played = entry(PathBuf::from("/games/jetpak.gb"), "Super JetPak DX");
+        played.console = Some(citrine_gb::console::ConsoleKind::Gb);
+        let games = recent_games(
+            &[played],
+            (None, None),
+            jiff::civil::date(2026, 11, 2),
+            |_| false,
+            |_| Some(citrine_gb::console::ConsoleKind::Gbc),
+        );
+        assert_eq!(
+            games[0].console,
+            Some(citrine_gb::console::ConsoleKind::Gbc)
+        );
+    }
+
+    #[test]
     fn a_kept_copy_of_the_game_now_playing_is_not_listed_again() {
         let entries = [entry(PathBuf::from("abc123.gbc"), "Copy")];
         let today = jiff::civil::date(2026, 11, 2);
-        let games = recent_games(&entries, (None, Some("abc123")), today, |_| false);
+        let games = recent_games(&entries, (None, Some("abc123")), today, |_| false, |_| None);
         assert!(games.is_empty());
     }
 

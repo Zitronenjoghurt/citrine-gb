@@ -8,14 +8,18 @@ use std::time::Duration;
 
 const DESKTOP_HEIGHT: f32 = 130.0;
 const PHONE_HEIGHT: f32 = 150.0;
-const GAME: (Color32, Color32) = (
+pub(crate) const GAME: (Color32, Color32) = (
     Color32::from_rgb(110, 170, 255),
     Color32::from_rgb(30, 100, 200),
 );
-const GPU: (Color32, Color32) = (
+pub(crate) const GPU: (Color32, Color32) = (
     Color32::from_rgb(190, 140, 255),
     Color32::from_rgb(120, 60, 200),
 );
+
+pub(crate) fn pick((on_dark, on_light): (Color32, Color32), dark: bool) -> Color32 {
+    if dark { on_dark } else { on_light }
+}
 
 pub struct FrameGraph<'a> {
     pub samples: &'a VecDeque<FrameSample>,
@@ -87,7 +91,6 @@ pub fn series(samples: &VecDeque<FrameSample>, game_frame: Duration) -> Series {
 impl Widget for FrameGraph<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let dark = ui.visuals().dark_mode;
-        let pick = |(on_dark, on_light): (Color32, Color32)| if dark { on_dark } else { on_light };
         let shown_color = ui.visuals().strong_text_color();
         let repeated_color = ui.visuals().warn_fg_color;
         let budget_color = ui.visuals().weak_text_color();
@@ -129,13 +132,13 @@ impl Widget for FrameGraph<'_> {
                     );
                     plot.line(
                         Line::new("Game", PlotPoints::new(series.game))
-                            .color(pick(GAME))
+                            .color(pick(GAME, dark))
                             .width(1.0_f32),
                     );
                     if self.gpu {
                         plot.points(
                             Points::new("3D GPU", PlotPoints::new(series.gpu))
-                                .color(pick(GPU))
+                                .color(pick(GPU, dark))
                                 .radius(1.5_f32),
                         );
                     }
@@ -148,9 +151,9 @@ impl Widget for FrameGraph<'_> {
                 });
             ui.horizontal_wrapped(|ui| {
                 key(ui, Swatch::Line, shown_color, "Shown");
-                key(ui, Swatch::Line, pick(GAME), "Game");
+                key(ui, Swatch::Line, pick(GAME, dark), "Game");
                 if self.gpu {
-                    key(ui, Swatch::Dots, pick(GPU), "3D GPU");
+                    key(ui, Swatch::Dots, pick(GPU, dark), "3D GPU");
                 }
                 key(ui, Swatch::Diamond, repeated_color, "Repeated");
                 key(ui, Swatch::Dashes, budget_color, &budget_name);

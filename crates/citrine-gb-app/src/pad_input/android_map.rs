@@ -307,7 +307,7 @@ fn info(id: i32, pad: &Pad) -> PadInfo {
 mod tests {
     use super::*;
     use crate::app::ui_state::keybinds::{BindingCapture, GbButton, KeyBindings};
-    use crate::pad_input::{PadAction, route};
+    use crate::pad_input::{PadAction, route_alone};
 
     fn inputs(events: Vec<PadEvent>) -> Vec<PadInput> {
         events.into_iter().map(|e| e.input).collect()
@@ -441,7 +441,7 @@ mod tests {
         let bindings = KeyBindings::default();
         let capture = BindingCapture::default();
         let events = translator.translate(5, AndroidInput::KeyDown(97, false));
-        let action = route(events[1].input, &bindings, &capture, None, false);
+        let action = route_alone(events[1].input, &bindings, &capture, false);
         assert_eq!(action, PadAction::Press(GbButton::A));
     }
 }

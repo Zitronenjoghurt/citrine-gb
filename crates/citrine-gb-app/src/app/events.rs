@@ -1,11 +1,12 @@
 use crate::app::tabs::Tab;
-use crate::app::ui_state::settings::SettingsTab;
+use crate::app::ui_state::settings_tree::{GroupId, SettingsTab};
 use crate::media::MediaId;
 use citrine_gb::gb::GbModel;
 
 #[derive(Debug, PartialEq)]
 pub enum GamesAction {
     Open,
+    Files,
     Resume,
     Search,
     Homebrew,
@@ -20,6 +21,8 @@ pub enum GamesAction {
     RemoveFolder(String),
     Play(String),
     RemoveGame(String),
+    CancelDownload(String),
+    DeleteDownload(String),
     RemoveMissing,
     Undo,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -34,6 +37,9 @@ pub enum GamesAction {
 }
 
 pub enum AppEvent {
+    Record(crate::app::widgets::record_bar::RecordBarAction),
+    Replay(crate::app::widgets::replay_bar::ReplayBarAction),
+    Clip(crate::app::widgets::clip_panel::ClipAction),
     RemoveHud {
         id: u32,
     },
@@ -82,33 +88,40 @@ pub enum AppEvent {
     OpenSettings {
         tab: SettingsTab,
     },
+    FindSetting {
+        row: crate::app::ui_state::settings_tree::rows::RowId,
+    },
     UndoSnapshot {
         rom_key: String,
         slot: usize,
     },
+    KeepPeerSaves(crate::emulator::peer_saves::PeerNotice),
+    AskDiscardPeerSaves(crate::emulator::peer_saves::PeerNotice),
+    SetPeerSavesAside(crate::emulator::peer_saves::PeerNotice),
+    UndoKeptSaves(Box<crate::emulator::peer_saves::KeptSaves>),
     PickCameraPicture,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    PickCaptureFolder,
     #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
     DownloadCodec,
     CentreTilt,
+    HardcoreOff,
     SaveGameReport,
     Screens(crate::app::ui_state::ds_screens::ScreensAction),
+    EditLayout(crate::app::layout_edit::EditStart),
+    ToggleLid,
     ScreenSettings {
         phone: bool,
     },
-    #[cfg(feature = "gba")]
-    PickGbaBios,
-    #[cfg(feature = "gba")]
-    UseBuiltInBios,
-    #[cfg(feature = "nds")]
-    PickDsFile(crate::app::ds_firmware::DsFile),
-    #[cfg(feature = "nds")]
-    RemoveDsFile(crate::app::ds_firmware::DsFile),
+    FindGroup {
+        group: GroupId,
+    },
+    PickFile(crate::app::system_files::SystemFile),
+    RemoveFile(crate::app::system_files::SystemFile),
     #[cfg(feature = "nds")]
     FindDsBios,
     #[cfg(feature = "nds")]
     FindDsDirect,
-    #[cfg(feature = "nds")]
-    ClearJitCache,
 }
 
 #[derive(Default)]
@@ -141,29 +154,12 @@ impl AppEventQueue {
         self.queue.push(AppEvent::PrefetchShelfGame { game });
     }
 
-    #[cfg(feature = "gba")]
-    pub fn pick_gba_bios(&mut self) {
-        self.queue.push(AppEvent::PickGbaBios);
+    pub fn pick_system_file(&mut self, file: crate::app::system_files::SystemFile) {
+        self.queue.push(AppEvent::PickFile(file));
     }
 
-    #[cfg(feature = "gba")]
-    pub fn use_built_in_bios(&mut self) {
-        self.queue.push(AppEvent::UseBuiltInBios);
-    }
-
-    #[cfg(feature = "nds")]
-    pub fn pick_ds_file(&mut self, file: crate::app::ds_firmware::DsFile) {
-        self.queue.push(AppEvent::PickDsFile(file));
-    }
-
-    #[cfg(feature = "nds")]
-    pub fn remove_ds_file(&mut self, file: crate::app::ds_firmware::DsFile) {
-        self.queue.push(AppEvent::RemoveDsFile(file));
-    }
-
-    #[cfg(feature = "nds")]
-    pub fn clear_jit_cache(&mut self) {
-        self.queue.push(AppEvent::ClearJitCache);
+    pub fn remove_system_file(&mut self, file: crate::app::system_files::SystemFile) {
+        self.queue.push(AppEvent::RemoveFile(file));
     }
 
     pub fn play_on(&mut self, model: GbModel) {
@@ -194,6 +190,11 @@ impl AppEventQueue {
         self.queue.push(AppEvent::PickCameraPicture);
     }
 
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn pick_capture_folder(&mut self) {
+        self.queue.push(AppEvent::PickCaptureFolder);
+    }
+
     #[cfg(all(not(target_arch = "wasm32"), not(feature = "openh264-source")))]
     pub fn download_codec(&mut self) {
         self.queue.push(AppEvent::DownloadCodec);
@@ -207,12 +208,28 @@ impl AppEventQueue {
         self.queue.push(AppEvent::RemoveHud { id });
     }
 
+    pub fn edit_layout(&mut self, start: crate::app::layout_edit::EditStart) {
+        self.queue.push(AppEvent::EditLayout(start));
+    }
+
+    pub fn toggle_lid(&mut self) {
+        self.queue.push(AppEvent::ToggleLid);
+    }
+
     pub fn screen_settings(&mut self, phone: bool) {
         self.queue.push(AppEvent::ScreenSettings { phone });
     }
 
+    pub fn find_group(&mut self, group: GroupId) {
+        self.queue.push(AppEvent::FindGroup { group });
+    }
+
     pub fn centre_tilt(&mut self) {
         self.queue.push(AppEvent::CentreTilt);
+    }
+
+    pub fn hardcore_off(&mut self) {
+        self.queue.push(AppEvent::HardcoreOff);
     }
 
     pub fn save_game_report(&mut self) {

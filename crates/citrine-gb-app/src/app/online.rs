@@ -48,10 +48,10 @@ impl Citrine {
         use crate::ds_wifi::Refusal;
         let text = match refusal {
             Refusal::SignedOut => {
-                "DS online play goes through your relay. Sign in, or turn on Direct connection."
+                "DS online play goes through your relay. Sign in, or connect without it."
             }
             Refusal::RelayOff => {
-                "This relay doesn't offer DS online play. Turn on Direct connection to play without it."
+                "This relay doesn't offer DS online play. You can connect without it."
             }
         };
         self.toasts
@@ -91,9 +91,29 @@ impl Citrine {
             ctx.request_repaint();
         }
         let settings = &self.ui.settings.online;
+        self.online.choose_device_name(&settings.device_name);
+        self.online.set_typing_text(&settings.typing_text);
         self.online
             .set_cloud(settings.cloud_owner(), settings.cloud_saves);
-        let sync = settings.cloud_saves && settings.sync_settings;
+        let keep = (self.ui.library.revision(), settings.keep_saves);
+        if self.cloud_keep != Some(keep) {
+            self.cloud_keep = Some(keep);
+            let roms = self
+                .ui
+                .library
+                .entries()
+                .into_iter()
+                .filter_map(|game| game.rom_key.clone());
+            self.online.cloud_keep(keep.1, roms);
+        }
+        self.online.network_settings(
+            settings.network_saves,
+            settings.network_allowed.iter().map(|key| key.0),
+        );
+        let sync_cloud = settings.cloud_saves && settings.sync_settings;
+        let sync_network =
+            crate::app::widgets::settings::pages::sync::network_on(&self.ui.settings)
+                && settings.sync_settings;
         let typing = settings.typing_indicators;
         self.update_push();
         self.online.update(now);
@@ -122,7 +142,7 @@ impl Citrine {
         self.online.compose(self.ui.friends.chat.composing(), now);
         if self
             .online
-            .sync_settings(&mut self.ui.settings.synced, sync)
+            .sync_settings(&mut self.ui.settings.synced, sync_cloud, sync_network)
         {
             let values = self.ui.settings.synced.values();
             synced::adopt(&mut self.ui.settings, &values);
@@ -131,6 +151,7 @@ impl Citrine {
         self.settle_cloud_game(now);
         self.play
             .set_input_delay(self.ui.settings.online.input_delay.frames());
+        self.play.set_direct(self.ui.settings.online.direct);
         #[cfg(feature = "nds")]
         self.play
             .set_ds_user(self.emulator.ds_user(self.play.ds_mac()));
@@ -194,6 +215,9 @@ impl Citrine {
 
     pub(super) fn settle_play(&mut self, ctx: &Context) {
         self.settle_room();
+        if std::mem::take(&mut self.ui.playing.hardcore_refused) {
+            self.hardcore_refused("Play together is off in hardcore");
+        }
         if let Some(ended) = &self.ui.playing.ended
             && match ended.paused {
                 true => self.emulator.running,
@@ -385,11 +409,10 @@ impl Citrine {
             self.ui.playing.unlink_load = None;
             return;
         };
-        let choice = super::widgets::confirm::confirm_with_detail(
+        let choice = super::widgets::confirm::confirm_losing_progress(
             ctx,
             "unlink_load_confirm",
             &format!("Load this state? You'll unlink from {partners}."),
-            Some("Unsaved progress is lost."),
             "Load",
         );
         let Some(confirmed) = choice else {
@@ -403,10 +426,9 @@ impl Citrine {
         let name = self.emulator.snapshot_name(slot);
         match self.emulator.load_snapshot(slot) {
             Ok(_) => self.toasts.success(format!("Loaded {name}")),
-            Err(err) => {
-                self.toasts
-                    .error(failed_message(FailedStep::Load, &format!("'{name}'"), &err))
-            }
+            Err(err) => self
+                .toasts
+                .error(failed_message(FailedStep::Load, &name, &err)),
         };
         self.ui.snapshots.invalidate();
     }

@@ -1,3 +1,79 @@
+# 0.13.0
+
+## Added
+
+- Replays: Record keeps every input instead of a video, plays back in the game, renders the video afterwards and can keep each frame's timings
+- Save a clip of the last 30 seconds of play, with a trim panel that also crops replays
+- Layout menu for every console with built-in and saved screen layouts, per game and per mode
+- Edit layout for screens, buttons and HUDs on phone, desktop and big screen
+- Direct connection in Play together, with a switch to the relay and back mid-game
+- GBA JIT recompiler on macOS, Linux and Android, for a quarter to a third less CPU time a frame
+- RetroAchievements for GBA and DS games, and leaderboards with live attempts in the HUD
+- DS microphone on desktop, Android and the web, with Push to talk
+- Settings search, and settings in three sections that are the same on desktop, phone and big screen
+- Settings for one game, for every row that changes how a game looks, sounds or runs
+- This game panel for the running game's console, clock, camera, printer and cheats
+- Saves on this network between your devices on the same Wi-Fi, and a Sync page with the saves other devices keep
+- Storage page with the space your data and the cache take, Clear for each cache, and Export, Import and Delete everything
+- Key combinations of up to 4 keys or controller buttons for game buttons and shortcuts
+- DS texture filters Bilinear, Bicubic and xBR, and anisotropic filtering
+- Pokéwalker across your devices: Nearby on the same network, Move here, borrowing for a transfer, and steps on Android while the app is closed
+- Chat replies, your own typing text, and a Newest messages bar on phones
+- Online values in the game HUD: ping, input delay, connection and waits
+- Open menu entries for every boot ROM, BIOS and firmware file, and the GBC boot ROM before Game Boy Color games
+- Theme that follows the system, fast forward by Hold or Toggle, Quick load on a hold, and play, mute or pause in the background
+- Real fullscreen on Shift+F11, a hidden pointer over games, library subfolders, a capture folder, tilt keys and GBA screen colours of their own
+- Device names you choose, shown on your other devices
+- Discord screenshot of the top or bottom DS screen
+- Server: STUN on UDP port 3478 for direct connections, set with CITRINE_STUN_PORT
+- `make publish` for the citrine-gb crate and the two crates it needs
+
+## Changed
+
+- Playing together needs 0.13.0 on both sides
+- DS on a phone opens Big top in landscape and Stacked at full width in portrait, with the frame hidden
+- Console icons in place of the GB, GBC, GBA and DS badges, and new icons for consoles, games, saves and the link cable
+- Citrine is now licensed under GPL-3.0-or-later
+- Licences page in About with every library the app ships and the projects its code comes from, on the web too
+- Faster DS JIT on x86-64 and Apple Silicon
+- Faster DS 3D on the GPU at every resolution, with half the CPU time to prepare a frame
+- DS games on desktop draw on 2 helper threads instead of up to 7
+- Smooth 3D edges is now Anti-aliasing, with 4x and 8x MSAA
+- End-to-end encrypted second screens, with a 5-digit security code on both devices
+- Lower and steadier input delay in Play together on DS
+- Cloud saves download before a library game first opens on a device
+- Smaller apps: the Android APK by 11.9 MB and the desktop app by 1.4 MiB
+- RetroAchievements sign-in token in the system keyring on Windows and Linux, and out of Android backups
+- Big screen with tabs across the top, a Home menu with Friends and Volume, and 4 games a row
+- Big screen game menu with every entry of the phone's More menu, a Volume slider, the DS lid and Swap screens
+- Desktop settings with checkboxes before their labels, controls in one column on every page and values in percent
+- Pokéwalker moves only on Move here, which asks before it replaces a walker with steps
+- Chat on a phone with the emoji panel in the keyboard's place and messages that move with the keyboard
+- Saves show the date and time they were saved
+- Time played card in Stats for the period or day you pick
+- Questions that delete, reset or quit start on Cancel with a keyboard or pad
+- Keyboard shortcuts sync to your other devices, and controller shortcuts stay on each device
+
+## Fixed
+
+- Android push notifications reach the phone
+- Less judder on 120 Hz and faster screens, fast forward at full speed there, and no stall every 30 seconds on desktop
+- The app no longer draws on every screen refresh with no game running, or slows down after you add a big game folder
+- DS 3D on the GPU no longer crashes on GPUs without storage textures, such as OpenGL-only Linux, or when a phone's driver can't build a shader
+- A DS game no longer freezes when it fills the 3D command queue right after a buffer swap
+- DS online on the relay no longer stops with error 60000 or 85030, and a save from another device no longer warns that it belongs to another DS
+- Achievements no longer stay on "Loading achievements"
+- Discord shows GBA and DS screens, 3D included
+- Games in zips show their names and covers and import their old .sav, and DS games over 64 MB show theirs
+- A settings file with a value the app can't read keeps every other value, the sign-in included
+- The web app keeps stats, the Pokéwalker, chats and the RetroAchievements sign-in after a reload
+- In Play together the HUD, the Controller pane and second screens follow the session's console
+- Big screen: the pad reaches page numbers, sliders, info marks and sheets, and Back returns to the row you left
+- Security: damaged or crafted snapshots, saves, zips, chat pictures, cheats, DS files and relay messages no longer crash, hang or fill the app's memory
+- Security: the app remembers each friend's chat key, so a server can't swap in its own
+- Security: a friend's game state in Play together saves apart from your own saves, and the JIT cache on disk is signed per install
+- Server: limits on connections, uploads, GTS tokens and login attempts, and sign-ups that no longer fail during the hourly backup
+
 # 0.12.0
 
 ## Added

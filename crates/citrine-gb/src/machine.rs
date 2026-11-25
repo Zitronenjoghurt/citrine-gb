@@ -20,12 +20,22 @@ use std::sync::Arc;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Firmware {
     pub gb_boot_rom: Option<Vec<u8>>,
+    pub gbc_boot_rom: Option<Vec<u8>>,
     #[cfg(feature = "gba")]
     pub gba_bios: Option<Bios>,
     #[cfg(feature = "gba")]
     pub gba_boot: Boot,
     #[cfg(feature = "nds")]
     pub nds: NdsFirmware,
+}
+
+impl Firmware {
+    pub fn boot_rom(&self, model: GbModel) -> Option<&[u8]> {
+        match model {
+            GbModel::Dmg => self.gb_boot_rom.as_deref(),
+            GbModel::Cgb => self.gbc_boot_rom.as_deref(),
+        }
+    }
 }
 
 pub enum Machine {
@@ -51,9 +61,7 @@ impl Machine {
         }
         let model = GbModel::try_from(kind)?;
         let mut gb = GameBoy::new_empty(model);
-        if let Some(boot_rom) = &firmware.gb_boot_rom {
-            gb.load_boot_rom(boot_rom);
-        }
+        gb.set_boot_rom(firmware.boot_rom(model));
         gb.load_rom_with_model(rom, model)?;
         Ok(Self::Gb(Box::new(gb)))
     }
@@ -167,6 +175,29 @@ impl Machine {
         Ok(())
     }
 
+    #[cfg(feature = "persistence")]
+    pub fn twin(&self) -> Self {
+        use crate::console::Rollback;
+        match self {
+            Self::Gb(gb) => Self::Gb(Box::new(gb.clone_state())),
+            #[cfg(feature = "gba")]
+            Self::Gba(gba) => Self::Gba(Box::new(gba.clone_state())),
+            #[cfg(feature = "nds")]
+            Self::Nds(nds) => Self::Nds(Box::new(nds.clone_state())),
+        }
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn state_hash(&self) -> u64 {
+        match self {
+            Self::Gb(gb) => gb.check_hash(),
+            #[cfg(feature = "gba")]
+            Self::Gba(gba) => gba.check_hash(),
+            #[cfg(feature = "nds")]
+            Self::Nds(nds) => nds.check_hash(),
+        }
+    }
+
     pub fn as_gb(&self) -> Option<&GameBoy> {
         match self {
             Self::Gb(gb) => Some(gb),
@@ -174,6 +205,16 @@ impl Machine {
             Self::Gba(_) => None,
             #[cfg(feature = "nds")]
             Self::Nds(_) => None,
+        }
+    }
+
+    pub fn achievement_read(&self, address: u32, buffer: &mut [u8]) -> usize {
+        match self {
+            Self::Gb(gb) => gb.achievement_read(address, buffer),
+            #[cfg(feature = "gba")]
+            Self::Gba(gba) => gba.achievement_read(address, buffer),
+            #[cfg(feature = "nds")]
+            Self::Nds(nds) => nds.achievement_read(address, buffer),
         }
     }
 
@@ -227,6 +268,82 @@ impl Machine {
             Self::Gba(gba) => gba.hold_clock(secs),
             #[cfg(feature = "nds")]
             Self::Nds(nds) => nds.hold_clock(secs),
+        }
+    }
+
+    pub fn has_absolute_clock(&self) -> bool {
+        !matches!(self, Self::Gb(_))
+    }
+
+    pub fn set_local_clock(
+        &mut self,
+        #[cfg_attr(not(feature = "gba"), expect(unused_variables))] local_unix: i64,
+    ) {
+        match self {
+            Self::Gb(_) => {}
+            #[cfg(feature = "gba")]
+            Self::Gba(gba) => {
+                if gba.cart_devices().rtc {
+                    gba.set_clock(local_unix);
+                }
+            }
+            #[cfg(feature = "nds")]
+            Self::Nds(nds) => nds.set_clock(local_unix),
+        }
+    }
+
+    #[cfg(feature = "persistence")]
+    pub fn shift_clock(&mut self, seconds: i64, now: u64) {
+        let Some(gb) = self.as_gb_mut() else {
+            return;
+        };
+        if let Some(rtc) = gb.cartridge.rtc_mut() {
+            rtc.shift(seconds);
+        } else if gb.has_huc3_clock()
+            && seconds > 0
+            && let Some(save) = gb.battery(true, now)
+        {
+            gb.put_battery(save, now + seconds as u64);
+        }
+    }
+
+    pub fn set_motion(
+        &mut self,
+        x: f32,
+        y: f32,
+        #[cfg_attr(not(feature = "gba"), expect(unused_variables))] turn: f32,
+    ) {
+        match self {
+            Self::Gb(gb) => {
+                if gb.has_tilt() {
+                    gb.set_tilt(x, y);
+                }
+            }
+            #[cfg(feature = "gba")]
+            Self::Gba(gba) => {
+                gba.set_tilt(x, y);
+                gba.set_turn(turn);
+            }
+            #[cfg(feature = "nds")]
+            Self::Nds(_) => {}
+        }
+    }
+
+    pub fn set_sunlight(
+        &mut self,
+        #[cfg_attr(not(feature = "gba"), expect(unused_variables))] light: f32,
+    ) {
+        #[cfg(feature = "gba")]
+        if let Self::Gba(gba) = self {
+            gba.set_sunlight(light);
+        }
+    }
+
+    pub fn set_camera_frame(&mut self, frame: &[u8]) {
+        if let Self::Gb(gb) = self
+            && gb.has_camera()
+        {
+            gb.set_camera_frame(frame);
         }
     }
 
@@ -316,6 +433,14 @@ impl Console for Machine {
 
     fn set_touch(&mut self, touch: Option<Touch>) {
         self.console_mut().set_touch(touch);
+    }
+
+    fn set_mic(&mut self, samples: &[i16]) {
+        self.console_mut().set_mic(samples);
+    }
+
+    fn mic_in_use(&self) -> bool {
+        self.console().mic_in_use()
     }
 
     fn soft_reset(&mut self) {
@@ -836,18 +961,44 @@ mod tests {
     fn a_boot_rom_from_the_firmware_runs_first() {
         let firmware = Firmware {
             gb_boot_rom: Some(vec![0x00; 0x100]),
-            #[cfg(feature = "gba")]
-            gba_bios: None,
-            #[cfg(feature = "gba")]
-            gba_boot: crate::gba::bios::Boot::Skip,
-            #[cfg(feature = "nds")]
-            nds: crate::nds::machine::NdsFirmware::default(),
+            ..Firmware::default()
         };
         let machine = Machine::load(&Rom::new(TOBU), ConsoleKind::Gb, &firmware).expect("load");
         let gb = machine.as_gb().expect("game boy");
 
         assert!(gb.boot_rom.mounted);
         assert_eq!(gb.cpu.pc, 0x0000);
+    }
+
+    #[cfg(all(feature = "debug", feature = "persistence"))]
+    #[test]
+    #[allow(clippy::needless_update)]
+    fn each_model_boots_from_its_own_boot_rom() {
+        let firmware = Firmware {
+            gb_boot_rom: Some(vec![0x00; 0x100]),
+            gbc_boot_rom: Some(vec![0x00; 0x900]),
+            ..Firmware::default()
+        };
+        for kind in [ConsoleKind::Gb, ConsoleKind::Gbc] {
+            let machine = Machine::load(&Rom::new(TOBU), kind, &firmware).expect("load");
+            let gb = machine.as_gb().expect("game boy");
+            assert!(gb.boot_rom.mounted, "{kind:?}");
+            assert_eq!(
+                gb.boot_rom.rom.len(),
+                if kind == ConsoleKind::Gb {
+                    0x100
+                } else {
+                    0x900
+                }
+            );
+        }
+
+        let only_gbc = Firmware {
+            gbc_boot_rom: Some(vec![0x00; 0x900]),
+            ..Firmware::default()
+        };
+        let machine = Machine::load(&Rom::new(TOBU), ConsoleKind::Gb, &only_gbc).expect("load");
+        assert!(!machine.as_gb().expect("game boy").boot_rom.mounted);
     }
 
     #[cfg(all(feature = "debug", feature = "persistence"))]

@@ -1,6 +1,6 @@
 use super::Citrine;
 use crate::app::ui_state::hotkeys::{HotkeyAction, Hotkeys};
-use crate::emulator::fast_forward::FastForwardSpeed;
+use crate::emulator::fast_forward::{FastForwardKey, FastForwardSpeed};
 use egui::Context;
 
 #[derive(Debug, Default)]
@@ -17,7 +17,13 @@ impl Citrine {
             self.fast_forward.key = false;
             return;
         }
-        let keys = self.ui.settings.hotkeys.keys_for(HotkeyAction::FastForward);
+        let settings = &self.ui.settings;
+        let mut keys = settings.hotkeys.keys_for(HotkeyAction::FastForward);
+        keys.retain(|hotkey| {
+            hotkey.single_key().is_some_and(|key| {
+                !settings.hotkeys.key_in_combo(key) && !settings.bindings.key_in_combo(key)
+            })
+        });
         let down = &mut self.fast_forward.key;
         raw.events.retain(|event| match event {
             egui::Event::Key {
@@ -25,7 +31,7 @@ impl Citrine {
                 pressed,
                 modifiers,
                 ..
-            } if keys.iter().any(|hotkey| hotkey.key == *key) => {
+            } if keys.iter().any(|hotkey| hotkey.single_key() == Some(*key)) => {
                 *down = *pressed && keys.iter().any(|hotkey| hotkey.matches(*key, *modifiers));
                 false
             }
@@ -39,21 +45,21 @@ impl Citrine {
 
     pub(super) fn follow_fast_forward(&mut self, ctx: &Context) {
         let clicked = std::mem::take(&mut self.fast_forward.clicked);
-        let hotkeys = &self.ui.settings.hotkeys;
-        let pad = !self.ui.capture.is_waiting()
-            && self
-                .emulator
-                .loose_held()
-                .iter()
-                .any(|pad| hotkeys.action_for_pad(*pad) == Some(HotkeyAction::FastForward));
-        let held = self.fast_forward.key || pad;
+        let shortcut = !self.ui.capture.is_waiting()
+            && self.emulator.holds_shortcut(HotkeyAction::FastForward);
+        let held = self.fast_forward.key || shortcut;
+        let pressed = held && !self.fast_forward.held;
         if clicked {
             self.emulator.fast_forward = !self.emulator.fast_forward;
         }
-        if held {
-            self.emulator.fast_forward = true;
-        } else if self.fast_forward.held {
-            self.emulator.fast_forward = false;
+        match self.ui.settings.fast_forward_key {
+            FastForwardKey::Hold if held => self.emulator.fast_forward = true,
+            FastForwardKey::Hold if self.fast_forward.held => self.emulator.fast_forward = false,
+            FastForwardKey::Hold => {}
+            FastForwardKey::Toggle if pressed => {
+                self.emulator.fast_forward = !self.emulator.fast_forward;
+            }
+            FastForwardKey::Toggle => {}
         }
         self.fast_forward.held = held;
         let rewinding = self.emulator.rewind_held && self.emulator.can_rewind();
@@ -70,7 +76,7 @@ impl Citrine {
             Some("Open a game to fast forward it")
         } else if self.play.session().is_some() {
             Some("Fast forward is off while playing together")
-        } else if self.emulator.screen_recorder.is_recording() {
+        } else if self.emulator.is_recording() {
             Some("Fast forward is off while recording")
         } else {
             None
@@ -81,7 +87,11 @@ impl Citrine {
         let action = HotkeyAction::FastForward;
         let button = egui::Button::new(action.icon(false)).selected(self.emulator.fast_forward);
         let off = self.fast_forward_off_reason();
-        let hint = fast_forward_hint(&self.ui.settings.hotkeys, self.emulator.fast_forward_speed);
+        let hint = fast_forward_hint(
+            &self.ui.settings.hotkeys,
+            self.emulator.fast_forward_speed,
+            self.ui.settings.fast_forward_key,
+        );
         let response = ui
             .add_enabled(off.is_none(), button)
             .on_hover_text(hint)
@@ -90,9 +100,13 @@ impl Citrine {
     }
 }
 
-fn fast_forward_hint(hotkeys: &Hotkeys, speed: FastForwardSpeed) -> String {
+fn fast_forward_hint(hotkeys: &Hotkeys, speed: FastForwardSpeed, mode: FastForwardKey) -> String {
+    let verb = match mode {
+        FastForwardKey::Hold => "hold",
+        FastForwardKey::Toggle => "press",
+    };
     match hotkeys.key_name(HotkeyAction::FastForward) {
-        Some(key) => format!("Fast forward ({speed}, hold {key})"),
+        Some(key) => format!("Fast forward ({speed}, {verb} {key})"),
         None => format!("Fast forward ({speed})"),
     }
 }
@@ -139,17 +153,7 @@ mod tests {
         ctx.run(input, |ctx| {
             crate::app::mobile::touch_spacing(ctx, false);
             app.render(ctx);
-            app.handle_snapshot_hotkeys(ctx);
-            let Citrine {
-                emulator, pads, ui, ..
-            } = app;
-            emulator.handle_input(
-                ctx,
-                pads.as_mut(),
-                &ui.settings.bindings,
-                &mut ui.capture,
-                None,
-            );
+            app.take_input(ctx);
             app.follow_rewind(ctx);
             app.follow_fast_forward(ctx);
         })
@@ -237,7 +241,7 @@ mod tests {
         use crate::app::ui_state::hotkeys::Hotkey;
         let mut app = playing("ff-rebound");
         let hotkeys = &mut app.ui.settings.hotkeys;
-        hotkeys.unbind(Hotkey::plain(egui::Key::Space));
+        hotkeys.unbind(&Hotkey::plain(egui::Key::Space));
         hotkeys.bind(Hotkey::plain(egui::Key::F), HotkeyAction::FastForward);
         app.ui
             .settings
@@ -252,6 +256,35 @@ mod tests {
         assert!(app.emulator.fast_forward);
         frame(&mut app, &ctx, vec![key(egui::Key::F, false)]);
         assert!(!app.emulator.fast_forward);
+    }
+
+    #[test]
+    fn in_toggle_mode_a_press_turns_fast_forward_on_and_the_next_press_off() {
+        let mut app = playing("ff-toggle");
+        app.ui.settings.fast_forward_key = FastForwardKey::Toggle;
+        let ctx = Context::default();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(egui::Key::Space, true)]);
+        assert!(app.emulator.fast_forward);
+        frame(&mut app, &ctx, vec![key(egui::Key::Space, false)]);
+        assert!(app.emulator.fast_forward, "stays on after letting go");
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.emulator.fast_forward);
+        frame(&mut app, &ctx, vec![key(egui::Key::Space, true)]);
+        assert!(!app.emulator.fast_forward, "the next press turns it off");
+        frame(&mut app, &ctx, vec![key(egui::Key::Space, false)]);
+        assert!(!app.emulator.fast_forward);
+    }
+
+    #[test]
+    fn in_toggle_mode_the_toolbar_button_names_a_press() {
+        let mut app = playing("ff-toggle-hint");
+        app.ui.settings.fast_forward_key = FastForwardKey::Toggle;
+        app.emulator.fast_forward_speed = FastForwardSpeed::Five;
+        let ctx = Context::default();
+        let at = button(&mut app, &ctx);
+        let out = hover(&mut app, &ctx, at);
+        assert!(text_rect(&out, "Fast forward (5x, press Space)").is_some());
     }
 
     #[test]
@@ -278,15 +311,13 @@ mod tests {
     }
 
     #[test]
-    fn without_a_game_the_button_does_nothing_and_says_why() {
+    fn without_a_game_the_bar_has_no_fast_forward_and_its_key_does_nothing() {
         let mut app = desktop("ff-no-game");
         let ctx = Context::default();
-        let at = button(&mut app, &ctx);
-        frame(&mut app, &ctx, tap(at));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(text_rect(&out, crate::icons::FAST_FORWARD).is_none());
         frame(&mut app, &ctx, vec![key(egui::Key::Space, true)]);
         assert!(!app.emulator.fast_forward);
-        let out = hover(&mut app, &ctx, at);
-        assert!(text_rect(&out, "Open a game to fast forward it").is_some());
     }
 
     #[test]

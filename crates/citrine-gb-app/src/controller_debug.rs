@@ -395,6 +395,7 @@ pub fn capture_text(pending: Option<PendingBinding>) -> String {
         BindingTarget::Ds(button) => button.to_string(),
         BindingTarget::Shortcut(action) => action.label().to_string(),
         BindingTarget::LinkKey(half, button) => format!("{} {button}", half.label()),
+        BindingTarget::Tilt(tilt) => tilt.to_string(),
     };
     let kind = match pending.kind {
         BindingKind::Keyboard => "a key",

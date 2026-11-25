@@ -1,4 +1,5 @@
 use crate::config::Limits;
+use crate::connections::address_key;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::IpAddr;
@@ -29,6 +30,11 @@ impl Bucket {
     pub fn has(&mut self, amount: f64) -> bool {
         self.refill(Instant::now());
         self.tokens >= amount
+    }
+
+    pub fn wait(&mut self, amount: f64) -> Duration {
+        self.refill(Instant::now());
+        Duration::from_secs_f64((amount - self.tokens).max(0.0) / self.per_second)
     }
 
     pub fn full(&mut self) -> bool {
@@ -73,50 +79,91 @@ impl ConnLimit {
     }
 }
 
+pub trait Tried: Hash + Eq {
+    fn grouped(self) -> Self;
+}
+
+impl Tried for IpAddr {
+    fn grouped(self) -> Self {
+        address_key(self)
+    }
+}
+
+impl Tried for i64 {
+    fn grouped(self) -> Self {
+        self
+    }
+}
+
+struct Failures<K> {
+    map: HashMap<K, (u32, Instant)>,
+    prune_at: usize,
+}
+
 pub struct Attempts<K = IpAddr> {
     max: u32,
     window: Duration,
-    failures: Mutex<HashMap<K, (u32, Instant)>>,
+    failures: Mutex<Failures<K>>,
 }
 
-impl<K: Hash + Eq> Attempts<K> {
+impl<K: Tried> Attempts<K> {
     pub fn new(max: u32, window: Duration) -> Self {
         Self {
             max,
             window,
-            failures: Mutex::new(HashMap::new()),
+            failures: Mutex::new(Failures {
+                map: HashMap::new(),
+                prune_at: PRUNE_AT,
+            }),
         }
     }
 
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<K, (u32, Instant)>> {
+    fn failures(&self) -> std::sync::MutexGuard<'_, Failures<K>> {
         self.failures.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn live(&self, since: Instant, now: Instant) -> bool {
+        now.duration_since(since) < self.window
     }
 
     pub fn blocked(&self, key: K) -> bool {
         let now = Instant::now();
-        let mut map = self.map();
-        map.retain(|_, (_, since)| now.duration_since(*since) < self.window);
-        map.get(&key).is_some_and(|(count, _)| *count >= self.max)
+        let failures = self.failures();
+        failures
+            .map
+            .get(&key.grouped())
+            .is_some_and(|(count, since)| *count >= self.max && self.live(*since, now))
     }
 
     pub fn fail(&self, key: K) {
         let now = Instant::now();
-        let mut map = self.map();
-        let entry = map.entry(key).or_insert((0, now));
-        if now.duration_since(entry.1) >= self.window {
+        let mut failures = self.failures();
+        if failures.map.len() >= failures.prune_at {
+            failures
+                .map
+                .retain(|_, (_, since)| now.duration_since(*since) < self.window);
+            failures.prune_at = (failures.map.len() * 2).max(PRUNE_AT);
+        }
+        let entry = failures.map.entry(key.grouped()).or_insert((0, now));
+        if !self.live(entry.1, now) {
             *entry = (0, now);
         }
         entry.0 += 1;
     }
 
     pub fn forgive(&self, key: K) {
-        if let Some(entry) = self.map().get_mut(&key) {
+        if let Some(entry) = self.failures().map.get_mut(&key.grouped()) {
             entry.0 = entry.0.saturating_sub(1);
         }
     }
 
     pub fn clear(&self, key: K) {
-        self.map().remove(&key);
+        self.failures().map.remove(&key.grouped());
+    }
+
+    #[cfg(test)]
+    fn kept(&self) -> usize {
+        self.failures().map.len()
     }
 }
 
@@ -170,6 +217,7 @@ pub struct Rates {
     chat_bytes: Buckets<i64>,
     pub friend_requests: Buckets<i64>,
     pub downloads: Buckets<i64>,
+    pub archive_downloads: Buckets<i64>,
     pub sessions: Buckets<(u64, i64)>,
     pub games: Buckets<(u64, i64)>,
     pub sign_ups: Buckets<IpAddr>,
@@ -192,6 +240,10 @@ impl Rates {
             chat_bytes: Buckets::new(chat_bytes, chat_bytes * 4.0),
             friend_requests: Buckets::new(per_hour, limits.friend_request_burst as f64),
             downloads: Buckets::new(per_day / 86_400.0, per_day),
+            archive_downloads: Buckets::new(
+                limits.archive_download_bytes_per_day as f64 / 86_400.0,
+                limits.archive_download_bytes_per_day as f64,
+            ),
             sessions: Buckets::new(
                 limits.session_bytes_per_second as f64,
                 limits.session_burst_bytes as f64,
@@ -217,6 +269,15 @@ impl Rates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bucket_waits_for_what_it_lacks() {
+        let mut bucket = Bucket::new(10.0, 20.0);
+        assert_eq!(bucket.wait(20.0), Duration::ZERO);
+        assert!(bucket.take(20.0));
+        let wait = bucket.wait(5.0);
+        assert!(wait > Duration::from_millis(400) && wait <= Duration::from_millis(500));
+    }
 
     #[test]
     fn bucket_refills_over_time() {
@@ -247,9 +308,29 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_tries_count_once_per_network() {
+        let attempts = Attempts::new(3, Duration::from_secs(60));
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        for n in 1..=3 {
+            attempts.fail(ip(&format!("2001:db8:5:6::{n}")));
+        }
+        assert!(attempts.blocked(ip("2001:db8:5:6:abcd::9")));
+        assert!(!attempts.blocked(ip("2001:db8:5:7::1")));
+    }
+
+    #[test]
+    fn stale_tries_are_dropped_as_new_ones_come() {
+        let attempts = Attempts::new(3, Duration::ZERO);
+        for n in 0..3 * PRUNE_AT as u32 {
+            attempts.fail(IpAddr::from(n.to_be_bytes()));
+        }
+        assert!(attempts.kept() <= PRUNE_AT);
+    }
+
+    #[test]
     fn a_forgiven_attempt_no_longer_counts() {
         let attempts = Attempts::new(2, Duration::from_secs(60));
-        attempts.fail(1);
+        attempts.fail(1i64);
         attempts.fail(1);
         assert!(attempts.blocked(1));
         attempts.forgive(1);

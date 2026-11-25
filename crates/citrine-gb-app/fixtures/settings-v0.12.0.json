@@ -1,0 +1,1347 @@
+{
+  "ui_scale": 1.175,
+  "ui_scale_per_ratio": false,
+  "ui_theme": "CatppuccinFrappe",
+  "layout": "Desktop",
+  "console": "GameBoy",
+  "game_consoles": {},
+  "game_names": {
+    "POKEMON SILVER|0123ABCD": "Pokémon Silver"
+  },
+  "cheats": {},
+  "dmg_theme": "Amber",
+  "custom_palette": null,
+  "gbc_palette": null,
+  "palettes": {
+    "entries": []
+  },
+  "game_palettes": {},
+  "color_correction": "Raw",
+  "scaling": "Fit",
+  "same_size_pixels": true,
+  "ds_screens": {
+    "desktop": {
+      "arrangement": "BigAndSmall",
+      "swapped": true,
+      "one_screen": true
+    },
+    "portrait": {
+      "arrangement": "BigAndSmall",
+      "swapped": true,
+      "one_screen": true
+    },
+    "landscape": {
+      "arrangement": "BigAndSmall",
+      "swapped": true,
+      "one_screen": true
+    },
+    "corner": "BottomLeft",
+    "small": "Half",
+    "gap": 1,
+    "rotation": "Left",
+    "separate_tabs": true
+  },
+  "ds_3d": {
+    "resolution": "Double",
+    "smooth_edges": "More"
+  },
+  "ds_jit": false,
+  "matrix": true,
+  "ghosting": true,
+  "match_screen": false,
+  "matrix_edge_darkness": 0.16250001,
+  "matrix_corner_darkness": 0.2375,
+  "ghosting_strength": 0.275,
+  "volume": 0.2375,
+  "muted": true,
+  "audio_queue_ms": 81,
+  "audio_device": null,
+  "slow_sound": "Pitch",
+  "channels": [
+    true,
+    true,
+    true,
+    true
+  ],
+  "gba_channels": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "bindings": {
+    "keyboard": [
+      [
+        "W",
+        "Up"
+      ],
+      [
+        "ArrowUp",
+        "Up"
+      ],
+      [
+        "S",
+        "Down"
+      ],
+      [
+        "ArrowDown",
+        "Down"
+      ],
+      [
+        "A",
+        "Left"
+      ],
+      [
+        "ArrowLeft",
+        "Left"
+      ],
+      [
+        "D",
+        "Right"
+      ],
+      [
+        "ArrowRight",
+        "Right"
+      ],
+      [
+        "Q",
+        "A"
+      ],
+      [
+        "Z",
+        "A"
+      ],
+      [
+        "Y",
+        "A"
+      ],
+      [
+        "O",
+        "A"
+      ],
+      [
+        "E",
+        "B"
+      ],
+      [
+        "X",
+        "B"
+      ],
+      [
+        "P",
+        "B"
+      ],
+      [
+        "Enter",
+        "Start"
+      ],
+      [
+        "Backspace",
+        "Select"
+      ]
+    ],
+    "gamepad": [
+      [
+        "DPadUp",
+        "Up"
+      ],
+      [
+        "DPadDown",
+        "Down"
+      ],
+      [
+        "DPadLeft",
+        "Left"
+      ],
+      [
+        "DPadRight",
+        "Right"
+      ],
+      [
+        "East",
+        "A"
+      ],
+      [
+        "West",
+        "A"
+      ],
+      [
+        "South",
+        "B"
+      ],
+      [
+        "North",
+        "B"
+      ],
+      [
+        "Start",
+        "Start"
+      ],
+      [
+        "Select",
+        "Select"
+      ]
+    ],
+    "shoulders": {
+      "keyboard": [
+        [
+          "Num1",
+          "L"
+        ],
+        [
+          "Num3",
+          "R"
+        ]
+      ],
+      "gamepad": [
+        [
+          "LeftTrigger",
+          "L"
+        ],
+        [
+          "LeftTrigger2",
+          "L"
+        ],
+        [
+          "RightTrigger",
+          "R"
+        ],
+        [
+          "RightTrigger2",
+          "R"
+        ]
+      ],
+      "triggers": false
+    },
+    "ds": {
+      "keyboard": [
+        [
+          "C",
+          "X"
+        ],
+        [
+          "V",
+          "Y"
+        ]
+      ],
+      "gamepad": [
+        [
+          "North",
+          "X"
+        ],
+        [
+          "West",
+          "Y"
+        ]
+      ],
+      "adopted": false
+    },
+    "stick_as_dpad": false,
+    "stick_deadzone": 51
+  },
+  "hotkeys": {
+    "bindings": [
+      [
+        {
+          "key": "F8",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "QuickSave"
+      ],
+      [
+        {
+          "key": "F8",
+          "ctrl": false,
+          "shift": true,
+          "alt": false
+        },
+        "QuickSaveNewSlot"
+      ],
+      [
+        {
+          "key": "F9",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "QuickLoad"
+      ],
+      [
+        {
+          "key": "F12",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "Screenshot"
+      ],
+      [
+        {
+          "key": "F12",
+          "ctrl": false,
+          "shift": true,
+          "alt": false
+        },
+        "ToggleRecording"
+      ],
+      [
+        {
+          "key": "F5",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "TogglePause"
+      ],
+      [
+        {
+          "key": "R",
+          "ctrl": true,
+          "shift": false,
+          "alt": false
+        },
+        "SoftReset"
+      ],
+      [
+        {
+          "key": "F10",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "ToggleMute"
+      ],
+      [
+        {
+          "key": "F11",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "ToggleFocusMode"
+      ],
+      [
+        {
+          "key": "Escape",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "LeaveFocusMode"
+      ],
+      [
+        {
+          "key": "F6",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "SwitchGame"
+      ],
+      [
+        {
+          "key": "Tab",
+          "ctrl": false,
+          "shift": false,
+          "alt": false
+        },
+        "FocusChat"
+      ]
+    ],
+    "pads": [],
+    "offered": [
+      "QuickSave",
+      "QuickSaveNewSlot",
+      "QuickLoad",
+      "Screenshot",
+      "ToggleRecording",
+      "TogglePause",
+      "SoftReset",
+      "ToggleMute",
+      "ToggleFocusMode",
+      "LeaveFocusMode",
+      "ToggleTouchControls",
+      "SwitchGame",
+      "FocusChat"
+    ],
+    "screens": {
+      "bindings": [
+        [
+          {
+            "key": "F2",
+            "ctrl": false,
+            "shift": false,
+            "alt": false
+          },
+          "SwapScreens"
+        ],
+        [
+          {
+            "key": "F2",
+            "ctrl": false,
+            "shift": true,
+            "alt": false
+          },
+          "OneScreen"
+        ],
+        [
+          {
+            "key": "F2",
+            "ctrl": true,
+            "shift": false,
+            "alt": false
+          },
+          "NextScreenLayout"
+        ]
+      ],
+      "pads": [],
+      "offered": [
+        "SwapScreens",
+        "OneScreen",
+        "NextScreenLayout",
+        "ToggleLid"
+      ]
+    },
+    "debugger": {
+      "bindings": [
+        [
+          {
+            "key": "F7",
+            "ctrl": false,
+            "shift": false,
+            "alt": false
+          },
+          "StepInstruction"
+        ],
+        [
+          {
+            "key": "F3",
+            "ctrl": false,
+            "shift": false,
+            "alt": false
+          },
+          "StepOver"
+        ],
+        [
+          {
+            "key": "F4",
+            "ctrl": false,
+            "shift": false,
+            "alt": false
+          },
+          "StepOut"
+        ]
+      ],
+      "pads": [],
+      "offered": [
+        "StepInstruction",
+        "StepOver",
+        "StepOut",
+        "StepLine",
+        "StepFrame"
+      ]
+    },
+    "rewind": {
+      "bindings": [
+        [
+          {
+            "key": "R",
+            "ctrl": false,
+            "shift": false,
+            "alt": false
+          },
+          "Rewind"
+        ]
+      ],
+      "pads": [],
+      "offered": [
+        "Rewind"
+      ]
+    },
+    "fast_forward": {
+      "bindings": [
+        [
+          {
+            "key": "Space",
+            "ctrl": false,
+            "shift": false,
+            "alt": false
+          },
+          "FastForward"
+        ]
+      ],
+      "pads": [],
+      "offered": [
+        "FastForward"
+      ]
+    },
+    "hud": {
+      "bindings": [
+        [
+          {
+            "key": "F3",
+            "ctrl": false,
+            "shift": true,
+            "alt": false
+          },
+          "ToggleHuds"
+        ]
+      ],
+      "pads": [],
+      "offered": [
+        "ToggleHuds"
+      ]
+    }
+  },
+  "touch": {
+    "show_controls": false,
+    "opacity": 0.6125,
+    "scale": 0.8,
+    "haptics": false,
+    "landscape": "Overlay",
+    "hidden_buttons": "Hide",
+    "mirrored": true,
+    "ui_scale": 0.8,
+    "scaling": "Integer"
+  },
+  "online": {
+    "address": "A",
+    "joined": "relay.example",
+    "relays": {
+      "relay.example": {
+        "relay_id": "fixture relay id",
+        "password": "fixture password",
+        "online_id": "1234",
+        "display_name": "Clara",
+        "relay_key": null,
+        "device": [
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7
+        ]
+      }
+    },
+    "show_playing": false,
+    "typing_indicators": false,
+    "cloud_saves": false,
+    "sync_settings": false,
+    "friend_volume": 0.425,
+    "friend_muted": true,
+    "input_delay": "Four",
+    "notify_friend_requests": false,
+    "notify_invites": false,
+    "notify_chats": false,
+    "notify_asked": true,
+    "focus_popups": false
+  },
+  "local_link": {
+    "controls": "KeyboardAndController",
+    "swapped": true,
+    "second_sound": false,
+    "left_keys": [
+      [
+        "W",
+        "Up"
+      ],
+      [
+        "S",
+        "Down"
+      ],
+      [
+        "A",
+        "Left"
+      ],
+      [
+        "D",
+        "Right"
+      ],
+      [
+        "G",
+        "A"
+      ],
+      [
+        "F",
+        "B"
+      ],
+      [
+        "Num2",
+        "Start"
+      ],
+      [
+        "Num1",
+        "Select"
+      ]
+    ],
+    "right_keys": [
+      [
+        "ArrowUp",
+        "Up"
+      ],
+      [
+        "ArrowDown",
+        "Down"
+      ],
+      [
+        "ArrowLeft",
+        "Left"
+      ],
+      [
+        "ArrowRight",
+        "Right"
+      ],
+      [
+        "L",
+        "A"
+      ],
+      [
+        "K",
+        "B"
+      ],
+      [
+        "Enter",
+        "Start"
+      ],
+      [
+        "Backspace",
+        "Select"
+      ]
+    ]
+  },
+  "gimmicks": {
+    "rumble": false,
+    "light_source": "Slider",
+    "light": 0.425,
+    "camera": "Picture",
+    "camera_view": {
+      "zoom": 0.8,
+      "x": 0.425,
+      "y": 0.425
+    },
+    "clock_offsets": {},
+    "printers": []
+  },
+  "discord": {
+    "enabled": true,
+    "game": false,
+    "details": false,
+    "play_time": false,
+    "screenshot": true,
+    "every": "FiveMinutes"
+  },
+  "achievements": {
+    "account": null,
+    "in_library": false
+  },
+  "stats_range": "Calendar",
+  "current_tab": "Controls",
+  "quick_slot": 1,
+  "autosave_interval": "FifteenMinutes",
+  "autosave_keep": 11,
+  "rewind": "Off",
+  "fast_forward_speed": "Five",
+  "screenshot_scale": 5,
+  "recording_scale": 4,
+  "randomized_ram": true,
+  "dev_mode": true,
+  "check_updates": false,
+  "covers": false,
+  "focus_place": {
+    "x": 0.425,
+    "y": 0.425
+  },
+  "hud": {
+    "shown": false,
+    "opacity": 0.3125,
+    "huds": []
+  },
+  "big_screen": {
+    "on": true,
+    "confirm": "Bottom",
+    "icons": "Nintendo",
+    "backdrop": "Theme"
+  },
+  "ds_user": {
+    "nickname": null,
+    "birthday": [
+      1,
+      1
+    ],
+    "language": null,
+    "favorite_color": 1,
+    "keep_firmware_settings": true,
+    "clock": null
+  },
+  "ds_online": {
+    "service": "Citrine",
+    "dns": null,
+    "direct": true
+  },
+  "walker": {
+    "in_game": true,
+    "phone": false
+  },
+  "track_pc": true,
+  "synced": {
+    "entries": {
+      "autosave_interval": {
+        "at": 1,
+        "value": "FifteenMinutes"
+      },
+      "autosave_keep": {
+        "at": 1,
+        "value": 11
+      },
+      "bindings.ds.keyboard": {
+        "at": 0,
+        "value": [
+          [
+            "C",
+            "X"
+          ],
+          [
+            "V",
+            "Y"
+          ]
+        ]
+      },
+      "bindings.keyboard": {
+        "at": 0,
+        "value": [
+          [
+            "W",
+            "Up"
+          ],
+          [
+            "ArrowUp",
+            "Up"
+          ],
+          [
+            "S",
+            "Down"
+          ],
+          [
+            "ArrowDown",
+            "Down"
+          ],
+          [
+            "A",
+            "Left"
+          ],
+          [
+            "ArrowLeft",
+            "Left"
+          ],
+          [
+            "D",
+            "Right"
+          ],
+          [
+            "ArrowRight",
+            "Right"
+          ],
+          [
+            "Q",
+            "A"
+          ],
+          [
+            "Z",
+            "A"
+          ],
+          [
+            "Y",
+            "A"
+          ],
+          [
+            "O",
+            "A"
+          ],
+          [
+            "E",
+            "B"
+          ],
+          [
+            "X",
+            "B"
+          ],
+          [
+            "P",
+            "B"
+          ],
+          [
+            "Enter",
+            "Start"
+          ],
+          [
+            "Backspace",
+            "Select"
+          ]
+        ]
+      },
+      "bindings.shoulders.keyboard": {
+        "at": 0,
+        "value": [
+          [
+            "Num1",
+            "L"
+          ],
+          [
+            "Num3",
+            "R"
+          ]
+        ]
+      },
+      "color_correction": {
+        "at": 1,
+        "value": "Raw"
+      },
+      "console": {
+        "at": 1,
+        "value": "GameBoy"
+      },
+      "custom_palette": {
+        "at": 0,
+        "value": null
+      },
+      "dev_mode": {
+        "at": 1,
+        "value": true
+      },
+      "dmg_theme": {
+        "at": 1,
+        "value": "Amber"
+      },
+      "ds_online.dns": {
+        "at": 0,
+        "value": null
+      },
+      "ds_online.service": {
+        "at": 1,
+        "value": "Citrine"
+      },
+      "ds_screens": {
+        "at": 1,
+        "value": {
+          "corner": "BottomLeft",
+          "desktop": {
+            "arrangement": "BigAndSmall",
+            "one_screen": true,
+            "swapped": true
+          },
+          "gap": 1,
+          "landscape": {
+            "arrangement": "BigAndSmall",
+            "one_screen": true,
+            "swapped": true
+          },
+          "portrait": {
+            "arrangement": "BigAndSmall",
+            "one_screen": true,
+            "swapped": true
+          },
+          "rotation": "Left",
+          "separate_tabs": true,
+          "small": "Half"
+        }
+      },
+      "ds_user.birthday": {
+        "at": 0,
+        "value": [
+          1,
+          1
+        ]
+      },
+      "ds_user.favorite_color": {
+        "at": 1,
+        "value": 1
+      },
+      "ds_user.language": {
+        "at": 0,
+        "value": null
+      },
+      "ds_user.nickname": {
+        "at": 0,
+        "value": null
+      },
+      "fast_forward_speed": {
+        "at": 1,
+        "value": "Five"
+      },
+      "game_names/POKEMON SILVER|0123ABCD": {
+        "at": 1,
+        "value": "Pokémon Silver"
+      },
+      "gbc_palette": {
+        "at": 0,
+        "value": null
+      },
+      "ghosting": {
+        "at": 1,
+        "value": true
+      },
+      "ghosting_strength": {
+        "at": 1,
+        "value": 0.2750000059604645
+      },
+      "gimmicks.printers": {
+        "at": 0,
+        "value": []
+      },
+      "hotkeys": {
+        "at": 0,
+        "value": {
+          "bindings": [
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F8",
+                "shift": false
+              },
+              "QuickSave"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F8",
+                "shift": true
+              },
+              "QuickSaveNewSlot"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F9",
+                "shift": false
+              },
+              "QuickLoad"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F12",
+                "shift": false
+              },
+              "Screenshot"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F12",
+                "shift": true
+              },
+              "ToggleRecording"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F5",
+                "shift": false
+              },
+              "TogglePause"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": true,
+                "key": "R",
+                "shift": false
+              },
+              "SoftReset"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F10",
+                "shift": false
+              },
+              "ToggleMute"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F11",
+                "shift": false
+              },
+              "ToggleFocusMode"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "Escape",
+                "shift": false
+              },
+              "LeaveFocusMode"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "F6",
+                "shift": false
+              },
+              "SwitchGame"
+            ],
+            [
+              {
+                "alt": false,
+                "ctrl": false,
+                "key": "Tab",
+                "shift": false
+              },
+              "FocusChat"
+            ]
+          ],
+          "debugger": {
+            "bindings": [
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "F7",
+                  "shift": false
+                },
+                "StepInstruction"
+              ],
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "F3",
+                  "shift": false
+                },
+                "StepOver"
+              ],
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "F4",
+                  "shift": false
+                },
+                "StepOut"
+              ]
+            ],
+            "offered": [
+              "StepInstruction",
+              "StepOver",
+              "StepOut",
+              "StepLine",
+              "StepFrame"
+            ],
+            "pads": []
+          },
+          "fast_forward": {
+            "bindings": [
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "Space",
+                  "shift": false
+                },
+                "FastForward"
+              ]
+            ],
+            "offered": [
+              "FastForward"
+            ],
+            "pads": []
+          },
+          "hud": {
+            "bindings": [
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "F3",
+                  "shift": true
+                },
+                "ToggleHuds"
+              ]
+            ],
+            "offered": [
+              "ToggleHuds"
+            ],
+            "pads": []
+          },
+          "offered": [
+            "QuickSave",
+            "QuickSaveNewSlot",
+            "QuickLoad",
+            "Screenshot",
+            "ToggleRecording",
+            "TogglePause",
+            "SoftReset",
+            "ToggleMute",
+            "ToggleFocusMode",
+            "LeaveFocusMode",
+            "ToggleTouchControls",
+            "SwitchGame",
+            "FocusChat"
+          ],
+          "pads": [],
+          "rewind": {
+            "bindings": [
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "R",
+                  "shift": false
+                },
+                "Rewind"
+              ]
+            ],
+            "offered": [
+              "Rewind"
+            ],
+            "pads": []
+          },
+          "screens": {
+            "bindings": [
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "F2",
+                  "shift": false
+                },
+                "SwapScreens"
+              ],
+              [
+                {
+                  "alt": false,
+                  "ctrl": false,
+                  "key": "F2",
+                  "shift": true
+                },
+                "OneScreen"
+              ],
+              [
+                {
+                  "alt": false,
+                  "ctrl": true,
+                  "key": "F2",
+                  "shift": false
+                },
+                "NextScreenLayout"
+              ]
+            ],
+            "offered": [
+              "SwapScreens",
+              "OneScreen",
+              "NextScreenLayout",
+              "ToggleLid"
+            ],
+            "pads": []
+          }
+        }
+      },
+      "local_link.left_keys": {
+        "at": 0,
+        "value": [
+          [
+            "W",
+            "Up"
+          ],
+          [
+            "S",
+            "Down"
+          ],
+          [
+            "A",
+            "Left"
+          ],
+          [
+            "D",
+            "Right"
+          ],
+          [
+            "G",
+            "A"
+          ],
+          [
+            "F",
+            "B"
+          ],
+          [
+            "Num2",
+            "Start"
+          ],
+          [
+            "Num1",
+            "Select"
+          ]
+        ]
+      },
+      "local_link.right_keys": {
+        "at": 0,
+        "value": [
+          [
+            "ArrowUp",
+            "Up"
+          ],
+          [
+            "ArrowDown",
+            "Down"
+          ],
+          [
+            "ArrowLeft",
+            "Left"
+          ],
+          [
+            "ArrowRight",
+            "Right"
+          ],
+          [
+            "L",
+            "A"
+          ],
+          [
+            "K",
+            "B"
+          ],
+          [
+            "Enter",
+            "Start"
+          ],
+          [
+            "Backspace",
+            "Select"
+          ]
+        ]
+      },
+      "local_link.second_sound": {
+        "at": 1,
+        "value": false
+      },
+      "local_link.swapped": {
+        "at": 1,
+        "value": true
+      },
+      "matrix": {
+        "at": 1,
+        "value": true
+      },
+      "matrix_corner_darkness": {
+        "at": 1,
+        "value": 0.23749999701976776
+      },
+      "matrix_edge_darkness": {
+        "at": 1,
+        "value": 0.16250000894069672
+      },
+      "online.focus_popups": {
+        "at": 1,
+        "value": false
+      },
+      "online.input_delay": {
+        "at": 1,
+        "value": "Four"
+      },
+      "online.notify_chats": {
+        "at": 1,
+        "value": false
+      },
+      "online.notify_friend_requests": {
+        "at": 1,
+        "value": false
+      },
+      "online.notify_invites": {
+        "at": 1,
+        "value": false
+      },
+      "online.show_playing": {
+        "at": 1,
+        "value": false
+      },
+      "online.typing_indicators": {
+        "at": 1,
+        "value": false
+      },
+      "randomized_ram": {
+        "at": 1,
+        "value": true
+      },
+      "recording_scale": {
+        "at": 0,
+        "value": 4
+      },
+      "rewind": {
+        "at": 1,
+        "value": "Off"
+      },
+      "same_size_pixels": {
+        "at": 1,
+        "value": true
+      },
+      "scaling": {
+        "at": 1,
+        "value": "Fit"
+      },
+      "screenshot_scale": {
+        "at": 1,
+        "value": 5
+      },
+      "stats_range": {
+        "at": 1,
+        "value": "Calendar"
+      },
+      "track_pc": {
+        "at": 1,
+        "value": true
+      },
+      "ui_theme": {
+        "at": 1,
+        "value": "CatppuccinFrappe"
+      },
+      "walker.in_game": {
+        "at": 1,
+        "value": true
+      }
+    },
+    "clock": 0,
+    "started": true
+  }
+}

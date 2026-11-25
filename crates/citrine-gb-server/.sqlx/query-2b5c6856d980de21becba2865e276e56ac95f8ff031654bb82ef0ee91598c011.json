@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", sealed, wrapped_key, stored, added_at\n               FROM archive_games WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "sealed",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "sealed"
+          }
+        }
+      },
+      {
+        "name": "wrapped_key",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "wrapped_key"
+          }
+        }
+      },
+      {
+        "name": "stored",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "stored"
+          }
+        }
+      },
+      {
+        "name": "added_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "archive_games",
+            "name": "added_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2b5c6856d980de21becba2865e276e56ac95f8ff031654bb82ef0ee91598c011"
+}

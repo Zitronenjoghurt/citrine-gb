@@ -7,16 +7,27 @@ pub fn client_address(headers: &HeaderMap, peer: SocketAddr, hops: usize) -> IpA
         return peer;
     }
 
-    let chain: Vec<&str> = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(',').map(str::trim).collect())
-        .unwrap_or_default();
-
-    if let Some(at) = chain.len().checked_sub(hops)
-        && let Some(found) = chain.get(at).and_then(|raw| raw.parse().ok())
+    let lines: Vec<&str> = match headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .map(|value| value.to_str())
+        .collect()
     {
-        return found;
+        Ok(lines) => lines,
+        Err(_) => return peer,
+    };
+    if !lines.is_empty() {
+        let chain: Vec<&str> = lines
+            .iter()
+            .flat_map(|line| line.split(','))
+            .map(str::trim)
+            .collect();
+        return chain
+            .len()
+            .checked_sub(hops)
+            .and_then(|at| chain.get(at))
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(peer);
     }
 
     headers
@@ -115,6 +126,24 @@ mod tests {
             client_address(&HeaderMap::new(), peer("10.0.0.1"), 1),
             ip("10.0.0.1")
         );
+    }
+
+    #[test]
+    fn a_forged_first_header_line_cannot_hide_the_line_our_proxy_added() {
+        let sent = headers(&[
+            ("x-forwarded-for", "9.9.9.9"),
+            ("x-forwarded-for", "203.0.113.7"),
+        ]);
+        assert_eq!(
+            client_address(&sent, peer("10.0.0.1"), 1),
+            ip("203.0.113.7")
+        );
+    }
+
+    #[test]
+    fn a_forged_real_ip_is_ignored_when_a_chain_was_sent() {
+        let sent = headers(&[("x-forwarded-for", "junk"), ("x-real-ip", "9.9.9.9")]);
+        assert_eq!(client_address(&sent, peer("10.0.0.1"), 1), ip("10.0.0.1"));
     }
 
     #[test]

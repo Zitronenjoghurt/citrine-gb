@@ -61,6 +61,8 @@ pub struct Fast {
     pub cache: *const u8,
     pub windows: [Window; WINDOWS],
     pub pages: *const Page,
+    pub rom: *const u8,
+    pub bios: *const u8,
 }
 
 impl Fast {
@@ -69,6 +71,8 @@ impl Fast {
         cache: ptr::null(),
         windows: [Window::CLOSED; WINDOWS],
         pages: ptr::null(),
+        rom: ptr::null(),
+        bios: ptr::null(),
     };
 }
 

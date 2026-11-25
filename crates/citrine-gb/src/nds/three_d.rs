@@ -1,5 +1,6 @@
 use super::geometry::frame::Frame;
 use super::geometry::{self, Geometry};
+use super::lcd::Lcd;
 use super::render::texture::{Decoded, PALETTE_SIZE, TEXTURE_SIZE, TextureMemory};
 use super::render::{self, Registers, Renderer, Stencil};
 use super::video::{HEIGHT, Line3d};
@@ -12,6 +13,13 @@ pub const REGISTERS_FIRST: usize = 0x320;
 pub const REGISTERS_LAST: usize = 0x3BF;
 const RAM_OVERFLOW: u32 = 1 << 13;
 const LOOK_AHEAD: u32 = 64;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PackedWrite {
+    pub stall: u32,
+    pub raised: bool,
+    pub level: bool,
+}
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThreeD {
@@ -402,11 +410,11 @@ impl ThreeD {
         self.registers.read(render::DISP3DCNT) | overflow
     }
 
-    pub fn write(&mut self, offset: usize, value: u32, mask: u32) -> u32 {
+    pub fn write(&mut self, offset: usize, value: u32, mask: u32, lcd: &Lcd) -> u32 {
         match offset {
             geometry::FIRST..=geometry::LAST => {
                 self.geometry.write(offset - geometry::FIRST, value, mask);
-                return self.drain_while_full();
+                return self.drain_while_full(lcd);
             }
             render::DISP3DCNT if value & mask & RAM_OVERFLOW != 0 => {
                 self.geometry.acknowledge_ram_overflow();
@@ -417,9 +425,30 @@ impl ThreeD {
         0
     }
 
-    pub fn write_packed(&mut self, value: u32) -> u32 {
+    pub fn write_packed(&mut self, value: u32, lcd: &Lcd) -> u32 {
         self.geometry.write_packed(value);
-        self.drain_while_full()
+        self.drain_while_full(lcd)
+    }
+
+    pub fn write_packed_words(&mut self, words: &[u32], lcd: &Lcd) -> PackedWrite {
+        let mut write = PackedWrite::default();
+        let mut rest = words;
+        while let Some((&first, tail)) = rest.split_first() {
+            self.geometry.write_packed(first);
+            self.settle_packed(&mut write, lcd);
+            let written = self.geometry.write_packed_until_full(tail);
+            if written > 0 {
+                self.settle_packed(&mut write, lcd);
+            }
+            rest = &tail[written..];
+        }
+        write
+    }
+
+    fn settle_packed(&mut self, write: &mut PackedWrite, lcd: &Lcd) {
+        write.stall += self.drain_while_full(lcd);
+        write.level = self.irq();
+        write.raised |= write.level;
     }
 
     pub fn step(&mut self, cycles: u32) {
@@ -559,9 +588,13 @@ impl ThreeD {
         self.geometry.come_home();
     }
 
-    fn drain_while_full(&mut self) -> u32 {
+    fn drain_while_full(&mut self, lcd: &Lcd) -> u32 {
         let mut spent = 0;
         while self.geometry.full() {
+            if self.geometry.swapping() {
+                spent += lcd.until_vblank().saturating_sub(self.ahead + spent);
+                break;
+            }
             let busy = self.geometry.busy();
             self.geometry.step(busy);
             spent += busy;
@@ -580,7 +613,7 @@ mod tests {
     use super::super::dma::{DmaBus, Run};
     use super::super::geometry::command::*;
     use super::super::interrupt::Irq;
-    use super::super::lcd::{FRAME_CYCLES, LINE_CYCLES, VISIBLE_LINES};
+    use super::super::lcd::{FRAME_CYCLES, LINE_CYCLES, Lcd, VISIBLE_LINES};
     use super::super::video::WIDTH;
     use super::super::video::color;
     use crate::gba::wait::Width;
@@ -800,6 +833,111 @@ mod tests {
         }
         assert_eq!(states[0], states[1]);
         assert!(states[0].1 > 0);
+    }
+
+    #[test]
+    fn a_fifo_dma_run_of_mixed_commands_leaves_what_word_by_word_writes_leave() {
+        let words = mixed_commands(0x1234_5678, 900);
+        let run = Run {
+            source: 0x0200_0000,
+            source_step: 4,
+            dest: GXFIFO,
+            dest_step: 0,
+            wide: true,
+            units: words.len() as u32,
+        };
+        for (irq_mode, queued) in [(1, 0), (1, 100), (2, 3), (2, 250), (0, 120)] {
+            let mut states = Vec::new();
+            for whole_run in [true, false] {
+                let mut buses = console();
+                buses.arm9().write(GXSTAT, Width::Word, irq_mode << 30);
+                for _ in 0..queued {
+                    send(&mut buses, MTX_IDENTITY, 0);
+                }
+                for (index, &word) in words.iter().enumerate() {
+                    buses
+                        .arm9()
+                        .write(0x0200_0000 + 4 * index as u32, Width::Word, word);
+                }
+                buses
+                    .arm9()
+                    .write(IF, Width::Word, Irq::GEOMETRY_FIFO.bits());
+                buses.arm9().take_stall();
+                if whole_run {
+                    buses.arm9().copy(&run);
+                } else {
+                    run.copy_each(&mut buses.arm9());
+                }
+                let stall = buses.arm9().take_stall();
+                let flags = buses.interrupts(super::super::Cpu::Arm9).flags();
+                let status = buses.arm9().read(GXSTAT, Width::Word);
+                buses.elapse(FRAME_CYCLES);
+                let later = buses.arm9().read(GXSTAT, Width::Word);
+                states.push((status, stall, flags, later));
+            }
+            assert_eq!(states[0], states[1], "irq mode {irq_mode}, {queued} queued");
+        }
+    }
+
+    #[test]
+    fn a_full_fifo_behind_a_swap_stalls_the_arm9_until_vblank() {
+        let mut buses = console();
+        send(&mut buses, SWAP_BUFFERS, 0);
+        let elapsed = 5_000;
+        buses.elapse(elapsed);
+        buses.arm9().take_stall();
+        for _ in 0..300 {
+            send(&mut buses, MTX_IDENTITY, 0);
+        }
+        let until_vblank = u32::from(VISIBLE_LINES) * LINE_CYCLES - elapsed;
+        assert_eq!(buses.arm9().take_stall(), 2 * until_vblank);
+        let full = 1 << 24;
+        assert_ne!(buses.arm9().read(GXSTAT, Width::Word) & full, 0);
+        buses.elapse(until_vblank + 10_000);
+        assert_eq!(buses.arm9().read(GXSTAT, Width::Word) & full, 0);
+    }
+
+    fn mixed_commands(mut seed: u32, len: usize) -> Vec<u32> {
+        let commands = [
+            NOP,
+            MTX_IDENTITY,
+            MTX_PUSH,
+            MTX_POP,
+            MTX_MULT_4X4,
+            MTX_TRANS,
+            COLOR,
+            NORMAL,
+            TEXCOORD,
+            VTX_16,
+            VTX_10,
+            VTX_DIFF,
+            BEGIN_VTXS,
+            END_VTXS,
+            SWAP_BUFFERS,
+        ];
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let mut words = Vec::new();
+        while words.len() < len {
+            if next() % 16 == 0 {
+                words.push(0);
+                continue;
+            }
+            let picked: Vec<u8> = (0..4)
+                .map(|_| commands[(next() >> 8) as usize % commands.len()])
+                .collect();
+            words.push(u32::from_le_bytes([
+                picked[0], picked[1], picked[2], picked[3],
+            ]));
+            for &command in &picked {
+                for _ in 0..parameters(command) {
+                    words.push(next() & 0x0FFF_0FFF);
+                }
+            }
+        }
+        words
     }
 
     #[test]
@@ -1063,7 +1201,12 @@ mod tests {
 
     fn engine_quad(three_d: &mut super::ThreeD) {
         let send = |three_d: &mut super::ThreeD, command: u8, param: u32| {
-            three_d.write(0x400 + (usize::from(command) << 2), param, u32::MAX);
+            three_d.write(
+                0x400 + (usize::from(command) << 2),
+                param,
+                u32::MAX,
+                &Lcd::default(),
+            );
         };
         send(three_d, VIEWPORT, 0xBFFF_0000);
         send(three_d, POLYGON_ATTR, 0x001F_0080);
@@ -1088,7 +1231,12 @@ mod tests {
     #[test]
     fn an_unchanged_scene_keeps_its_lines_and_any_change_draws_it_again_like_melonds() {
         let mut three_d = super::ThreeD::default();
-        three_d.write(super::render::CLEAR_DEPTH, 0x7FFF, u32::MAX);
+        three_d.write(
+            super::render::CLEAR_DEPTH,
+            0x7FFF,
+            u32::MAX,
+            &Lcd::default(),
+        );
         let mut vram = super::Vram::default();
         let blank = super::Line3d::default();
         let drawn_again = |three_d: &mut super::ThreeD, vram: &super::Vram| {
@@ -1099,10 +1247,15 @@ mod tests {
         engine_quad(&mut three_d);
         assert!(drawn_again(&mut three_d, &vram));
         assert!(!drawn_again(&mut three_d, &vram));
-        three_d.write(super::render::CLEAR_COLOR, 0x7C00, u32::MAX);
+        three_d.write(
+            super::render::CLEAR_COLOR,
+            0x7C00,
+            u32::MAX,
+            &Lcd::default(),
+        );
         assert!(drawn_again(&mut three_d, &vram));
         assert!(!drawn_again(&mut three_d, &vram));
-        three_d.write(super::render::TOON_TABLE, 0x001F, u32::MAX);
+        three_d.write(super::render::TOON_TABLE, 0x001F, u32::MAX, &Lcd::default());
         assert!(drawn_again(&mut three_d, &vram));
         vram.write_control(super::super::vram::Bank::A, TEXTURE_SLOT_0 as u8);
         assert!(drawn_again(&mut three_d, &vram));
@@ -1119,12 +1272,22 @@ mod tests {
     fn a_3d_engine_cloned_or_copied_into_draws_what_the_original_draws() {
         let vram = super::Vram::default();
         let mut original = super::ThreeD::default();
-        original.write(super::render::CLEAR_DEPTH, 0x7FFF, u32::MAX);
+        original.write(
+            super::render::CLEAR_DEPTH,
+            0x7FFF,
+            u32::MAX,
+            &Lcd::default(),
+        );
         engine_quad(&mut original);
         engine_frame(&mut original, &vram);
         let mut clone = original.clone();
         let mut copied = super::ThreeD::default();
-        copied.write(super::render::CLEAR_COLOR, 0x001F, u32::MAX);
+        copied.write(
+            super::render::CLEAR_COLOR,
+            0x001F,
+            u32::MAX,
+            &Lcd::default(),
+        );
         engine_quad(&mut copied);
         engine_frame(&mut copied, &vram);
         copied.clone_from(&original);
@@ -1135,7 +1298,12 @@ mod tests {
             &textures(&clone)
         ));
         for three_d in [&mut original, &mut clone, &mut copied] {
-            three_d.write(super::render::CLEAR_COLOR, 0x7C00, u32::MAX);
+            three_d.write(
+                super::render::CLEAR_COLOR,
+                0x7C00,
+                u32::MAX,
+                &Lcd::default(),
+            );
             engine_quad(three_d);
             engine_frame(three_d, &vram);
         }

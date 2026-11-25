@@ -11,8 +11,8 @@ publish = false
 default = ["audio-codec", "nds"]
 audio-codec = ["dep:rusty_aac", "dep:symphonia-codec-aac", "dep:symphonia-core"]
 openh264-source = ["openh264/source"]
-gba = ["citrine-gb/gba", "citrine-gb-report/gba"]
-nds = ["gba", "citrine-gb/nds", "citrine-gb/jit", "citrine-gb-report/nds", "dep:citrine-gb-walker", "dep:citrine-gb-pkm", "dep:citrine-gb-nds-net", "dep:citrine-gb-nds-gpu", "dep:citrine-gb-nds-sound"]
+gba = ["citrine-gb/gba", "citrine-gb-report/gba", "citrine-gb-replay/gba"]
+nds = ["gba", "citrine-gb-gameinfo/nds", "citrine-gb/nds", "citrine-gb/jit", "citrine-gb-report/nds", "citrine-gb-replay/nds", "dep:citrine-gb-walker", "dep:citrine-gb-pkm", "dep:citrine-gb-nds-net", "dep:citrine-gb-nds-gpu", "dep:citrine-gb-nds-sound"]
 dev-route = []
 profile = ["dep:puffin", "dep:puffin_egui"]
 
@@ -24,7 +24,10 @@ targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
 citrine-gb = { workspace = true, features = ["debug", "persistence", "recording", "base64", "brotli", "strum"] }
 citrine-gb-achievements.workspace = true
 citrine-gb-gamedata = { workspace = true }
+citrine-gb-gameinfo.workspace = true
+citrine-gb-direct = { workspace = true }
 citrine-gb-net = { workspace = true }
+citrine-gb-replay = { workspace = true }
 citrine-gb-websocket = { workspace = true }
 citrine-gb-nds-files.workspace = true
 citrine-gb-nds-sound = { workspace = true, optional = true }
@@ -60,6 +63,7 @@ resvg = { version = "0.49.0", default-features = false }
 ringbuf = "0.4.8"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+serde_path_to_error = "0.1.20"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 sys-locale = { version = "0.3.2", features = ["js"] }
@@ -71,6 +75,7 @@ rfd = "0.17.2"
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 arboard = "3.6.1"
+color_quant = "1.1.0"
 discord-rich-presence = "1.1.0"
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 
@@ -103,11 +108,18 @@ wgpu = { version = "27.0.1", features = ["metal", "vulkan", "dx12"] }
 [target.'cfg(not(any(windows, target_os = "android")))'.dependencies]
 gilrs = "0.11.1"
 
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "async-secret-service", "async-io", "crypto-rust"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo"] }
+objc2 = "0.6.3"
+raw-window-handle = "0.6.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6.2"
 sdl3-sys = { version = "0.7.2", default-features = false, features = ["build-from-source-static", "no-sdl-audio", "no-sdl-camera", "no-sdl-dialog", "no-sdl-gpu", "no-sdl-render", "no-sdl-tray"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Devices_Display", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 puffin = { version = "0.20.0", optional = true, features = ["web"] }
@@ -152,7 +164,14 @@ web-sys = { version = "0.3.70", features = [
     "IdbTransaction",
     "IdbTransactionMode",
     "Location",
+    "MediaDeviceInfo",
+    "MediaDeviceKind",
+    "MediaDevices",
     "MediaQueryList",
+    "MediaStream",
+    "MediaStreamAudioSourceNode",
+    "MediaStreamConstraints",
+    "MediaStreamTrack",
     "MessageEvent",
     "MessagePort",
     "Navigator",
@@ -176,6 +195,7 @@ citrine-gb-nds-files = { workspace = true, features = ["fixtures"] }
 base64 = "0.22.1"
 citrine-gb-server = { workspace = true }
 minisign = "0.7"
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 mp4 = "0.14.0"
 openh264 = { version = "0.9.9", features = ["source"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled"] }
@@ -195,6 +215,6 @@ winresource = "0.1"
 [package.metadata.winresource]
 ProductName = "Citrine"
 FileDescription = "A cycle-accurate Game Boy and Game Boy Color emulator"
-LegalCopyright = "MIT licensed"
+LegalCopyright = "Copyright (C) 2026 Zitronenjoghurt. GPL-3.0-or-later"
 CompanyName = "Zitronenjoghurt"
 OriginalFilename = "citrine.exe"

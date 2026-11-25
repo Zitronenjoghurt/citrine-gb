@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO archive_games (id, sealed, wrapped_key, stored, added_at)\n             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "18ae77b4a295cc9095ffa203ec078ca14814b06952b7a3eaf2e58e3456da0fc7"
+}

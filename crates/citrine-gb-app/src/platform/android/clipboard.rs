@@ -23,6 +23,7 @@ fn mime(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Screenshot | MediaKind::Print => "image/png",
         MediaKind::Recording => "video/mp4",
+        MediaKind::Replay => "application/octet-stream",
     }
 }
 

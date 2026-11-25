@@ -1,11 +1,14 @@
 use super::{Online, Phase};
-use crate::storage::Backend;
+use crate::storage::Folders;
+use crate::storage::kinds::Folder;
 use citrine_gb_net::{
     Body, CHUNK_BYTES, ChatMessage, ClientMsg, Edit, Envelope, ErrorCode, FileId, FileInfo,
     FriendState, MAX_PALETTE_BYTES, MAX_RECEIPT_IDS, MAX_TEXT_CHARS, MessageId, OldChat, OnlineId,
-    Receipt, STORAGE_BLOCK, ServerMsg, Share, ShareKind, Tag,
+    Quote, Receipt, STORAGE_BLOCK, ServerMsg, Share, ShareKind, Tag, quote_line, typing_text,
 };
-use history::{decode_history, encode_history, history_name, is_history_name};
+use history::{
+    decode_history, decode_kept, encode_history, history_name, is_history_name, trim_history,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -13,7 +16,7 @@ use web_time::Instant;
 
 pub mod history;
 
-const NAMESPACE: &str = "chats";
+const NAMESPACE: Folder = Folder::Chats;
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 const RECEIPT_EVERY: Duration = Duration::from_secs(1);
 const UPLOAD_PER_SECOND: f64 = 3.0 * 1024.0 * 1024.0;
@@ -108,6 +111,7 @@ pub struct ChatEntry {
     pub body: Body,
     pub delivery: Delivery,
     pub change: Change,
+    pub reply: Option<Quote>,
 }
 
 impl ChatEntry {
@@ -125,6 +129,31 @@ impl ChatEntry {
 
     fn reached_anyone(&self) -> bool {
         !matches!(self.delivery, Delivery::Sending | Delivery::Failed(_))
+    }
+
+    pub fn quotes_mine(&self) -> Option<bool> {
+        self.reply
+            .as_ref()
+            .map(|quote| quote.by_sender == self.mine)
+    }
+
+    pub fn quote(&self) -> Quote {
+        let line = match &self.body {
+            Body::Text(text) => quote_line(text),
+            Body::Share(share) => match share.kind {
+                ShareKind::Screenshot => "Screenshot",
+                ShareKind::Recording => "Recording",
+                ShareKind::Replay => "Replay",
+            }
+            .to_owned(),
+            Body::Palette(_) => "Palette".to_owned(),
+            _ => String::new(),
+        };
+        Quote {
+            id: self.id,
+            by_sender: self.mine,
+            line,
+        }
     }
 }
 
@@ -147,6 +176,7 @@ pub struct Conversation {
     pub entries: Vec<ChatEntry>,
     pub unread: usize,
     pub relayed: BTreeMap<u64, MessageId>,
+    pub typing_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +213,10 @@ struct Download {
     data: Vec<u8>,
 }
 
+const UNSENT: &str = "The server couldn't send the file";
+const KEPT_HISTORY_BYTES: usize = 128 << 20;
+const PREALLOCATED_BYTES: u64 = 16 << 20;
+
 #[derive(Default)]
 pub struct ChatState {
     chats: BTreeMap<OnlineId, Conversation>,
@@ -199,7 +233,7 @@ pub struct ChatState {
     receipts: BTreeMap<OnlineId, Receipt>,
     receipts_at: Option<Instant>,
     files: Option<Vec<FileInfo>>,
-    store: Option<Backend>,
+    store: Option<Folders>,
     sent: u32,
     dirty: bool,
     saved_at: Option<Instant>,
@@ -370,6 +404,15 @@ impl ChatState {
         self.dirty = true;
     }
 
+    fn take_typing_text(&mut self, friend: OnlineId, text: &str) {
+        let text = typing_text(text);
+        let chat = self.chats.entry(friend).or_default();
+        if chat.typing_text != text {
+            chat.typing_text = text;
+            self.dirty = true;
+        }
+    }
+
     fn insert_old(&mut self, friend: OnlineId, mut entry: ChatEntry) {
         let chat = self.chats.entry(friend).or_default();
         if chat.entries.iter().any(|e| e.id == entry.id) {
@@ -429,6 +472,7 @@ impl ChatState {
             return false;
         };
         self.saved_at = Some(now);
+        trim_history(&mut self.chats, KEPT_HISTORY_BYTES);
         let Some(bytes) = encode_history(&self.chats) else {
             return false;
         };
@@ -555,7 +599,7 @@ impl Online {
     }
 
     pub fn persist_chats(&mut self) {
-        self.chat.store = Some(Backend::settings());
+        self.chat.store = Some(Folders::default());
     }
 
     pub(super) fn chat_changes_due(&mut self) {
@@ -665,25 +709,22 @@ impl Online {
                     );
                 }
             }
-            ServerMsg::FileStart { file, size } => {
-                if let Some(download) = self.chat.downloads.get_mut(&file) {
-                    download.size = size;
-                    download.data = Vec::with_capacity(size as usize);
-                    self.chat.fetched.insert(
-                        file,
-                        Fetch::Loading {
-                            done: 0,
-                            total: size,
-                        },
-                    );
+            ServerMsg::FileStart { file, size } => match self.chat.downloads.get_mut(&file) {
+                Some(download) if size == download.size => {
+                    download.data = Vec::with_capacity(size.min(PREALLOCATED_BYTES) as usize);
                 }
-            }
+                Some(_) => {
+                    self.chat.downloads.remove(&file);
+                    self.chat.fetched.insert(file, Fetch::Failed(UNSENT));
+                }
+                None => {}
+            },
             ServerMsg::FileChunk { file, data } => self.chat_chunk(file, data),
             ServerMsg::DownloadFailed { file, error } => {
                 self.chat.downloads.remove(&file);
                 let text = match error {
                     ErrorCode::UnknownFile => "This file is no longer on the server",
-                    _ => "The server couldn't send the file",
+                    _ => UNSENT,
                 };
                 self.chat.fetched.insert(file, Fetch::Failed(text));
             }
@@ -725,6 +766,10 @@ impl Online {
                 self.chat.take_delete(from, *id);
                 return;
             }
+            Body::TypingText(text) => {
+                self.chat.take_typing_text(from, text);
+                return;
+            }
             Body::Text(text) if text.chars().count() > MAX_TEXT_CHARS => return,
             Body::Palette(palette) if palette.len() > MAX_PALETTE_BYTES => return,
             _ => {}
@@ -748,6 +793,7 @@ impl Online {
                 body: envelope.body,
                 delivery: Delivery::Received,
                 change: Change::Kept,
+                reply: envelope.reply,
             },
         );
     }
@@ -771,6 +817,7 @@ impl Online {
             Body::Edit(_) | Body::Delete(_) => {
                 return self.chat.take_own_change(to, &envelope.body);
             }
+            Body::TypingText(_) => return,
             Body::Text(text) if text.chars().count() > MAX_TEXT_CHARS => return,
             Body::Palette(palette) if palette.len() > MAX_PALETTE_BYTES => return,
             _ => {}
@@ -789,6 +836,7 @@ impl Online {
                 body: envelope.body,
                 delivery: Delivery::Sent,
                 change: Change::Kept,
+                reply: envelope.reply,
             },
         );
     }
@@ -801,7 +849,7 @@ impl Online {
         let Ok(plain) = keys.open_kept(&chat.sealed) else {
             return;
         };
-        let Ok(entry) = postcard::from_bytes::<ChatEntry>(&plain) else {
+        let Some(entry) = decode_kept(&plain) else {
             return;
         };
         if entry.id == chat.key && entry.reached_anyone() {
@@ -869,10 +917,11 @@ impl Online {
             (Change::Edited { .. }, Body::Text(text)) => Some(Body::Text(text.clone())),
             _ => return,
         };
+        let reply = entry.reply.clone();
         let sealed = match (body, &self.keys, self.friends.get(&friend)) {
             (None, ..) => None,
             (Some(body), Some(keys), Some(person)) => {
-                Some(keys.seal_envelope(&person.public_key, &Envelope { id, body }))
+                Some(keys.seal_envelope(&person.public_key, &Envelope { id, body, reply }))
             }
             _ => return,
         };
@@ -916,6 +965,11 @@ impl Online {
         let Some(download) = self.chat.downloads.get_mut(&file) else {
             return;
         };
+        if (download.data.len() + data.len()) as u64 > download.size {
+            self.chat.downloads.remove(&file);
+            self.chat.fetched.insert(file, Fetch::Failed(UNSENT));
+            return;
+        }
         download.data.extend_from_slice(&data);
         let (done, total) = (download.data.len() as u64, download.size);
         if done < total {
@@ -1172,6 +1226,7 @@ impl Online {
         let envelope = Envelope {
             id,
             body: entry.body.clone(),
+            reply: entry.reply.clone(),
         };
         entry.delivery = Delivery::Sending;
         self.chat.dirty = true;
@@ -1235,13 +1290,27 @@ impl Online {
         self.friends
             .get(&friend)
             .is_some_and(|f| f.state == FriendState::Friend)
+            && !self.key_changed(friend)
     }
 
     pub fn send_text(&mut self, friend: OnlineId, text: &str) -> bool {
+        self.send_reply(friend, text, None)
+    }
+
+    pub fn send_reply(&mut self, friend: OnlineId, text: &str, to: Option<u64>) -> bool {
         let text = text.trim();
         if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS || !self.can_chat(friend) {
             return false;
         }
+        let reply = to.and_then(|to| {
+            self.chat
+                .chats
+                .get(&friend)?
+                .entries
+                .iter()
+                .find(|e| e.id == to && !e.is_deleted())
+                .map(ChatEntry::quote)
+        });
         let envelope = Envelope::new(Body::Text(text.to_owned()));
         let id = envelope.id;
         self.chat.push(
@@ -1253,6 +1322,7 @@ impl Online {
                 body: envelope.body,
                 delivery: Delivery::Sending,
                 change: Change::Kept,
+                reply,
             },
         );
         self.send_entry(friend, id);
@@ -1295,6 +1365,7 @@ impl Online {
                 body: envelope.body,
                 delivery: Delivery::Sending,
                 change: Change::Kept,
+                reply: None,
             },
         );
         self.start_upload(friend, id, bytes);
@@ -1317,6 +1388,7 @@ impl Online {
                 body: envelope.body,
                 delivery: Delivery::Sending,
                 change: Change::Kept,
+                reply: None,
             },
         );
         self.send_entry(friend, id);
@@ -1432,6 +1504,38 @@ impl Online {
         }
     }
 
+    pub fn typing_text(&self, friend: OnlineId) -> Option<&str> {
+        self.chat
+            .chats
+            .get(&friend)
+            .map(|chat| chat.typing_text.as_str())
+            .filter(|text| !text.is_empty())
+    }
+
+    pub(super) fn tell_typing_text(&mut self, to: OnlineId, now: Instant) {
+        let Some(text) = self.typing.text_owed(to).map(str::to_owned) else {
+            return;
+        };
+        let sealed = match (&self.keys, self.friends.get(&to)) {
+            (Some(keys), Some(person))
+                if person.state == FriendState::Friend && super::is_online(person.presence) =>
+            {
+                keys.seal_envelope(
+                    &person.public_key,
+                    &Envelope::new(Body::TypingText(text.clone())),
+                )
+            }
+            _ => return,
+        };
+        if !self.chat.take_chat(now) {
+            return;
+        }
+        let tag = self.chat.tag();
+        if self.send(ClientMsg::Chat { tag, to, sealed }) {
+            self.typing.told(to, text);
+        }
+    }
+
     pub fn conversation(&self, friend: OnlineId) -> Option<&Conversation> {
         self.chat.chats.get(&friend)
     }
@@ -1496,17 +1600,32 @@ impl Online {
                 .insert(file, Fetch::Failed("You're offline"));
             return;
         }
+        let Some(size) = self.chat.chats.get(&peer).and_then(|chat| {
+            chat.entries.iter().find_map(|e| match &e.body {
+                Body::Share(share) if share.file == file => Some(share.size),
+                _ => None,
+            })
+        }) else {
+            self.chat
+                .fetched
+                .insert(file, Fetch::Failed("The file can't be opened"));
+            return;
+        };
         self.chat.downloads.insert(
             file,
             Download {
                 peer,
-                size: 0,
+                size,
                 data: Vec::new(),
             },
         );
-        self.chat
-            .fetched
-            .insert(file, Fetch::Loading { done: 0, total: 0 });
+        self.chat.fetched.insert(
+            file,
+            Fetch::Loading {
+                done: 0,
+                total: size,
+            },
+        );
         self.send(ClientMsg::Download(file));
     }
 
@@ -1595,15 +1714,26 @@ impl Online {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn add_chat_for_test(&mut self, friend: OnlineId, entries: Vec<ChatEntry>) {
+        self.chat
+            .chats
+            .entry(friend)
+            .or_default()
+            .entries
+            .extend(entries);
+    }
+
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn persist_chats_in(&mut self, root: std::path::PathBuf) {
-        self.chat.store = Some(Backend::at(root));
+        self.chat.store = Some(Folders::at(root));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use citrine_gb_net::{Friend, FriendState, PublicKey, RelayId, ShareKind};
 
     fn mine(id: u64, delivery: Delivery) -> ChatEntry {
         ChatEntry {
@@ -1613,6 +1743,7 @@ mod tests {
             body: Body::Text("hi".into()),
             delivery,
             change: Change::Kept,
+            reply: None,
         }
     }
 
@@ -1651,6 +1782,63 @@ mod tests {
                 Delivery::Read(200),
             ]
         );
+    }
+
+    #[test]
+    fn a_download_only_takes_the_bytes_the_share_named() {
+        let (mut online, _wire, now) =
+            crate::online::tests::signed_in(&RelayId::from_bytes([1; 32]));
+        let friend = OnlineId::new(7).unwrap();
+        online.befriend_for_test(Friend {
+            online_id: friend,
+            display_name: "Ana".into(),
+            public_key: PublicKey([4; 32]),
+            state: FriendState::Friend,
+            presence: None,
+        });
+        let file = FileId([3; 16]);
+        let mut theirs = mine(1, Delivery::Received);
+        theirs.mine = false;
+        theirs.body = Body::Share(Share {
+            file,
+            kind: ShareKind::Screenshot,
+            size: 100,
+            game: "Tetris".into(),
+            rom_sha256: None,
+            created_at: 0,
+            width: 160,
+            height: 144,
+            length_ms: None,
+            preview: Vec::new(),
+        });
+        online.chat.push(friend, theirs);
+
+        online.fetch(friend, file);
+        online.receive(
+            ServerMsg::FileStart {
+                file,
+                size: u64::MAX,
+            },
+            now,
+        );
+        assert_eq!(online.fetched(file), Some(&Fetch::Failed(UNSENT)));
+
+        online.fetch(friend, file);
+        online.receive(ServerMsg::FileStart { file, size: 100 }, now);
+        online.receive(
+            ServerMsg::FileChunk {
+                file,
+                data: vec![0; 150],
+            },
+            now,
+        );
+        assert_eq!(online.fetched(file), Some(&Fetch::Failed(UNSENT)));
+
+        online.fetch(friend, FileId([9; 16]));
+        assert!(matches!(
+            online.fetched(FileId([9; 16])),
+            Some(Fetch::Failed(_))
+        ));
     }
 
     #[test]
@@ -1770,6 +1958,7 @@ mod tests {
             body: Body::Text(text.into()),
             delivery: Delivery::Received,
             change: Change::Kept,
+            reply: None,
         }
     }
 
@@ -2112,6 +2301,130 @@ mod tests {
         let start = Instant::now();
         pair.until("a moment passes", |_| start.elapsed() > SHOW_FOR / 5);
         assert!(!typing(&pair));
+    }
+
+    #[test]
+    fn a_reply_reaches_the_friend_and_a_new_device_with_its_quote() {
+        use crate::play::tests::{Pair, homebrew};
+        use citrine_gb_net::Quote;
+        let mut pair = Pair::new(false, 0, 0, homebrew());
+        let (host, guest) = (pair.host.id(), pair.guest.id());
+        assert!(
+            pair.guest
+                .online
+                .send_text(host, "did you beat the castle?\nI keep falling")
+        );
+        pair.until("clara has it", |p| texts(&p.host.online, guest).len() == 1);
+        let asked = pair.host.online.conversation(guest).unwrap().entries[0].id;
+        assert!(
+            pair.host
+                .online
+                .send_reply(guest, "yes, forty tries", Some(asked))
+        );
+        pair.until("mia has the reply", |p| {
+            texts(&p.guest.online, host).len() == 2
+        });
+        let second = |online: &Online, friend: OnlineId| {
+            online.conversation(friend).unwrap().entries[1].clone()
+        };
+        let quote = Quote {
+            id: asked,
+            by_sender: false,
+            line: "did you beat the castle?".into(),
+        };
+        let mia_sees = second(&pair.guest.online, host);
+        assert_eq!(mia_sees.body, Body::Text("yes, forty tries".into()));
+        assert_eq!(mia_sees.reply.as_ref(), Some(&quote));
+        assert_eq!(mia_sees.quotes_mine(), Some(true));
+        let clara_sent = second(&pair.host.online, guest);
+        assert_eq!(clara_sent.reply.as_ref(), Some(&quote));
+        assert_eq!(clara_sent.quotes_mine(), Some(false));
+        let mut settle = 0;
+        pair.until("the acks reach the relay", |_| {
+            settle += 1;
+            settle > 60
+        });
+
+        let mut phone = second_device(&mut pair);
+        let begun = Instant::now();
+        with_phone(
+            &mut pair,
+            &mut phone,
+            "the phone has the reply",
+            |_, phone| texts(phone, guest).len() == 2 || begun.elapsed() > Duration::from_secs(10),
+        );
+        let on_phone = second(&phone, guest);
+        assert!(on_phone.mine);
+        assert_eq!(on_phone.reply, Some(quote));
+        assert_eq!(on_phone.quotes_mine(), Some(false));
+    }
+
+    #[test]
+    fn a_reply_to_a_deleted_message_goes_without_a_quote() {
+        use citrine_gb_net::{Friend, FriendState, Presence, PublicKey, Quote};
+        let mut online = Online::default();
+        let friend = OnlineId::new(7).unwrap();
+        online.befriend_for_test(Friend {
+            online_id: friend,
+            display_name: "Ana".into(),
+            public_key: PublicKey([4; 32]),
+            state: FriendState::Friend,
+            presence: Some(Presence::Online { away: false }),
+        });
+        let mut gone = received(1, "old");
+        gone.change = Change::Deleted { told: true };
+        online.add_chat_for_test(friend, vec![gone, received(2, "  \n new one \n more")]);
+        assert!(online.send_reply(friend, "what?", Some(1)));
+        assert!(online.send_reply(friend, "yes", Some(2)));
+        let entries = &online.conversation(friend).unwrap().entries;
+        assert_eq!(entries[2].reply, None);
+        assert_eq!(
+            entries[3].reply,
+            Some(Quote {
+                id: 2,
+                by_sender: false,
+                line: "new one".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_friend_sees_my_typing_text_and_hears_it_once_a_connection() {
+        use crate::play::tests::{Pair, homebrew};
+        let mut pair = Pair::new(false, 0, 0, homebrew());
+        let (host, guest) = (pair.host.id(), pair.guest.id());
+        let shown = |p: &Pair| {
+            p.guest
+                .online
+                .is_typing(host, Instant::now())
+                .then(|| p.guest.online.typing_text(host).map(str::to_owned))
+        };
+        let retype = |pair: &mut Pair, text: &str| {
+            pair.host.online.compose(Some((guest, "")), Instant::now());
+            pair.host.online.set_typing_text(text);
+            pair.host.online.compose(Some((guest, "")), Instant::now());
+            pair.host.online.compose(Some((guest, "h")), Instant::now());
+        };
+
+        retype(&mut pair, "is meowing...");
+        pair.until("mia sees clara meowing", |p| {
+            shown(p) == Some(Some("is meowing".into()))
+        });
+        assert_eq!(pair.host.online.typing.text_owed(guest), None);
+
+        retype(&mut pair, "is purring");
+        pair.until("the new text", |p| {
+            shown(p) == Some(Some("is purring".into()))
+        });
+
+        retype(&mut pair, "");
+        pair.until("back to the default", |p| shown(p) == Some(None));
+
+        pair.host.online.typing.offline(guest);
+        assert_eq!(pair.host.online.typing.text_owed(guest), Some(""));
+        pair.host.online.typing.reset();
+        pair.host.online.set_typing_text("is meowing");
+        assert_eq!(pair.host.online.typing.text_owed(guest), Some("is meowing"));
     }
 
     #[test]

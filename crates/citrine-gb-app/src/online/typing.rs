@@ -1,4 +1,4 @@
-use citrine_gb_net::OnlineId;
+use citrine_gb_net::{OnlineId, typing_text};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use web_time::Instant;
@@ -30,6 +30,9 @@ pub struct Typing {
     heard: BTreeMap<OnlineId, Instant>,
     last_send: Option<Instant>,
     relay_lacks: bool,
+    raw: String,
+    text: String,
+    told: BTreeMap<OnlineId, String>,
 }
 
 impl Default for Typing {
@@ -41,6 +44,9 @@ impl Default for Typing {
             heard: BTreeMap::new(),
             last_send: None,
             relay_lacks: false,
+            raw: String::new(),
+            text: String::new(),
+            told: BTreeMap::new(),
         }
     }
 }
@@ -84,6 +90,21 @@ impl Typing {
         out
     }
 
+    pub fn set_text(&mut self, text: &str) {
+        if text != self.raw {
+            text.clone_into(&mut self.raw);
+            self.text = typing_text(text);
+        }
+    }
+
+    pub fn text_owed(&self, to: OnlineId) -> Option<&str> {
+        (self.told.get(&to) != Some(&self.text)).then_some(self.text.as_str())
+    }
+
+    pub fn told(&mut self, to: OnlineId, text: String) {
+        self.told.insert(to, text);
+    }
+
     pub fn stop(&mut self) -> Option<Signal> {
         self.sent.take().map(|(to, _)| Signal::Stop(to))
     }
@@ -109,6 +130,7 @@ impl Typing {
         self.heard.clear();
         self.last_send = None;
         self.relay_lacks = false;
+        self.told.clear();
     }
 
     pub fn heard(&mut self, from: OnlineId, typing: bool, now: Instant) {
@@ -121,6 +143,11 @@ impl Typing {
 
     pub fn gone(&mut self, from: OnlineId) {
         self.heard.remove(&from);
+    }
+
+    pub fn offline(&mut self, who: OnlineId) {
+        self.heard.remove(&who);
+        self.told.remove(&who);
     }
 
     pub fn is_typing(&self, from: OnlineId, now: Instant) -> bool {

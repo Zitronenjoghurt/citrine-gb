@@ -1,21 +1,53 @@
 use super::shelf::{Finder, Look};
 use super::{
     Ending, Engine, Incoming, KEPT_PINGS, PARTS_PER_UPDATE, PING_EVERY, PlaySession, RESEND_AFTER,
-    Role, SILENCE_LIMIT, Stage, unpacked,
+    Role, SETUP_PINGS, SILENCE_LIMIT, Stage, unpacked,
 };
 use crate::online::Online;
 use citrine_gb::gb::serial::LinkMessage;
+use citrine_gb_direct::Direct;
 use citrine_gb_net::{
-    CableByte, ClientMsg, GAME_ACK_BYTES, GAME_PART_BYTES, GAME_WINDOW_BYTES, GamePart, OnlineId,
-    PlayMsg, PublicKey, Sealed, SessionId, UNPACED_GAME_BYTES, game_cap, plays_with,
+    CableByte, ClientMsg, GAME_ACK_BYTES, GAME_PART_BYTES, GAME_WINDOW_BYTES, GamePart, Keys,
+    LinkPath, OnlineId, PeerLink, PlayMsg, PublicKey, UNPACED_GAME_BYTES, game_cap, plays_with,
 };
 use citrine_gb_threads::Threads;
 use std::sync::Arc;
 use web_time::Instant;
 
+pub(in crate::play) const HELD_BYTES: usize = 64 << 20;
+pub(in crate::play) const HELD_MESSAGES: usize = 16384;
+
+pub(in crate::play) fn fits<'a>(
+    held: impl ExactSizeIterator<Item = &'a PlayMsg>,
+    msg: &PlayMsg,
+) -> bool {
+    held.len() < HELD_MESSAGES
+        && held.map(PlayMsg::held_bytes).sum::<usize>() + msg.held_bytes() <= HELD_BYTES
+}
+
+pub(in crate::play) fn keep(
+    queue: &mut Vec<(OnlineId, PlayMsg)>,
+    from: OnlineId,
+    msg: PlayMsg,
+    most: usize,
+) {
+    queue.push((from, msg));
+    let mut total: usize = queue.iter().map(|(_, m)| m.held_bytes()).sum();
+    let mut cut = 0;
+    while queue.len() - cut > most || total > HELD_BYTES {
+        total -= queue[cut].1.held_bytes();
+        cut += 1;
+    }
+    queue.drain(..cut);
+}
+
 impl PlaySession {
     pub(super) fn receive(&mut self, msg: PlayMsg, finder: &mut Finder, now: Instant) {
         if !self.parked.is_empty() || self.waits_for_shelf(&msg, finder) {
+            if !fits(self.parked.iter(), &msg) {
+                self.end(Ending::Failed);
+                return;
+            }
             self.parked.push_back(msg);
             return;
         }
@@ -105,8 +137,13 @@ impl PlaySession {
                     self.round.acked = None;
                 }
             }
-            PlayMsg::Setup { round, from } => {
+            PlayMsg::Setup {
+                round,
+                from,
+                budget,
+            } => {
                 if round == self.round.number {
+                    self.round.their_budget = Some(u32::from(budget));
                     let console = self
                         .round
                         .theirs
@@ -132,6 +169,13 @@ impl PlaySession {
                     self.round_trips.push_back(ms);
                     while self.round_trips.len() > KEPT_PINGS {
                         self.round_trips.pop_front();
+                        self.stale_trips = self.stale_trips.saturating_sub(1);
+                    }
+                    if self.stale_trips > 0
+                        && self.round_trips.len() - self.stale_trips >= SETUP_PINGS
+                    {
+                        self.round_trips.drain(..self.stale_trips);
+                        self.stale_trips = 0;
                     }
                 }
             }
@@ -170,6 +214,10 @@ impl PlaySession {
                 if let Some(r) = self.round.rollback_mut() {
                     r.receive(msg);
                 } else if self.round.building.is_some() {
+                    if !fits(self.round.early.iter(), &msg) {
+                        self.end(Ending::Failed);
+                        return;
+                    }
                     self.round.early.push(msg);
                 }
             }
@@ -186,7 +234,8 @@ impl PlaySession {
             | PlayMsg::Paused(_)
             | PlayMsg::Away(_)
             | PlayMsg::WatchFrom { .. }
-            | PlayMsg::WatchGroup(_) => {}
+            | PlayMsg::WatchGroup(_)
+            | PlayMsg::Direct(_) => {}
             PlayMsg::Rejoin { round, from } => {
                 if round == self.round.number {
                     self.round.their_rejoin = Some(from);
@@ -370,7 +419,22 @@ impl PlaySession {
         }
     }
 
-    pub(super) fn flush(&mut self, online: &mut Online, aware: bool) {
+    pub(super) fn link(&mut self, keys: &Keys, key: &PublicKey) -> &mut PeerLink {
+        let sealer = self
+            .sealer
+            .get_or_insert_with(|| Arc::new(keys.sealer(key)))
+            .clone();
+        self.link.get_or_insert_with(|| PeerLink::new(sealer))
+    }
+
+    pub(super) fn flush(
+        &mut self,
+        online: &mut Online,
+        direct: &mut Direct,
+        want: bool,
+        aware: bool,
+        now: Instant,
+    ) {
         let Some(id) = self.id else {
             return;
         };
@@ -378,65 +442,54 @@ impl PlaySession {
         if let Some(r) = self.round.rollback_mut() {
             r.flush(&mut self.outbox);
         }
-        let key = self.key(online);
-        if self.sealer.is_none()
-            && let (Some(keys), Some(key)) = (online.keys(), key)
-        {
-            self.sealer = Some(Arc::new(keys.sealer(&key)));
+        let mut offerer = false;
+        if let (Some(keys), Some(key)) = (online.keys(), self.key(online)) {
+            offerer = keys.public_key().0 < key.0;
+            self.link(keys, &key);
         }
         self.take_sealed();
-        if self.outbox.is_empty() && self.sealed.is_empty() {
-            return;
-        }
-        let Some(key) = key else {
+        let want = want && self.is_live();
+        let Some(link) = &mut self.link else {
             return;
         };
-        send_all(
-            online,
-            id,
-            aware.then_some(self.friend),
-            &key,
-            std::mem::take(&mut self.outbox),
-            std::mem::take(&mut self.sealed),
-            &mut self.last_piece,
-        );
-    }
-}
-
-fn send_all(
-    online: &mut Online,
-    session: SessionId,
-    to: Option<OnlineId>,
-    key: &PublicKey,
-    msgs: Vec<PlayMsg>,
-    parts: Vec<Sealed>,
-    last_piece: &mut u32,
-) {
-    let sealed: Vec<ClientMsg> = match online.keys() {
-        Some(keys) => msgs
-            .iter()
-            .flat_map(|msg| msg.seal_in_pieces(keys, key, last_piece))
-            .map(|sealed| match to {
+        self.direct
+            .step(want, offerer, link, direct, &mut self.outbox, now);
+        for msg in std::mem::take(&mut self.outbox) {
+            link.send(&msg, now);
+        }
+        let to = aware.then_some(self.friend);
+        for (path, sealed) in link.poll(now) {
+            if path == LinkPath::Direct {
+                if let Ok(frame) = postcard::to_allocvec(&sealed) {
+                    direct.send(self.direct.tag(), frame);
+                }
+                continue;
+            }
+            online.send(match to {
                 Some(to) => ClientMsg::RoomPlay {
-                    room: session,
+                    room: id,
                     to,
                     sealed,
                 },
-                None => ClientMsg::Play { session, sealed },
-            })
-            .chain(parts.into_iter().map(|sealed| match to {
+                None => ClientMsg::Play {
+                    session: id,
+                    sealed,
+                },
+            });
+        }
+        for sealed in std::mem::take(&mut self.sealed) {
+            online.send(match to {
                 Some(to) => ClientMsg::RoomGame {
-                    room: session,
+                    room: id,
                     to,
                     sealed,
                 },
-                None => ClientMsg::Game { session, sealed },
-            }))
-            .collect(),
-        None => return,
-    };
-    for msg in sealed {
-        online.send(msg);
+                None => ClientMsg::Game {
+                    session: id,
+                    sealed,
+                },
+            });
+        }
     }
 }
 
@@ -471,5 +524,40 @@ fn from_byte(byte: CableByte) -> LinkMessage {
             since,
         },
         CableByte::Reply { id, byte } => LinkMessage::Reply { id, byte },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resync(mib: usize) -> PlayMsg {
+        PlayMsg::Resync {
+            round: 1,
+            frame: 0,
+            unit: 0,
+            data: vec![0; mib << 20],
+            cable: None,
+        }
+    }
+
+    #[test]
+    fn held_play_messages_stop_at_a_byte_budget() {
+        let friend = OnlineId::new(7).unwrap();
+        let mut queue = Vec::new();
+        for _ in 0..3 {
+            keep(&mut queue, friend, resync(30), 1024);
+        }
+        assert_eq!(queue.len(), 2);
+        let held: Vec<PlayMsg> = queue.into_iter().map(|(_, m)| m).collect();
+        assert!(fits(held.iter().take(1), &resync(30)));
+        assert!(!fits(held.iter(), &resync(30)));
+    }
+
+    #[test]
+    fn held_play_messages_stop_at_a_count() {
+        let held = vec![PlayMsg::Ping(0); HELD_MESSAGES];
+        assert!(fits(held.iter().skip(1), &PlayMsg::Ping(0)));
+        assert!(!fits(held.iter(), &PlayMsg::Ping(0)));
     }
 }

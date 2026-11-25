@@ -1,5 +1,8 @@
 use crate::proto::Frame;
 
+pub const MAX_SCREEN_PIXELS: usize = 1024 * 1024;
+pub const MAX_SCREENS: usize = 4;
+
 #[derive(Debug, Default)]
 pub struct Encoder {
     last: Vec<u8>,
@@ -42,9 +45,17 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn decode(&mut self, frame: &Frame) -> Option<&[u8]> {
-        let size = usize::from(frame.width) * usize::from(frame.height) * 3;
-        let delta = lz4_flex::decompress_size_prepended(&frame.data).ok()?;
-        if delta.len() != size {
+        let pixels = usize::from(frame.width) * usize::from(frame.height);
+        if pixels > MAX_SCREEN_PIXELS {
+            return None;
+        }
+        let size = pixels * 3;
+        let (claimed, packed) = frame.data.split_first_chunk::<4>()?;
+        if u32::from_le_bytes(*claimed) as usize != size {
+            return None;
+        }
+        let mut delta = vec![0; size];
+        if lz4_flex::decompress_into(packed, &mut delta).ok()? != size {
             return None;
         }
         if frame.key {
@@ -124,12 +135,43 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_that_claims_more_than_its_screen_is_refused() {
+        let mut lying = Encoder::default().encode(0, 0, &picture(3), 256, 192);
+        lying.data[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(Decoder::default().decode(&lying), None);
+        let blank = vec![0; 1025 * 1024 * 4];
+        let huge = Encoder::default().encode(0, 0, &blank, 1025, 1024);
+        assert_eq!(Decoder::default().decode(&huge), None);
+    }
+
+    #[test]
     fn a_delta_without_its_key_frame_is_refused() {
         let mut encoder = Encoder::default();
         let rgba = picture(3);
         encoder.encode(0, 0, &rgba, 256, 192);
         let delta = encoder.encode(0, 1, &rgba, 256, 192);
         assert_eq!(Decoder::default().decode(&delta), None);
+    }
+
+    #[test]
+    fn a_frame_claiming_a_bigger_picture_is_refused() {
+        let mut encoder = Encoder::default();
+        let mut frame = encoder.encode(0, 0, &picture(4), 256, 192);
+        frame.data[..4].copy_from_slice(&0xffff_ff40_u32.to_le_bytes());
+        assert_eq!(Decoder::default().decode(&frame), None);
+    }
+
+    #[test]
+    fn an_oversized_screen_is_refused() {
+        let frame = Frame {
+            screen: 0,
+            seq: 0,
+            width: u16::MAX,
+            height: u16::MAX,
+            key: true,
+            data: lz4_flex::compress_prepend_size(&[]),
+        };
+        assert_eq!(Decoder::default().decode(&frame), None);
     }
 
     #[test]

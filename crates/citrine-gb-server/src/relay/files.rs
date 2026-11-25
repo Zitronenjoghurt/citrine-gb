@@ -30,17 +30,18 @@ impl Client {
             return Err(ErrorCode::TooLarge);
         }
         let usage = db(self.app.db.usage(row.id).await)?;
-        if usage.files + self.uploads.len() as u64 >= self.app.config.limits.max_files {
+        let held = self.app.storage.held_by(row.id);
+        if usage.files + held.files >= self.app.config.limits.max_files {
             self.refused(Refused::Storage);
             return Err(ErrorCode::QuotaFull);
         }
         let cost = charge(size);
-        if usage.bytes + self.reserved() + cost > quota {
+        if usage.bytes + held.bytes + cost > quota {
             self.refused(Refused::Storage);
             return Err(ErrorCode::QuotaFull);
         }
         self.room(cost).await?;
-        let reserved = self.app.storage.reserve(cost);
+        let reserved = self.app.storage.reserve(row.id, cost);
         let id = random_file_id();
         let path = self.app.files_dir.join(format!("{}.part", hex(&id.0)));
         let file = tokio::fs::File::create(&path).await.map_err(|e| {
@@ -55,15 +56,11 @@ impl Client {
                 received: 0,
                 file,
                 path,
-                reserved,
+                _reserved: reserved,
             },
         );
         self.send(ServerMsg::UploadReady(tag)).await;
         Ok(())
-    }
-
-    pub(super) fn reserved(&self) -> u64 {
-        self.uploads.values().map(|u| u.reserved.bytes()).sum()
     }
 
     pub(super) async fn chunk(&mut self, tag: Tag, data: &[u8]) -> Result<(), ErrorCode> {
@@ -234,7 +231,7 @@ impl Client {
             .as_ref()
             .map_or(0, |(info, _)| charge(info.size) + info.label.len() as u64);
         let cost = charge(size) + put.label.len() as u64;
-        let used = usage.bytes + self.reserved();
+        let used = usage.bytes + self.app.storage.held_by(row.id).bytes;
         if used.saturating_sub(replacing).saturating_add(cost) > quota {
             self.refused(Refused::Storage);
             return Err(plain(ErrorCode::QuotaFull));

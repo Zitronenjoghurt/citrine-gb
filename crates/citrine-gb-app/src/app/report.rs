@@ -3,9 +3,9 @@ use crate::game_report::Built;
 use crate::utils::file_channels::FileChannels;
 
 #[cfg(not(target_os = "android"))]
-pub(crate) const SAVE_GAME_REPORT: &str = "Save game report";
+pub(crate) const SAVE_GAME_REPORT: &str = "Save a bug report";
 #[cfg(target_os = "android")]
-pub(crate) const SAVE_GAME_REPORT: &str = "Share game report";
+pub(crate) const SAVE_GAME_REPORT: &str = "Share a bug report";
 #[cfg(not(target_os = "android"))]
 pub(crate) const SAVE_GAME_REPORT_ICON: &str = crate::icons::DOWNLOAD_SIMPLE;
 #[cfg(target_os = "android")]
@@ -80,7 +80,7 @@ impl Hand {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn failed(self, err: String) {
+    pub(crate) fn failed(self, err: String) {
         let _ = self
             .saved
             .send(crate::utils::file_saver::SaveOutcome::Failed(err));
@@ -89,7 +89,7 @@ impl Hand {
     #[cfg(target_os = "android")]
     pub(crate) fn over(self, file: Outgoing) {
         let _ = (file.filter, file.extension);
-        let dir = crate::storage::cache_dir().join(crate::storage::REPORTS);
+        let dir = crate::storage::folder(crate::storage::kinds::Folder::Reports);
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join(&file.file_name);
         let written =
@@ -105,7 +105,7 @@ impl Hand {
     }
 
     #[cfg(target_os = "android")]
-    fn failed(self, err: String) {
+    pub(crate) fn failed(self, err: String) {
         let _ = self
             .error
             .send(format!("Couldn't share the {}: {err}", self.what));

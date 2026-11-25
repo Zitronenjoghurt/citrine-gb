@@ -162,6 +162,10 @@ pub struct Backup {
     address: usize,
     address_left: u8,
     dummy_left: u8,
+    #[cfg_attr(
+        feature = "serde",
+        serde(serialize_with = "crate::utils::unsaved::serialize")
+    )]
     dirty: bool,
 }
 

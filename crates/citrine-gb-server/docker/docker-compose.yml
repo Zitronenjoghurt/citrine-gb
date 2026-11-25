@@ -9,6 +9,7 @@ services:
         required: false
     ports:
       - "${CITRINE_PORT:-13707}:${CITRINE_PORT:-13707}"
+      - "${CITRINE_STUN_PORT:-3478}:${CITRINE_STUN_PORT:-3478}/udp"
     volumes:
       - citrine-data:/citrine/data
     restart: unless-stopped

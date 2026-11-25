@@ -13,6 +13,7 @@ const MAX_DECODE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub struct MediaStore {
     root: PathBuf,
+    home: PathBuf,
     temp: PathBuf,
     items: Vec<MediaItem>,
 }
@@ -26,11 +27,11 @@ impl Default for MediaStore {
 }
 
 fn media_root() -> PathBuf {
-    crate::storage::data_dir().join("media")
+    crate::storage::folder(crate::storage::kinds::Folder::Media)
 }
 
 fn media_temp() -> PathBuf {
-    crate::storage::cache_dir().join(crate::storage::MEDIA_TEMP)
+    crate::storage::folder(crate::storage::kinds::Folder::MediaTemp)
 }
 
 pub fn recording_temp_path() -> io::Result<PathBuf> {
@@ -50,18 +51,32 @@ impl MediaStore {
     pub fn at(root: PathBuf) -> Self {
         let mut temp = root.file_name().unwrap_or_default().to_os_string();
         temp.push("-cache");
-        let temp = root.with_file_name(temp).join(crate::storage::MEDIA_TEMP);
+        let temp = root
+            .with_file_name(temp)
+            .join(crate::storage::kinds::Folder::MediaTemp.name());
         Self::with_temp(root, temp)
     }
 
     fn with_temp(root: PathBuf, temp: PathBuf) -> Self {
         let mut store = Self {
+            home: root.clone(),
             root,
             temp,
             items: Vec::new(),
         };
         store.refresh();
         store
+    }
+
+    pub fn follow_folder(&mut self, folder: Option<&str>) {
+        let root = folder
+            .filter(|folder| !folder.is_empty())
+            .map_or_else(|| self.home.clone(), PathBuf::from);
+        if root != self.root {
+            self.root = root;
+            self.items.clear();
+            self.refresh();
+        }
     }
 
     pub fn name_games(&mut self, names: &crate::game_name::GameNames) {
@@ -78,6 +93,16 @@ impl MediaStore {
 
     pub fn temp_path(&self) -> io::Result<PathBuf> {
         temp_path_in(&self.temp)
+    }
+
+    pub fn chosen_folders(&self) -> Vec<(MediaKind, PathBuf)> {
+        if self.root == self.home {
+            return Vec::new();
+        }
+        MediaKind::ALL
+            .into_iter()
+            .flat_map(|kind| [(kind, self.folder(kind)), (kind, self.sidecar_folder(kind))])
+            .collect()
     }
 
     fn folder(&self, kind: MediaKind) -> PathBuf {
@@ -131,20 +156,43 @@ impl MediaStore {
         let file_name =
             unique_file_name(&stem, kind.extension(), |name| folder.join(name).exists());
         let target = folder.join(&file_name);
-        if std::fs::rename(temp, &target).is_err() {
-            std::fs::copy(temp, &target)?;
+        self.describe(temp, &target, &file_name, new)
+    }
+
+    pub fn replace(&mut self, id: &MediaId, temp: &Path, new: NewMedia) -> io::Result<MediaItem> {
+        let target = self.path(id);
+        if id.kind() != Some(new.kind) || !target.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the recording is gone",
+            ));
+        }
+        let file_name = id.file_name().to_string();
+        self.describe(temp, &target, &file_name, new)
+    }
+
+    fn describe(
+        &mut self,
+        temp: &Path,
+        target: &Path,
+        file_name: &str,
+        new: NewMedia,
+    ) -> io::Result<MediaItem> {
+        let kind = new.kind;
+        if std::fs::rename(temp, target).is_err() {
+            std::fs::copy(temp, target)?;
             let _ = std::fs::remove_file(temp);
         }
-        let bytes = std::fs::metadata(&target)?.len();
+        let bytes = std::fs::metadata(target)?.len();
         let info = new.info(bytes);
         let thumb_png = encode_thumbnail(&new.frame);
         if let Some(png) = &thumb_png {
-            std::fs::write(self.thumb_path(kind, &file_name), png)?;
+            std::fs::write(self.thumb_path(kind, file_name), png)?;
         }
         let json = serde_json::to_vec_pretty(&info).map_err(io::Error::other)?;
-        std::fs::write(self.info_path(kind, &file_name), json)?;
+        std::fs::write(self.info_path(kind, file_name), json)?;
         let item = MediaItem {
-            id: MediaId::new(kind, &file_name),
+            id: MediaId::new(kind, file_name),
             info,
             thumbnail: thumb_png.as_deref().and_then(decode_png),
         };
@@ -303,6 +351,8 @@ impl MediaStore {
                     width,
                     height,
                     length_ms: None,
+                    frame_times: false,
+                    video: false,
                 }
             }
         };
@@ -362,8 +412,8 @@ mod tests {
     use citrine_gb::gb::GbModel;
 
     fn store(name: &str) -> (MediaStore, PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("citrine-media-{name}-{}", std::process::id()));
+        let root = crate::storage::scratch_dir()
+            .join(format!("citrine-media-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(
             root.with_file_name(format!("citrine-media-{name}-{}-cache", std::process::id())),
@@ -389,6 +439,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn captures_go_to_the_chosen_folder_and_back_home_without_one() {
+        let (mut store, root) = store("folder");
+        store
+            .add_screenshot(new_media(MediaKind::Screenshot, 100), &png())
+            .unwrap();
+        let chosen = tempfile::tempdir().unwrap();
+        let folder = chosen.path().to_string_lossy().into_owned();
+
+        store.follow_folder(Some(&folder));
+        assert!(store.items().is_empty(), "the new folder starts empty");
+        let item = store
+            .add_screenshot(new_media(MediaKind::Screenshot, 200), &png())
+            .unwrap();
+        assert!(store.path(&item.id).starts_with(chosen.path()));
+        assert!(chosen.path().join("screenshots").is_dir());
+        store.follow_folder(Some(&folder));
+        assert_eq!(store.items().len(), 1);
+
+        store.follow_folder(None);
+        assert_eq!(store.items().len(), 1);
+        assert!(store.path(&store.items()[0].id).starts_with(&root));
+        store.follow_folder(Some(""));
+        assert!(store.path(&store.items()[0].id).starts_with(&root));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn new_media(kind: MediaKind, created_at: u64) -> NewMedia {
         NewMedia {
             kind,
@@ -399,6 +476,9 @@ mod tests {
             width: 160,
             height: 144,
             length_ms: (kind == MediaKind::Recording).then_some(4200),
+            frame_times: false,
+            video: false,
+            replay: None,
             frame: Frame {
                 width: 160,
                 height: 144,

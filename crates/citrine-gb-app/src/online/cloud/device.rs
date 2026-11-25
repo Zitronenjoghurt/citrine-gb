@@ -1,5 +1,83 @@
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn device_name() -> String {
+    named("", system_name)
+}
+
+pub(crate) fn device_name_from(chosen: &str) -> String {
+    named(chosen, system_name)
+}
+
+fn named(chosen: &str, system: impl FnOnce() -> String) -> String {
+    if chosen.trim().is_empty() {
+        citrine_gb_net::device_name(&system())
+    } else {
+        citrine_gb_net::device_name(chosen)
+    }
+}
+
+#[cfg(target_os = "android")]
+pub fn system_name() -> String {
+    crate::platform::android::device_name().unwrap_or_else(os_name)
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn system_name() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        computer_name()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(os_name)
+    })
+    .clone()
+}
+
+#[cfg(target_os = "macos")]
+fn computer_name() -> Option<String> {
+    let out = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(windows)]
+fn computer_name() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok()
+}
+
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "macos",
+    windows
+)))]
+fn computer_name() -> Option<String> {
+    let pretty = std::fs::read_to_string("/etc/machine-info")
+        .ok()
+        .and_then(|info| pretty_hostname(&info));
+    pretty.or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+}
+
+#[cfg_attr(
+    any(
+        target_arch = "wasm32",
+        target_os = "android",
+        target_os = "macos",
+        windows
+    ),
+    allow(dead_code)
+)]
+fn pretty_hostname(info: &str) -> Option<String> {
+    let value = info
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("PRETTY_HOSTNAME="))?;
+    Some(value.trim().trim_matches('"').to_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn os_name() -> String {
     match std::env::consts::OS {
         "macos" => "Mac",
         "windows" => "Windows PC",
@@ -12,7 +90,7 @@ pub(crate) fn device_name() -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn device_name() -> String {
+pub fn system_name() -> String {
     let agent = web_sys::window()
         .and_then(|w| w.navigator().user_agent().ok())
         .unwrap_or_default();
@@ -54,7 +132,25 @@ pub(super) fn browser_on(agent: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::browser_on;
+    use super::{browser_on, named};
+
+    #[test]
+    fn the_pretty_hostname_comes_from_machine_info() {
+        let info = "DEPLOYMENT=x\nPRETTY_HOSTNAME=\"Clara's Desk\"\n";
+        assert_eq!(
+            super::pretty_hostname(info).as_deref(),
+            Some("Clara's Desk")
+        );
+        assert_eq!(super::pretty_hostname("CHASSIS=desktop"), None);
+    }
+
+    #[test]
+    fn a_chosen_name_wins_and_an_empty_one_falls_back_to_the_system() {
+        let system = || "Clara's MacBook Pro".to_owned();
+        assert_eq!(named("", system), "Clara's MacBook Pro");
+        assert_eq!(named("  ", system), "Clara's MacBook Pro");
+        assert_eq!(named(" Desk Mac ", system), "Desk Mac");
+    }
 
     #[test]
     fn devices_read_as_browser_and_system() {

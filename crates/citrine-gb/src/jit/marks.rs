@@ -13,6 +13,8 @@ pub struct CodeMarks {
 }
 
 impl CodeMarks {
+    pub const HIT: usize = std::mem::offset_of!(CodeMarks, hit);
+
     #[inline(always)]
     pub fn written(&mut self, offset: usize) {
         let page = offset >> PAGE_BITS;
@@ -55,6 +57,11 @@ impl CodeMarks {
 
     pub fn stamp(&self) -> u32 {
         self.stamp
+    }
+
+    #[inline(always)]
+    pub fn quiet(&self, seen: u32) -> bool {
+        !self.hit & (self.stamp == seen)
     }
 
     pub fn written_page(&self, stamp: u32) -> Option<usize> {

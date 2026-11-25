@@ -18,7 +18,7 @@ pub fn show(viewer: &mut TabViewer, ui: &mut Ui) {
     let system = SystemInfo::current(viewer.pads.api());
     let pads = pads(viewer);
     let held = ButtonsHeld {
-        console: viewer.emulator.kind(),
+        console: viewer.emulator.played_kind(),
         keys: viewer.emulator.held_buttons(),
     };
     let focused = ui.input(|i| i.viewport().focused);

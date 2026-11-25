@@ -67,6 +67,9 @@ fn users_flash(done: Option<&str>) -> Option<Flash> {
         ),
         "banned-many" => (true, "Accounts banned and disconnected"),
         "banned-none" => (true, "Nobody new to ban"),
+        other if super::archive::archive_flash(Some(other)).is_some() => {
+            return super::archive::archive_flash(Some(other));
+        }
         other => {
             return flash(&Done {
                 done: Some(other.to_string()),
@@ -74,7 +77,10 @@ fn users_flash(done: Option<&str>) -> Option<Flash> {
             });
         }
     };
-    Some(Flash { ok, text })
+    Some(Flash {
+        ok,
+        text: text.into(),
+    })
 }
 
 pub(super) fn left(time: Duration) -> String {
@@ -161,16 +167,28 @@ pub(super) async fn users(
             to_newest == newest
         )
     };
+    let sort_item = |to_newest: bool, label: &str| {
+        let on = to_newest == newest;
+        format!(
+            r#"<a class="btn" role="menuitemradio" aria-checked="{on}" href="{}">{label}{}</a>"#,
+            esc(&users_link(search, to_newest, 1)),
+            if on { icon("check") } else { String::new() }
+        )
+    };
     let _ = write!(
         body,
-        r#"<div class="toolbar"><form method="get" action="/admin/users" role="search"><div class="search">{}<input type="search" name="q" value="{}" placeholder="Name or online ID" aria-label="Search users"></div>{}<button class="btn" type="submit">Search</button></form><div class="segmented" role="group" aria-label="Order">{}{}</div><span class="count">{}</span>{}</div>"#,
+        r#"<div class="toolbar users-toolbar"><form method="get" action="/admin/users" role="search"><div class="search">{}<input type="search" name="q" value="{}" placeholder="Name or online ID" aria-label="Search users"><button type="button" class="filter-btn" popovertarget="order-menu" data-anchor="end" aria-label="Order">{}{}</button></div>{}<button class="btn" type="submit">Search</button></form><div id="order-menu" popover class="pick-menu"><div class="menu" role="menu"><span class="menu-head">Order</span>{}{}</div></div><div class="segmented" role="group" aria-label="Order">{}{}</div><span class="count">{}</span>{}</div>"#,
         icon("search"),
         esc(search),
+        icon("sliders"),
+        if newest { r#"<i class="dot"></i>"# } else { "" },
         if newest {
             r#"<input type="hidden" name="sort" value="newest">"#
         } else {
             ""
         },
+        sort_item(false, "Last seen"),
+        sort_item(true, "Newest"),
         sort_link(false, "Last seen"),
         sort_link(true, "Newest"),
         match total {
@@ -191,6 +209,15 @@ pub(super) async fn users(
         });
     }
     let here = users_link(search, newest, page_no);
+    let archive_on = app.archive.on();
+    let granted: std::collections::HashSet<i64> = if archive_on {
+        match app.db.archive_accounts().await {
+            Ok(accounts) => accounts.iter().map(|a| a.id).collect(),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    } else {
+        Default::default()
+    };
     for row in rows {
         let a = &row.account;
         let two_factor = matches!(app.db.account_totp(a.id).await, Ok(Some(_)));
@@ -269,6 +296,21 @@ pub(super) async fn users(
         } else {
             String::new()
         };
+        let has_archive = granted.contains(&a.id);
+        let archive_mark = |where_: &str| {
+            if has_archive {
+                format!(
+                    r#"&#8288;<button type="button" class="hint archive-badge" popovertarget="archive-{where_}-{}" aria-label="Has Game Archive access">{}</button><div id="archive-{where_}-{}" popover class="hint-pop">Has Game Archive access</div>"#,
+                    a.id,
+                    icon("archive"),
+                    a.id
+                )
+            } else {
+                String::new()
+            }
+        };
+        let archive_badge = archive_mark("row");
+        let archive_menu_badge = archive_mark("menu");
         let seen = match &address {
             Some(address) => format!(
                 r#"<div class="seen"><span class="state online"><span class="dot"></span>Online</span><span class="ip mono muted" title="{0}">{0}</span></div>"#,
@@ -315,10 +357,26 @@ pub(super) async fn users(
         };
         let _ = write!(
             list,
-            r#"<div class="user-row"><div class="who">{avatar}<div style="min-width:0"><div class="name">{name} {banned}</div><span class="mono muted">{oid}</span></div></div><span class="mono oid">{oid}</span>{joined}{seen}<div class="storage">{used} of {quota_text}<div class="bar"><i style="width:{fraction:.1}%"></i></div></div><div class="actions"><button type="button" class="btn small" popovertarget="manage-{id}">{more}<span>Manage</span></button></div></div>
-<div id="manage-{id}" popover><div class="who">{avatar}<div style="min-width:0"><div class="name">{name} {banned}</div><span class="mono muted">{oid}</span></div></div><div class="menu"><form method="post" action="/admin/users/{id}/quota" class="inline">{back_field}<input type="number" name="quota_mb" min="0" step="1" value="{quota_value}" placeholder="{default_mb} MB (default)" aria-label="Storage limit in MB"><button class="btn" type="submit">{drive}Set limit</button></form><form method="post" action="/admin/users/{id}/disconnect">{back_field}<button class="btn" type="submit"{offline}>{unplug}Disconnect</button></form>{ban}{block}{two_factor_button}<button type="button" class="btn danger" popovertarget="files-{id}"{no_files}>{trash}{files_label}</button><button type="button" class="btn danger" popovertarget="delete-{id}">{trash}Delete account</button></div>{devices_block}</div>
-{ban_confirm}{block_confirm}{two_factor_confirm}{files_confirm}{delete_confirm}{device_confirms}"#,
+            r#"<div class="user-row"><div class="who">{avatar}<div style="min-width:0"><div class="name">{name} {banned}{archive_badge}</div><span class="mono muted">{oid}</span></div></div><span class="mono oid">{oid}</span>{joined}{seen}<div class="storage">{used} of {quota_text}<div class="bar"><i style="width:{fraction:.1}%"></i></div></div><div class="actions"><button type="button" class="btn small" popovertarget="manage-{id}">{more}<span>Manage</span></button></div></div>
+<div id="manage-{id}" popover><div class="who">{avatar}<div style="min-width:0"><div class="name">{name} {banned}{archive_menu_badge}</div><span class="mono muted">{oid}</span></div></div><div class="menu"><form method="post" action="/admin/users/{id}/quota" class="inline">{back_field}<input type="number" name="quota_mb" min="0" step="1" value="{quota_value}" placeholder="{default_mb} MB (default)" aria-label="Storage limit in MB"><button class="btn" type="submit">{drive}Set limit</button></form><form method="post" action="/admin/users/{id}/disconnect">{back_field}<button class="btn" type="submit"{offline}>{unplug}Disconnect</button></form>{archive_button}{ban}{block}{two_factor_button}<button type="button" class="btn danger" popovertarget="files-{id}"{no_files}>{trash}{files_label}</button><button type="button" class="btn danger" popovertarget="delete-{id}">{trash}Delete account</button></div>{devices_block}</div>
+{ban_confirm}{block_confirm}{two_factor_confirm}{files_confirm}{delete_confirm}{archive_confirm}{device_confirms}"#,
             avatar = avatar(&a.display_name, a.online_id.value()),
+            archive_button = match (archive_on, has_archive) {
+                (false, _) => String::new(),
+                (true, true) => format!(
+                    r#"<button type="button" class="btn danger" popovertarget="revoke-{id}">{}Remove Game Archive access</button>"#,
+                    icon("archive")
+                ),
+                (true, false) => format!(
+                    r#"<form method="post" action="/admin/archive/access">{back_field}<input type="hidden" name="account" value="{id}"><button class="btn" type="submit">{}Give Game Archive access</button></form>"#,
+                    icon("archive")
+                ),
+            },
+            archive_confirm = if has_archive {
+                super::archive::revoke_confirm(id, &name, &back_field)
+            } else {
+                String::new()
+            },
             used = bytes(row.storage_used),
             more = icon("more"),
             drive = icon("drive"),

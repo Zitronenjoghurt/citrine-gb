@@ -3,7 +3,10 @@ pub mod bit;
 pub mod bytes;
 pub mod crc16;
 pub mod date;
+pub mod digest;
 pub mod ema;
 pub mod formatting;
 #[cfg(feature = "serde")]
 pub mod retired;
+#[cfg(all(feature = "serde", feature = "gba"))]
+pub mod unsaved;

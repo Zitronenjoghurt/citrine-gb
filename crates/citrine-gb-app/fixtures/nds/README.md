@@ -7,3 +7,5 @@
 `blocksds-lighting_cube.nds` is BlocksDS's `examples/graphics_3d/lighting_cube` from the same commit, built with BlocksDS in docker. The example is CC0-1.0 (`cc0-1.0.txt`); the libraries it links are zlib (`zlib.txt`) and MIT (`mit.txt`).
 
 `airtalk.nds` is built here from `airtalk/` with `airtalk/build.sh` (BlocksDS in docker). Two DSes running it talk over local wireless: the one whose MAC ends in an even byte hosts and beacons, the other scans, connects and replies each frame, and both keep a report in main RAM that the netplay tests read. Its own code is part of this repository; the BlocksDS libraries it links, dswifi among them, are zlib (`zlib.txt`) and MIT (`mit.txt`).
+
+`mictest.nds` is built here from `mictest/` with `mictest/build.sh` (BlocksDS in docker). It records the microphone at 16384 Hz, 12 bits, and keeps a report in main RAM (rate, sample count, level, zero crossings, quiet and loud counts) that the microphone tests read. Its own code is part of this repository; the BlocksDS libraries it links are zlib (`zlib.txt`) and MIT (`mit.txt`).

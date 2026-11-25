@@ -6,6 +6,7 @@ use crate::app::hud::paint::Look;
 use crate::app::hud::{DEFAULT_OPACITY, Direction, Group, Hud, SIZES, Value, addable};
 use crate::app::mobile::kit::{self, Row, SwitchRow};
 use crate::app::mobile::sheet::{self, Amount};
+use crate::app::ui_state::settings_tree::GroupId;
 use crate::icons;
 use egui::{Align, Context, Id, Layout, RichText, Sense, Stroke, vec2};
 
@@ -48,7 +49,7 @@ fn live(value: Value, facts: &Facts) -> String {
         return String::new();
     }
     let cell = cell(value, facts);
-    match cell.unit {
+    match cell.unit.as_ref() {
         "" => cell.value,
         "%" => format!("{}%", cell.value),
         unit => format!("{} {unit}", cell.value),
@@ -77,7 +78,7 @@ impl Citrine {
     }
 
     fn hud_list_sheet(&mut self, ctx: &Context) -> Option<Option<HudSheet>> {
-        let ds = self.emulator.kind() == citrine_gb::console::ConsoleKind::Nds;
+        let ds = self.emulator.played_kind() == citrine_gb::console::ConsoleKind::Nds;
         let settings = &self.ui.settings.hud;
         let shown = sheet::show(ctx, Id::new("hud_list_sheet"), "HUD", |ui| {
             let mut picked = None;
@@ -132,7 +133,7 @@ impl Citrine {
                 Some(Some(HudSheet::Edit(id)))
             }
             Some(Picked::More) => {
-                self.open_screen_settings(true);
+                self.find_group(GroupId::Huds, true);
                 Some(None)
             }
             None => None,
@@ -141,13 +142,15 @@ impl Citrine {
     }
 
     fn hud_edit_sheet(&mut self, ctx: &Context, id: u32) -> Option<Option<HudSheet>> {
-        let ds = self.emulator.kind() == citrine_gb::console::ConsoleKind::Nds;
+        let ds = self.emulator.played_kind() == citrine_gb::console::ConsoleKind::Nds;
         let facts = crate::app::hud::cells::gather(
             crate::app::hud::cells::Sources {
                 frame_log: &mut self.ui.frame_log,
                 load: self.ui.performance.view(),
                 emulator: &self.emulator,
                 stats: &self.stats,
+                play: &self.play,
+                online: &mut self.online,
             },
             &mut self.ui.hud.cells,
             &self.ui.settings.hud,
@@ -278,7 +281,7 @@ impl Citrine {
     }
 
     fn hud_add_sheet(&mut self, ctx: &Context, id: u32) -> Option<Option<HudSheet>> {
-        let ds = self.emulator.kind() == citrine_gb::console::ConsoleKind::Nds;
+        let ds = self.emulator.played_kind() == citrine_gb::console::ConsoleKind::Nds;
         let Some(hud) = self.ui.settings.hud.get_mut(id) else {
             return Some(None);
         };
@@ -396,4 +399,63 @@ fn value_rows(list: &mut kit::List<'_>, hud: &mut Hud, facts: &Facts, look: Look
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HudSheet;
+    use crate::app::Citrine;
+    use crate::app::mobile;
+    use crate::app::tests::{phone_app, shown_whole, tap, text_containing};
+    use crate::app::ui_state::settings_tree::SettingsTab;
+    use citrine_gb::gb::GbModel;
+    use citrine_gb::rom::Rom;
+    use egui::Context;
+
+    fn frame(app: &mut Citrine, ctx: &Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(412.0, 480.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| {
+            let touch = app.is_mobile(ctx);
+            mobile::touch_spacing(ctx, touch);
+            app.render(ctx);
+            app.handle_event_queue(touch);
+        })
+    }
+
+    #[test]
+    fn more_hud_settings_opens_the_screen_page_at_its_huds() {
+        let mut app = phone_app("hud-more-phone");
+        app.emulator
+            .load_rom(
+                &Rom::new(&[0u8; 0x8000]),
+                GbModel::Dmg,
+                #[cfg(not(target_arch = "wasm32"))]
+                None,
+            )
+            .expect("load");
+        app.mobile.nav.show_game();
+        app.mobile.hud_sheet = Some(HudSheet::List);
+        let ctx = Context::default();
+        let mut output = frame(&mut app, &ctx, Vec::new());
+        for _ in 0..20 {
+            output = frame(&mut app, &ctx, Vec::new());
+        }
+        let more = text_containing(&output, "More HUD settings").expect("the sheet entry");
+        frame(&mut app, &ctx, tap(more.center()));
+        for _ in 0..40 {
+            output = frame(&mut app, &ctx, Vec::new());
+        }
+        assert_eq!(app.mobile.nav.settings_page(), Some(SettingsTab::Screen));
+        assert!(
+            shown_whole(&output, "HUDs"),
+            "the HUDs heading is out of view"
+        );
+    }
 }

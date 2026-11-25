@@ -1,4 +1,4 @@
-pub(crate) const WIRE_XOR: u8 = 0xAA;
+pub const WIRE_XOR: u8 = 0xAA;
 pub(crate) const HEADER_SIZE: usize = 8;
 pub(crate) const MAX_PAYLOAD: usize = 128;
 pub(crate) const ADVERTISE: u8 = 0xFC;
@@ -69,7 +69,7 @@ pub(crate) fn advertisement() -> Vec<u8> {
     vec![ADVERTISE ^ WIRE_XOR]
 }
 
-pub(crate) fn checksum(bytes: &[u8]) -> u16 {
+pub fn checksum(bytes: &[u8]) -> u16 {
     let (header, payload) = bytes.split_at(bytes.len().min(HEADER_SIZE));
     let seed = sum(header, CHECKSUM_SEED);
     if payload.is_empty() {
